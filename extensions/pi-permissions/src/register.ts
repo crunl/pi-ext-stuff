@@ -123,6 +123,11 @@ export function registerExtension(
     approvedWriteRoots.clear();
   };
 
+  const resetBranchPermissionContext = (reason: string): void => {
+    trustedUserMessages.length = 0;
+    invalidatePermissionContext(reason);
+  };
+
   const oneCallWriteRoots = (
     event: ToolCallEvent,
     cwd: string,
@@ -551,8 +556,7 @@ export function registerExtension(
 
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
-    trustedUserMessages.length = 0;
-    invalidatePermissionContext("session changed");
+    resetBranchPermissionContext("session changed");
     try {
       const result = await activateConfig(ctx, true);
       modeRuntime = new PermissionModeRuntime(
@@ -575,6 +579,18 @@ export function registerExtension(
       }
     } catch (error: unknown) {
       reportConfigError(ctx, error);
+    }
+  });
+
+  pi.on("session_before_tree", () => {
+    resetBranchPermissionContext("session tree changed");
+  });
+
+  pi.on("session_tree", (_event, ctx) => {
+    resetBranchPermissionContext("session tree changed");
+    if (loaded && modeRuntime) {
+      modeRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
+      setDefaultStatus(ctx);
     }
   });
 

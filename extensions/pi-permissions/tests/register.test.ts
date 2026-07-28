@@ -276,6 +276,69 @@ describe("Default mode registration", () => {
     );
   });
 
+  it("does not carry trusted authorization or approvals across session tree branches", async () => {
+    const reviewer = {
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.handlers.get("input")?.({
+      type: "input",
+      source: "interactive",
+      text: "Authorize cleanup only on branch A.",
+    }, app.context);
+    const approved = {
+      toolName: "bash",
+      toolCallId: "branch-a-approval",
+      input: { command: "rm -rf build" },
+    };
+    await app.handlers.get("tool_call")!(approved, app.context);
+
+    await app.handlers.get("session_before_tree")?.(
+      { type: "session_before_tree" },
+      app.context,
+    );
+    await app.handlers.get("session_tree")?.(
+      { type: "session_tree" },
+      app.context,
+    );
+    await expect(
+      app.tools.get("bash").execute(
+        approved.toolCallId,
+        approved.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "branch-b-review",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(reviewer.review).toHaveBeenLastCalledWith(
+      expect.objectContaining({ userMessages: [] }),
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("never sends deterministic blocks to the reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
