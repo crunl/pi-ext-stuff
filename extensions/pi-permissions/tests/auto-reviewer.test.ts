@@ -61,7 +61,12 @@ describe("PiAutoReviewer", () => {
     expect(modelRegistry.find).toHaveBeenCalledWith("openai-codex", "reviewer");
     expect(complete).toHaveBeenCalledWith(
       configuredModel,
-      expect.objectContaining({ messages: expect.any(Array) }),
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining(
+          "You are a permission reviewer",
+        ),
+        messages: expect.any(Array),
+      }),
       expect.objectContaining({
         apiKey: "token",
         headers: { "x-test": "yes" },
@@ -149,6 +154,34 @@ describe("PiAutoReviewer", () => {
     controller.abort(new Error("turn aborted"));
 
     await expect(pending).rejects.toMatchObject({ kind: "cancelled" });
+  });
+
+  it("enforces timeout when a provider ignores the abort signal", async () => {
+    const reviewer = new PiAutoReviewer(
+      vi.fn(
+        async () =>
+          new Promise<typeof response>((resolve) => {
+            setTimeout(() => resolve(response), 20);
+          }),
+      ) as any,
+    );
+
+    await expect(
+      reviewer.review(request, {
+        modelRegistry: {
+          find: () => ({ provider: "openai", id: "main" }),
+          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
+        } as any,
+        activeModel: { provider: "openai", id: "main" } as any,
+        reviewer: {
+          provider: "openai",
+          model: "main",
+          reasoningEffort: "medium",
+          timeoutMs: 1,
+          maxConsecutiveDenials: 3,
+        },
+      }),
+    ).rejects.toMatchObject({ kind: "timeout" });
   });
 
   it("exposes typed reviewer failures", () => {

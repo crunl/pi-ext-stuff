@@ -96,6 +96,7 @@ export function registerExtension(
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
+  const trustedUserMessages: string[] = [];
   const reviewControllers = new Map<string, AbortController>();
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
@@ -550,6 +551,7 @@ export function registerExtension(
 
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
+    trustedUserMessages.length = 0;
     invalidatePermissionContext("session changed");
     try {
       const result = await activateConfig(ctx, true);
@@ -584,7 +586,21 @@ export function registerExtension(
     });
   });
 
+  pi.on("input", (event) => {
+    if (
+      (event.source === "interactive" || event.source === "rpc") &&
+      event.text.length > 0
+    ) {
+      trustedUserMessages.push(event.text);
+    }
+  });
+
   pi.on("tool_call", async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | void> => {
+    if (event.toolCallId) {
+      approvedCalls.delete(event.toolCallId);
+      approvedNetworkHosts.delete(event.toolCallId);
+      approvedWriteRoots.delete(event.toolCallId);
+    }
     let result: LoadedPermissionsConfig;
     try {
       result = await activateConfig(ctx);
@@ -624,13 +640,16 @@ export function registerExtension(
       }
       const reviewController = new AbortController();
       reviewControllers.set(id, reviewController);
+      const reviewSignal = ctx.signal
+        ? AbortSignal.any([ctx.signal, reviewController.signal])
+        : reviewController.signal;
       try {
         const request = buildAutoReviewRequest(
           event,
           decision,
           ctx.cwd,
           result.config.sandbox.profile,
-          ctx.sessionManager.getBranch(),
+          trustedUserMessages,
         );
         const auto = await reviewAutoPrompt(
           autoReviewer,
@@ -642,18 +661,19 @@ export function registerExtension(
           },
           runtime.autoState,
           result.config.reviewer?.maxConsecutiveDenials ?? 3,
-          ctx.signal
-            ? AbortSignal.any([ctx.signal, reviewController.signal])
-            : reviewController.signal,
+          reviewSignal,
         );
-        if (reviewController.signal.aborted) {
+        if (reviewSignal.aborted) {
           return {
             block: true,
             reason: "pi-permissions: permission context changed during Auto review",
           };
         }
-        runtime.applyAutoState(auto.state);
         if (auto.action === "approve") {
+          runtime.recordAutoReview(
+            "approve",
+            result.config.reviewer?.maxConsecutiveDenials ?? 3,
+          );
           grantApprovedCall(
             event,
             decision,
@@ -664,6 +684,10 @@ export function registerExtension(
           return;
         }
         if (auto.action === "deny") {
+          runtime.recordAutoReview(
+            "deny",
+            result.config.reviewer?.maxConsecutiveDenials ?? 3,
+          );
           return {
             block: true,
             reason: `pi-permissions Auto denied: ${auto.review.rationale} Take a materially safer approach.`,

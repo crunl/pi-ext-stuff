@@ -38,4 +38,16 @@ describe("PermissionModeRuntime", () => {
     runtime.endHumanApproval();
     expect(runtime.beginHumanApproval()).toBe(true);
   });
+
+  it("does not activate the unimplemented Plan mode from configuration or persisted state", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.defaultMode = "plan";
+    const runtime = new PermissionModeRuntime(config, vi.fn());
+
+    expect(runtime.mode).toBe("default");
+    expect(runtime.statusLabel).toBe("Default");
+    expect(() => runtime.activate("plan", { idle: true })).toThrow(
+      "Plan mode is not implemented",
+    );
+  });
 });

@@ -210,10 +210,7 @@ export async function evaluateDefaultRequest(
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
   }
-  if (
-    request.operation === "execute"
-    && request.networkTargets?.some((host) => !isPublicNetworkHost(host))
-  ) {
+  if (request.networkTargets?.some((host) => !isPublicNetworkHost(host))) {
     return { action: "block", risk: "HARD", reason: "Private or special-use network target is blocked" };
   }
 

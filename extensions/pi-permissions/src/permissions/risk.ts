@@ -242,7 +242,19 @@ function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
 }
 
 function extractNetworkTargets(input: Record<string, unknown>): string[] {
-  return typeof input.url === "string" ? [input.url] : [];
+  const values = [
+    ...(typeof input.url === "string" ? [input.url] : []),
+    ...(Array.isArray(input.urls)
+      ? input.urls.filter((value): value is string => typeof value === "string")
+      : []),
+  ];
+  return values.map((value) => {
+    try {
+      return new URL(value).hostname;
+    } catch {
+      return value;
+    }
+  });
 }
 
 export function normalizeToolCall(tool: string, input: Record<string, unknown>, cwd: string): PermissionRequest {

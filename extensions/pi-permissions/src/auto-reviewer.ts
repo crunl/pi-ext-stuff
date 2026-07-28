@@ -11,6 +11,7 @@ import type {
 import { complete } from "@earendil-works/pi-ai/compat";
 import type { PermissionsConfig } from "./config.ts";
 import {
+  AUTO_REVIEW_SYSTEM_PROMPT,
   type AutoReviewRequest,
   type AutoReviewResult,
   parseAutoReviewResult,
@@ -104,6 +105,7 @@ export class PiAutoReviewer implements AutoReviewer {
       ? AbortSignal.any([callerSignal, timeoutSignal])
       : timeoutSignal;
     const reviewContext: Context = {
+      systemPrompt: AUTO_REVIEW_SYSTEM_PROMPT,
       messages: [
         {
           role: "user",
@@ -114,19 +116,27 @@ export class PiAutoReviewer implements AutoReviewer {
     };
 
     let response: AssistantMessage;
+    const abortResponse = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new Error("Auto review aborted"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
     try {
-      response = await this.invoke(model, reviewContext, {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        env: auth.env,
-        reasoningEffort:
-          context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
-        timeoutMs,
-        maxRetries: 0,
-        cacheRetention: "none",
-        signal,
-        sessionId: `pi-permissions-auto-${randomUUID()}`,
-      });
+      response = await Promise.race([
+        this.invoke(model, reviewContext, {
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          env: auth.env,
+          reasoningEffort:
+            context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
+          timeoutMs,
+          maxRetries: 0,
+          cacheRetention: "none",
+          signal,
+          sessionId: `pi-permissions-auto-${randomUUID()}`,
+        }),
+        abortResponse,
+      ]);
     } catch (error) {
       if (callerSignal?.aborted) {
         throw new AutoReviewerFailure("cancelled", "Auto review was cancelled", {
@@ -143,6 +153,12 @@ export class PiAutoReviewer implements AutoReviewer {
         `Auto reviewer request failed: ${errorMessage(error)}`,
         { cause: error },
       );
+    }
+    if (callerSignal?.aborted) {
+      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+    }
+    if (timeoutSignal.aborted) {
+      throw new AutoReviewerFailure("timeout", "Auto review timed out");
     }
 
     if (response.stopReason !== "stop") {

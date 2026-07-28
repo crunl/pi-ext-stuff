@@ -2,6 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import {
   type AutoState,
+  recordAutoApproval,
+  recordAutoDenial,
   resetAutoState,
 } from "./modes/auto.ts";
 import {
@@ -15,6 +17,13 @@ import {
   restorePermissionState,
 } from "./state.ts";
 
+function functionalState(state: PermissionSessionState): PermissionSessionState {
+  const normalized = structuredClone(state);
+  if (normalized.mode === "plan") normalized.mode = "default";
+  if (normalized.pendingMode === "plan") normalized.pendingMode = undefined;
+  return normalized;
+}
+
 export class PermissionModeRuntime {
   private controller: ModeController;
   private state: PermissionSessionState;
@@ -25,7 +34,7 @@ export class PermissionModeRuntime {
     config: PermissionsConfig,
     private readonly appendEntry: ExtensionAPI["appendEntry"],
   ) {
-    this.state = createPermissionSessionState(config);
+    this.state = functionalState(createPermissionSessionState(config));
     this.controller = new ModeController(this.state.mode);
   }
 
@@ -114,8 +123,19 @@ export class PermissionModeRuntime {
     this.persist();
   }
 
+  recordAutoReview(
+    decision: "approve" | "deny",
+    denialLimit: number,
+  ): AutoState {
+    this.state.auto = decision === "approve"
+      ? recordAutoApproval(this.state.auto)
+      : recordAutoDenial(this.state.auto, denialLimit);
+    this.persist();
+    return this.autoState;
+  }
+
   restore(entries: readonly unknown[], config: PermissionsConfig): void {
-    this.state = restorePermissionState(entries, config);
+    this.state = functionalState(restorePermissionState(entries, config));
     this.controller = new ModeController(this.state.mode);
     this.activeReviewIds.clear();
     this.humanApprovalActive = false;

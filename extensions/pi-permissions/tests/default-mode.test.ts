@@ -223,6 +223,24 @@ describe("Default mode gate", () => {
     });
   });
 
+  it("blocks private WebFetch targets without offering reviewer approval", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+
+    for (const url of [
+      "http://127.0.0.1/admin",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::ffff:127.0.0.1]/",
+    ]) {
+      await expect(
+        evaluateDefaultRequest("WebFetch", { url }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("Private"),
+      });
+    }
+  });
+
   it("accepts Codex-style one-call write roots for agent bash", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const outputName = `pi-permissions-output-${Date.now()}`;
@@ -255,6 +273,18 @@ describe("Default mode gate", () => {
     }, cwd, config())).resolves.toMatchObject({
       action: "block",
       reason: expect.stringContaining("sandbox_permissions"),
+    });
+
+    await expect(evaluateDefaultRequest("bash", {
+      command: "touch /pi-permissions-unsafe",
+      sandbox_permissions: "with_additional_permissions",
+      additional_permissions: {
+        file_system: { write: ["/"] },
+      },
+      justification: "Request an unsafe broad root",
+    }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("filesystem root"),
     });
 
     await expect(evaluateDefaultRequest("bash", {

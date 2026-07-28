@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { parse, resolve } from "node:path";
 import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
@@ -128,6 +128,15 @@ export async function resolveAdditionalWriteRoots(
       protectedWritePaths: filesystem.protectedWritePaths,
       operation: "write",
     });
+    if (
+      absolutePath === parse(absolutePath).root ||
+      decision.canonicalPath === parse(decision.canonicalPath).root
+    ) {
+      return {
+        ok: false,
+        reason: `additional write root cannot be the filesystem root: ${absolutePath}`,
+      };
+    }
     if (decision.allowed) continue;
     if (
       decision.reason === "permission control path is protected"
