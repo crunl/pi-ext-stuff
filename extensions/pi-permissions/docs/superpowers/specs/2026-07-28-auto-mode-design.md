@@ -300,7 +300,11 @@ abort, session switch, or shutdown never opens a fallback dialog.
 - At most one review promise exists per tool-call ID.
 - Concurrent different tool calls may be reviewed independently, but each
   result remains bound to its own ID and request fingerprint.
-- `approvalActive` covers both model review and human fallback.
+- `approvalActive` is derived as “at least one model review or human fallback
+  is active” for mode-transition guards. It does not serialize different model
+  reviews.
+- Human confirmation dialogs remain serialized; a second human fallback cannot
+  open over an active dialog.
 - Session shutdown aborts all in-flight reviewers and clears approval state.
 - Successful config reload and mode transition abort reviewers whose snapshots
   no longer match.
