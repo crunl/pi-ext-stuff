@@ -22,9 +22,20 @@ import {
   fingerprintValue,
   loadPermissionsConfig,
   type LoadedPermissionsConfig,
+  type PermissionsConfig,
 } from "./config.ts";
-import { evaluateDefaultRequest } from "./default-mode.ts";
+import {
+  evaluateDefaultRequest,
+  type DefaultDecision,
+} from "./default-mode.ts";
+import { buildAutoReviewRequest } from "./auto-review-request.ts";
+import {
+  type AutoReviewer,
+  PiAutoReviewer,
+} from "./auto-reviewer.ts";
+import { reviewAutoPrompt } from "./auto-policy.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
+import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import {
@@ -54,9 +65,12 @@ export interface RegisterExtensionOptions {
     SandboxExecutionCoordinator,
     "runShared" | "runExclusive"
   >;
+  autoReviewer?: AutoReviewer;
 }
 
 interface ApprovedCall {
+  authority: "user" | "auto-review";
+  mode: "default" | "auto";
   configFingerprint: string;
   cwd: string;
   requestFingerprint: string;
@@ -75,10 +89,11 @@ export function registerExtension(
   const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
+  const autoReviewer = options.autoReviewer ?? new PiAutoReviewer();
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
-  let approvalActive = false;
+  let modeRuntime: PermissionModeRuntime | undefined;
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
@@ -90,7 +105,7 @@ export function registerExtension(
     | { kind: "failed"; error: string } = { kind: "pending" };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    ctx.ui.setStatus("pi-permissions", "Default");
+    ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
   };
 
   const oneCallWriteRoots = (
@@ -103,6 +118,49 @@ export function registerExtension(
     if (typeof input.path !== "string") return [];
     const path = isAbsolute(input.path) ? resolve(input.path) : resolve(cwd, input.path);
     return [path, dirname(path)];
+  };
+
+  const ensureModeRuntime = (
+    config: PermissionsConfig,
+  ): PermissionModeRuntime => {
+    modeRuntime ??= new PermissionModeRuntime(
+      config,
+      pi.appendEntry.bind(pi),
+    );
+    return modeRuntime;
+  };
+
+  const grantApprovedCall = (
+    event: ToolCallEvent,
+    decision: Extract<DefaultDecision, { action: "prompt" }>,
+    config: PermissionsConfig,
+    cwd: string,
+    authority: "user" | "auto-review",
+  ): void => {
+    if (!event.toolCallId) return;
+    const runtime = ensureModeRuntime(config);
+    const mode = runtime.mode;
+    if (mode === "plan") throw new Error("Plan mode is not implemented");
+    approvedCalls.set(event.toolCallId, {
+      authority,
+      mode,
+      configFingerprint: fingerprintConfig(config),
+      cwd: resolve(cwd),
+      requestFingerprint: fingerprintValue({
+        tool: event.toolName.toLowerCase(),
+        input: event.input,
+      }),
+    });
+    if (decision.networkHosts?.length) {
+      approvedNetworkHosts.set(event.toolCallId, [...decision.networkHosts]);
+    }
+    const writeRoots = [...new Set([
+      ...oneCallWriteRoots(event, cwd),
+      ...(decision.filesystemWriteRoots ?? []),
+    ])];
+    if (writeRoots.length > 0) {
+      approvedWriteRoots.set(event.toolCallId, writeRoots);
+    }
   };
 
   const configKey = (
@@ -206,6 +264,7 @@ export function registerExtension(
     const approved = approval !== undefined
       && approval.cwd === resolve(ctx.cwd)
       && approval.configFingerprint === fingerprintConfig(loaded!.config)
+      && approval.mode === modeRuntime?.mode
       && approval.requestFingerprint === fingerprintValue({
         tool: tool.toLowerCase(),
         input,
@@ -412,16 +471,83 @@ export function registerExtension(
     return { block: true, reason: `pi-permissions configuration error: ${message}` };
   };
 
+  const requestHumanApproval = async (
+    event: ToolCallEvent,
+    decision: Extract<DefaultDecision, { action: "prompt" }>,
+    config: PermissionsConfig,
+    ctx: ExtensionContext,
+    options: { fallbackReason?: string } = {},
+  ): Promise<ToolCallEventResult | void> => {
+    if (!ctx.hasUI) {
+      const fallback = options.fallbackReason
+        ? `; Auto reviewer failed: ${options.fallbackReason}`
+        : "";
+      return {
+        block: true,
+        reason: `pi-permissions: ${decision.risk} operation requires interactive approval${fallback}`,
+      };
+    }
+    const runtime = ensureModeRuntime(config);
+    if (!runtime.beginHumanApproval()) {
+      return {
+        block: true,
+        reason: "pi-permissions: another approval is already active",
+      };
+    }
+
+    try {
+      const approved = await ctx.ui.confirm(
+        `pi-permissions · ${decision.risk}`,
+        `${event.toolName}: ${decision.summary}\n\n${decision.reason}${
+          decision.networkHosts?.length
+            ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
+            : ""
+        }${
+          decision.filesystemWriteRoots?.length
+            ? `\n\nFilesystem for this command: ${decision.filesystemWriteRoots.join(", ")}`
+            : ""
+        }${
+          decision.justification
+            ? `\n\nJustification: ${decision.justification}`
+            : ""
+        }${
+          options.fallbackReason
+            ? `\n\nAuto reviewer fallback: ${options.fallbackReason}`
+            : ""
+        }`,
+      );
+      if (approved) {
+        grantApprovedCall(event, decision, config, ctx.cwd, "user");
+        return;
+      }
+      return {
+        block: true,
+        reason: `pi-permissions: user denied ${decision.risk} operation`,
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        block: true,
+        reason: `pi-permissions approval failed: ${message}`,
+      };
+    } finally {
+      runtime.endHumanApproval();
+      setDefaultStatus(ctx);
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
-    approvalActive = false;
     approvedCalls.clear();
     approvedNetworkHosts.clear();
     approvedWriteRoots.clear();
     try {
       const result = await activateConfig(ctx, true);
-      if (result.config.defaultMode !== "default" && ctx.hasUI) {
-        ctx.ui.notify("pi-permissions 当前仅启用 Default mode；已忽略其他 defaultMode。", "warning");
-      }
+      modeRuntime = new PermissionModeRuntime(
+        result.config,
+        pi.appendEntry.bind(pi),
+      );
+      modeRuntime.restore(ctx.sessionManager.getBranch(), result.config);
+      setDefaultStatus(ctx);
     } catch (error: unknown) {
       reportConfigError(ctx, error);
     }
@@ -463,72 +589,73 @@ export function registerExtension(
     if (decision.action === "block") {
       return { block: true, reason: `pi-permissions: ${decision.reason}` };
     }
-    if (!ctx.hasUI) {
-      return {
-        block: true,
-        reason: `pi-permissions: ${decision.risk} operation requires interactive approval`,
-      };
-    }
-    if (approvalActive) {
-      return { block: true, reason: "pi-permissions: another approval is already active" };
-    }
-
-    approvalActive = true;
-    try {
-      const approved = await ctx.ui.confirm(
-        `pi-permissions · ${decision.risk}`,
-        `${event.toolName}: ${decision.summary}\n\n${decision.reason}${
-          decision.networkHosts?.length
-            ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
-            : ""
-        }${
-          decision.filesystemWriteRoots?.length
-            ? `\n\nFilesystem for this command: ${decision.filesystemWriteRoots.join(", ")}`
-            : ""
-        }${
-          decision.justification
-            ? `\n\nJustification: ${decision.justification}`
-            : ""
-        }`,
-      );
-      if (approved) {
-        if (event.toolCallId) {
-          approvedCalls.set(event.toolCallId, {
-            configFingerprint: fingerprintConfig(result.config),
-            cwd: resolve(ctx.cwd),
-            requestFingerprint: fingerprintValue({
-              tool: event.toolName.toLowerCase(),
-              input: event.input,
-            }),
-          });
-        }
-        if (decision.networkHosts?.length && event.toolCallId) {
-          approvedNetworkHosts.set(event.toolCallId, decision.networkHosts);
-        }
-        const writeRoots = [...new Set([
-          ...oneCallWriteRoots(event, ctx.cwd),
-          ...(decision.filesystemWriteRoots ?? []),
-        ])];
-        if (writeRoots.length > 0 && event.toolCallId) {
-          approvedWriteRoots.set(event.toolCallId, writeRoots);
-        }
-        return;
+    const runtime = ensureModeRuntime(result.config);
+    if (runtime.mode === "auto" && !runtime.autoState.paused) {
+      const id = event.toolCallId;
+      if (!id) {
+        return {
+          block: true,
+          reason: "pi-permissions: Auto review requires a tool-call ID",
+        };
       }
-      return { block: true, reason: `pi-permissions: user denied ${decision.risk} operation` };
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { block: true, reason: `pi-permissions approval failed: ${message}` };
-    } finally {
-      approvalActive = false;
-      setDefaultStatus(ctx);
+      if (!runtime.beginReview(id)) {
+        return { block: true, reason: "pi-permissions: duplicate Auto review" };
+      }
+      try {
+        const request = buildAutoReviewRequest(
+          event,
+          decision,
+          ctx.cwd,
+          result.config.sandbox.profile,
+          ctx.sessionManager.getBranch(),
+        );
+        const auto = await reviewAutoPrompt(
+          autoReviewer,
+          request,
+          {
+            modelRegistry: ctx.modelRegistry,
+            activeModel: ctx.model,
+            reviewer: result.config.reviewer,
+          },
+          runtime.autoState,
+          result.config.reviewer?.maxConsecutiveDenials ?? 3,
+          ctx.signal,
+        );
+        runtime.applyAutoState(auto.state);
+        if (auto.action === "approve") {
+          grantApprovedCall(
+            event,
+            decision,
+            result.config,
+            ctx.cwd,
+            "auto-review",
+          );
+          return;
+        }
+        if (auto.action === "deny") {
+          return {
+            block: true,
+            reason: `pi-permissions Auto denied: ${auto.review.rationale} Take a materially safer approach.`,
+          };
+        }
+        return requestHumanApproval(event, decision, result.config, ctx, {
+          fallbackReason: auto.error.message,
+        });
+      } finally {
+        runtime.endReview(id);
+      }
     }
+    return requestHumanApproval(event, decision, result.config, ctx);
   });
 
   pi.registerCommand("default", {
     description: "Activate pi-permissions Default mode",
     handler: async (_args, ctx) => {
       try {
-        await activateConfig(ctx, true);
+        const result = await activateConfig(ctx, true);
+        ensureModeRuntime(result.config).activate("default", {
+          idle: ctx.isIdle(),
+        });
         setDefaultStatus(ctx);
         ctx.ui.notify("pi-permissions: Default mode 已启用", "info");
       } catch (error: unknown) {
@@ -557,7 +684,7 @@ export function registerExtension(
               ? `sandbox error: ${sandboxState.error}`
               : "sandbox pending";
         ctx.ui.notify(
-          `Default · approval gate on · ${sandboxSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
+          `${modeRuntime?.statusLabel ?? "Default"} · approval gate on · ${sandboxSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
           "info",
         );
       } catch (error: unknown) {

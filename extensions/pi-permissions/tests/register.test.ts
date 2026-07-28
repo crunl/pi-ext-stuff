@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerExtension } from "../src/register.ts";
+import type { AutoReviewer } from "../src/auto-reviewer.ts";
 
 function harness(
   agentDir: string,
@@ -13,6 +14,7 @@ function harness(
     runShared<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
     runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   },
+  reviewer?: AutoReviewer,
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -38,10 +40,19 @@ function harness(
     close: vi.fn(async () => undefined),
   };
   const filteringProxyFactory = vi.fn(async () => filteringProxy);
+  const appendEntry = vi.fn();
+  const autoReviewer = reviewer ?? {
+    review: vi.fn(async () => ({
+      decision: "approve" as const,
+      risk: "low" as const,
+      rationale: "Authorized.",
+    })),
+  };
   const pi = {
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     registerCommand: (name: string, command: { handler: (...args: any[]) => any }) => commands.set(name, command),
     registerTool: (tool: any) => tools.set(tool.name, tool),
+    appendEntry,
   };
   registerExtension(pi as any, {
     agentDir,
@@ -50,11 +61,18 @@ function harness(
     localProxyPorts,
     filteringProxyFactory,
     sandboxCoordinator,
+    autoReviewer,
   });
   const context = {
     cwd: agentDir,
     hasUI,
+    mode: hasUI ? "tui" : "print",
     isProjectTrusted: () => false,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => [] },
+    modelRegistry: {},
+    model: undefined,
+    signal: undefined,
     ui: { setStatus, notify, confirm },
   };
   return {
@@ -70,6 +88,8 @@ function harness(
     bashExecute,
     filteringProxy,
     filteringProxyFactory,
+    appendEntry,
+    autoReviewer,
   };
 }
 
@@ -166,6 +186,140 @@ describe("Default mode registration", () => {
     await expect(handler({ toolName: "bash", input: { command: "rm -rf build" } }, app.context))
       .resolves.toMatchObject({ block: true });
     expect(app.confirm).toHaveBeenCalledOnce();
+  });
+
+  it("routes only Default prompts through Auto reviewer", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const reviewer = {
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        rationale: "The requested cleanup is authorized.",
+      })),
+    };
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "auto-1",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(app.confirm).not.toHaveBeenCalled();
+  });
+
+  it("never sends deterministic blocks to the reviewer", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const reviewer = { review: vi.fn() };
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "read",
+          toolCallId: "secret",
+          input: { path: ".env" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("binds automatic approval to one exact execution", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "bound-auto",
+      input: { command: "rm -rf build" },
+    };
+    await app.handlers.get("tool_call")!(event, app.context);
+    await app.tools.get("bash").execute(
+      "bound-auto",
+      event.input,
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    await expect(
+      app.tools.get("bash").execute(
+        "bound-auto",
+        event.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it("returns reviewer denial to the agent and never executes", async () => {
+    const reviewer = {
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        rationale: "Production deletion was not requested.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "denied-auto",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining(
+        "Production deletion was not requested.",
+      ),
+    });
+    expect(app.bashExecute).not.toHaveBeenCalled();
   });
 
   it("executes an approved call and fails closed without UI", async () => {
