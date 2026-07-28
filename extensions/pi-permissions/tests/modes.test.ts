@@ -18,7 +18,23 @@ describe("ModeController", () => {
       active: "default",
       pending: "plan",
     });
-    expect(controller.flushPending()).toBe("plan");
+    expect(controller.flushPending({ idle: true, approvalActive: false })).toBe("plan");
+  });
+
+  it("retains a pending transition when flushed while busy", () => {
+    const controller = new ModeController("default");
+    controller.request("plan", { idle: false, approvalActive: false });
+
+    expect(controller.flushPending({ idle: false, approvalActive: false })).toBe("default");
+    expect(controller.pending).toBe("plan");
+  });
+
+  it("retains a pending transition when flushed during approval", () => {
+    const controller = new ModeController("default");
+    controller.request("plan", { idle: false, approvalActive: false });
+
+    expect(controller.flushPending({ idle: true, approvalActive: true })).toBe("default");
+    expect(controller.pending).toBe("plan");
   });
 
   it("does not change mode during approval", () => {

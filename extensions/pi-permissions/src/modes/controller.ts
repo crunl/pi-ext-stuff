@@ -45,7 +45,8 @@ export class ModeController {
     return this.request(nextMode, context);
   }
 
-  flushPending(): PermissionMode {
+  flushPending(context: ModeTransitionContext): PermissionMode {
+    if (!context.idle || context.approvalActive) return this.activeMode;
     if (this.pendingMode !== undefined) {
       this.activeMode = this.pendingMode;
       this.pendingMode = undefined;
