@@ -57,6 +57,10 @@ export class PermissionModeRuntime {
     this.activeReviewIds.delete(toolCallId);
   }
 
+  cancelReviews(): void {
+    this.activeReviewIds.clear();
+  }
+
   beginHumanApproval(): boolean {
     if (this.humanApprovalActive) return false;
     this.humanApprovalActive = true;

@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerExtension } from "../src/register.ts";
-import type { AutoReviewer } from "../src/auto-reviewer.ts";
+import {
+  AutoReviewerFailure,
+  type AutoReviewer,
+} from "../src/auto-reviewer.ts";
 
 function harness(
   agentDir: string,
@@ -319,6 +322,246 @@ describe("Default mode registration", () => {
         "Production deletion was not requested.",
       ),
     });
+    expect(app.bashExecute).not.toHaveBeenCalled();
+  });
+
+  it("falls back to human approval when the reviewer is unavailable", async () => {
+    const reviewer = {
+      review: vi.fn(async () => {
+        throw new AutoReviewerFailure("timeout", "review timed out");
+      }),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, true, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "fallback",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.confirm).toHaveBeenCalledWith(
+      expect.stringContaining("HARD"),
+      expect.stringContaining("review timed out"),
+    );
+  });
+
+  it("fails closed on reviewer failure without dialog-capable UI", async () => {
+    const reviewer = {
+      review: vi.fn(async () => {
+        throw new AutoReviewerFailure("provider", "provider unavailable");
+      }),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, false, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "headless-fallback",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("provider unavailable"),
+    });
+  });
+
+  it("pauses after three denials and /auto explicitly resumes", async () => {
+    const reviewer = {
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        rationale: "Not authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    for (const id of ["deny-1", "deny-2", "deny-3"]) {
+      await app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: id,
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      );
+    }
+    app.confirm.mockResolvedValueOnce(false);
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "paused-human",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(reviewer.review).toHaveBeenCalledTimes(3);
+    expect(app.confirm).toHaveBeenCalledOnce();
+
+    await app.commands.get("auto")!.handler("", app.context);
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "resumed-auto",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(reviewer.review).toHaveBeenCalledTimes(4);
+  });
+
+  it("shows only the active mode in status", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    await app.commands.get("auto")!.handler("", app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    await app.commands.get("default")!.handler("", app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith(
+      "pi-permissions",
+      "Default",
+    );
+  });
+
+  it("invalidates a late Auto approval when mode changes", async () => {
+    let resolveReview!: (value: {
+      decision: "approve";
+      risk: "low";
+      rationale: string;
+    }) => void;
+    const reviewer = {
+      review: vi.fn(
+        async () =>
+          new Promise<{
+            decision: "approve";
+            risk: "low";
+            rationale: string;
+          }>((resolvePromise) => {
+            resolveReview = resolvePromise;
+          }),
+      ),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "late-mode-change",
+      input: { command: "rm -rf build" },
+    };
+    const pending = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
+
+    await app.commands.get("default")!.handler("", app.context);
+    resolveReview({
+      decision: "approve",
+      risk: "low",
+      rationale: "Late approval.",
+    });
+
+    await expect(pending).resolves.toMatchObject({ block: true });
+    await expect(
+      app.tools.get("bash").execute(
+        event.toolCallId,
+        event.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+    expect(app.bashExecute).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a late Auto approval on session shutdown", async () => {
+    let resolveReview!: (value: {
+      decision: "approve";
+      risk: "low";
+      rationale: string;
+    }) => void;
+    const reviewer = {
+      review: vi.fn(
+        async () =>
+          new Promise<{
+            decision: "approve";
+            risk: "low";
+            rationale: string;
+          }>((resolvePromise) => {
+            resolveReview = resolvePromise;
+          }),
+      ),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "late-shutdown",
+      input: { command: "rm -rf build" },
+    };
+    const pending = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
+
+    await app.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown" },
+      app.context,
+    );
+    resolveReview({
+      decision: "approve",
+      risk: "low",
+      rationale: "Late approval.",
+    });
+
+    await expect(pending).resolves.toMatchObject({ block: true });
     expect(app.bashExecute).not.toHaveBeenCalled();
   });
 

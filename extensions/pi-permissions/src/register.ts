@@ -94,6 +94,7 @@ export function registerExtension(
   let loadedKey: string | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
+  const reviewControllers = new Map<string, AbortController>();
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
@@ -106,6 +107,17 @@ export function registerExtension(
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
+  };
+
+  const invalidatePermissionContext = (reason: string): void => {
+    for (const controller of reviewControllers.values()) {
+      controller.abort(new Error(reason));
+    }
+    reviewControllers.clear();
+    modeRuntime?.cancelReviews();
+    approvedCalls.clear();
+    approvedNetworkHosts.clear();
+    approvedWriteRoots.clear();
   };
 
   const oneCallWriteRoots = (
@@ -233,9 +245,7 @@ export function registerExtension(
 
     activationFailure = undefined;
     if (force) {
-      approvedCalls.clear();
-      approvedNetworkHosts.clear();
-      approvedWriteRoots.clear();
+      invalidatePermissionContext("permission context changed");
     }
     loaded = candidate;
     loadedKey = key;
@@ -537,9 +547,7 @@ export function registerExtension(
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    approvedCalls.clear();
-    approvedNetworkHosts.clear();
-    approvedWriteRoots.clear();
+    invalidatePermissionContext("session changed");
     try {
       const result = await activateConfig(ctx, true);
       modeRuntime = new PermissionModeRuntime(
@@ -554,11 +562,9 @@ export function registerExtension(
   });
 
   pi.on("session_shutdown", async () => {
+    invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
-      approvedCalls.clear();
-      approvedNetworkHosts.clear();
-      approvedWriteRoots.clear();
       await sandboxManager.reset();
     });
   });
@@ -601,6 +607,8 @@ export function registerExtension(
       if (!runtime.beginReview(id)) {
         return { block: true, reason: "pi-permissions: duplicate Auto review" };
       }
+      const reviewController = new AbortController();
+      reviewControllers.set(id, reviewController);
       try {
         const request = buildAutoReviewRequest(
           event,
@@ -619,8 +627,16 @@ export function registerExtension(
           },
           runtime.autoState,
           result.config.reviewer?.maxConsecutiveDenials ?? 3,
-          ctx.signal,
+          ctx.signal
+            ? AbortSignal.any([ctx.signal, reviewController.signal])
+            : reviewController.signal,
         );
+        if (reviewController.signal.aborted) {
+          return {
+            block: true,
+            reason: "pi-permissions: permission context changed during Auto review",
+          };
+        }
         runtime.applyAutoState(auto.state);
         if (auto.action === "approve") {
           grantApprovedCall(
@@ -642,31 +658,52 @@ export function registerExtension(
           fallbackReason: auto.error.message,
         });
       } finally {
+        if (reviewControllers.get(id) === reviewController) {
+          reviewControllers.delete(id);
+        }
         runtime.endReview(id);
       }
     }
     return requestHumanApproval(event, decision, result.config, ctx);
   });
 
+  const activateMode = async (
+    mode: "default" | "auto",
+    ctx: ExtensionContext,
+  ): Promise<void> => {
+    try {
+      const result = await activateConfig(ctx, true);
+      const runtime = ensureModeRuntime(result.config);
+      if (
+        runtime.snapshot().configFingerprint !==
+        fingerprintConfig(result.config)
+      ) {
+        runtime.restore([], result.config);
+      }
+      runtime.activate(mode, { idle: ctx.isIdle() });
+      setDefaultStatus(ctx);
+      ctx.ui.notify(
+        `pi-permissions: ${runtime.statusLabel} mode 已启用`,
+        "info",
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDefaultStatus(ctx);
+      ctx.ui.notify(
+        `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
+        "error",
+      );
+    }
+  };
+
   pi.registerCommand("default", {
     description: "Activate pi-permissions Default mode",
-    handler: async (_args, ctx) => {
-      try {
-        const result = await activateConfig(ctx, true);
-        ensureModeRuntime(result.config).activate("default", {
-          idle: ctx.isIdle(),
-        });
-        setDefaultStatus(ctx);
-        ctx.ui.notify("pi-permissions: Default mode 已启用", "info");
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        setDefaultStatus(ctx);
-        ctx.ui.notify(
-          `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
-          "error",
-        );
-      }
-    },
+    handler: async (_args, ctx) => activateMode("default", ctx),
+  });
+
+  pi.registerCommand("auto", {
+    description: "Activate pi-permissions Auto mode",
+    handler: async (_args, ctx) => activateMode("auto", ctx),
   });
 
   pi.registerCommand("permissions", {
@@ -675,6 +712,12 @@ export function registerExtension(
       try {
         const result = await activateConfig(ctx, true);
         const config = result.config;
+        const runtime = ensureModeRuntime(config);
+        if (
+          runtime.snapshot().configFingerprint !== fingerprintConfig(config)
+        ) {
+          runtime.restore(ctx.sessionManager.getBranch(), config);
+        }
         setDefaultStatus(ctx);
         const sandboxSummary = sandboxState.kind === "ready"
           ? `${sandboxState.profile} sandbox on`
@@ -683,8 +726,16 @@ export function registerExtension(
             : sandboxState.kind === "failed"
               ? `sandbox error: ${sandboxState.error}`
               : "sandbox pending";
+        const reviewerSummary = config.reviewer
+          ? `${config.reviewer.provider}/${config.reviewer.model}`
+          : "current session model";
+        const autoSummary = runtime.mode === "auto"
+          ? runtime.autoState.paused
+            ? "Auto paused"
+            : "Auto active"
+          : "manual approval";
         ctx.ui.notify(
-          `${modeRuntime?.statusLabel ?? "Default"} · approval gate on · ${sandboxSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
+          `${runtime.statusLabel} · reviewer ${reviewerSummary} · ${sandboxSummary} · ${autoSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
           "info",
         );
       } catch (error: unknown) {
