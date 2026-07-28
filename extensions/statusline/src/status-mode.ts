@@ -17,8 +17,9 @@ export function formatModelStatus(
 export function partitionExtensionStatuses(
 	statuses: ReadonlyMap<string, string>,
 ): { mode: string | undefined; remaining: Array<[string, string]> } {
+	const publishedMode = statuses.get("pi-permissions");
 	return {
-		mode: statuses.get("pi-permissions"),
+		mode: publishedMode === "Default" ? undefined : publishedMode,
 		remaining: [...statuses.entries()].filter(([key]) => key !== "pi-permissions"),
 	};
 }

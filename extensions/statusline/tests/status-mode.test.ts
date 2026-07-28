@@ -13,10 +13,10 @@ const info = {
 	effort: "xhigh",
 };
 
-test("formats compact mode, provider, model, and effort", () => {
+test("formats compact non-default mode, provider, model, and effort", () => {
 	assert.equal(
-		formatModelStatus(info, "Default"),
-		"Default•(tuzi) gpt-5.6-sol-fast•xhigh",
+		formatModelStatus(info, "Auto"),
+		"Auto•(tuzi) gpt-5.6-sol-fast•xhigh",
 	);
 });
 
@@ -29,18 +29,26 @@ test("preserves the existing label when the mode is absent", () => {
 
 test("omits the effort separator when effort is absent", () => {
 	assert.equal(
-		formatModelStatus({ ...info, effort: undefined }, "Default"),
-		"Default•(tuzi) gpt-5.6-sol-fast",
+		formatModelStatus({ ...info, effort: undefined }, "Auto"),
+		"Auto•(tuzi) gpt-5.6-sol-fast",
 	);
 });
 
-test("extracts only pi-permissions and preserves unrelated statuses", () => {
+test("hides Default while preserving unrelated statuses", () => {
 	const result = partitionExtensionStatuses(new Map([
 		["other", "Indexing"],
 		["pi-permissions", "Default"],
 	]));
-	assert.equal(result.mode, "Default");
+	assert.equal(result.mode, undefined);
 	assert.deepEqual(result.remaining, [["other", "Indexing"]]);
+});
+
+test("keeps non-default permission modes visible", () => {
+	const result = partitionExtensionStatuses(
+		new Map([["pi-permissions", "Auto"]]),
+	);
+	assert.equal(result.mode, "Auto");
+	assert.deepEqual(result.remaining, []);
 });
 
 test("mode state reports only distinct changes", () => {
@@ -63,13 +71,15 @@ test("sync requests one render per distinct mode and returns other statuses", ()
 		syncPermissionsMode(statuses, state, () => renders++),
 		[["other", "Indexing"]],
 	);
+	assert.equal(state.get(), undefined);
 	syncPermissionsMode(statuses, state, () => renders++);
-	assert.equal(renders, 1);
+	assert.equal(renders, 0);
 
 	syncPermissionsMode(
-		new Map([["pi-permissions", "Plan"]]),
+		new Map([["pi-permissions", "Auto"]]),
 		state,
 		() => renders++,
 	);
-	assert.equal(renders, 2);
+	assert.equal(renders, 1);
+	assert.equal(state.get(), "Auto");
 });
