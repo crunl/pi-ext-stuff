@@ -82,4 +82,8 @@ test("sync requests one render per distinct mode and returns other statuses", ()
 	);
 	assert.equal(renders, 1);
 	assert.equal(state.get(), "Auto");
+
+	syncPermissionsMode(statuses, state, () => renders++);
+	assert.equal(renders, 2);
+	assert.equal(state.get(), undefined);
 });
