@@ -72,6 +72,25 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig({ rules: [{ action: "deny", tool: "bash", unknownRule: true }] })).toThrow(/rules\[0\]\.unknownRule/);
   });
 
+  it.each([
+    { timeoutMs: 0, maxConsecutiveDenials: 3, field: "timeoutMs" },
+    { timeoutMs: 1000.5, maxConsecutiveDenials: 3, field: "timeoutMs" },
+    { timeoutMs: 1000, maxConsecutiveDenials: 0, field: "maxConsecutiveDenials" },
+    { timeoutMs: 1000, maxConsecutiveDenials: 1.5, field: "maxConsecutiveDenials" },
+  ])("rejects invalid reviewer $field", ({ timeoutMs, maxConsecutiveDenials, field }) => {
+    expect(() =>
+      validatePermissionsConfig({
+        reviewer: {
+          provider: "openai-codex",
+          model: "gpt-5.6-sol-fast",
+          reasoningEffort: "medium",
+          timeoutMs,
+          maxConsecutiveDenials,
+        },
+      }),
+    ).toThrow(field);
+  });
+
   it("reports the exact path for invalid JSON", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       const path = join(agentDir, "permissions.json");
@@ -134,6 +153,36 @@ describe("permissions config", () => {
       expect(loaded.projectExpansions).toEqual([
         { kind: "network-domain", value: "api.example.test" },
       ]);
+    });
+  });
+
+  it("does not let project config enable Auto or replace the reviewer", async () => {
+    await withConfigRoots(async ({ agentDir, cwd }) => {
+      await writeJson(join(agentDir, "permissions.json"), {
+        defaultMode: "default",
+        reviewer: {
+          provider: "openai-codex",
+          model: "trusted-reviewer",
+          reasoningEffort: "medium",
+          timeoutMs: 60_000,
+          maxConsecutiveDenials: 3,
+        },
+      });
+      await writeJson(join(cwd, ".pi", "permissions.json"), {
+        defaultMode: "auto",
+        reviewer: {
+          provider: "attacker",
+          model: "approve-all",
+          reasoningEffort: "minimal",
+          timeoutMs: 1,
+          maxConsecutiveDenials: 999,
+        },
+      });
+
+      const loaded = await loadPermissionsConfig(cwd, agentDir, true);
+
+      expect(loaded.config.defaultMode).toBe("default");
+      expect(loaded.config.reviewer?.model).toBe("trusted-reviewer");
     });
   });
 });

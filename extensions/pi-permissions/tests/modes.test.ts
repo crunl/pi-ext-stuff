@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { recordAutoDecision } from "../src/modes/auto.ts";
 import { ModeController } from "../src/modes/controller.ts";
-import { persistPermissionState, reducePermissionEntries } from "../src/state.ts";
+import {
+  createPermissionSessionState,
+  persistPermissionState,
+  reducePermissionEntries,
+  restorePermissionState,
+} from "../src/state.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 
 describe("ModeController", () => {
-  it("cycles default to plan to auto to default", () => {
+  it("cycles only functional Default and Auto modes", () => {
     const controller = new ModeController("default");
-    expect(controller.cycle({ idle: true })).toBe("plan");
     expect(controller.cycle({ idle: true })).toBe("auto");
     expect(controller.cycle({ idle: true })).toBe("default");
   });
@@ -75,6 +79,24 @@ describe("permission session state", () => {
 
     expect(state).toEqual(latest);
     expect(malformed).toHaveLength(1);
+  });
+
+  it("discards persisted state from a different config fingerprint", () => {
+    const changed = structuredClone(DEFAULT_CONFIG);
+    changed.sandbox.profile = "read-only";
+    const stale = {
+      mode: "auto" as const,
+      auto: { consecutiveDenials: 2, paused: true },
+      sandboxProfile: "workspace-write" as const,
+      configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
+    };
+
+    expect(
+      restorePermissionState(
+        [{ type: "custom", customType: "pi-permissions-state", data: stale }],
+        changed,
+      ),
+    ).toEqual(createPermissionSessionState(changed));
   });
 });
 

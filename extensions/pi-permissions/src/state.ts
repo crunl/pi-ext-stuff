@@ -92,3 +92,14 @@ export function reducePermissionEntries(
   }
   return state;
 }
+
+export function restorePermissionState(
+  entries: readonly unknown[],
+  config: PermissionsConfig,
+  reportMalformed: (entry: unknown) => void = () => {},
+): PermissionSessionState {
+  const restored = reducePermissionEntries(entries, config, reportMalformed);
+  return restored.configFingerprint === fingerprintConfig(config)
+    ? restored
+    : createPermissionSessionState(config);
+}

@@ -10,7 +10,7 @@ export interface ModeTransition {
   pending?: PermissionMode;
 }
 
-const cycleOrder: PermissionMode[] = ["default", "plan", "auto"];
+const cycleOrder: PermissionMode[] = ["default", "auto"];
 
 export class ModeController {
   private activeMode: PermissionMode;

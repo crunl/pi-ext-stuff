@@ -111,6 +111,14 @@ function expectNumber(value: unknown, path: string): number {
   return value;
 }
 
+function expectPositiveSafeInteger(value: unknown, path: string): number {
+  const parsed = expectNumber(value, path);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new ConfigError(`${path} must be a positive safe integer`);
+  }
+  return parsed;
+}
+
 function expectStrings(value: unknown, path: string): string[] {
   if (!Array.isArray(value)) throw new ConfigError(`${path} must be an array of strings`);
   return value.map((entry, index) => expectString(entry, `${path}[${index}]`));
@@ -155,8 +163,11 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
       provider: expectString(reviewer.provider, "reviewer.provider"),
       model: expectString(reviewer.model, "reviewer.model"),
       reasoningEffort: reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"],
-      timeoutMs: expectNumber(reviewer.timeoutMs, "reviewer.timeoutMs"),
-      maxConsecutiveDenials: expectNumber(reviewer.maxConsecutiveDenials, "reviewer.maxConsecutiveDenials"),
+      timeoutMs: expectPositiveSafeInteger(reviewer.timeoutMs, "reviewer.timeoutMs"),
+      maxConsecutiveDenials: expectPositiveSafeInteger(
+        reviewer.maxConsecutiveDenials,
+        "reviewer.maxConsecutiveDenials",
+      ),
     };
   }
   if ("sandbox" in input && input.sandbox !== undefined) {
@@ -260,9 +271,18 @@ function intersect(values: string[], permitted: string[]): string[] {
 }
 
 function projectRestrictions(globalConfig: PermissionsConfig, project: PermissionsConfigOverlay): PermissionsConfig {
+  const projectDefaultMode =
+    project.defaultMode === "auto" && globalConfig.defaultMode !== "auto"
+      ? globalConfig.defaultMode
+      : project.defaultMode;
+  const baseRestricted: PermissionsConfigOverlay = {
+    ...project,
+    defaultMode: projectDefaultMode,
+    reviewer: undefined,
+  };
   const restrictedOverlay: PermissionsConfigOverlay = project.sandbox
     ? {
-        ...project,
+        ...baseRestricted,
         sandbox: {
           ...project.sandbox,
           enabled: project.sandbox.enabled === false && globalConfig.sandbox.enabled ? true : project.sandbox.enabled,
@@ -291,7 +311,7 @@ function projectRestrictions(globalConfig: PermissionsConfig, project: Permissio
             : undefined,
         },
       }
-    : project;
+    : baseRestricted;
   const effective = mergePermissionsConfig(globalConfig, restrictedOverlay);
 
   if (project.sandbox?.filesystem?.denyRead) {
