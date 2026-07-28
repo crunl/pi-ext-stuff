@@ -52,6 +52,7 @@ function harness(
     review: vi.fn(async () => ({
       decision: "approve" as const,
       risk: "low" as const,
+      userAuthorization: "high" as const,
       rationale: "Authorized.",
     })),
   };
@@ -205,6 +206,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
+        userAuthorization: "high" as const,
         rationale: "Approved by the reviewer.",
       })),
     };
@@ -266,6 +268,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
+        userAuthorization: "high" as const,
         rationale: "The requested cleanup is authorized.",
       })),
     };
@@ -295,6 +298,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
+        userAuthorization: "low" as const,
         rationale: "Denied for test.",
       })),
     };
@@ -342,6 +346,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
+        userAuthorization: "high" as const,
         rationale: "Authorized.",
       })),
     };
@@ -567,11 +572,13 @@ describe("Default mode registration", () => {
         .mockResolvedValueOnce({
           decision: "approve" as const,
           risk: "low" as const,
+          userAuthorization: "high" as const,
           rationale: "First call approved.",
         })
         .mockResolvedValueOnce({
           decision: "deny" as const,
           risk: "high" as const,
+          userAuthorization: "low" as const,
           rationale: "Replacement denied.",
         }),
     };
@@ -614,6 +621,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
+        userAuthorization: "low" as const,
         rationale: "Production deletion was not requested.",
       })),
     };
@@ -716,6 +724,7 @@ describe("Default mode registration", () => {
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
+        userAuthorization: "low" as const,
         rationale: "Not authorized.",
       })),
     };
@@ -769,6 +778,7 @@ describe("Default mode registration", () => {
       (value: {
         decision: "deny";
         risk: "high";
+        userAuthorization: "low";
         rationale: string;
       }) => void
     > = [];
@@ -778,6 +788,7 @@ describe("Default mode registration", () => {
           new Promise<{
             decision: "deny";
             risk: "high";
+            userAuthorization: "low";
             rationale: string;
           }>((resolvePromise) => {
             resolvers.push(resolvePromise);
@@ -811,6 +822,7 @@ describe("Default mode registration", () => {
       resolveReview({
         decision: "deny",
         risk: "high",
+        userAuthorization: "low",
         rationale: "Not authorized.",
       });
     }
@@ -968,6 +980,7 @@ describe("Default mode registration", () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
+      userAuthorization: "high";
       rationale: string;
     }) => void;
     let reviewSignal: AbortSignal | undefined;
@@ -978,6 +991,7 @@ describe("Default mode registration", () => {
           return new Promise<{
             decision: "approve";
             risk: "low";
+            userAuthorization: "high";
             rationale: string;
           }>((resolvePromise) => {
             resolveReview = resolvePromise;
@@ -1014,6 +1028,7 @@ describe("Default mode registration", () => {
     resolveReview({
       decision: "approve",
       risk: "low",
+      userAuthorization: "high",
       rationale: "Approved before the queued mode transition.",
     });
     await expect(pendingReview).resolves.toBeUndefined();
@@ -1039,6 +1054,7 @@ describe("Default mode registration", () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
+      userAuthorization: "high";
       rationale: string;
     }) => void;
     const reviewer = {
@@ -1047,6 +1063,7 @@ describe("Default mode registration", () => {
           new Promise<{
             decision: "approve";
             risk: "low";
+            userAuthorization: "high";
             rationale: string;
           }>((resolvePromise) => {
             resolveReview = resolvePromise;
@@ -1075,6 +1092,7 @@ describe("Default mode registration", () => {
     resolveReview({
       decision: "approve",
       risk: "low",
+      userAuthorization: "high",
       rationale: "Late approval.",
     });
 
@@ -1095,6 +1113,7 @@ describe("Default mode registration", () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
+      userAuthorization: "high";
       rationale: string;
     }) => void;
     const reviewer = {
@@ -1103,6 +1122,7 @@ describe("Default mode registration", () => {
           new Promise<{
             decision: "approve";
             risk: "low";
+            userAuthorization: "high";
             rationale: string;
           }>((resolvePromise) => {
             resolveReview = resolvePromise;
@@ -1134,6 +1154,7 @@ describe("Default mode registration", () => {
     resolveReview({
       decision: "approve",
       risk: "low",
+      userAuthorization: "high",
       rationale: "Late approval.",
     });
 

@@ -33,7 +33,7 @@ const response = {
 describe("PiAutoReviewer", () => {
   it("uses the configured model, Pi credentials, and bounded options", async () => {
     const configuredModel = { provider: "openai-codex", id: "reviewer" } as any;
-    const complete = vi.fn(async () => response);
+    const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
     const reviewer = new PiAutoReviewer(complete as any);
     const modelRegistry = {
       find: vi.fn(() => configuredModel),
