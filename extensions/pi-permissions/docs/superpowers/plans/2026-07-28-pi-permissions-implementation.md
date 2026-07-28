@@ -95,8 +95,11 @@ Use this manifest:
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
+    "typebox": "1.1.38",
     "vitest": "^4.1.0"
   }
 }
