@@ -50,34 +50,55 @@ function globMatches(value: string, pattern: string): boolean {
   return new RegExp(`^${expression}$`).test(value);
 }
 
-function matchesProtectedPattern(path: string, cwd: string, patterns: string[]): boolean {
-  const workspaceRelative = relative(cwd, path);
-  const candidates = [basename(path), workspaceRelative];
-  return patterns.some((rawPattern) => {
+async function matchesProtectedPattern(
+  lexicalPath: string,
+  canonicalPath: string,
+  lexicalCwd: string,
+  canonicalCwd: string,
+  patterns: string[],
+): Promise<boolean> {
+  return (await Promise.all(patterns.map(async (rawPattern) => {
     const pattern = expandHome(rawPattern);
-    if (isAbsolute(pattern)) return isWithin(path, pattern);
+    if (isAbsolute(pattern)) {
+      const canonicalPattern = await canonicalize(pattern);
+      return isWithin(lexicalPath, pattern) || isWithin(canonicalPath, canonicalPattern);
+    }
+    const candidates = [
+      basename(lexicalPath),
+      relative(lexicalCwd, lexicalPath),
+      basename(canonicalPath),
+      relative(canonicalCwd, canonicalPath),
+    ];
     return candidates.some((candidate) => globMatches(candidate, pattern));
-  });
+  }))).some(Boolean);
 }
 
 /** Resolves symlinks in every existing ancestor before comparing path components. */
 export async function isPathAllowed(path: string, policy: PathPolicy): Promise<PathDecision> {
-  const cwd = await canonicalize(resolve(expandHome(policy.cwd)));
+  const lexicalCwd = resolve(expandHome(policy.cwd));
+  const cwd = await canonicalize(lexicalCwd);
   const requested = isAbsolute(expandHome(path))
     ? expandHome(path)
-    : resolve(cwd, expandHome(path));
+    : resolve(lexicalCwd, expandHome(path));
   const canonicalPath = await canonicalize(requested);
   const protectedControls = [
     resolve(homedir(), ".pi/agent/permissions.json"),
-    resolve(cwd, ".pi/permissions.json"),
+    resolve(lexicalCwd, ".pi/permissions.json"),
   ];
+  const canonicalControls = await Promise.all(protectedControls.map(canonicalize));
+  const canonicalPackageRoot = await canonicalize(packageRoot);
 
-  if (policy.operation === "write" && (isWithin(canonicalPath, packageRoot) || protectedControls.some((control) => canonicalPath === control))) {
+  if (policy.operation === "write" && (
+    isWithin(requested, packageRoot)
+    || isWithin(canonicalPath, canonicalPackageRoot)
+    || protectedControls.some((control) => requested === control)
+    || canonicalControls.some((control) => canonicalPath === control)
+  )) {
     return { allowed: false, canonicalPath, reason: "permission control path is protected" };
   }
 
   const denied = policy.operation === "write" ? policy.denyWrite : policy.denyRead;
-  if (matchesProtectedPattern(canonicalPath, cwd, denied)) {
+  if (await matchesProtectedPattern(requested, canonicalPath, lexicalCwd, cwd, denied)) {
     return { allowed: false, canonicalPath, reason: "path matches protected pattern" };
   }
 
@@ -86,9 +107,9 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
   const writeRoots = await Promise.all(policy.allowWrite.map(async (root) => {
     const expanded = expandHome(root);
     const absolute = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-    return canonicalize(absolute);
+    return { lexical: isAbsolute(expanded) ? expanded : resolve(lexicalCwd, expanded), canonical: await canonicalize(absolute) };
   }));
-  if (!writeRoots.some((root) => isWithin(canonicalPath, root))) {
+  if (!writeRoots.some((root) => isWithin(requested, root.lexical) && isWithin(canonicalPath, root.canonical))) {
     return { allowed: false, canonicalPath, reason: "write path is outside allowed roots" };
   }
 

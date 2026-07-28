@@ -33,7 +33,7 @@ const actionRank: Record<PermissionRule["action"], number> = { allow: 1, ask: 2,
 function globMatches(value: string, pattern: string): boolean {
   const expression = pattern
     .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
-    .replace(/\*/g, ".*");
+    .replace(/\*/g, "[\\s\\S]*");
   return new RegExp(`^${expression}$`).test(value);
 }
 
