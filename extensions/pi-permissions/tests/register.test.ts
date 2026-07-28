@@ -57,7 +57,7 @@ describe("Default mode registration", () => {
 
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
 
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default · workspace-write");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
     expect(app.commands.has("default")).toBe(true);
     expect(app.commands.has("permissions")).toBe(true);
     expect(app.tools.has("bash")).toBe(true);
@@ -110,7 +110,7 @@ describe("Default mode registration", () => {
     await expect(
       app.tools.get("bash").execute("call-1", { command: "pwd" }, undefined, undefined, app.context),
     ).rejects.toThrow("sandbox unavailable");
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default · sandbox error");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
   });
 
   it("uses the native bash backend only when sandbox is explicitly disabled", async () => {
@@ -126,6 +126,6 @@ describe("Default mode registration", () => {
 
     expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default · sandbox off");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
   });
 });

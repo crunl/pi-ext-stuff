@@ -44,14 +44,7 @@ export function registerExtension(
     | { kind: "failed"; error: string } = { kind: "pending" };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    const suffix = sandboxState.kind === "ready"
-      ? ` · ${sandboxState.profile}`
-      : sandboxState.kind === "disabled"
-        ? " · sandbox off"
-        : sandboxState.kind === "failed"
-          ? " · sandbox error"
-          : "";
-    ctx.ui.setStatus("pi-permissions", `Default${suffix}`);
+    ctx.ui.setStatus("pi-permissions", "Default");
   };
 
   const getConfig = async (
@@ -183,7 +176,6 @@ export function registerExtension(
     }
 
     approvalActive = true;
-    ctx.ui.setStatus("pi-permissions", `Default · ${decision.risk} approval`);
     try {
       const approved = await ctx.ui.confirm(
         `pi-permissions · ${decision.risk}`,
