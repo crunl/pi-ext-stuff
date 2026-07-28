@@ -39,6 +39,43 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.beginHumanApproval()).toBe(true);
   });
 
+  it("uses the pending mode when cycling again while working", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.beginReview("active-review");
+
+    expect(runtime.cycle({ idle: false })).toEqual({
+      active: "default",
+      pending: "auto",
+    });
+    expect(runtime.cycle({ idle: false })).toEqual({
+      active: "default",
+      pending: undefined,
+    });
+  });
+
+  it("restores a persisted pending transition and flushes it when settled", () => {
+    const pendingState = {
+      mode: "default" as const,
+      pendingMode: "auto" as const,
+      auto: { consecutiveDenials: 0, paused: false },
+      sandboxProfile: "workspace-write" as const,
+      configFingerprint: new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn())
+        .snapshot().configFingerprint,
+    };
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.restore(
+      [{
+        type: "custom",
+        customType: "pi-permissions-state",
+        data: pendingState,
+      }],
+      DEFAULT_CONFIG,
+    );
+
+    expect(runtime.flushPending({ idle: true })).toBe("auto");
+    expect(runtime.snapshot().pendingMode).toBeUndefined();
+  });
+
   it("does not activate the unimplemented Plan mode from configuration or persisted state", () => {
     const config = structuredClone(DEFAULT_CONFIG);
     config.defaultMode = "plan";

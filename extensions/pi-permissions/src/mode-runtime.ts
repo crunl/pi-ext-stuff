@@ -101,8 +101,19 @@ export class PermissionModeRuntime {
   }
 
   cycle(context: { idle: boolean }): PermissionMode | ModeTransition {
-    const target = this.mode === "default" ? "auto" : "default";
-    return this.activate(target, context);
+    const result = this.controller.cycle({
+      ...context,
+      approvalActive: this.approvalActive,
+    });
+    if (typeof result === "string") {
+      this.state.mode = result;
+      this.state.pendingMode = undefined;
+      if (result === "auto") this.state.auto = resetAutoState();
+    } else {
+      this.state.pendingMode = result.pending;
+    }
+    this.persist();
+    return result;
   }
 
   flushPending(context: { idle: boolean }): PermissionMode {
@@ -136,7 +147,7 @@ export class PermissionModeRuntime {
 
   restore(entries: readonly unknown[], config: PermissionsConfig): void {
     this.state = functionalState(restorePermissionState(entries, config));
-    this.controller = new ModeController(this.state.mode);
+    this.controller = new ModeController(this.state.mode, this.state.pendingMode);
     this.activeReviewIds.clear();
     this.humanApprovalActive = false;
   }

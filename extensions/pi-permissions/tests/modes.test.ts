@@ -41,6 +41,20 @@ describe("ModeController", () => {
     expect(controller.pending).toBe("plan");
   });
 
+  it("lets a second busy cycle cancel the pending transition", () => {
+    const controller = new ModeController("default");
+
+    expect(controller.cycle({ idle: false, approvalActive: true })).toEqual({
+      active: "default",
+      pending: "auto",
+    });
+    expect(controller.cycle({ idle: false, approvalActive: true })).toEqual({
+      active: "default",
+      pending: undefined,
+    });
+    expect(controller.pending).toBeUndefined();
+  });
+
   it("does not change mode during approval", () => {
     const controller = new ModeController("auto");
     expect(() => controller.request("default", { idle: true, approvalActive: true })).toThrow(/approval/);

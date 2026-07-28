@@ -77,6 +77,10 @@ interface ApprovedCall {
   requestFingerprint: string;
 }
 
+const ALLOW_ONCE_CHOICE = "Yes, allow once";
+const SWITCH_TO_AUTO_CHOICE = "Yes, switch future approvals to Auto";
+const DENY_CHOICE = "No, tell Pi what to do differently";
+
 export function registerExtension(
   pi: ExtensionAPI,
   options: RegisterExtensionOptions = {},
@@ -111,6 +115,17 @@ export function registerExtension(
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
+  };
+
+  const restoreModeState = (
+    ctx: Pick<ExtensionContext, "isIdle" | "sessionManager">,
+    config: PermissionsConfig,
+  ): void => {
+    if (!modeRuntime) return;
+    modeRuntime.restore(ctx.sessionManager.getBranch(), config);
+    if (ctx.isIdle() && modeRuntime.snapshot().pendingMode) {
+      modeRuntime.flushPending({ idle: true });
+    }
   };
 
   const invalidatePermissionContext = (reason: string): void => {
@@ -517,9 +532,7 @@ export function registerExtension(
     const approvalEpoch = permissionContextEpoch;
 
     try {
-      const approved = await ctx.ui.confirm(
-        `pi-permissions · ${decision.risk}`,
-        `${event.toolName}: ${decision.summary}\n\n${decision.reason}${
+      const prompt = `pi-permissions · ${decision.risk}\n\n${event.toolName}: ${decision.summary}\n\n${decision.reason}${
           decision.networkHosts?.length
             ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
             : ""
@@ -535,14 +548,30 @@ export function registerExtension(
           options.fallbackReason
             ? `\n\nAuto reviewer fallback: ${options.fallbackReason}`
             : ""
-        }`,
+        }`;
+      const choices = runtime.mode === "default"
+        ? [ALLOW_ONCE_CHOICE, SWITCH_TO_AUTO_CHOICE, DENY_CHOICE]
+        : [ALLOW_ONCE_CHOICE, DENY_CHOICE];
+      const choice = await ctx.ui.select(
+        prompt,
+        choices,
       );
-      if (approved) {
+      if (choice === ALLOW_ONCE_CHOICE || choice === SWITCH_TO_AUTO_CHOICE) {
         if (permissionContextEpoch !== approvalEpoch) {
           return {
             block: true,
             reason: "pi-permissions: approval context changed before confirmation",
           };
+        }
+        if (choice === SWITCH_TO_AUTO_CHOICE) {
+          runtime.endHumanApproval();
+          runtime.activate("auto", { idle: true });
+          invalidatePermissionContext("permission mode changed");
+          setDefaultStatus(ctx);
+          ctx.ui.notify(
+            "pi-permissions: Auto mode 已启用；后续审批将交给 reviewer",
+            "info",
+          );
         }
         grantApprovedCall(event, decision, config, ctx.cwd, "user");
         return;
@@ -572,7 +601,7 @@ export function registerExtension(
         result.config,
         pi.appendEntry.bind(pi),
       );
-      modeRuntime.restore(ctx.sessionManager.getBranch(), result.config);
+      restoreModeState(ctx, result.config);
       setDefaultStatus(ctx);
       if (
         await shiftTabAvailability(agentDir) === "reserved" &&
@@ -598,7 +627,7 @@ export function registerExtension(
   pi.on("session_tree", (_event, ctx) => {
     resetBranchPermissionContext("session tree changed");
     if (loaded && modeRuntime) {
-      modeRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
+      restoreModeState(ctx, loaded.config);
       setDefaultStatus(ctx);
     }
   });
@@ -609,6 +638,19 @@ export function registerExtension(
       sandboxState = { kind: "pending" };
       await sandboxManager.reset();
     });
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!modeRuntime?.snapshot().pendingMode) return;
+    const previous = modeRuntime.mode;
+    const active = modeRuntime.flushPending({ idle: ctx.isIdle() });
+    if (active === previous) return;
+    invalidatePermissionContext("permission mode changed");
+    setDefaultStatus(ctx);
+    ctx.ui.notify(
+      `pi-permissions: ${modeRuntime.statusLabel} mode 已启用`,
+      "info",
+    );
   });
 
   pi.on("input", (event) => {
@@ -736,7 +778,7 @@ export function registerExtension(
     ctx: ExtensionContext,
   ): Promise<void> => {
     try {
-      const result = await activateConfig(ctx, true);
+      const result = await activateConfig(ctx, ctx.isIdle());
       const runtime = ensureModeRuntime(result.config);
       if (
         runtime.snapshot().configFingerprint !==
@@ -744,12 +786,26 @@ export function registerExtension(
       ) {
         runtime.restore([], result.config);
       }
-      runtime.activate(mode, { idle: ctx.isIdle() });
+      const transition = runtime.activate(mode, { idle: ctx.isIdle() });
       setDefaultStatus(ctx);
-      ctx.ui.notify(
-        `pi-permissions: ${runtime.statusLabel} mode 已启用`,
-        "info",
-      );
+      if (typeof transition === "string") {
+        invalidatePermissionContext("permission mode changed");
+        ctx.ui.notify(
+          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
+          "info",
+        );
+      } else if (transition.pending) {
+        const pending = transition.pending === "auto" ? "Auto" : "Default";
+        ctx.ui.notify(
+          `pi-permissions: ${pending} mode 将在当前工作结束后启用`,
+          "info",
+        );
+      } else {
+        ctx.ui.notify(
+          `pi-permissions: mode 切换已取消；继续使用 ${runtime.statusLabel}`,
+          "info",
+        );
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       setDefaultStatus(ctx);
@@ -774,13 +830,26 @@ export function registerExtension(
     try {
       const result = await activateConfig(ctx);
       const runtime = ensureModeRuntime(result.config);
-      invalidatePermissionContext("permission mode changed");
-      runtime.cycle({ idle: ctx.isIdle() });
+      const transition = runtime.cycle({ idle: ctx.isIdle() });
       setDefaultStatus(ctx);
-      ctx.ui.notify(
-        `pi-permissions: ${runtime.statusLabel} mode 已启用`,
-        "info",
-      );
+      if (typeof transition === "string") {
+        invalidatePermissionContext("permission mode changed");
+        ctx.ui.notify(
+          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
+          "info",
+        );
+      } else if (transition.pending) {
+        const pending = transition.pending === "auto" ? "Auto" : "Default";
+        ctx.ui.notify(
+          `pi-permissions: ${pending} mode 将在当前工作结束后启用`,
+          "info",
+        );
+      } else {
+        ctx.ui.notify(
+          `pi-permissions: mode 切换已取消；继续使用 ${runtime.statusLabel}`,
+          "info",
+        );
+      }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       setDefaultStatus(ctx);
