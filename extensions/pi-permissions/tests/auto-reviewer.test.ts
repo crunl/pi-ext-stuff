@@ -20,8 +20,9 @@ const response = {
     {
       type: "text",
       text: JSON.stringify({
-        decision: "approve",
-        risk: "low",
+        risk_level: "low",
+        user_authorization: "high",
+        outcome: "allow",
         rationale: "Authorized test command.",
       }),
     },
@@ -63,7 +64,7 @@ describe("PiAutoReviewer", () => {
       configuredModel,
       expect.objectContaining({
         systemPrompt: expect.stringContaining(
-          "You are a permission reviewer",
+          "You are judging one planned coding-agent action.",
         ),
         messages: expect.any(Array),
       }),
@@ -78,6 +79,17 @@ describe("PiAutoReviewer", () => {
         signal: expect.any(AbortSignal),
         sessionId: expect.any(String),
       }),
+    );
+    const reviewContext = complete.mock.calls[0]?.[1] as any;
+    expect(reviewContext.systemPrompt).toContain("# Evidence Handling");
+    expect(reviewContext.systemPrompt).toContain("# User Authorization Scoring");
+    expect(reviewContext.systemPrompt).toContain("# Base Risk Taxonomy");
+    expect(reviewContext.systemPrompt).toContain("# Outcome Policy");
+    expect(reviewContext.systemPrompt).toContain(
+      '"user_authorization": "unknown" | "low" | "medium" | "high"',
+    );
+    expect(reviewContext.systemPrompt).not.toContain(
+      "{{ tenant_policy_config }}",
     );
   });
 
