@@ -322,20 +322,64 @@ function isRemoteScpPath(value: string): boolean {
 }
 
 function scpUploadsSecret(args: string[]): boolean {
-  const paths = args.filter((argument) => !argument.startsWith("-"));
+  const paths: string[] = [];
+  const consumesValue = new Set(["-c", "-D", "-F", "-i", "-J", "-l", "-o", "-P", "-S", "-X", "--config", "--identity-file", "--jump", "--limit", "--option", "--port", "--ssh-program"]);
+  let pathsOnly = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (pathsOnly) {
+      paths.push(argument);
+      continue;
+    }
+    if (argument === "--") {
+      pathsOnly = true;
+      continue;
+    }
+    if (consumesValue.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (/^-(?:c|D|F|i|J|l|o|P|S|X).+/.test(argument) || /^(?:--config|--identity-file|--jump|--limit|--option|--port|--ssh-program)=/.test(argument)) continue;
+    if (!argument.startsWith("-")) paths.push(argument);
+  }
   if (paths.length < 2 || !isRemoteScpPath(paths.at(-1)!)) return false;
   return paths.slice(0, -1).some((path) => !isRemoteScpPath(path) && isSecretPath(path));
 }
 
 function curlUploadsSecret(args: string[]): boolean {
-  const fileOption = new Set(["--data", "--data-ascii", "--data-binary", "--upload-file", "--form", "-T"]);
-  return args.some((argument, index) => {
-    if (/^(?:--data|--data-ascii|--data-binary|--upload-file|--form)=@?/.test(argument)) {
-      return isSecretPath(argument.slice(argument.indexOf("=") + 1));
+  const dataOptions = new Set(["-d", "--data", "--data-ascii", "--data-binary", "--data-raw"]);
+  const formOptions = new Set(["-F", "--form"]);
+  const uploadOptions = new Set(["-T", "--upload-file"]);
+  const dataFile = (value: string) => value.startsWith("@") && isSecretPath(value);
+  const formFile = (value: string) => {
+    const match = /(?:^|=)[@<](.+)$/.exec(value);
+    return match ? isSecretPath(match[1]!) : false;
+  };
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    const equals = argument.indexOf("=");
+    const option = equals >= 0 ? argument.slice(0, equals) : argument;
+    const attached = equals >= 0 ? argument.slice(equals + 1) : undefined;
+    if (dataOptions.has(option)) {
+      if (dataFile(attached ?? args[index + 1] ?? "")) return true;
+      if (attached === undefined) index += 1;
+      continue;
     }
-    if (argument.startsWith("-T") && argument.length > 2) return isSecretPath(argument.slice(2));
-    return fileOption.has(argument) && isSecretPath(args[index + 1] ?? "");
-  });
+    if (formOptions.has(option)) {
+      if (formFile(attached ?? args[index + 1] ?? "")) return true;
+      if (attached === undefined) index += 1;
+      continue;
+    }
+    if (uploadOptions.has(option)) {
+      if (isSecretPath(attached ?? args[index + 1] ?? "")) return true;
+      if (attached === undefined) index += 1;
+      continue;
+    }
+    if (argument.startsWith("-d") && argument.length > 2 && dataFile(argument.slice(2))) return true;
+    if (argument.startsWith("-F") && argument.length > 2 && formFile(argument.slice(2))) return true;
+    if (argument.startsWith("-T") && argument.length > 2 && isSecretPath(argument.slice(2))) return true;
+  }
+  return false;
 }
 
 function exfiltratesSecret(segments: CommandSegment[]): boolean {
@@ -377,11 +421,31 @@ function hasForcedProtectedPush(args: string[]): boolean {
   return forced && args.some((argument) => /(?:^|[:/+])(main|master)$/.test(argument));
 }
 
+function gitAliases(args: string[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    const value = argument === "-c" ? args[++index] : argument.startsWith("-c") ? argument.slice(2) : undefined;
+    if (!value) continue;
+    const match = /^alias\.([^=]+)=(.*)$/.exec(value);
+    if (match) aliases.set(match[1]!, match[2]!);
+  }
+  return aliases;
+}
+
 function isForcedPushToProtectedBranch(segments: CommandSegment[]): boolean {
   return segments.some((segment) => {
     if (segment.executable !== "git") return false;
     const subcommand = gitSubcommandOffset(segment.args);
-    if (subcommand !== undefined && segment.args[subcommand] === "push") return hasForcedProtectedPush(segment.args.slice(subcommand + 1));
+    if (subcommand !== undefined) {
+      const command = segment.args[subcommand]!;
+      const trailing = segment.args.slice(subcommand + 1);
+      if (command === "push") return hasForcedProtectedPush(trailing);
+      const expansion = gitAliases(segment.args).get(command);
+      if (expansion && /(?:^|\s)push(?:\s|$)/.test(expansion)) {
+        return hasForcedProtectedPush([...expansion.trim().split(/\s+/), ...trailing]);
+      }
+    }
     return segment.args.includes("push") && hasForcedProtectedPush(segment.args);
   });
 }
