@@ -31,7 +31,7 @@ function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
 }
 
 function extractNetworkTargets(input: Record<string, unknown>): string[] {
-  return ["url", "host", "hostname"].flatMap((key) => typeof input[key] === "string" ? [input[key]] : []);
+  return typeof input.url === "string" ? [input.url] : [];
 }
 
 /**
@@ -57,20 +57,55 @@ export function normalizeToolCall(tool: string, input: Record<string, unknown>, 
   };
 }
 
-function isPrivateTarget(value: string): boolean {
-  let host = value;
-  try { host = new URL(value).hostname; } catch { host = value.replace(/^\[|\]$/g, ""); }
-  const normalized = host.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
-  if (["localhost", "::", "::1", "metadata.google.internal"].includes(normalized) || normalized.endsWith(".localhost")) return true;
-  const mapped = /^::ffff:(.+)$/i.exec(normalized)?.[1];
-  if (mapped) return isPrivateTarget(mapped);
-  if (isIP(normalized) === 6) {
-    const firstHextet = Number.parseInt(normalized.split(":")[0] ?? "", 16);
-    return normalized.startsWith("fc") || normalized.startsWith("fd") || (firstHextet >= 0xfe80 && firstHextet <= 0xfebf);
-  }
-  if (isIP(normalized) !== 4) return false;
-  const [first, second] = normalized.split(".").map(Number);
-  return first === 0 || first === 10 || first === 127 || first === 169 && second === 254 || first === 192 && second === 168 || first === 172 && second >= 16 && second <= 31;
+function isSpecialIpv4(host: string): boolean {
+  const [first, second, third] = host.split(".").map(Number);
+  return first === 0
+    || first === 10
+    || first === 127
+    || first === 100 && second >= 64 && second <= 127
+    || first === 169 && second === 254
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && (second === 0 || second === 88 || second === 168)
+    || first === 198 && (second === 18 || second === 19 || second === 51 && third === 100)
+    || first === 203 && second === 0 && third === 113
+    || first >= 224;
+}
+
+function mappedIpv4(host: string): string | undefined {
+  const tail = /^::ffff:(.+)$/i.exec(host)?.[1];
+  if (!tail) return undefined;
+  if (isIP(tail) === 4) return tail;
+  const groups = tail.split(":");
+  if (groups.length !== 2 || !groups.every((group) => /^[0-9a-f]{1,4}$/i.test(group))) return undefined;
+  const [first, second] = groups.map((group) => Number.parseInt(group, 16));
+  return `${first! >> 8}.${first! & 255}.${second! >> 8}.${second! & 255}`;
+}
+
+function isSpecialIp(host: string): boolean {
+  const mapped = mappedIpv4(host);
+  if (mapped) return isSpecialIpv4(mapped);
+  if (isIP(host) === 4) return isSpecialIpv4(host);
+  if (isIP(host) !== 6) return false;
+  const firstHextet = Number.parseInt(host.split(":")[0] ?? "", 16);
+  return host === "::"
+    || host === "::1"
+    || host.startsWith("fc")
+    || host.startsWith("fd")
+    || (firstHextet >= 0xfe80 && firstHextet <= 0xfebf)
+    || host.startsWith("ff")
+    || host.startsWith("2001:db8:")
+    || host.startsWith("2001:2:");
+}
+
+function webFetchRisk(request: PermissionRequest): Risk {
+  const value = request.input.url;
+  if (typeof value !== "string" || value.trim() === "" || request.networkTargets?.length !== 1) return "HARD";
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { return "HARD"; }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) return "HARD";
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") return "HARD";
+  return isSpecialIp(host) ? "HARD" : "LOW";
 }
 
 function isWithin(path: string, root: string): boolean {
@@ -85,8 +120,20 @@ function writeRisk(request: PermissionRequest): Risk {
   return request.resolvedPaths.length > 0 && request.resolvedPaths.every((path) => isWithin(path, request.cwd)) ? "LOW" : "REVIEW";
 }
 
-function hasComplexShellSyntax(command: string): boolean {
-  return /[\\'"`$;\n<>|&]/.test(command);
+function parsePureArgv(command: string): CommandSegment | undefined {
+  if (command.trim() !== command || !command || !/^[A-Za-z0-9._+\-/:=@%, ]+$/.test(command)) return undefined;
+  const [executableToken = "", ...args] = command.split(/ +/);
+  if (!/^[A-Za-z0-9._+\-]+$/.test(executableToken) || executableToken.includes("=")) return undefined;
+  if (!args.every((arg) => /^[A-Za-z0-9._+\-/:=@%,]+$/.test(arg))) return undefined;
+  return {
+    source: command,
+    executableToken,
+    executable: executableToken,
+    args,
+    hasRedirect: false,
+    hasSubstitution: false,
+    nestedShell: false,
+  };
 }
 
 function safeOptions(args: string[], allowed: Set<string>, compact?: RegExp): boolean {
@@ -122,18 +169,18 @@ function isHardSimpleCommand(segment: CommandSegment, command: string): boolean 
   if (deleteExecutables.has(segment.executable) || networkExecutables.has(segment.executable)) return true;
   if (segment.executable === "git" && segment.args.includes("push")) return true;
   if (segment.args.includes("publish") || /\b(?:deploy|production|destroy)\b/i.test(command)) return true;
-  return ["kubectl", "terraform", "helm", "ansible"].includes(segment.executable);
+  return false;
 }
 
 export function classifyRisk(request: PermissionRequest): Risk {
   if (request.tool === "WebSearch") return "LOW";
-  if (request.tool === "WebFetch") return request.networkTargets?.some(isPrivateTarget) ? "HARD" : "LOW";
+  if (request.tool === "WebFetch") return webFetchRisk(request);
   if (request.operation === "write") return writeRisk(request);
   if (request.operation === "read") return "LOW";
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";
-  if (hasComplexShellSyntax(command)) return "HARD";
-  const segment = request.commandSegments?.[0] ?? parseSimpleSegment(command);
+  const segment = parsePureArgv(command);
+  if (!segment) return "HARD";
   if (isHardSimpleCommand(segment, command)) return "HARD";
   return isTrustedRead(segment) ? "LOW" : "REVIEW";
 }

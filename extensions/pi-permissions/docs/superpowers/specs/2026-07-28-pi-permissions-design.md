@@ -332,7 +332,9 @@ The extension:
 - filters inherited environment variables;
 - validates every one-off escalation against the exact normalized request.
 
-Before executing Bash, the runtime wrapper uses a controlled PATH and realpath/revalidates the bare executable. It enforces sensitive read denial, canonical write roots and deny rules, and network target policy at runtime; static classification never replaces this sandbox boundary.
+Before executing Bash, the runtime wrapper builds a child environment with a fixed trusted PATH rather than inherited PATH. It resolves a permitted bare executable against that PATH, realpaths it immediately before exec, and checks the resolved identity against the runtime allowlist. It enforces sensitive read denial, canonical write roots and deny rules, and network target policy at runtime; static classification never replaces this sandbox boundary.
+
+The registered WebFetch adapter is also a runtime boundary. Before a LOW public WebFetch can execute, it validates exactly one initial HTTP(S) URL, resolves every DNS A/AAAA result and rejects any non-public/special-use address, and applies the identical validation to every redirect hop. A URL parse failure, empty host, non-HTTP(S) scheme, failed DNS result, unsafe redirect, or failed sandbox initialization is fail-closed.
 
 Mode transitions do not reinitialize or loosen the sandbox. A one-off approval does not create a permanent exception.
 

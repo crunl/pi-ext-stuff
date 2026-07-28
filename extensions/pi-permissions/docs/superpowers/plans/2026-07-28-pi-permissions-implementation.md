@@ -549,6 +549,8 @@ git commit -m "feat: add gated plan mode"
 
 > **Runtime boundary requirement:** Task 5 must execute Bash with a controlled PATH and realpath/revalidate the selected bare executable immediately before execution. It must enforce sensitive read denial, canonical write roots and deny rules, and network target policy at runtime. Static Task 3 classification is not a substitute for any of these checks.
 
+> **Required runtime checks:** Build the child environment with a fixed trusted PATH, never an inherited arbitrary PATH. Resolve each approved bare executable against that PATH, realpath it immediately before exec, and compare it with the Task 5 executable allowlist. The sandbox must deny reads from protected secret roots, enforce canonical allowed write roots and deny-write paths, and apply its network policy to Bash. The registered WebFetch adapter must validate the initial HTTP(S) URL, resolve all DNS A/AAAA results, and validate every redirect hop with the same public-target policy before returning content. Any invalid URL, DNS result, redirect hop, executable identity, or sandbox initialization is fail-closed.
+
 **Files:**
 - Create: `src/sandbox/network.ts`
 - Create: `src/sandbox/bash.ts`
@@ -580,6 +582,8 @@ it.each(["http://127.0.0.1", "http://169.254.169.254", "http://10.0.0.1"])(
 );
 ```
 
+Also test that the child PATH is fixed rather than inherited, a spoofed bare executable outside the trusted realpath allowlist is denied, secret reads and external writes fail, DNS results containing any private/special-use address fail, every redirect is revalidated, and the registered WebFetch adapter uses the same validation path.
+
 - [ ] **Step 2: Run the sandbox test and observe failure**
 
 Run `npm test -- tests/sandbox.test.ts`.
@@ -608,9 +612,13 @@ Track `uninitialized`, `active`, `degraded`, and `stopped`. Initialization error
 
 Wrap each authorized command with `SandboxManager.wrapWithSandbox(command)`, spawn it with the filtered environment, stream stdout/stderr, honor timeout and AbortSignal, and kill the process group on abort or timeout. Do not run the original command when sandbox state is degraded.
 
+Before wrapping, resolve a bare executable using only the fixed trusted PATH, realpath it, and reject it unless it is in the runtime allowlist. Never execute an explicit command path based only on Task 3 classification.
+
 - [ ] **Step 5: Override Pi Bash and user Bash**
 
 Register a `bash` tool based on `createBashTool(cwd)` and use sandboxed operations only after permission authorization. Intercept `user_bash` with the same operations. Register session initialization and idempotent shutdown handlers.
+
+Register and wrap Pi WebFetch as well: validate its initial URL, DNS A/AAAA answers, and every redirect hop before fetching; do not rely on the static Task 3 WebFetch result as the execution-time check.
 
 - [ ] **Step 6: Add macOS end-to-end checks**
 

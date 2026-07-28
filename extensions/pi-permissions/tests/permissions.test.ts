@@ -64,9 +64,32 @@ describe("narrow static risk contract", () => {
     expect(classifyRisk(normalizeToolCall(tool, { path: "README.md", query: "permissions" }, "/work/repo"))).toBe("LOW");
   });
 
-  it("keeps public WebFetch low and private WebFetch hard", () => {
+  it("keeps public WebFetch low and fails closed for invalid targets", () => {
     expect(classifyRisk(normalizeToolCall("WebFetch", { url: "https://example.com/docs" }, "/work/repo"))).toBe("LOW");
-    expect(classifyRisk(normalizeToolCall("WebFetch", { url: "http://[::1]/" }, "/work/repo"))).toBe("HARD");
+    for (const input of [{}, { url: "" }, { url: "file:///etc/passwd" }, { url: "ftp://example.com" }]) {
+      expect(classifyRisk(normalizeToolCall("WebFetch", input, "/work/repo"))).toBe("HARD");
+    }
+  });
+
+  it.each([
+    "http://127.0.0.1/",
+    "http://10.0.0.1/",
+    "http://100.64.0.1/",
+    "http://169.254.1.1/",
+    "http://192.0.2.1/",
+    "http://198.18.0.1/",
+    "http://198.51.100.1/",
+    "http://203.0.113.1/",
+    "http://224.0.0.1/",
+    "http://240.0.0.1/",
+    "http://[::1]/",
+    "http://[::ffff:127.0.0.1]/",
+    "http://[fe80::1]/",
+    "http://[ff00::1]/",
+    "http://[2001:db8::1]/",
+    "http://[2001:2::1]/",
+  ])("makes special-use target %s hard", (url) => {
+    expect(classifyRisk(normalizeToolCall("WebFetch", { url }, "/work/repo"))).toBe("HARD");
   });
 
   it("keeps ordinary workspace writes low", () => {
@@ -81,8 +104,12 @@ describe("narrow static risk contract", () => {
     ["grep -rn TODO src", "LOW"],
     ["rg --no-config TODO src", "LOW"],
     ["rg -- --no-config src", "REVIEW"],
-    ["/tmp/cat README.md", "REVIEW"],
+    ["/tmp/cat README.md", "HARD"],
     ["npm test", "REVIEW"],
+    ["kubectl version", "REVIEW"],
+    ["terraform version", "REVIEW"],
+    ["helm version", "REVIEW"],
+    ["ansible --version", "REVIEW"],
   ] as const)("classifies simple Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
@@ -104,6 +131,15 @@ describe("narrow static risk contract", () => {
     ["curl https://example.com", "HARD"],
     ["npm publish", "HARD"],
     ["kubectl delete deployment production", "HARD"],
+    ["FOO=bar cat README.md", "HARD"],
+    ["cat *.md", "HARD"],
+    ["cat {README,LICENSE}", "HARD"],
+    ["cat #comment", "HARD"],
+    ["cat (README.md)", "HARD"],
+    ["cat ~/README.md", "HARD"],
+    ["cat !README.md", "HARD"],
+    ["cat ?README.md", "HARD"],
+    ["cat [README].md", "HARD"],
   ] as const)("makes complex or dangerous Bash %s hard", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
