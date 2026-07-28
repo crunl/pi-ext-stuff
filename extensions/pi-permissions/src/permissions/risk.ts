@@ -6,196 +6,27 @@ import type { CommandSegment, PermissionRequest } from "./rules.ts";
 export type Risk = "LOW" | "REVIEW" | "HARD";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
 
-const readOnlyGitSubcommands = new Set(["status", "diff", "log", "show", "rev-parse"]);
-const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
-const networkExecutables = new Set(["curl", "wget", "ssh", "scp", "ftp", "nc", "ncat"]);
+const trustedReadCommands = new Set(["ls", "pwd", "cat", "head", "tail", "wc", "rg", "grep"]);
+const networkExecutables = new Set(["curl", "wget", "ssh", "scp", "ftp", "nc", "ncat", "sftp"]);
+const deleteExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
 
-interface ShellScan {
-  segments: string[];
-  ambiguous: boolean;
-}
-
-function splitCommand(command: string): ShellScan {
-  const segments: string[] = [];
-  let current = "";
-  let quote: "single" | "double" | "ansi" | undefined;
-  let ambiguous = false;
-  const push = () => {
-    const segment = current.trim();
-    if (segment) segments.push(segment);
-    current = "";
-  };
-
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (quote === "single") {
-      current += character;
-      if (character === "'") quote = undefined;
-      continue;
-    }
-    if (quote === "ansi") {
-      current += character;
-      if (character === "\\" && index + 1 < command.length) current += command[++index]!;
-      else if (character === "'") quote = undefined;
-      continue;
-    }
-    if (quote === "double") {
-      current += character;
-      if (character === '"') quote = undefined;
-      else if (character === "\\" && ["$", "`", '"', "\\", "\n"].includes(command[index + 1] ?? "")) current += command[++index]!;
-      continue;
-    }
-    if (character === "\\") {
-      current += character;
-      if (index + 1 < command.length) current += command[++index]!;
-      else ambiguous = true;
-      continue;
-    }
-    if (character === "$" && command[index + 1] === "'") {
-      quote = "ansi";
-      ambiguous = true;
-      current += "'";
-      index += 1;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character === "'" ? "single" : "double";
-      current += character;
-      continue;
-    }
-    if (character === ";" || character === "\n" || character === "|") {
-      push();
-      if (character === "|" && command[index + 1] === "|") index += 1;
-      continue;
-    }
-    if (character === "&") {
-      if (command[index + 1] === ">") {
-        current += character;
-        continue;
-      }
-      push();
-      if (command[index + 1] === "&") index += 1;
-      continue;
-    }
-    current += character;
-  }
-  push();
-  return { segments, ambiguous: ambiguous || quote !== undefined };
-}
-
-function hasUnquotedRedirect(source: string): boolean {
-  let quote: "single" | "double" | "ansi" | undefined;
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
-    if (quote === "single") {
-      if (character === "'") quote = undefined;
-      continue;
-    }
-    if (quote === "ansi") {
-      if (character === "\\") index += 1;
-      else if (character === "'") quote = undefined;
-      continue;
-    }
-    if (quote === "double") {
-      if (character === '"') quote = undefined;
-      else if (character === "\\" && ["$", "`", '"', "\\", "\n"].includes(source[index + 1] ?? "")) index += 1;
-      continue;
-    }
-    if (character === "\\") {
-      index += 1;
-      continue;
-    }
-    if (character === "$" && source[index + 1] === "'") { quote = "ansi"; index += 1; continue; }
-    if (character === "'" || character === '"') {
-      quote = character === "'" ? "single" : "double";
-      continue;
-    }
-    if (character === ">" || character === "<") return true;
-  }
-  return false;
-}
-
-function tokenizeCookedWords(source: string): { words: string[]; ambiguous: boolean } {
-  const words: string[] = [];
-  let current = "";
-  let inWord = false;
-  let quote: "single" | "double" | "ansi" | undefined;
-  let ambiguous = false;
-  const push = () => {
-    if (inWord) words.push(current);
-    current = "";
-    inWord = false;
-  };
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
-    if (quote === "single") {
-      if (character === "'") quote = undefined;
-      else current += character;
-      continue;
-    }
-    if (quote === "ansi") {
-      if (character === "'") quote = undefined;
-      else if (character === "\\" && index + 1 < source.length) current += source[++index]!;
-      else current += character;
-      continue;
-    }
-    if (quote === "double") {
-      if (character === '"') quote = undefined;
-      else if (character === "\\" && ["$", "`", '"', "\\", "\n"].includes(source[index + 1] ?? "")) current += source[++index]!;
-      else {
-        if (character === "$") ambiguous = true;
-        current += character;
-      }
-      continue;
-    }
-    if (/\s/.test(character)) {
-      push();
-      continue;
-    }
-    inWord = true;
-    if (character === "\\") {
-      if (index + 1 >= source.length) ambiguous = true;
-      else current += source[++index]!;
-      continue;
-    }
-    if (character === "$" && source[index + 1] === "'") {
-      quote = "ansi";
-      ambiguous = true;
-      index += 1;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character === "'" ? "single" : "double";
-      continue;
-    }
-    if (character === "$") ambiguous = true;
-    current += character;
-  }
-  push();
-  return { words, ambiguous: ambiguous || quote !== undefined };
-}
-
-function parseSegment(source: string, ambiguous = false): CommandSegment {
-  const cooked = tokenizeCookedWords(source);
-  const executableToken = cooked.words[0] ?? "";
-  const executable = basename(executableToken);
-  const args = cooked.words.slice(1);
+function parseSimpleSegment(source: string): CommandSegment {
+  const [executableToken = "", ...args] = source.trim().split(/\s+/);
   return {
     source,
     executableToken,
-    executable,
+    executable: basename(executableToken),
     args,
-    hasRedirect: hasUnquotedRedirect(source),
-    hasSubstitution: /\$\(|`/.test(source),
-    nestedShell: ambiguous || cooked.ambiguous || shellExecutables.has(executable) || /(?:^|\s)-c(?:\s|$)/.test(source),
+    hasRedirect: /[<>]/.test(source),
+    hasSubstitution: /[$`]/.test(source),
+    nestedShell: /\b(?:bash|sh|zsh|fish|dash)\b/.test(source),
   };
 }
 
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
   return ["path", "filePath", "targetPath", "sourcePath"].flatMap((key) => {
     const value = input[key];
-    if (typeof value !== "string") return [];
-    return [isAbsolute(value) ? resolve(value) : resolve(cwd, value)];
+    return typeof value === "string" ? [isAbsolute(value) ? resolve(value) : resolve(cwd, value)] : [];
   });
 }
 
@@ -203,10 +34,13 @@ function extractNetworkTargets(input: Record<string, unknown>): string[] {
   return ["url", "host", "hostname"].flatMap((key) => typeof input[key] === "string" ? [input[key]] : []);
 }
 
+/**
+ * This is intentionally not a shell parser. Task 5 executes only through a
+ * controlled PATH and revalidates the resolved executable immediately before
+ * sandboxed execution.
+ */
 export function normalizeToolCall(tool: string, input: Record<string, unknown>, cwd: string): PermissionRequest {
   const command = typeof input.command === "string" ? input.command : undefined;
-  const scan = command ? splitCommand(command) : undefined;
-  const commandSegments = scan?.segments.map((segment) => parseSegment(segment, scan.ambiguous));
   const lowerTool = tool.toLowerCase();
   const operation = lowerTool === "webfetch" ? "network"
     : new Set(["websearch", "read", "search", "grep", "find", "ls"]).has(lowerTool) ? "read"
@@ -218,7 +52,7 @@ export function normalizeToolCall(tool: string, input: Record<string, unknown>, 
     input,
     cwd: resolve(cwd),
     resolvedPaths: extractedPaths(input, cwd),
-    commandSegments,
+    commandSegments: command ? [parseSimpleSegment(command)] : undefined,
     networkTargets: extractNetworkTargets(input),
   };
 }
@@ -226,242 +60,17 @@ export function normalizeToolCall(tool: string, input: Record<string, unknown>, 
 function isPrivateTarget(value: string): boolean {
   let host = value;
   try { host = new URL(value).hostname; } catch { host = value.replace(/^\[|\]$/g, ""); }
-  const lower = host.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
-  if (lower === "localhost" || lower === "::" || lower === "::1" || lower === "metadata.google.internal" || lower.endsWith(".localhost")) return true;
-  const mapped = /^::ffff:(.+)$/i.exec(lower)?.[1];
-  if (mapped) {
-    if (mapped.includes(".")) return isPrivateTarget(mapped);
-    const groups = mapped.split(":");
-    if (groups.length === 2 && groups.every((group) => /^[0-9a-f]{1,4}$/i.test(group))) {
-      const numeric = groups.map((group) => Number.parseInt(group, 16));
-      return isPrivateTarget(`${numeric[0]! >> 8}.${numeric[0]! & 255}.${numeric[1]! >> 8}.${numeric[1]! & 255}`);
-    }
+  const normalized = host.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
+  if (["localhost", "::", "::1", "metadata.google.internal"].includes(normalized) || normalized.endsWith(".localhost")) return true;
+  const mapped = /^::ffff:(.+)$/i.exec(normalized)?.[1];
+  if (mapped) return isPrivateTarget(mapped);
+  if (isIP(normalized) === 6) {
+    const firstHextet = Number.parseInt(normalized.split(":")[0] ?? "", 16);
+    return normalized.startsWith("fc") || normalized.startsWith("fd") || (firstHextet >= 0xfe80 && firstHextet <= 0xfebf);
   }
-  if (isIP(lower) === 6) {
-    const firstHextet = Number.parseInt(lower.split(":")[0] ?? "", 16);
-    return lower.startsWith("fc") || lower.startsWith("fd") || (firstHextet >= 0xfe80 && firstHextet <= 0xfebf);
-  }
-  if (isIP(lower) !== 4) return false;
-  const [first, second] = lower.split(".").map(Number);
+  if (isIP(normalized) !== 4) return false;
+  const [first, second] = normalized.split(".").map(Number);
   return first === 0 || first === 10 || first === 127 || first === 169 && second === 254 || first === 192 && second === 168 || first === 172 && second >= 16 && second <= 31;
-}
-
-function isSafeGitArgument(subcommand: string, argument: string, index: number): boolean {
-  const value = argument;
-  if (!value.startsWith("-")) return true;
-  if (["--ext-diff", "--textconv", "--no-pager"].includes(value)) return value === "--no-pager";
-  if (/helper|filter|pager/i.test(value)) return false;
-  const shared = new Set(["--", "--stat", "--name-only", "--name-status", "--summary", "--patch", "-p", "--no-patch", "-s", "--cached", "--staged", "--quiet", "--exit-code", "--check"]);
-  if (shared.has(value)) return true;
-  if (subcommand === "status") return ["--short", "-s", "--branch", "-b", "--ignored", "--untracked-files", "--no-renames", "--porcelain"].includes(value) || value.startsWith("--porcelain=") || value.startsWith("--untracked-files=");
-  if (subcommand === "log") return ["--oneline", "--decorate", "--graph", "--all", "-n"].includes(value) || /^-\d+$/.test(value) || value.startsWith("--max-count=") || value.startsWith("--since=") || value.startsWith("--until=") || value.startsWith("--author=");
-  if (subcommand === "rev-parse") return ["--show-toplevel", "--is-inside-work-tree", "--git-dir", "--abbrev-ref", "--verify"].includes(value) || (index > 0 && !value.startsWith("--"));
-  return false;
-}
-
-function hasOnlySafeOptions(args: string[], safeOptions: Set<string>, safePrefixes: string[] = [], shortOptionPattern?: RegExp): boolean {
-  let pathsOnly = false;
-  return args.every((argument) => {
-    if (pathsOnly) return true;
-    if (argument === "--") {
-      pathsOnly = true;
-      return true;
-    }
-    if (!argument.startsWith("-")) return true;
-    return safeOptions.has(argument) || safePrefixes.some((prefix) => argument.startsWith(prefix)) || shortOptionPattern?.test(argument) === true;
-  });
-}
-
-function isSafeRg(args: string[]): boolean {
-  if (args[0] !== "--no-config") return false;
-  const safeOptions = new Set(["--no-config", "-n", "-i", "-F", "-E", "-G", "-v", "-w", "-x", "-l", "-c", "-o", "-S", "-s", "-u", "--files", "--hidden", "--no-ignore", "--line-number", "--ignore-case", "--fixed-strings", "--extended-regexp", "--glob-case-insensitive"]);
-  return hasOnlySafeOptions(args, safeOptions, ["--glob=", "--type="]);
-}
-
-function isSafeReadOnlyCommand(segment: CommandSegment): boolean {
-  const options: Record<string, { allowed: Set<string>; prefixes?: string[]; shortOptionPattern?: RegExp }> = {
-    cat: { allowed: new Set(["-n", "-b", "-s", "-A", "-e", "-E", "-T", "-v", "--number", "--number-nonblank", "--squeeze-blank", "--show-all", "--show-ends", "--show-tabs", "--show-nonprinting"]) },
-    head: { allowed: new Set(["-q", "-v", "--quiet", "--verbose"]), prefixes: ["-n", "-c", "--lines=", "--bytes="] },
-    tail: { allowed: new Set(["-q", "-v", "-f", "--quiet", "--verbose", "--follow"]), prefixes: ["-n", "-c", "--lines=", "--bytes="] },
-    wc: { allowed: new Set(["-c", "-m", "-l", "-w", "-L", "--bytes", "--chars", "--lines", "--words", "--max-line-length"]) },
-    ls: { allowed: new Set(["-a", "-A", "-l", "-h", "-t", "-r", "-S", "-R", "-d", "-1", "-C", "-x", "-F", "-p", "--all", "--almost-all", "--long", "--human-readable", "--recursive", "--directory", "--classify", "--indicator-style=classify"]), prefixes: ["--color="], shortOptionPattern: /^-[aAlhtrSRd1CxFp]+$/ },
-    grep: { allowed: new Set(["-n", "-i", "-r", "-R", "-E", "-F", "-G", "-v", "-l", "-L", "-c", "-w", "-x", "-q", "-s", "-H", "-h", "--line-number", "--ignore-case", "--recursive", "--dereference-recursive", "--extended-regexp", "--fixed-strings", "--basic-regexp", "--invert-match", "--files-with-matches", "--files-without-match", "--count", "--word-regexp", "--line-regexp", "--quiet", "--no-messages"]), prefixes: ["--include=", "--exclude=", "--color="], shortOptionPattern: /^-[niRrEFGvlLcwxsHh]+$/ },
-  };
-  if (segment.executable === "pwd") return segment.args.length === 0 || hasOnlySafeOptions(segment.args, new Set(["-L", "-P", "--logical", "--physical"]));
-  if (segment.executable === "rg") return isSafeRg(segment.args);
-  const policy = options[segment.executable];
-  return policy ? hasOnlySafeOptions(segment.args, policy.allowed, policy.prefixes, policy.shortOptionPattern) : false;
-}
-
-function readOnlySegment(segment: CommandSegment): boolean {
-  if (segment.hasRedirect || segment.hasSubstitution || segment.nestedShell) return false;
-  if (segment.executableToken.includes("/")) return false;
-  if (isSafeReadOnlyCommand(segment)) return true;
-  return segment.executable === "git"
-    && readOnlyGitSubcommands.has(segment.args[0] ?? "")
-    && segment.args.slice(1).every((argument, index) => isSafeGitArgument(segment.args[0]!, argument, index));
-}
-
-function isSecretPath(value: string): boolean {
-  const path = value.replace(/^@/, "");
-  const parts = path.split(/[\\/]/);
-  const name = parts.at(-1) ?? "";
-  return name.startsWith(".env") || name.endsWith(".pem") || name.endsWith(".key") || parts.some((part) => [".ssh", ".aws", ".gnupg"].includes(part));
-}
-
-function secretRedirectSource(source: string): boolean {
-  return [...source.matchAll(/<\s*("[^"]*"|'[^']*'|[^\s;|&]+)/g)].some((match) => isSecretPath(tokenizeCookedWords(match[1] ?? "").words[0] ?? ""));
-}
-
-function isNetworkSink(segment: CommandSegment): boolean {
-  return networkExecutables.has(segment.executable);
-}
-
-function isRemoteScpPath(value: string): boolean {
-  return /^[^/\s:]+:/.test(value);
-}
-
-function scpUploadsSecret(args: string[]): boolean {
-  const paths: string[] = [];
-  const consumesValue = new Set(["-c", "-D", "-F", "-i", "-J", "-l", "-o", "-P", "-S", "-X", "--config", "--identity-file", "--jump", "--limit", "--option", "--port", "--ssh-program"]);
-  let pathsOnly = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    if (pathsOnly) {
-      paths.push(argument);
-      continue;
-    }
-    if (argument === "--") {
-      pathsOnly = true;
-      continue;
-    }
-    if (consumesValue.has(argument)) {
-      index += 1;
-      continue;
-    }
-    if (/^-(?:c|D|F|i|J|l|o|P|S|X).+/.test(argument) || /^(?:--config|--identity-file|--jump|--limit|--option|--port|--ssh-program)=/.test(argument)) continue;
-    if (!argument.startsWith("-")) paths.push(argument);
-  }
-  if (paths.length < 2 || !isRemoteScpPath(paths.at(-1)!)) return false;
-  return paths.slice(0, -1).some((path) => !isRemoteScpPath(path) && isSecretPath(path));
-}
-
-function curlUploadsSecret(args: string[]): boolean {
-  const dataOptions = new Set(["-d", "--data", "--data-ascii", "--data-binary", "--data-raw"]);
-  const formOptions = new Set(["-F", "--form"]);
-  const uploadOptions = new Set(["-T", "--upload-file"]);
-  const dataFile = (value: string) => value.startsWith("@") && isSecretPath(value);
-  const formFile = (value: string) => {
-    const match = /(?:^|=)[@<](.+)$/.exec(value);
-    return match ? isSecretPath(match[1]!) : false;
-  };
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    const equals = argument.indexOf("=");
-    const option = equals >= 0 ? argument.slice(0, equals) : argument;
-    const attached = equals >= 0 ? argument.slice(equals + 1) : undefined;
-    if (dataOptions.has(option)) {
-      if (dataFile(attached ?? args[index + 1] ?? "")) return true;
-      if (attached === undefined) index += 1;
-      continue;
-    }
-    if (formOptions.has(option)) {
-      if (formFile(attached ?? args[index + 1] ?? "")) return true;
-      if (attached === undefined) index += 1;
-      continue;
-    }
-    if (uploadOptions.has(option)) {
-      if (isSecretPath(attached ?? args[index + 1] ?? "")) return true;
-      if (attached === undefined) index += 1;
-      continue;
-    }
-    if (argument.startsWith("-d") && argument.length > 2 && dataFile(argument.slice(2))) return true;
-    if (argument.startsWith("-F") && argument.length > 2 && formFile(argument.slice(2))) return true;
-    if (argument.startsWith("-T") && argument.length > 2 && isSecretPath(argument.slice(2))) return true;
-  }
-  return false;
-}
-
-function exfiltratesSecret(segments: CommandSegment[]): boolean {
-  const secretSegment = (segment: CommandSegment) => segment.args.some(isSecretPath) || secretRedirectSource(segment.source);
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index]!;
-    if (segment.executable === "scp" && scpUploadsSecret(segment.args)) return true;
-    if (segment.executable === "curl" && curlUploadsSecret(segment.args)) return true;
-    if (isNetworkSink(segment) && secretRedirectSource(segment.source)) return true;
-    if (secretSegment(segment) && segments.slice(index + 1).some(isNetworkSink)) return true;
-  }
-  return false;
-}
-
-function removesBoundary(target: string, request: PermissionRequest): boolean {
-  const unquoted = target.replace(/^(['"])(.*)\1$/, "$2");
-  if (["/", "~", "~/", "$HOME", "${HOME}"].includes(unquoted)) return true;
-  if ([".", "$PWD", "${PWD}"].includes(unquoted)) return true;
-  return unquoted === homedir() || unquoted === request.cwd || resolve(request.cwd, unquoted) === request.cwd;
-}
-
-function gitSubcommandOffset(args: string[]): number | undefined {
-  const takesValue = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    if (takesValue.has(argument)) {
-      index += 1;
-      continue;
-    }
-    if (argument.startsWith("--git-dir=") || argument.startsWith("--work-tree=") || argument.startsWith("--namespace=") || argument.startsWith("--exec-path=")) continue;
-    if (argument.startsWith("-")) continue;
-    return index;
-  }
-  return undefined;
-}
-
-function hasForcedProtectedPush(args: string[]): boolean {
-  const forced = args.some((argument) => argument === "--force" || argument.startsWith("--force=") || argument.startsWith("--force-with-lease") || /^-[^-]*f/.test(argument) || argument.startsWith("+"));
-  return forced && args.some((argument) => /(?:^|[:/+])(main|master)$/.test(argument));
-}
-
-function gitAliases(args: string[]): Map<string, string> {
-  const aliases = new Map<string, string>();
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    const value = argument === "-c" ? args[++index] : argument.startsWith("-c") ? argument.slice(2) : undefined;
-    if (!value) continue;
-    const match = /^alias\.([^=]+)=(.*)$/.exec(value);
-    if (match) aliases.set(match[1]!, match[2]!);
-  }
-  return aliases;
-}
-
-function isForcedPushToProtectedBranch(segments: CommandSegment[]): boolean {
-  return segments.some((segment) => {
-    if (segment.executable !== "git") return false;
-    const subcommand = gitSubcommandOffset(segment.args);
-    if (subcommand !== undefined) {
-      const command = segment.args[subcommand]!;
-      const trailing = segment.args.slice(subcommand + 1);
-      if (command === "push") return hasForcedProtectedPush(trailing);
-      const expansion = gitAliases(segment.args).get(command);
-      if (expansion && /(?:^|\s)push(?:\s|$)/.test(expansion)) {
-        return hasForcedProtectedPush([...expansion.trim().split(/\s+/), ...trailing]);
-      }
-    }
-    return segment.args.includes("push") && hasForcedProtectedPush(segment.args);
-  });
-}
-
-function commandIsHard(request: PermissionRequest, segments: CommandSegment[]): boolean {
-  const command = typeof request.input.command === "string" ? request.input.command : segments.map((segment) => segment.source).join(" ");
-  if (isForcedPushToProtectedBranch(segments)) return true;
-  if (segments.some((segment) => {
-    if (segment.executable !== "rm") return false;
-    return segment.args
-      .filter((argument) => !argument.startsWith("-"))
-      .some((target) => removesBoundary(target, request));
-  })) return true;
-  if (/\b(?:kubectl|terraform)\b[^\n]*(?:destroy|delete)[^\n]*(?:prod|production)/i.test(command)) return true;
-  if (exfiltratesSecret(segments)) return true;
-  return request.resolvedPaths.some((path) => path === "/" || path === request.cwd);
 }
 
 function isWithin(path: string, root: string): boolean {
@@ -473,8 +82,47 @@ function writeRisk(request: PermissionRequest): Risk {
   const projectConfig = resolve(request.cwd, ".pi/permissions.json");
   const globalConfig = resolve(homedir(), ".pi/agent/permissions.json");
   if (request.resolvedPaths.some((path) => path === projectConfig || path === globalConfig)) return "HARD";
-  if (request.resolvedPaths.length === 0 || request.resolvedPaths.some((path) => !isWithin(path, request.cwd))) return "REVIEW";
-  return "LOW";
+  return request.resolvedPaths.length > 0 && request.resolvedPaths.every((path) => isWithin(path, request.cwd)) ? "LOW" : "REVIEW";
+}
+
+function hasComplexShellSyntax(command: string): boolean {
+  return /[\\'"`$;\n<>|&]/.test(command);
+}
+
+function safeOptions(args: string[], allowed: Set<string>, compact?: RegExp): boolean {
+  let pathsOnly = false;
+  return args.every((arg) => {
+    if (pathsOnly) return true;
+    if (arg === "--") { pathsOnly = true; return true; }
+    if (!arg.startsWith("-")) return true;
+    return allowed.has(arg) || compact?.test(arg) === true;
+  });
+}
+
+function isTrustedRead(segment: CommandSegment): boolean {
+  if (!trustedReadCommands.has(segment.executable) || segment.executableToken.includes("/")) return false;
+  if (segment.executable === "pwd") return safeOptions(segment.args, new Set(["-L", "-P", "--logical", "--physical"]));
+  if (segment.executable === "rg") {
+    if (segment.args[0] !== "--no-config") return false;
+    return safeOptions(segment.args, new Set(["--no-config", "-n", "-i", "-F", "-E", "-G", "-v", "-w", "-x", "-l", "-c", "-o", "-S", "-s", "-u", "--files", "--hidden", "--no-ignore", "--line-number", "--ignore-case", "--fixed-strings", "--extended-regexp"]));
+  }
+  const options: Record<string, { allowed: Set<string>; compact?: RegExp }> = {
+    cat: { allowed: new Set(["-n", "-b", "-s", "-A", "-e", "-E", "-T", "-v"]) },
+    head: { allowed: new Set(["-q", "-v", "--quiet", "--verbose"]) },
+    tail: { allowed: new Set(["-q", "-v", "-f", "--quiet", "--verbose", "--follow"]) },
+    wc: { allowed: new Set(["-c", "-m", "-l", "-w", "-L"]) },
+    ls: { allowed: new Set(["-a", "-A", "-l", "-h", "-t", "-r", "-S", "-R", "-d", "-1", "-C", "-x", "-F", "-p"]), compact: /^-[aAlhtrSRd1CxFp]+$/ },
+    grep: { allowed: new Set(["-n", "-i", "-r", "-R", "-E", "-F", "-G", "-v", "-l", "-L", "-c", "-w", "-x", "-q", "-s", "-H", "-h"]), compact: /^-[niRrEFGvlLcwxsHh]+$/ },
+  };
+  const policy = options[segment.executable];
+  return policy ? safeOptions(segment.args, policy.allowed, policy.compact) : false;
+}
+
+function isHardSimpleCommand(segment: CommandSegment, command: string): boolean {
+  if (deleteExecutables.has(segment.executable) || networkExecutables.has(segment.executable)) return true;
+  if (segment.executable === "git" && segment.args.includes("push")) return true;
+  if (segment.args.includes("publish") || /\b(?:deploy|production|destroy)\b/i.test(command)) return true;
+  return ["kubectl", "terraform", "helm", "ansible"].includes(segment.executable);
 }
 
 export function classifyRisk(request: PermissionRequest): Risk {
@@ -482,10 +130,10 @@ export function classifyRisk(request: PermissionRequest): Risk {
   if (request.tool === "WebFetch") return request.networkTargets?.some(isPrivateTarget) ? "HARD" : "LOW";
   if (request.operation === "write") return writeRisk(request);
   if (request.operation === "read") return "LOW";
-  if (request.commandSegments) {
-    if (commandIsHard(request, request.commandSegments)) return "HARD";
-    if (request.commandSegments.every(readOnlySegment)) return "LOW";
-    return "REVIEW";
-  }
-  return "REVIEW";
+  const command = typeof request.input.command === "string" ? request.input.command : undefined;
+  if (!command) return "REVIEW";
+  if (hasComplexShellSyntax(command)) return "HARD";
+  const segment = request.commandSegments?.[0] ?? parseSimpleSegment(command);
+  if (isHardSimpleCommand(segment, command)) return "HARD";
+  return isTrustedRead(segment) ? "LOW" : "REVIEW";
 }

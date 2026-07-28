@@ -200,12 +200,11 @@ Normalization performs:
 
 - absolute path resolution against the session working directory;
 - canonicalization and symlink-aware boundary checks;
-- Bash segmentation across `&&`, `||`, `;`, and pipelines;
-- conservative handling of nested shells, redirection, command substitution, and interpreters;
+- narrow Bash syntax detection rather than full shell parsing;
 - extraction of obvious network targets and external side effects;
 - protected-path detection.
 
-Ambiguous commands are never classified as read-only merely because their first token looks safe.
+The classifier deliberately does not interpret complete Bash, curl/scp transfer grammar, or Git aliases. `LOW` Bash is limited to a bare trusted executable, no shell syntax, and safe arguments; every quote, escape, variable, substitution, redirect, control operator, pipeline, newline, backgrounding, nested shell, delete, push, shell network command, or publish/deploy marker is `HARD`. Unknown simple commands are `REVIEW`. Ambiguous commands are never classified as read-only merely because their first token looks safe.
 
 ## 7. Authorization Pipeline
 
@@ -332,6 +331,8 @@ The extension:
 - protects `edit` and `write` with canonical workspace path checks;
 - filters inherited environment variables;
 - validates every one-off escalation against the exact normalized request.
+
+Before executing Bash, the runtime wrapper uses a controlled PATH and realpath/revalidates the bare executable. It enforces sensitive read denial, canonical write roots and deny rules, and network target policy at runtime; static classification never replaces this sandbox boundary.
 
 Mode transitions do not reinitialize or loosen the sandbox. A one-off approval does not create a permanent exception.
 

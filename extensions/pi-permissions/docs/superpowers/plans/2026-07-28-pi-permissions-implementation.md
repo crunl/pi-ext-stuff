@@ -350,6 +350,8 @@ git commit -m "feat: add persistent permission mode state"
 
 ### Task 3: Request Normalization, Paths, Rules, and Risk
 
+> **Contract note (user-authorized architecture contraction):** Task 3 is a narrow static classifier, not a Bash parser. It grants `LOW` only to bare, syntax-free commands from a fixed read-only allowlist with safe arguments. Quotes, escapes, substitutions, redirects, control operators, pipelines, newlines, backgrounding, nested shells, deletes, pushes, network commands, publish/deploy markers, and other complex Bash are `HARD`; unknown simple commands are `REVIEW`. Task 5 owns controlled-PATH/realpath executable identity, filesystem, sensitive-read, write-root, and runtime network enforcement.
+
 **Files:**
 - Create: `src/permissions/paths.ts`
 - Create: `src/permissions/rules.ts`
@@ -410,7 +412,7 @@ type PathDecision =
   | { allowed: false; canonicalPath: string; reason: string };
 ```
 
-- [ ] **Step 4: Implement conservative command normalization**
+- [ ] **Step 4: Implement narrow command normalization**
 
 Represent each Bash segment:
 
@@ -425,7 +427,7 @@ interface CommandSegment {
 }
 ```
 
-Only the fixed read-only allowlist (`ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `rg`, `grep`, and read-only Git subcommands) can become LOW. Any redirect, command substitution, unknown executable, nested shell, or unsafe segment raises the whole request to at least REVIEW.
+Only the fixed read-only allowlist (`ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `rg`, and `grep`) can become LOW, and only when the command is a bare token with no shell syntax and safe arguments. `rg` requires first-position `--no-config`. Any quote, escape, variable, substitution, redirect, control operator, pipeline, newline, backgrounding, nested shell, delete, push, network executable, publish/deploy marker, or unsafe argument is `HARD`; unknown simple commands are `REVIEW`.
 
 - [ ] **Step 5: Implement rules and risk**
 
@@ -442,8 +444,8 @@ export interface PermissionRule {
 Classify:
 
 - LOW: reads, searches, allowed workspace edits, `WebSearch`, public `WebFetch`, and the read-only command allowlist.
-- REVIEW: deletes below workspace root, installs, networked Bash, unknown commands, external writes, `git push`, and MCP tools with side effects.
-- HARD: root/home/workspace-root deletion, secret exfiltration, protected configuration writes, force push to main/master, and production destruction markers.
+- REVIEW: simple unknown commands, installs, external writes, and MCP tools with side effects.
+- HARD: complex Bash syntax, deletes, `git push`, shell network executables, publish/deploy/production-destroy markers, private WebFetch targets, and protected configuration writes.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -544,6 +546,8 @@ git commit -m "feat: add gated plan mode"
 ---
 
 ### Task 5: OS Sandbox and Bash Execution Boundary
+
+> **Runtime boundary requirement:** Task 5 must execute Bash with a controlled PATH and realpath/revalidate the selected bare executable immediately before execution. It must enforce sensitive read denial, canonical write roots and deny rules, and network target policy at runtime. Static Task 3 classification is not a substitute for any of these checks.
 
 **Files:**
 - Create: `src/sandbox/network.ts`
