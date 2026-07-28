@@ -1,15 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerExtension } from "../src/register.ts";
-import { extractShellNetworkHosts } from "../src/permissions/risk.ts";
 
 function harness(
   agentDir: string,
   approved = false,
   hasUI = true,
   localProxyPorts: { http?: number; socks?: number } = {},
+  sandboxCoordinator?: {
+    runShared<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+    runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+  },
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -17,26 +20,12 @@ function harness(
   const setStatus = vi.fn();
   const notify = vi.fn();
   const confirm = vi.fn(async () => approved);
-  let sandboxAsk: ((request: { host: string; port: number | undefined }) => Promise<boolean>) | undefined;
-  const networkDecisions: boolean[] = [];
   const sandboxManager = {
-    initialize: vi.fn(async (
-      _config: unknown,
-      ask?: (request: { host: string; port: number | undefined }) => Promise<boolean>,
-    ) => {
-      sandboxAsk = ask;
-    }),
+    initialize: vi.fn(async (_config: unknown) => undefined),
     wrapWithSandbox: vi.fn(async (command: string) => command),
     reset: vi.fn(async () => undefined),
   };
-  const bashExecute = vi.fn(async (_id: string, params: { command: string }) => {
-    if (sandboxAsk) {
-      for (const host of extractShellNetworkHosts(params.command)) {
-        networkDecisions.push(await sandboxAsk({ host, port: 443 }));
-      }
-    }
-    return { content: [], details: undefined };
-  });
+  const bashExecute = vi.fn(async () => ({ content: [], details: undefined }));
   const bashToolFactory = vi.fn((_cwd: string, _options?: unknown) => ({
     name: "bash",
     label: "bash",
@@ -44,6 +33,11 @@ function harness(
     parameters: {},
     execute: bashExecute,
   }));
+  const filteringProxy = {
+    ports: { http: 45670, socks: 45671 },
+    close: vi.fn(async () => undefined),
+  };
+  const filteringProxyFactory = vi.fn(async () => filteringProxy);
   const pi = {
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     registerCommand: (name: string, command: { handler: (...args: any[]) => any }) => commands.set(name, command),
@@ -54,6 +48,8 @@ function harness(
     sandboxManager,
     bashToolFactory: bashToolFactory as any,
     localProxyPorts,
+    filteringProxyFactory,
+    sandboxCoordinator,
   });
   const context = {
     cwd: agentDir,
@@ -72,9 +68,8 @@ function harness(
     sandboxManager,
     bashToolFactory,
     bashExecute,
-    networkDecisions,
-    askNetwork: async (host: string) =>
-      sandboxAsk ? sandboxAsk({ host, port: 443 }) : false,
+    filteringProxy,
+    filteringProxyFactory,
   };
 }
 
@@ -89,7 +84,76 @@ describe("Default mode registration", () => {
     expect(app.commands.has("default")).toBe(true);
     expect(app.commands.has("permissions")).toBe(true);
     expect(app.tools.has("bash")).toBe(true);
+    expect(app.tools.has("write")).toBe(true);
+    expect(app.tools.has("edit")).toBe(true);
+    expect(app.tools.get("write").executionMode).toBe("sequential");
+    expect(app.tools.get("edit").executionMode).toBe("sequential");
+    expect(app.tools.get("bash").parameters.properties).toHaveProperty("sandbox_permissions");
+    expect(app.tools.get("bash").parameters.properties).toHaveProperty("additional_permissions");
+    expect(app.tools.get("bash").parameters.properties).toHaveProperty("justification");
     expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+  });
+
+  it("leaves explicit user !bash outside the extension sandbox", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+
+    expect(app.handlers.has("user_bash")).toBe(false);
+  });
+
+  it("rolls back the active policy when a config reload cannot initialize", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ sandbox: { network: { allowedDomains: ["candidate.example"] } } }),
+    );
+    app.sandboxManager.initialize.mockImplementation(async (config: any) => {
+      if (config.network.allowedDomains.includes("candidate.example")) {
+        throw new Error("candidate rejected");
+      }
+    });
+
+    await app.commands.get("default")?.handler("", app.context);
+    await app.tools.get("bash").execute(
+      "after-rollback",
+      { command: "pwd" },
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
+    expect(app.sandboxManager.initialize).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        network: expect.objectContaining({ allowedDomains: [] }),
+      }),
+    );
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("candidate rejected"),
+      "error",
+    );
+    expect(app.bashExecute).toHaveBeenCalledOnce();
+  });
+
+  it("executes native write through sandbox operations", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    const app = harness(agentDir);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    await app.tools.get("write").execute(
+      "write-1",
+      { path: "note.txt", content: "native sandbox" },
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(await readFile(join(project, "note.txt"), "utf8")).toBe("native sandbox");
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalled();
   });
 
   it("allows LOW calls and blocks a denied approval", async () => {
@@ -115,6 +179,121 @@ describe("Default mode registration", () => {
       .resolves.toMatchObject({ block: true, reason: expect.stringContaining("interactive approval") });
   });
 
+  it("rejects an approved call after a successful policy reload changes its decision", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, true);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "stale-approval",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+    await writeFile(
+      join(agentDir, "permissions.json"),
+      JSON.stringify({ rules: [{ action: "deny", tool: "bash", pattern: "rm *" }] }),
+    );
+    await app.commands.get("default")!.handler("", app.context);
+
+    await expect(app.tools.get("bash").execute(
+      "stale-approval",
+      event.input,
+      undefined,
+      undefined,
+      app.context,
+    )).rejects.toThrow("no longer authorized");
+    expect(app.bashExecute).not.toHaveBeenCalled();
+  });
+
+  it("revalidates an approval after acquiring the execution lease", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    let beforeShared: (() => Promise<void>) | undefined;
+    const coordinator = {
+      async runShared<T>(operation: () => Promise<T>): Promise<T> {
+        const hook = beforeShared;
+        beforeShared = undefined;
+        await hook?.();
+        return operation();
+      },
+      async runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+        return operation();
+      },
+    };
+    const app = harness(agentDir, true, true, {}, coordinator);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "lease-race",
+      input: { command: "rm -rf build" },
+    };
+    await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+
+    beforeShared = async () => {
+      await writeFile(
+        join(agentDir, "permissions.json"),
+        JSON.stringify({ rules: [{ action: "deny", tool: "bash", pattern: "rm *" }] }),
+      );
+      await app.commands.get("default")!.handler("", app.context);
+    };
+
+    await expect(app.tools.get("bash").execute(
+      "lease-race",
+      event.input,
+      undefined,
+      undefined,
+      app.context,
+    )).rejects.toThrow("no longer authorized");
+    expect(app.bashExecute).not.toHaveBeenCalled();
+  });
+
+  it("does not let an approved tool-call id authorize different input", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, true);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "swapped-input",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+    await expect(app.tools.get("bash").execute(
+      "swapped-input",
+      { command: "rm -rf /var/tmp/unapproved-target" },
+      undefined,
+      undefined,
+      app.context,
+    )).rejects.toThrow("no longer authorized");
+    expect(app.bashExecute).not.toHaveBeenCalled();
+  });
+
+  it("does not let an approved native-write id authorize a sibling path", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const external = await mkdtemp(join(tmpdir(), "pi-permissions-external-"));
+    const app = harness(agentDir, true);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "write",
+      toolCallId: "swapped-native-write",
+      input: { path: join(external, "approved.txt"), content: "approved" },
+    };
+
+    try {
+      await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+      await expect(app.tools.get("write").execute(
+        "swapped-native-write",
+        { path: join(external, "sibling.txt"), content: "unapproved" },
+        undefined,
+        undefined,
+        app.context,
+      )).rejects.toThrow("no longer authorized");
+      await expect(readFile(join(external, "sibling.txt"), "utf8")).rejects.toThrow();
+    } finally {
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+
   it("grants an approved public host only while that bash call executes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir, true);
@@ -134,12 +313,139 @@ describe("Default mode registration", () => {
       app.context,
     );
 
-    expect(app.networkDecisions).toEqual([true]);
-    await expect(app.askNetwork("example.com")).resolves.toBe(false);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
+    expect(app.sandboxManager.initialize.mock.calls[1]?.[0]).toMatchObject({
+      network: { allowedDomains: ["example.com"] },
+    });
+    expect(app.sandboxManager.initialize.mock.calls[2]?.[0]).toMatchObject({
+      network: { allowedDomains: [] },
+    });
     expect(app.confirm).toHaveBeenCalledWith(
       "pi-permissions · HARD",
       expect.stringContaining("Network for this command: example.com"),
     );
+  });
+
+  it("grants Git metadata and GitHub network access in the same agent bash approval", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    await mkdir(join(project, ".git"));
+    await writeFile(join(project, ".git", "config"), "");
+    const app = harness(agentDir, true);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "git-network-1",
+      input: { command: "gh pr checkout 123" },
+    };
+
+    await app.handlers.get("tool_call")!(event, app.context);
+    await app.tools.get("bash").execute(
+      "git-network-1",
+      event.input,
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    const temporary = app.sandboxManager.initialize.mock.calls[1]?.[0] as any;
+    const gitDirectory = await realpath(join(project, ".git"));
+    expect(temporary.network.allowedDomains).toContain("api.github.com");
+    expect(temporary.filesystem.allowWrite).toContain(gitDirectory);
+    expect(temporary.filesystem.denyWrite).not.toContain(gitDirectory);
+    expect(app.confirm).toHaveBeenCalledWith(
+      "pi-permissions · HARD",
+      expect.stringContaining(`Filesystem for this command: ${gitDirectory}`),
+    );
+  });
+
+  it("applies a structured write root only to the approved agent bash call", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, true);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const outputName = `pi-permissions-output-${Date.now()}`;
+    const outputRoot = join("/var/tmp", outputName);
+    const canonicalOutputRoot = join(await realpath("/var/tmp"), outputName);
+    const event = {
+      toolName: "bash",
+      toolCallId: "filesystem-1",
+      input: {
+        command: `mkdir -p ${outputRoot}`,
+        sandbox_permissions: "with_additional_permissions",
+        additional_permissions: {
+          file_system: { write: [outputRoot] },
+        },
+        justification: "Write the requested build artifact",
+      },
+    };
+
+    await app.handlers.get("tool_call")!(event, app.context);
+    await app.tools.get("bash").execute(
+      "filesystem-1",
+      event.input,
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(app.sandboxManager.reset).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+    const options = app.bashToolFactory.mock.calls.at(-1)?.[1] as any;
+    const operations = options?.operations;
+    expect(operations).toBeDefined();
+    await operations.exec("printf isolated", agentDir, { onData: () => undefined });
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenLastCalledWith(
+      "printf isolated",
+      undefined,
+      expect.objectContaining({
+        filesystem: expect.objectContaining({
+          allowWrite: expect.arrayContaining([canonicalOutputRoot]),
+        }),
+      }),
+      undefined,
+    );
+    expect(app.confirm).toHaveBeenCalledWith(
+      "pi-permissions · REVIEW",
+      expect.stringMatching(
+        new RegExp(
+          `Filesystem for this command: ${canonicalOutputRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*Justification: Write the requested build artifact`,
+          "s",
+        ),
+      ),
+    );
+  });
+
+  it("waits for an active sandboxed command before reloading the runtime", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    let release!: () => void;
+    const commandRunning = new Promise<void>((resolvePromise) => {
+      app.bashExecute.mockImplementationOnce(async () => {
+        await new Promise<void>((resolveCommand) => {
+          release = resolveCommand;
+          resolvePromise();
+        });
+        return { content: [], details: undefined };
+      });
+    });
+
+    const execution = app.tools.get("bash").execute(
+      "long-running",
+      { command: "pwd" },
+      undefined,
+      undefined,
+      app.context,
+    );
+    await commandRunning;
+    const reload = app.commands.get("default")!.handler("", app.context);
+    await Promise.resolve();
+
+    expect(app.sandboxManager.reset).toHaveBeenCalledOnce();
+    release();
+    await Promise.all([execution, reload]);
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(2);
   });
 
   it("never grants a private network target even after approval", async () => {
@@ -155,7 +461,7 @@ describe("Default mode registration", () => {
     await expect(app.handlers.get("tool_call")!(event, app.context))
       .resolves.toMatchObject({ block: true, reason: expect.stringContaining("Private") });
     expect(app.confirm).not.toHaveBeenCalled();
-    expect(app.networkDecisions).toEqual([]);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
   });
 
   it("temporarily uses a loopback system proxy for an approved network command", async () => {
@@ -178,10 +484,22 @@ describe("Default mode registration", () => {
     );
 
     expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
+    expect(app.filteringProxyFactory).toHaveBeenCalledWith(
+      ["example.com"],
+      { http: 7890, socks: 7891 },
+      ["localhost", "127.0.0.1", "::1", "169.254.169.254"],
+    );
     expect(app.sandboxManager.initialize.mock.calls[1]?.[0]).toMatchObject({
-      network: { httpProxyPort: 7890, socksProxyPort: 7891 },
+      network: {
+        allowedDomains: ["example.com"],
+        httpProxyPort: 45670,
+        socksProxyPort: 45671,
+      },
     });
-    expect(app.sandboxManager.initialize.mock.calls[2]?.[1]).toEqual(expect.any(Function));
+    expect(app.sandboxManager.initialize.mock.calls[2]?.[0]).toMatchObject({
+      network: { allowedDomains: [] },
+    });
+    expect(app.filteringProxy.close).toHaveBeenCalledOnce();
   });
 
   it("restores the base sandbox when temporary proxy initialization fails", async () => {
@@ -205,8 +523,10 @@ describe("Default mode registration", () => {
     )).rejects.toThrow("proxy failed");
 
     expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
-    expect(app.sandboxManager.initialize.mock.calls[2]?.[1]).toEqual(expect.any(Function));
-    await expect(app.askNetwork("example.com")).resolves.toBe(false);
+    expect(app.sandboxManager.initialize.mock.calls[2]?.[0]).toMatchObject({
+      network: { allowedDomains: [] },
+    });
+    expect(app.filteringProxy.close).toHaveBeenCalledOnce();
   });
 
   it("runs the overridden bash tool with sandbox operations", async () => {

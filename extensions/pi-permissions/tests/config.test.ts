@@ -125,13 +125,15 @@ describe("permissions config", () => {
     });
   });
 
-  it("treats a project allowlist as a restriction when the global allowlist is empty", async () => {
+  it("does not let a project expand an empty global network allowlist", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(join(agentDir, "permissions.json"), { sandbox: { network: { allowedDomains: [] } } });
       await writeJson(join(cwd, ".pi", "permissions.json"), { sandbox: { network: { allowedDomains: ["api.example.test"] } } });
       const loaded = await loadPermissionsConfig(cwd, agentDir, true);
-      expect(loaded.config.sandbox.network.allowedDomains).toEqual(["api.example.test"]);
-      expect(loaded.projectExpansions).toEqual([]);
+      expect(loaded.config.sandbox.network.allowedDomains).toEqual([]);
+      expect(loaded.projectExpansions).toEqual([
+        { kind: "network-domain", value: "api.example.test" },
+      ]);
     });
   });
 });

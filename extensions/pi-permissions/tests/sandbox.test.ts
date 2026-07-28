@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import {
   createSandboxedBashOperations,
+  createSandboxedFileOperations,
   createSandboxRuntimeConfig,
   detectLocalProxyPorts,
-  OneShotNetworkGrants,
+  withAdditionalWriteRoots,
   withLocalProxy,
 } from "../src/sandbox.ts";
 
@@ -14,8 +17,13 @@ describe("sandbox integration", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
 
     expect(runtime.filesystem.allowWrite).toContain("/workspace/project");
-    expect(runtime.filesystem.denyRead).toContain("/workspace/project/.env");
-    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/*.key");
+    expect(runtime.filesystem.denyRead).toContain("/workspace/project/**/.env");
+    expect(runtime.filesystem.denyRead).toContain("/workspace/project/**/.env.*");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/**/*.key");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.pi/permissions.json");
     expect(runtime.network.allowedDomains).toEqual([]);
   });
 
@@ -36,7 +44,8 @@ describe("sandbox integration", () => {
     };
     const output: Buffer[] = [];
 
-    const result = await createSandboxedBashOperations(manager).exec(
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd());
+    const result = await createSandboxedBashOperations(manager, runtime).exec(
       "printf unsandboxed",
       join(process.cwd()),
       { onData: (data) => output.push(data) },
@@ -45,25 +54,40 @@ describe("sandbox integration", () => {
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       "printf unsandboxed",
       undefined,
-      undefined,
+      runtime,
       undefined,
     );
     expect(Buffer.concat(output).toString()).toBe("sandboxed");
     expect(result.exitCode).toBe(0);
   });
 
-  it("scopes network grants to the active command and handles overlap", () => {
-    const grants = new OneShotNetworkGrants();
-    const releaseFirst = grants.acquire(["example.com"]);
-    const releaseSecond = grants.acquire(["EXAMPLE.com", "api.example.com"]);
+  it("runs native file operations through the sandbox with one-call write roots", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-native-"));
+    const path = join(cwd, "nested", "note.txt");
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd);
+    const operations = createSandboxedFileOperations(manager, runtime, [path]);
 
-    expect(grants.has("example.com")).toBe(true);
-    expect(grants.has("api.example.com")).toBe(true);
-    releaseFirst();
-    expect(grants.has("example.com")).toBe(true);
-    releaseSecond();
-    expect(grants.has("example.com")).toBe(false);
-    expect(grants.has("api.example.com")).toBe(false);
+    await operations.mkdir(join(cwd, "nested"));
+    await operations.writeFile(path, "sandboxed native write");
+    await operations.access(path);
+
+    expect((await operations.readFile(path)).toString()).toBe("sandboxed native write");
+    expect(await readFile(path, "utf8")).toBe("sandboxed native write");
+    expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({
+        filesystem: expect.objectContaining({
+          allowWrite: expect.arrayContaining([path]),
+        }),
+      }),
+      undefined,
+    );
   });
 
   it("detects only loopback system proxies and applies them to one runtime", () => {
@@ -82,5 +106,18 @@ describe("sandbox integration", () => {
     );
     expect(runtime.network.httpProxyPort).toBe(7890);
     expect(runtime.network.socksProxyPort).toBe(7891);
+  });
+
+  it("does not let a broad write root erase nested protected paths", () => {
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
+    const gitRoot = "/workspace/project/.git";
+
+    const broad = withAdditionalWriteRoots(runtime, ["/workspace"]);
+    expect(broad.filesystem.denyWrite).toContain(gitRoot);
+
+    const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
+    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).toContain("/workspace/project/.agents");
+    expect(exact.filesystem.denyWrite).toContain("/workspace/project/.codex");
   });
 });

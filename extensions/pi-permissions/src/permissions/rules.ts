@@ -16,7 +16,7 @@ export interface PermissionRequest {
 
 export interface CommandSegment {
   source: string;
-  /** Raw simple token only; Task 5 revalidates bare-command identity before execution. */
+  /** Raw executable token before basename normalization. */
   executableToken: string;
   executable: string;
   args: string[];

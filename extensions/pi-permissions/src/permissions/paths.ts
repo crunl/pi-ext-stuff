@@ -1,21 +1,19 @@
 import { realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 
 export interface PathPolicy {
   cwd: string;
   allowWrite: string[];
   denyRead: string[];
   denyWrite: string[];
+  protectedWritePaths?: string[];
   operation: "read" | "write";
 }
 
 export type PathDecision =
   | { allowed: true; canonicalPath: string }
   | { allowed: false; canonicalPath: string; reason: string };
-
-const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? resolve(homedir(), value.slice(2)) : value;
@@ -60,6 +58,9 @@ async function matchesProtectedPattern(
   return (await Promise.all(patterns.map(async (rawPattern) => {
     const pattern = expandHome(rawPattern);
     if (isAbsolute(pattern)) {
+      if (pattern.includes("*")) {
+        return globMatches(lexicalPath, pattern) || globMatches(canonicalPath, pattern);
+      }
       const canonicalPattern = await canonicalize(pattern);
       return isWithin(lexicalPath, pattern) || isWithin(canonicalPath, canonicalPattern);
     }
@@ -81,18 +82,15 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
     ? expandHome(path)
     : resolve(lexicalCwd, expandHome(path));
   const canonicalPath = await canonicalize(requested);
-  const protectedControls = [
+  const protectedControls = policy.protectedWritePaths ?? [
     resolve(homedir(), ".pi/agent/permissions.json"),
     resolve(lexicalCwd, ".pi/permissions.json"),
   ];
   const canonicalControls = await Promise.all(protectedControls.map(canonicalize));
-  const canonicalPackageRoot = await canonicalize(packageRoot);
 
   if (policy.operation === "write" && (
-    isWithin(requested, packageRoot)
-    || isWithin(canonicalPath, canonicalPackageRoot)
-    || protectedControls.some((control) => requested === control)
-    || canonicalControls.some((control) => canonicalPath === control)
+    protectedControls.some((control) => isWithin(requested, control))
+    || canonicalControls.some((control) => isWithin(canonicalPath, control))
   )) {
     return { allowed: false, canonicalPath, reason: "permission control path is protected" };
   }

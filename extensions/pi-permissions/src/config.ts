@@ -282,9 +282,10 @@ function projectRestrictions(globalConfig: PermissionsConfig, project: Permissio
             ? {
                 ...project.sandbox.network,
                 allowedDomains: project.sandbox.network.allowedDomains
-                  ? globalConfig.sandbox.network.allowedDomains.length > 0
-                    ? intersect(project.sandbox.network.allowedDomains, globalConfig.sandbox.network.allowedDomains)
-                    : project.sandbox.network.allowedDomains
+                  ? intersect(
+                      project.sandbox.network.allowedDomains,
+                      globalConfig.sandbox.network.allowedDomains,
+                    )
                   : undefined,
               }
             : undefined,
@@ -349,7 +350,7 @@ export async function loadPermissionsConfig(
       .filter((value) => !globalConfig.sandbox.filesystem.allowWrite.includes(value))
       .map((value) => ({ kind: "write-root" as const, value })),
     ...(projectOverlay.sandbox?.network?.allowedDomains ?? [])
-      .filter((value) => globalConfig.sandbox.network.allowedDomains.length > 0 && !globalConfig.sandbox.network.allowedDomains.includes(value))
+      .filter((value) => !globalConfig.sandbox.network.allowedDomains.includes(value))
       .map((value) => ({ kind: "network-domain" as const, value })),
   ];
   return { config: projectRestrictions(globalConfig, projectOverlay), globalConfig, projectExpansions };
@@ -363,6 +364,10 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 
+export function fingerprintValue(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(stableValue(value))).digest("hex");
+}
+
 export function fingerprintConfig(config: PermissionsConfig): string {
-  return createHash("sha256").update(JSON.stringify(stableValue(config))).digest("hex");
+  return fingerprintValue(config);
 }
