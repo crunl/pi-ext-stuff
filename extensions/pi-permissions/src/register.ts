@@ -17,13 +17,20 @@ import { evaluateDefaultRequest } from "./default-mode.ts";
 import {
   createSandboxedBashOperations,
   createSandboxRuntimeConfig,
+  detectLocalProxyPorts,
+  type LocalProxyPorts,
+  OneShotNetworkGrants,
   type SandboxManagerLike,
+  withLocalProxy,
 } from "./sandbox.ts";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { isPublicNetworkHost } from "./permissions/risk.ts";
 
 export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
   bashToolFactory?: typeof createBashTool;
+  localProxyPorts?: LocalProxyPorts;
 }
 
 export function registerExtension(
@@ -34,9 +41,13 @@ export function registerExtension(
   const sandboxManager = options.sandboxManager ?? SandboxManager;
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
   const baseBash = bashToolFactory(process.cwd());
+  const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let approvalActive = false;
+  const networkGrants = new OneShotNetworkGrants();
+  const approvedNetworkHosts = new Map<string, string[]>();
+  let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
     | { kind: "disabled" }
@@ -73,7 +84,12 @@ export function registerExtension(
     sandboxState = { kind: "pending" };
     try {
       await sandboxManager.reset();
-      await sandboxManager.initialize(createSandboxRuntimeConfig(config.sandbox, ctx.cwd));
+      networkGrants.clear();
+      baseSandboxConfig = createSandboxRuntimeConfig(config.sandbox, ctx.cwd);
+      await sandboxManager.initialize(
+        baseSandboxConfig,
+        async ({ host }) => networkGrants.has(host) && isPublicNetworkHost(host),
+      );
       sandboxState = { kind: "ready", profile: config.sandbox.profile };
       setDefaultStatus(ctx);
     } catch (error: unknown) {
@@ -97,15 +113,45 @@ export function registerExtension(
   pi.registerTool({
     ...baseBash,
     label: "bash (sandboxed)",
+    executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       const result = await getConfig(ctx);
       if (!result.config.sandbox.enabled) {
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
-      const sandboxedBash = bashToolFactory(ctx.cwd, {
-        operations: sandboxOperations(),
-      });
-      return sandboxedBash.execute(id, params, signal, onUpdate);
+      const networkHosts = approvedNetworkHosts.get(id) ?? [];
+      approvedNetworkHosts.delete(id);
+      const releaseNetworkGrant = networkGrants.acquire(networkHosts);
+      const useLocalProxy = Boolean(networkHosts.length > 0
+        && baseSandboxConfig
+        && (localProxyPorts.http || localProxyPorts.socks));
+      try {
+        if (useLocalProxy) {
+          await sandboxManager.reset();
+          await sandboxManager.initialize(withLocalProxy(baseSandboxConfig!, localProxyPorts));
+        }
+        const sandboxedBash = bashToolFactory(ctx.cwd, {
+          operations: sandboxOperations(),
+        });
+        return await sandboxedBash.execute(id, params, signal, onUpdate);
+      } finally {
+        releaseNetworkGrant();
+        if (useLocalProxy) {
+          try {
+            await sandboxManager.reset();
+            await sandboxManager.initialize(
+              baseSandboxConfig!,
+              async ({ host }) => networkGrants.has(host) && isPublicNetworkHost(host),
+            );
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            sandboxState = { kind: "failed", error: message };
+            if (ctx.hasUI) {
+              ctx.ui.notify(`pi-permissions sandbox 恢复失败：${message}`, "error");
+            }
+          }
+        }
+      }
     },
   });
 
@@ -124,6 +170,7 @@ export function registerExtension(
 
   pi.on("session_start", async (_event, ctx) => {
     approvalActive = false;
+    approvedNetworkHosts.clear();
     try {
       const result = await getConfig(ctx, true);
       await initializeSandbox(result.config, ctx);
@@ -137,6 +184,8 @@ export function registerExtension(
 
   pi.on("session_shutdown", async () => {
     sandboxState = { kind: "pending" };
+    approvedNetworkHosts.clear();
+    networkGrants.clear();
     await sandboxManager.reset();
   });
 
@@ -179,9 +228,18 @@ export function registerExtension(
     try {
       const approved = await ctx.ui.confirm(
         `pi-permissions · ${decision.risk}`,
-        `${event.toolName}: ${decision.summary}\n\n${decision.reason}`,
+        `${event.toolName}: ${decision.summary}\n\n${decision.reason}${
+          decision.networkHosts?.length
+            ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
+            : ""
+        }`,
       );
-      if (approved) return;
+      if (approved) {
+        if (decision.networkHosts?.length && event.toolCallId) {
+          approvedNetworkHosts.set(event.toolCallId, decision.networkHosts);
+        }
+        return;
+      }
       return { block: true, reason: `pi-permissions: user denied ${decision.risk} operation` };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

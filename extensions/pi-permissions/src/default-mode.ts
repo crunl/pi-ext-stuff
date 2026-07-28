@@ -1,11 +1,16 @@
 import type { PermissionsConfig } from "./config.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
-import { classifyRisk, normalizeToolCall, type Risk } from "./permissions/risk.ts";
+import {
+  classifyRisk,
+  isPublicNetworkHost,
+  normalizeToolCall,
+  type Risk,
+} from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 
 export type DefaultDecision =
   | { action: "allow"; risk: Risk; reason: string }
-  | { action: "prompt"; risk: Risk; reason: string; summary: string }
+  | { action: "prompt"; risk: Risk; reason: string; summary: string; networkHosts?: string[] }
   | { action: "block"; risk: Risk; reason: string };
 
 function summarize(tool: string, input: Record<string, unknown>): string {
@@ -42,6 +47,12 @@ export async function evaluateDefaultRequest(
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
   }
+  if (
+    request.operation === "execute"
+    && request.networkTargets?.some((host) => !isPublicNetworkHost(host))
+  ) {
+    return { action: "block", risk: "HARD", reason: "Private or special-use network target is blocked" };
+  }
 
   let risk = classifyRisk(request);
   const operation = pathOperation(request.operation);
@@ -73,6 +84,9 @@ export async function evaluateDefaultRequest(
       risk,
       reason: rule?.action === "ask" ? "Approval required by permissions rule" : `${risk} operation`,
       summary: summarize(tool, input),
+      networkHosts: request.operation === "execute" && request.networkTargets?.length
+        ? [...request.networkTargets]
+        : undefined,
     };
   }
 

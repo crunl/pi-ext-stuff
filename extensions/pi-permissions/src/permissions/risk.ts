@@ -6,7 +6,6 @@ import type { CommandSegment, PermissionRequest } from "./rules.ts";
 export type Risk = "LOW" | "REVIEW" | "HARD";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
 
-const trustedReadCommands = new Set(["ls", "pwd", "cat", "head", "tail", "wc", "rg", "grep"]);
 const networkExecutables = new Set(["curl", "wget", "ssh", "scp", "ftp", "nc", "ncat", "sftp"]);
 const deleteExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
 
@@ -53,7 +52,7 @@ export function normalizeToolCall(tool: string, input: Record<string, unknown>, 
     cwd: resolve(cwd),
     resolvedPaths: extractedPaths(input, cwd),
     commandSegments: command ? [parseSimpleSegment(command)] : undefined,
-    networkTargets: extractNetworkTargets(input),
+    networkTargets: command ? extractShellNetworkHosts(command) : extractNetworkTargets(input),
   };
 }
 
@@ -97,15 +96,70 @@ function isSpecialIp(host: string): boolean {
     || host.startsWith("2001:2:");
 }
 
+export function isPublicNetworkHost(value: string): boolean {
+  const host = value
+    .trim()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "")
+    .toLowerCase();
+  if (
+    !host
+    || host === "localhost"
+    || host.endsWith(".localhost")
+    || host === "metadata.google.internal"
+  ) return false;
+  return !isSpecialIp(host);
+}
+
+function normalizeHostToken(value: string): string | undefined {
+  let token = value.trim().replace(/^['"]|['"],?$/g, "");
+  if (!token) return undefined;
+  try {
+    if (/^https?:\/\//i.test(token)) return new URL(token).hostname;
+  } catch {
+    return undefined;
+  }
+  token = token.replace(/^[^@]+@/, "");
+  if (token.startsWith("[")) return /^\[([^\]]+)\]/.exec(token)?.[1];
+  token = token.replace(/:.*$/, "");
+  return /^(?:[a-z0-9-]+\.)+[a-z0-9-]+$/i.test(token) || isIP(token) !== 0
+    ? token
+    : undefined;
+}
+
+export function extractShellNetworkHosts(command: string): string[] {
+  const hosts = new Set<string>();
+  for (const match of command.matchAll(/https?:\/\/[^\s"'`<>]+/gi)) {
+    const host = normalizeHostToken(match[0]);
+    if (host) hosts.add(host.toLowerCase());
+  }
+
+  for (const match of command.matchAll(
+    /(?:^|[;&|()\s])(curl|wget|ssh|scp|sftp|ftp|nc|ncat)\s+([^;&|()\n]+)/gi,
+  )) {
+    const executable = match[1]?.toLowerCase();
+    const tokens = match[2]?.trim().split(/\s+/) ?? [];
+    for (const token of tokens) {
+      if (token.startsWith("-")) continue;
+      const remoteLike = /^https?:\/\//i.test(token)
+        || token.includes("@")
+        || (executable === "scp" && token.includes(":"))
+        || executable !== "scp";
+      if (!remoteLike) continue;
+      const host = normalizeHostToken(token);
+      if (host) hosts.add(host.toLowerCase());
+    }
+  }
+  return [...hosts];
+}
+
 function webFetchRisk(request: PermissionRequest): Risk {
   const value = request.input.url;
   if (typeof value !== "string" || value.trim() === "" || request.networkTargets?.length !== 1) return "HARD";
   let parsed: URL;
   try { parsed = new URL(value); } catch { return "HARD"; }
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) return "HARD";
-  const host = parsed.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
-  if (!host || host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") return "HARD";
-  return isSpecialIp(host) ? "HARD" : "LOW";
+  return isPublicNetworkHost(parsed.hostname) ? "LOW" : "HARD";
 }
 
 function isWithin(path: string, root: string): boolean {
@@ -120,56 +174,16 @@ function writeRisk(request: PermissionRequest): Risk {
   return request.resolvedPaths.length > 0 && request.resolvedPaths.every((path) => isWithin(path, request.cwd)) ? "LOW" : "REVIEW";
 }
 
-function parsePureArgv(command: string): CommandSegment | undefined {
-  if (command.trim() !== command || !command || !/^[A-Za-z0-9._+\-/:=@%, ]+$/.test(command)) return undefined;
-  const [executableToken = "", ...args] = command.split(/ +/);
-  if (!/^[A-Za-z0-9._+\-]+$/.test(executableToken) || executableToken.includes("=")) return undefined;
-  if (!args.every((arg) => /^[A-Za-z0-9._+\-/:=@%,]+$/.test(arg))) return undefined;
-  return {
-    source: command,
-    executableToken,
-    executable: executableToken,
-    args,
-    hasRedirect: false,
-    hasSubstitution: false,
-    nestedShell: false,
-  };
+function containsExecutable(command: string, executables: Set<string>): boolean {
+  return [...executables].some((executable) =>
+    new RegExp(`(?:^|[;&|()\\s])${executable}(?:\\s|$)`, "i").test(command));
 }
 
-function safeOptions(args: string[], allowed: Set<string>, compact?: RegExp): boolean {
-  let pathsOnly = false;
-  return args.every((arg) => {
-    if (pathsOnly) return true;
-    if (arg === "--") { pathsOnly = true; return true; }
-    if (!arg.startsWith("-")) return true;
-    return allowed.has(arg) || compact?.test(arg) === true;
-  });
-}
-
-function isTrustedRead(segment: CommandSegment): boolean {
-  if (!trustedReadCommands.has(segment.executable) || segment.executableToken.includes("/")) return false;
-  if (segment.executable === "pwd") return safeOptions(segment.args, new Set(["-L", "-P", "--logical", "--physical"]));
-  if (segment.executable === "rg") {
-    if (segment.args[0] !== "--no-config") return false;
-    return safeOptions(segment.args, new Set(["--no-config", "-n", "-i", "-F", "-E", "-G", "-v", "-w", "-x", "-l", "-c", "-o", "-S", "-s", "-u", "--files", "--hidden", "--no-ignore", "--line-number", "--ignore-case", "--fixed-strings", "--extended-regexp"]));
-  }
-  const options: Record<string, { allowed: Set<string>; compact?: RegExp }> = {
-    cat: { allowed: new Set(["-n", "-b", "-s", "-A", "-e", "-E", "-T", "-v"]) },
-    head: { allowed: new Set(["-q", "-v", "--quiet", "--verbose"]) },
-    tail: { allowed: new Set(["-q", "-v", "-f", "--quiet", "--verbose", "--follow"]) },
-    wc: { allowed: new Set(["-c", "-m", "-l", "-w", "-L"]) },
-    ls: { allowed: new Set(["-a", "-A", "-l", "-h", "-t", "-r", "-S", "-R", "-d", "-1", "-C", "-x", "-F", "-p"]), compact: /^-[aAlhtrSRd1CxFp]+$/ },
-    grep: { allowed: new Set(["-n", "-i", "-r", "-R", "-E", "-F", "-G", "-v", "-l", "-L", "-c", "-w", "-x", "-q", "-s", "-H", "-h"]), compact: /^-[niRrEFGvlLcwxsHh]+$/ },
-  };
-  const policy = options[segment.executable];
-  return policy ? safeOptions(segment.args, policy.allowed, policy.compact) : false;
-}
-
-function isHardSimpleCommand(segment: CommandSegment, command: string): boolean {
-  if (deleteExecutables.has(segment.executable) || networkExecutables.has(segment.executable)) return true;
-  if (segment.executable === "git" && segment.args.includes("push")) return true;
-  if (segment.args.includes("publish") || /\b(?:deploy|production|destroy)\b/i.test(command)) return true;
-  return false;
+function hasExternalSideEffect(command: string): boolean {
+  return /\bgit\s+push\b/i.test(command)
+    || /\bgh\s+(?:api\b[^;\n]*(?:-X|--method)|pr\s+(?:create|merge|close)|issue\s+(?:create|close|delete)|release\s+(?:create|delete)|workflow\s+run|repo\s+delete)\b/i.test(command)
+    || /\b(?:npm|pnpm|yarn|bun)\s+publish\b/i.test(command)
+    || /\b(?:deploy|production|destroy)\b/i.test(command);
 }
 
 export function classifyRisk(request: PermissionRequest): Risk {
@@ -179,8 +193,10 @@ export function classifyRisk(request: PermissionRequest): Risk {
   if (request.operation === "read") return "LOW";
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";
-  const segment = parsePureArgv(command);
-  if (!segment) return "HARD";
-  if (isHardSimpleCommand(segment, command)) return "HARD";
-  return isTrustedRead(segment) ? "LOW" : "REVIEW";
+  if (
+    containsExecutable(command, deleteExecutables)
+    || containsExecutable(command, networkExecutables)
+    || hasExternalSideEffect(command)
+  ) return "HARD";
+  return "LOW";
 }

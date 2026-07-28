@@ -40,6 +40,39 @@ describe("Default mode gate", () => {
       .resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 
+  it("auto-runs ordinary shell syntax inside the sandbox", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+
+    for (const command of ["npm test", "git status", "cat README.md | wc -l", "pnpm lint"]) {
+      await expect(evaluateDefaultRequest("bash", { command }, cwd, config()))
+        .resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    }
+  });
+
+  it("includes the requested public host in network approval", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "curl https://example.com/docs" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: ["example.com"],
+    });
+  });
+
+  it("blocks private shell network targets without offering approval", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("Private"),
+    });
+  });
+
   it("applies deny, ask, and allow rules without allowing HARD bypass", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const rules: PermissionsConfig["rules"] = [
