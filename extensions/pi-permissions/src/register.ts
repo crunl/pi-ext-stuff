@@ -101,6 +101,7 @@ export function registerExtension(
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
+  let permissionContextEpoch = 0;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -113,6 +114,7 @@ export function registerExtension(
   };
 
   const invalidatePermissionContext = (reason: string): void => {
+    permissionContextEpoch += 1;
     for (const controller of reviewControllers.values()) {
       controller.abort(new Error(reason));
     }
@@ -512,6 +514,7 @@ export function registerExtension(
         reason: "pi-permissions: another approval is already active",
       };
     }
+    const approvalEpoch = permissionContextEpoch;
 
     try {
       const approved = await ctx.ui.confirm(
@@ -535,6 +538,12 @@ export function registerExtension(
         }`,
       );
       if (approved) {
+        if (permissionContextEpoch !== approvalEpoch) {
+          return {
+            block: true,
+            reason: "pi-permissions: approval context changed before confirmation",
+          };
+        }
         grantApprovedCall(event, decision, config, ctx.cwd, "user");
         return;
       }

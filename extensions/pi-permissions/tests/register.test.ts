@@ -339,6 +339,52 @@ describe("Default mode registration", () => {
     );
   });
 
+  it("does not grant a late human approval after changing session tree branches", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    let resolveConfirm!: (approved: boolean) => void;
+    app.confirm.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => {
+        resolveConfirm = resolve;
+      }),
+    );
+    const pending = {
+      toolName: "bash",
+      toolCallId: "branch-a-human-approval",
+      input: { command: "rm -rf build" },
+    };
+    const approval = app.handlers.get("tool_call")!(pending, app.context);
+    await vi.waitFor(() => expect(app.confirm).toHaveBeenCalledOnce());
+
+    await app.handlers.get("session_before_tree")?.(
+      { type: "session_before_tree" },
+      app.context,
+    );
+    await app.handlers.get("session_tree")?.(
+      { type: "session_tree" },
+      app.context,
+    );
+    resolveConfirm(true);
+
+    await expect(approval).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context changed"),
+    });
+    await expect(
+      app.tools.get("bash").execute(
+        pending.toolCallId,
+        pending.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
   it("never sends deterministic blocks to the reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
