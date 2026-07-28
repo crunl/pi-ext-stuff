@@ -177,10 +177,12 @@ function tokenizeCookedWords(source: string): { words: string[]; ambiguous: bool
 
 function parseSegment(source: string, ambiguous = false): CommandSegment {
   const cooked = tokenizeCookedWords(source);
-  const executable = basename(cooked.words[0] ?? "");
+  const executableToken = cooked.words[0] ?? "";
+  const executable = basename(executableToken);
   const args = cooked.words.slice(1);
   return {
     source,
+    executableToken,
     executable,
     args,
     hasRedirect: hasUnquotedRedirect(source),
@@ -271,7 +273,7 @@ function hasOnlySafeOptions(args: string[], safeOptions: Set<string>, safePrefix
 }
 
 function isSafeRg(args: string[]): boolean {
-  if (!args.includes("--no-config")) return false;
+  if (args[0] !== "--no-config") return false;
   const safeOptions = new Set(["--no-config", "-n", "-i", "-F", "-E", "-G", "-v", "-w", "-x", "-l", "-c", "-o", "-S", "-s", "-u", "--files", "--hidden", "--no-ignore", "--line-number", "--ignore-case", "--fixed-strings", "--extended-regexp", "--glob-case-insensitive"]);
   return hasOnlySafeOptions(args, safeOptions, ["--glob=", "--type="]);
 }
@@ -293,6 +295,7 @@ function isSafeReadOnlyCommand(segment: CommandSegment): boolean {
 
 function readOnlySegment(segment: CommandSegment): boolean {
   if (segment.hasRedirect || segment.hasSubstitution || segment.nestedShell) return false;
+  if (segment.executableToken.includes("/")) return false;
   if (isSafeReadOnlyCommand(segment)) return true;
   return segment.executable === "git"
     && readOnlyGitSubcommands.has(segment.args[0] ?? "")
@@ -314,11 +317,34 @@ function isNetworkSink(segment: CommandSegment): boolean {
   return networkExecutables.has(segment.executable);
 }
 
+function isRemoteScpPath(value: string): boolean {
+  return /^[^/\s:]+:/.test(value);
+}
+
+function scpUploadsSecret(args: string[]): boolean {
+  const paths = args.filter((argument) => !argument.startsWith("-"));
+  if (paths.length < 2 || !isRemoteScpPath(paths.at(-1)!)) return false;
+  return paths.slice(0, -1).some((path) => !isRemoteScpPath(path) && isSecretPath(path));
+}
+
+function curlUploadsSecret(args: string[]): boolean {
+  const fileOption = new Set(["--data", "--data-ascii", "--data-binary", "--upload-file", "--form", "-T"]);
+  return args.some((argument, index) => {
+    if (/^(?:--data|--data-ascii|--data-binary|--upload-file|--form)=@?/.test(argument)) {
+      return isSecretPath(argument.slice(argument.indexOf("=") + 1));
+    }
+    if (argument.startsWith("-T") && argument.length > 2) return isSecretPath(argument.slice(2));
+    return fileOption.has(argument) && isSecretPath(args[index + 1] ?? "");
+  });
+}
+
 function exfiltratesSecret(segments: CommandSegment[]): boolean {
   const secretSegment = (segment: CommandSegment) => segment.args.some(isSecretPath) || secretRedirectSource(segment.source);
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index]!;
-    if (isNetworkSink(segment) && secretSegment(segment)) return true;
+    if (segment.executable === "scp" && scpUploadsSecret(segment.args)) return true;
+    if (segment.executable === "curl" && curlUploadsSecret(segment.args)) return true;
+    if (isNetworkSink(segment) && secretRedirectSource(segment.source)) return true;
     if (secretSegment(segment) && segments.slice(index + 1).some(isNetworkSink)) return true;
   }
   return false;
@@ -331,12 +357,32 @@ function removesBoundary(target: string, request: PermissionRequest): boolean {
   return unquoted === homedir() || unquoted === request.cwd || resolve(request.cwd, unquoted) === request.cwd;
 }
 
+function gitSubcommandOffset(args: string[]): number | undefined {
+  const takesValue = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (takesValue.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--git-dir=") || argument.startsWith("--work-tree=") || argument.startsWith("--namespace=") || argument.startsWith("--exec-path=")) continue;
+    if (argument.startsWith("-")) continue;
+    return index;
+  }
+  return undefined;
+}
+
+function hasForcedProtectedPush(args: string[]): boolean {
+  const forced = args.some((argument) => argument === "--force" || argument.startsWith("--force=") || argument.startsWith("--force-with-lease") || /^-[^-]*f/.test(argument) || argument.startsWith("+"));
+  return forced && args.some((argument) => /(?:^|[:/+])(main|master)$/.test(argument));
+}
+
 function isForcedPushToProtectedBranch(segments: CommandSegment[]): boolean {
   return segments.some((segment) => {
-    if (segment.executable !== "git" || segment.args[0] !== "push") return false;
-    const args = segment.args.slice(1);
-    const forced = args.some((argument) => argument === "--force" || argument.startsWith("--force=") || argument.startsWith("--force-with-lease") || /^-[^-]*f/.test(argument) || argument.startsWith("+"));
-    return forced && args.some((argument) => /(?:^|[:/+])(main|master)$/.test(argument));
+    if (segment.executable !== "git") return false;
+    const subcommand = gitSubcommandOffset(segment.args);
+    if (subcommand !== undefined && segment.args[subcommand] === "push") return hasForcedProtectedPush(segment.args.slice(subcommand + 1));
+    return segment.args.includes("push") && hasForcedProtectedPush(segment.args);
   });
 }
 

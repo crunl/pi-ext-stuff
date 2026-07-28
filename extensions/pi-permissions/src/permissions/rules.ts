@@ -16,6 +16,8 @@ export interface PermissionRequest {
 
 export interface CommandSegment {
   source: string;
+  /** Cooked argv[0]; bare-command identity is revalidated by Task 5's execution wrapper. */
+  executableToken: string;
   executable: string;
   args: string[];
   hasRedirect: boolean;
