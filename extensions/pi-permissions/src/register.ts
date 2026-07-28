@@ -37,6 +37,7 @@ import { reviewAutoPrompt } from "./auto-policy.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
+import { shiftTabAvailability } from "./shortcut-config.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import {
   createSandboxedBashOperations,
@@ -94,6 +95,7 @@ export function registerExtension(
   let loadedKey: string | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
+  let shortcutWarningShown = false;
   const reviewControllers = new Map<string, AbortController>();
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
@@ -547,6 +549,7 @@ export function registerExtension(
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    shortcutWarningShown = false;
     invalidatePermissionContext("session changed");
     try {
       const result = await activateConfig(ctx, true);
@@ -556,6 +559,18 @@ export function registerExtension(
       );
       modeRuntime.restore(ctx.sessionManager.getBranch(), result.config);
       setDefaultStatus(ctx);
+      if (
+        await shiftTabAvailability(agentDir) === "reserved" &&
+        !shortcutWarningShown
+      ) {
+        shortcutWarningShown = true;
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
+            "warning",
+          );
+        }
+      }
     } catch (error: unknown) {
       reportConfigError(ctx, error);
     }
@@ -704,6 +719,38 @@ export function registerExtension(
   pi.registerCommand("auto", {
     description: "Activate pi-permissions Auto mode",
     handler: async (_args, ctx) => activateMode("auto", ctx),
+  });
+
+  const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {
+    try {
+      const result = await activateConfig(ctx);
+      const runtime = ensureModeRuntime(result.config);
+      invalidatePermissionContext("permission mode changed");
+      runtime.cycle({ idle: ctx.isIdle() });
+      setDefaultStatus(ctx);
+      ctx.ui.notify(
+        `pi-permissions: ${runtime.statusLabel} mode 已启用`,
+        "info",
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDefaultStatus(ctx);
+      ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
+    }
+  };
+
+  pi.registerShortcut("shift+tab", {
+    description: "Cycle pi-permissions mode",
+    handler: async (ctx) => {
+      if (await shiftTabAvailability(agentDir) !== "available") {
+        ctx.ui.notify(
+          "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
+          "warning",
+        );
+        return;
+      }
+      await cyclePermissionMode(ctx);
+    },
   });
 
   pi.registerCommand("permissions", {

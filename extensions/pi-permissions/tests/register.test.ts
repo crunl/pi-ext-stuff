@@ -21,6 +21,7 @@ function harness(
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
+  const shortcuts = new Map<string, { handler: (...args: any[]) => any }>();
   const tools = new Map<string, any>();
   const setStatus = vi.fn();
   const notify = vi.fn();
@@ -54,6 +55,8 @@ function harness(
   const pi = {
     on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
     registerCommand: (name: string, command: { handler: (...args: any[]) => any }) => commands.set(name, command),
+    registerShortcut: (key: string, shortcut: { handler: (...args: any[]) => any }) =>
+      shortcuts.set(key, shortcut),
     registerTool: (tool: any) => tools.set(tool.name, tool),
     appendEntry,
   };
@@ -81,6 +84,7 @@ function harness(
   return {
     handlers,
     commands,
+    shortcuts,
     tools,
     context,
     setStatus,
@@ -453,6 +457,27 @@ describe("Default mode registration", () => {
     await app.commands.get("auto")!.handler("", app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
     await app.commands.get("default")!.handler("", app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith(
+      "pi-permissions",
+      "Default",
+    );
+  });
+
+  it("cycles Default and Auto with Shift+Tab after thinking is migrated", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "keybindings.json"),
+      JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith(
       "pi-permissions",
       "Default",
