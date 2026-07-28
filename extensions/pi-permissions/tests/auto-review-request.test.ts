@@ -7,27 +7,53 @@ import {
 } from "../src/auto-review-request.ts";
 
 describe("auto review result", () => {
-  it("accepts only the strict result schema", () => {
+  it("maps a full Codex guardian assessment to the internal result", () => {
     expect(
       parseAutoReviewResult(
         JSON.stringify({
-          decision: "approve",
-          risk: "low",
-          rationale: "The test command matches the current request.",
+          risk_level: "medium",
+          user_authorization: "high",
+          outcome: "allow",
+          rationale: "The requested action is authorized and bounded.",
         }),
       ),
     ).toEqual({
       decision: "approve",
-      risk: "low",
-      rationale: "The test command matches the current request.",
+      risk: "medium",
+      userAuthorization: "high",
+      rationale: "The requested action is authorized and bounded.",
     });
   });
 
   it.each([
-    "```json\n{\"decision\":\"approve\",\"risk\":\"low\",\"rationale\":\"ok\"}\n```",
-    "{\"decision\":\"approve\",\"risk\":\"low\",\"rationale\":\"\"}",
-    "{\"decision\":\"approve\",\"risk\":\"unknown\",\"rationale\":\"ok\"}",
-    "{\"decision\":\"approve\",\"risk\":\"low\",\"rationale\":\"ok\",\"extra\":true}",
+    {
+      text: "{\"outcome\":\"allow\"}",
+      expected: {
+        decision: "approve",
+        risk: "low",
+        userAuthorization: "unknown",
+        rationale: "Auto-review returned a low-risk allow decision.",
+      },
+    },
+    {
+      text: "{\"outcome\":\"deny\"}",
+      expected: {
+        decision: "deny",
+        risk: "high",
+        userAuthorization: "unknown",
+        rationale: "Auto-review returned a deny decision without a rationale.",
+      },
+    },
+  ])("applies Codex defaults for $expected.decision", ({ text, expected }) => {
+    expect(parseAutoReviewResult(text)).toEqual(expected);
+  });
+
+  it.each([
+    "```json\n{\"outcome\":\"allow\"}\n```",
+    "{\"outcome\":\"approve\"}",
+    "{\"outcome\":\"allow\",\"risk_level\":\"unknown\"}",
+    "{\"outcome\":\"allow\",\"user_authorization\":\"certain\"}",
+    "{\"outcome\":\"allow\",\"extra\":true}",
     "approve",
   ])("rejects malformed output: %s", (text) => {
     expect(() => parseAutoReviewResult(text)).toThrow(/reviewer output/i);

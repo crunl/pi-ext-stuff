@@ -2,10 +2,12 @@ import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { DefaultDecision } from "./default-mode.ts";
 
 export type AutoReviewRisk = "low" | "medium" | "high" | "critical";
+export type AutoReviewUserAuthorization = "unknown" | "low" | "medium" | "high";
 
 export interface AutoReviewResult {
   decision: "approve" | "deny";
   risk: AutoReviewRisk;
+  userAuthorization: AutoReviewUserAuthorization;
   rationale: string;
 }
 
@@ -121,27 +123,53 @@ export function parseAutoReviewResult(text: string): AutoReviewResult {
   if (!isRecord(parsed)) {
     throw new Error("Invalid reviewer output: expected an object");
   }
-  const keys = Object.keys(parsed).sort();
-  if (
-    keys.length !== 3 ||
-    keys[0] !== "decision" ||
-    keys[1] !== "rationale" ||
-    keys[2] !== "risk"
-  ) {
+  const allowedKeys = new Set([
+    "outcome",
+    "risk_level",
+    "user_authorization",
+    "rationale",
+  ]);
+  if (Object.keys(parsed).some((key) => !allowedKeys.has(key))) {
     throw new Error("Invalid reviewer output: unexpected fields");
   }
-  if (parsed.decision !== "approve" && parsed.decision !== "deny") {
-    throw new Error("Invalid reviewer output: invalid decision");
+  if (parsed.outcome !== "allow" && parsed.outcome !== "deny") {
+    throw new Error("Invalid reviewer output: invalid outcome");
   }
-  if (!new Set<unknown>(["low", "medium", "high", "critical"]).has(parsed.risk)) {
+  if (
+    parsed.risk_level !== undefined
+    && !new Set<unknown>(["low", "medium", "high", "critical"]).has(
+      parsed.risk_level,
+    )
+  ) {
     throw new Error("Invalid reviewer output: invalid risk");
   }
-  if (typeof parsed.rationale !== "string" || parsed.rationale.trim().length === 0) {
+  if (
+    parsed.user_authorization !== undefined
+    && !new Set<unknown>(["unknown", "low", "medium", "high"]).has(
+      parsed.user_authorization,
+    )
+  ) {
+    throw new Error("Invalid reviewer output: invalid user authorization");
+  }
+  if (
+    parsed.rationale !== undefined
+    && typeof parsed.rationale !== "string"
+  ) {
     throw new Error("Invalid reviewer output: rationale is required");
   }
+  const decision = parsed.outcome === "allow" ? "approve" : "deny";
+  const rationale = typeof parsed.rationale === "string"
+    && parsed.rationale.trim().length > 0
+    ? parsed.rationale
+    : decision === "approve"
+      ? "Auto-review returned a low-risk allow decision."
+      : "Auto-review returned a deny decision without a rationale.";
   return {
-    decision: parsed.decision,
-    risk: parsed.risk as AutoReviewRisk,
-    rationale: parsed.rationale,
+    decision,
+    risk: (parsed.risk_level
+      ?? (decision === "approve" ? "low" : "high")) as AutoReviewRisk,
+    userAuthorization: (parsed.user_authorization
+      ?? "unknown") as AutoReviewUserAuthorization,
+    rationale,
   };
 }

@@ -11,6 +11,7 @@ describe("Auto review policy", () => {
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
+        userAuthorization: "high" as const,
         rationale: "Authorized.",
       })),
     };
@@ -27,6 +28,7 @@ describe("Auto review policy", () => {
       review: {
         decision: "approve",
         risk: "low",
+        userAuthorization: "high",
         rationale: "Authorized.",
       },
       state: { consecutiveDenials: 0, paused: false },
@@ -38,6 +40,7 @@ describe("Auto review policy", () => {
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
+        userAuthorization: "unknown" as const,
         rationale: "External publication was not requested.",
       })),
     };
