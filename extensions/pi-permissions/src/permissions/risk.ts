@@ -6,7 +6,6 @@ import type { CommandSegment, PermissionRequest } from "./rules.ts";
 export type Risk = "LOW" | "REVIEW" | "HARD";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
 
-const readOnlyCommands = new Set(["ls", "pwd", "cat", "head", "tail", "wc", "rg", "grep"]);
 const readOnlyGitSubcommands = new Set(["status", "diff", "log", "show", "rev-parse"]);
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 const networkExecutables = new Set(["curl", "wget", "ssh", "scp", "ftp", "nc", "ncat"]);
@@ -116,17 +115,77 @@ function hasUnquotedRedirect(source: string): boolean {
   return false;
 }
 
+function tokenizeCookedWords(source: string): { words: string[]; ambiguous: boolean } {
+  const words: string[] = [];
+  let current = "";
+  let inWord = false;
+  let quote: "single" | "double" | "ansi" | undefined;
+  let ambiguous = false;
+  const push = () => {
+    if (inWord) words.push(current);
+    current = "";
+    inWord = false;
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (quote === "single") {
+      if (character === "'") quote = undefined;
+      else current += character;
+      continue;
+    }
+    if (quote === "ansi") {
+      if (character === "'") quote = undefined;
+      else if (character === "\\" && index + 1 < source.length) current += source[++index]!;
+      else current += character;
+      continue;
+    }
+    if (quote === "double") {
+      if (character === '"') quote = undefined;
+      else if (character === "\\" && ["$", "`", '"', "\\", "\n"].includes(source[index + 1] ?? "")) current += source[++index]!;
+      else {
+        if (character === "$") ambiguous = true;
+        current += character;
+      }
+      continue;
+    }
+    if (/\s/.test(character)) {
+      push();
+      continue;
+    }
+    inWord = true;
+    if (character === "\\") {
+      if (index + 1 >= source.length) ambiguous = true;
+      else current += source[++index]!;
+      continue;
+    }
+    if (character === "$" && source[index + 1] === "'") {
+      quote = "ansi";
+      ambiguous = true;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character === "'" ? "single" : "double";
+      continue;
+    }
+    if (character === "$") ambiguous = true;
+    current += character;
+  }
+  push();
+  return { words, ambiguous: ambiguous || quote !== undefined };
+}
+
 function parseSegment(source: string, ambiguous = false): CommandSegment {
-  const tokens = source.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-  const executable = basename(tokens[0] ?? "");
-  const args = tokens.slice(1);
+  const cooked = tokenizeCookedWords(source);
+  const executable = basename(cooked.words[0] ?? "");
+  const args = cooked.words.slice(1);
   return {
     source,
     executable,
     args,
     hasRedirect: hasUnquotedRedirect(source),
     hasSubstitution: /\$\(|`/.test(source),
-    nestedShell: ambiguous || shellExecutables.has(executable) || /(?:^|\s)-c(?:\s|$)/.test(source),
+    nestedShell: ambiguous || cooked.ambiguous || shellExecutables.has(executable) || /(?:^|\s)-c(?:\s|$)/.test(source),
   };
 }
 
@@ -186,7 +245,7 @@ function isPrivateTarget(value: string): boolean {
 }
 
 function isSafeGitArgument(subcommand: string, argument: string, index: number): boolean {
-  const value = argument.replace(/^(['"])(.*)\1$/, "$2");
+  const value = argument;
   if (!value.startsWith("-")) return true;
   if (["--ext-diff", "--textconv", "--no-pager"].includes(value)) return value === "--no-pager";
   if (/helper|filter|pager/i.test(value)) return false;
@@ -198,12 +257,71 @@ function isSafeGitArgument(subcommand: string, argument: string, index: number):
   return false;
 }
 
+function hasOnlySafeOptions(args: string[], safeOptions: Set<string>, safePrefixes: string[] = [], shortOptionPattern?: RegExp): boolean {
+  let pathsOnly = false;
+  return args.every((argument) => {
+    if (pathsOnly) return true;
+    if (argument === "--") {
+      pathsOnly = true;
+      return true;
+    }
+    if (!argument.startsWith("-")) return true;
+    return safeOptions.has(argument) || safePrefixes.some((prefix) => argument.startsWith(prefix)) || shortOptionPattern?.test(argument) === true;
+  });
+}
+
+function isSafeRg(args: string[]): boolean {
+  if (!args.includes("--no-config")) return false;
+  const safeOptions = new Set(["--no-config", "-n", "-i", "-F", "-E", "-G", "-v", "-w", "-x", "-l", "-c", "-o", "-S", "-s", "-u", "--files", "--hidden", "--no-ignore", "--line-number", "--ignore-case", "--fixed-strings", "--extended-regexp", "--glob-case-insensitive"]);
+  return hasOnlySafeOptions(args, safeOptions, ["--glob=", "--type="]);
+}
+
+function isSafeReadOnlyCommand(segment: CommandSegment): boolean {
+  const options: Record<string, { allowed: Set<string>; prefixes?: string[]; shortOptionPattern?: RegExp }> = {
+    cat: { allowed: new Set(["-n", "-b", "-s", "-A", "-e", "-E", "-T", "-v", "--number", "--number-nonblank", "--squeeze-blank", "--show-all", "--show-ends", "--show-tabs", "--show-nonprinting"]) },
+    head: { allowed: new Set(["-q", "-v", "--quiet", "--verbose"]), prefixes: ["-n", "-c", "--lines=", "--bytes="] },
+    tail: { allowed: new Set(["-q", "-v", "-f", "--quiet", "--verbose", "--follow"]), prefixes: ["-n", "-c", "--lines=", "--bytes="] },
+    wc: { allowed: new Set(["-c", "-m", "-l", "-w", "-L", "--bytes", "--chars", "--lines", "--words", "--max-line-length"]) },
+    ls: { allowed: new Set(["-a", "-A", "-l", "-h", "-t", "-r", "-S", "-R", "-d", "-1", "-C", "-x", "-F", "-p", "--all", "--almost-all", "--long", "--human-readable", "--recursive", "--directory", "--classify", "--indicator-style=classify"]), prefixes: ["--color="], shortOptionPattern: /^-[aAlhtrSRd1CxFp]+$/ },
+    grep: { allowed: new Set(["-n", "-i", "-r", "-R", "-E", "-F", "-G", "-v", "-l", "-L", "-c", "-w", "-x", "-q", "-s", "-H", "-h", "--line-number", "--ignore-case", "--recursive", "--dereference-recursive", "--extended-regexp", "--fixed-strings", "--basic-regexp", "--invert-match", "--files-with-matches", "--files-without-match", "--count", "--word-regexp", "--line-regexp", "--quiet", "--no-messages"]), prefixes: ["--include=", "--exclude=", "--color="], shortOptionPattern: /^-[niRrEFGvlLcwxsHh]+$/ },
+  };
+  if (segment.executable === "pwd") return segment.args.length === 0 || hasOnlySafeOptions(segment.args, new Set(["-L", "-P", "--logical", "--physical"]));
+  if (segment.executable === "rg") return isSafeRg(segment.args);
+  const policy = options[segment.executable];
+  return policy ? hasOnlySafeOptions(segment.args, policy.allowed, policy.prefixes, policy.shortOptionPattern) : false;
+}
+
 function readOnlySegment(segment: CommandSegment): boolean {
   if (segment.hasRedirect || segment.hasSubstitution || segment.nestedShell) return false;
-  if (readOnlyCommands.has(segment.executable)) return true;
+  if (isSafeReadOnlyCommand(segment)) return true;
   return segment.executable === "git"
     && readOnlyGitSubcommands.has(segment.args[0] ?? "")
     && segment.args.slice(1).every((argument, index) => isSafeGitArgument(segment.args[0]!, argument, index));
+}
+
+function isSecretPath(value: string): boolean {
+  const path = value.replace(/^@/, "");
+  const parts = path.split(/[\\/]/);
+  const name = parts.at(-1) ?? "";
+  return name.startsWith(".env") || name.endsWith(".pem") || name.endsWith(".key") || parts.some((part) => [".ssh", ".aws", ".gnupg"].includes(part));
+}
+
+function secretRedirectSource(source: string): boolean {
+  return [...source.matchAll(/<\s*("[^"]*"|'[^']*'|[^\s;|&]+)/g)].some((match) => isSecretPath(tokenizeCookedWords(match[1] ?? "").words[0] ?? ""));
+}
+
+function isNetworkSink(segment: CommandSegment): boolean {
+  return networkExecutables.has(segment.executable);
+}
+
+function exfiltratesSecret(segments: CommandSegment[]): boolean {
+  const secretSegment = (segment: CommandSegment) => segment.args.some(isSecretPath) || secretRedirectSource(segment.source);
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    if (isNetworkSink(segment) && secretSegment(segment)) return true;
+    if (secretSegment(segment) && segments.slice(index + 1).some(isNetworkSink)) return true;
+  }
+  return false;
 }
 
 function removesBoundary(target: string, request: PermissionRequest): boolean {
@@ -216,7 +334,7 @@ function removesBoundary(target: string, request: PermissionRequest): boolean {
 function isForcedPushToProtectedBranch(segments: CommandSegment[]): boolean {
   return segments.some((segment) => {
     if (segment.executable !== "git" || segment.args[0] !== "push") return false;
-    const args = segment.args.slice(1).map((argument) => argument.replace(/^(['"])(.*)\1$/, "$2"));
+    const args = segment.args.slice(1);
     const forced = args.some((argument) => argument === "--force" || argument.startsWith("--force=") || argument.startsWith("--force-with-lease") || /^-[^-]*f/.test(argument) || argument.startsWith("+"));
     return forced && args.some((argument) => /(?:^|[:/+])(main|master)$/.test(argument));
   });
@@ -232,8 +350,7 @@ function commandIsHard(request: PermissionRequest, segments: CommandSegment[]): 
       .some((target) => removesBoundary(target, request));
   })) return true;
   if (/\b(?:kubectl|terraform)\b[^\n]*(?:destroy|delete)[^\n]*(?:prod|production)/i.test(command)) return true;
-  if (/\b(?:cat|printenv|env)\b[\s\S]*?(?:\.env|\.ssh|\.aws|\.gnupg)[\s\S]*?\b(?:curl|wget|ssh|scp|ftp|nc|ncat)\b/.test(command)) return true;
-  if (/\b(?:curl|wget|ssh|scp|ftp|nc|ncat)\b[\s\S]*?<\s*(?:[^\s/]+\/)?(?:\.env|\.ssh|\.aws|\.gnupg)\b/.test(command)) return true;
+  if (exfiltratesSecret(segments)) return true;
   return request.resolvedPaths.some((path) => path === "/" || path === request.cwd);
 }
 
