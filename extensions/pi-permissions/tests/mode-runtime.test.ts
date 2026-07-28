@@ -53,6 +53,22 @@ describe("PermissionModeRuntime", () => {
     });
   });
 
+  it("keeps Auto active until a working transition can settle", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto", { idle: true });
+    runtime.beginReview("active-review");
+
+    expect(runtime.activate("default", { idle: false })).toEqual({
+      active: "auto",
+      pending: "default",
+    });
+    expect(runtime.mode).toBe("auto");
+    expect(runtime.flushPending({ idle: true })).toBe("auto");
+
+    runtime.endReview("active-review");
+    expect(runtime.flushPending({ idle: true })).toBe("default");
+  });
+
   it("restores a persisted pending transition and flushes it when settled", () => {
     const pendingState = {
       mode: "default" as const,
