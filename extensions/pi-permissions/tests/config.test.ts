@@ -35,6 +35,7 @@ describe("permissions config", () => {
     expect(DEFAULT_CONFIG.defaultMode).toBe("default");
     expect(DEFAULT_CONFIG.sandbox.enabled).toBe(true);
     expect(DEFAULT_CONFIG.sandbox.filesystem.allowWrite).toEqual([".", "/tmp"]);
+    expect(DEFAULT_CONFIG.sandbox.network.allowedDomains).toEqual([]);
   });
 
   it("denies sensitive workspace files for reads and writes by default", () => {
@@ -83,6 +84,9 @@ describe("permissions config", () => {
 
   it("applies trusted project deny rules without applying requested write or network expansions", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
+      await writeJson(join(agentDir, "permissions.json"), {
+        sandbox: { network: { allowedDomains: ["github.com"] } },
+      });
       await writeJson(join(cwd, ".pi", "permissions.json"), {
         sandbox: {
           filesystem: { allowWrite: [".", "generated"], denyWrite: ["secrets/*"] },

@@ -73,7 +73,7 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
       denyWrite: [".env", ".env.*", "*.pem", "*.key"],
     },
     network: {
-      allowedDomains: ["github.com", "*.github.com", "registry.npmjs.org"],
+      allowedDomains: [],
       deniedDomains: ["localhost", "127.0.0.1", "::1", "169.254.169.254"],
     },
   },

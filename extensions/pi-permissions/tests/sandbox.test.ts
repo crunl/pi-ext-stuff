@@ -16,6 +16,7 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.allowWrite).toContain("/workspace/project");
     expect(runtime.filesystem.denyRead).toContain("/workspace/project/.env");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/*.key");
+    expect(runtime.network.allowedDomains).toEqual([]);
   });
 
   it("removes project write roots in read-only profile", () => {
