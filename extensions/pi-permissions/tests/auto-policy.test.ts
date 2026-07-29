@@ -58,7 +58,7 @@ describe("Auto review policy", () => {
     });
   });
 
-  it("returns fallback for reviewer failures without mutating denial state", async () => {
+  it("returns a closed failure without mutating denial state", async () => {
     const reviewer = {
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("timeout", "review timed out");
@@ -66,7 +66,7 @@ describe("Auto review policy", () => {
     };
     const state = { consecutiveDenials: 1, paused: false };
     await expect(reviewAutoPrompt(reviewer, request, context, state, 3))
-      .resolves.toMatchObject({ action: "fallback", state });
+      .resolves.toMatchObject({ action: "error", state });
   });
 
   it("propagates caller cancellation instead of requesting fallback", async () => {

@@ -9,15 +9,15 @@ Add an `Auto` permission mode to `pi-permissions` that keeps the existing
 Default-mode sandbox and deterministic safety boundaries, while delegating
 approval prompts to a separate model call.
 
-The target experience is Codex's “Approve for me” behavior with grok-build's
-useful denial feedback and graceful fallback:
+The target experience is Codex's “Approve for me” behavior:
 
 - clearly safe operations continue without another model call;
 - deterministic policy blocks remain final;
 - only operations that Default mode would ask the user to approve are reviewed;
 - an approval grants exactly one bound tool call and does not widen the session;
-- reviewer failures fall back to the existing Yes/No dialog when UI is available;
-- repeated reviewer denials pause automatic review.
+- reviewer failures fail closed without opening a human approval dialog;
+- repeated reviewer denials interrupt the current turn;
+- `/approve` authorizes one exact denied action for one Auto-reviewed retry.
 
 ## 2. Reference Behavior
 
@@ -78,8 +78,8 @@ The decision order is fixed:
 4. If the result is `block`, block without invoking the reviewer.
 5. If the result is `prompt`:
    - Default mode uses the existing human confirmation;
-   - Auto mode invokes the reviewer, unless Auto is paused;
-   - paused Auto uses human confirmation.
+  - Auto mode invokes the reviewer, unless Auto is paused;
+  - paused Auto blocks without human fallback.
 6. Immediately before execution, re-evaluate the request inside the sandbox
    coordinator lease using the current config and exact approval record.
 
@@ -110,7 +110,7 @@ Rules:
 - If no explicit reviewer is configured, Auto uses the active session model as
   a separate, stateless model call.
 - If neither an explicit reviewer nor an active model is available, the
-  reviewer is unavailable and the fallback policy applies.
+  reviewer is unavailable and the action fails closed.
 - Invalid timeout or denial limits are configuration errors. `timeoutMs` must
   be a positive safe integer; `maxConsecutiveDenials` must be a positive safe
   integer.
@@ -125,13 +125,17 @@ independent prompt, message list, request ID, timeout, and no tools.
 A runtime mode owner coordinates:
 
 - active mode (`default` or `auto` for this delivery);
-- pending transitions while a tool call or reviewer is active;
+- cancellation of approvals and reviews already in flight when mode changes;
+- ordered mode mutations from commands and shortcuts;
 - Auto paused state and consecutive denial count;
 - statusline updates;
 - persistence through `pi-permissions-state`.
 
-Mode changes are rejected or queued while a human approval or model review is
-active. A successful transition clears stale one-call approval capabilities.
+Mode changes take effect immediately without waiting for the agent to become
+idle. An approval or model review that started under the previous mode is
+invalidated and cannot grant execution. Mode mutations are serialized in user
+action order. Session and tree changes advance the mutation generation so
+queued actions from the previous permission context are discarded.
 
 Commands:
 
@@ -175,6 +179,8 @@ The production implementation:
 - Default decision risk, reason, requested temporary write roots, and requested
   network hosts;
 - retained genuine user messages from the active session branch;
+- an extension-owned exact-action override after the user selects a denial
+  through `/approve`;
 - prior harness-owned reviewer decisions for the current turn, when available.
 
 The builder excludes:
@@ -252,7 +258,7 @@ Execution consumes the capability once and revalidates:
 Reload, mode change, session switch, shutdown, input substitution, cwd change,
 or a changed policy invalidates the capability.
 
-## 7. Decision and Fallback Flow
+## 7. Decision and Failure Flow
 
 ### 7.1 Reviewer approval
 
@@ -267,13 +273,16 @@ or a changed policy invalidates the capability.
 2. Return a blocked tool call with a concise reviewer rationale and guidance to
    try a materially safer approach.
 3. Do not show a human dialog for the first denials.
-4. At `maxConsecutiveDenials`, set Auto to paused.
-5. The denied threshold-crossing action remains denied; the next prompt uses
-   the human approval dialog. This prevents a denial from immediately becoming
-   approval merely because the threshold was reached.
-6. `/auto` explicitly resumes Auto and resets the counter.
+4. At `maxConsecutiveDenials`, or ten denials in the rolling window of the last
+   fifty reviews, set Auto to paused and abort the current agent turn.
+5. The denied threshold-crossing action remains denied; no human approval
+   dialog opens.
+6. The next agent turn starts with a fresh rejection circuit. `/auto` also
+   explicitly resumes Auto and resets the circuit.
 
-Any reviewer approval resets the consecutive denial counter.
+Any non-denial outcome, including reviewer approval, timeout, or fail-closed
+reviewer failure, resets the consecutive denial counter and occupies one slot
+in the rolling fifty-review window.
 
 ### 7.3 Reviewer failure
 
@@ -287,23 +296,34 @@ Failures include:
 - malformed JSON;
 - invalid result schema.
 
-When dialog-capable UI is available, these failures fall back immediately to
-the existing Yes/No approval dialog and disclose that automatic review was
-unavailable. Human approval creates the same exact one-call capability as
-Default mode.
+All reviewer failures fail closed, regardless of whether dialog-capable UI is
+available. Timeouts are reported separately and do not imply that the action
+was unsafe. Cancellation caused by turn abort, session switch, mode change, or
+shutdown never opens a fallback dialog.
 
-Without dialog-capable UI, failure is fail-closed. Cancellation caused by turn
-abort, session switch, or shutdown never opens a fallback dialog.
+### 7.4 Exact denial override
+
+`/approve` displays up to ten recent Auto-review denials. Selecting one:
+
+1. records authorization for one retry of that exact tool, input, cwd, and
+   configuration fingerprint;
+2. asks the main agent to retry the exact action;
+3. injects an extension-owned trusted override into the next matching reviewer
+   request;
+4. still requires Auto-review and never bypasses deterministic blocks.
+
+A different action does not consume the override. The exact matching reviewer
+attempt consumes it once, whether the reviewer approves, denies, or fails.
 
 ## 8. Concurrency and Lifecycle
 
 - At most one review promise exists per tool-call ID.
 - Concurrent different tool calls may be reviewed independently, but each
   result remains bound to its own ID and request fingerprint.
-- `approvalActive` is derived as “at least one model review or human fallback
+- `approvalActive` is derived as “at least one model review or human approval
   is active” for mode-transition guards. It does not serialize different model
   reviews.
-- Human confirmation dialogs remain serialized; a second human fallback cannot
+- Human confirmation dialogs remain serialized; a second Default approval cannot
   open over an active dialog.
 - Session shutdown aborts all in-flight reviewers and clears approval state.
 - Successful config reload and mode transition abort reviewers whose snapshots
@@ -325,7 +345,7 @@ mode label:
 Notifications are limited to:
 
 - entering Default or Auto;
-- Auto reviewer unavailable and human fallback opened;
+- Auto reviewer failure;
 - Auto paused after repeated denials;
 - invalid reviewer configuration.
 
@@ -366,12 +386,13 @@ warning.
 - Default `prompt` in Auto invokes reviewer;
 - approved call receives only its requested temporary permissions;
 - denied call never reaches tool execution;
-- reviewer failure opens human fallback only with UI;
-- headless failure blocks;
+- reviewer failure blocks with or without UI and never opens human fallback;
 - reload/mode change/input swap/cwd change invalidate automatic approval;
 - late review completion cannot grant execution;
-- paused Auto uses human approval;
-- `/auto` resumes and resets;
+- paused Auto blocks and interrupts the current turn;
+- a new agent turn or `/auto` resumes and resets;
+- `/approve` lists at most ten recent denials and grants only one exact
+  Auto-reviewed retry;
 - statusline shows only `Auto` or `Default`.
 
 ### 10.3 Sandbox and integration tests
@@ -382,7 +403,7 @@ warning.
 - public one-call network and additional filesystem grants are restored after
   execution;
 - concurrent approvals cannot leak capabilities;
-- real Pi model/auth failures follow the documented fallback.
+- real Pi model/auth failures follow the documented fail-closed behavior.
 
 ### 10.4 Shortcut verification
 
@@ -400,11 +421,11 @@ Auto mode is complete only when all of the following are proven:
 4. A reviewer approval executes exactly once under the existing sandbox.
 5. A reviewer denial blocks execution and returns its reason to the agent.
 6. Three consecutive denials pause Auto with the default configuration.
-7. Reviewer failure opens human fallback with UI and blocks headlessly.
+7. Reviewer failure blocks without human fallback in every UI mode.
 8. Project configuration cannot enable or weaken Auto/reviewer policy.
 9. Reload, mode transition, cancellation, and request substitution cannot reuse
    an automatic approval.
 10. Protected paths, private networks, and sandbox boundaries remain enforced.
 11. Unit, integration, type, and diff checks pass.
-12. An independent security-focused code review reports no unresolved
-    Critical or Important issue.
+12. `/approve` cannot authorize a similar action, survive a permission-context
+    change, bypass Auto-review, or be reused.

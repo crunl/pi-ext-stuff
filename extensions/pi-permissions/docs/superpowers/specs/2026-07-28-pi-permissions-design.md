@@ -178,7 +178,12 @@ Slash commands remain as direct and fallback entry points:
 - `/permissions`
 - `/sandbox`
 
-If a mode change is requested while a turn is running, the controller records `pendingMode`, displays it in the status line, and applies it after the turn. It does not change policy during an in-flight tool call. Mode changes are blocked while an approval prompt is active.
+If a mode change is requested while a turn is running, the selected mode and
+status line update immediately. The next tool call uses the new mode; an
+approval or model review already in flight remains bound to the mode captured
+when that call started. Commands, shortcuts, and approval-panel mode choices
+share one ordered mutation queue, preventing a delayed shortcut from
+overwriting a later explicit panel choice.
 
 ## 6. Permission Request Normalization
 
@@ -411,7 +416,6 @@ State is persisted through Pi session entries:
 ```ts
 interface PermissionSessionState {
   mode: "default" | "plan" | "auto";
-  pendingMode?: "default" | "plan" | "auto";
   modeBeforePlan?: "default" | "auto";
   plan?: {
     markdown: string;

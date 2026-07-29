@@ -8,7 +8,6 @@ import {
 } from "./modes/auto.ts";
 import {
   ModeController,
-  type ModeTransition,
 } from "./modes/controller.ts";
 import {
   createPermissionSessionState,
@@ -20,7 +19,7 @@ import {
 function functionalState(state: PermissionSessionState): PermissionSessionState {
   const normalized = structuredClone(state);
   if (normalized.mode === "plan") normalized.mode = "default";
-  if (normalized.pendingMode === "plan") normalized.pendingMode = undefined;
+  delete (normalized as PermissionSessionState & { pendingMode?: PermissionMode }).pendingMode;
   return normalized;
 }
 
@@ -28,6 +27,7 @@ export class PermissionModeRuntime {
   private controller: ModeController;
   private state: PermissionSessionState;
   private readonly activeReviewIds = new Set<string>();
+  private readonly autoReviewWindow: boolean[] = [];
   private humanApprovalActive = false;
 
   constructor(
@@ -80,53 +80,23 @@ export class PermissionModeRuntime {
     this.humanApprovalActive = false;
   }
 
-  activate(
-    mode: PermissionMode,
-    context: { idle: boolean },
-  ): PermissionMode | ModeTransition {
+  activate(mode: PermissionMode): PermissionMode {
     if (mode === "plan") throw new Error("Plan mode is not implemented");
-    const result = this.controller.request(mode, {
-      ...context,
-      approvalActive: this.approvalActive,
-    });
-    if (typeof result === "string") {
-      this.state.mode = result;
-      this.state.pendingMode = undefined;
-      if (result === "auto") this.state.auto = resetAutoState();
-    } else {
-      this.state.pendingMode = result.pending;
-    }
+    const result = this.controller.request(mode);
+    this.state.mode = result;
+    this.autoReviewWindow.length = 0;
+    if (result === "auto") this.state.auto = resetAutoState();
     this.persist();
     return result;
   }
 
-  cycle(context: { idle: boolean }): PermissionMode | ModeTransition {
-    const result = this.controller.cycle({
-      ...context,
-      approvalActive: this.approvalActive,
-    });
-    if (typeof result === "string") {
-      this.state.mode = result;
-      this.state.pendingMode = undefined;
-      if (result === "auto") this.state.auto = resetAutoState();
-    } else {
-      this.state.pendingMode = result.pending;
-    }
+  cycle(): PermissionMode {
+    const result = this.controller.cycle();
+    this.state.mode = result;
+    this.autoReviewWindow.length = 0;
+    if (result === "auto") this.state.auto = resetAutoState();
     this.persist();
     return result;
-  }
-
-  flushPending(context: { idle: boolean }): PermissionMode {
-    const previous = this.controller.active;
-    const active = this.controller.flushPending({
-      ...context,
-      approvalActive: this.approvalActive,
-    });
-    if (active !== previous && active === "auto") this.state.auto = resetAutoState();
-    this.state.mode = active;
-    this.state.pendingMode = this.controller.pending;
-    this.persist();
-    return active;
   }
 
   applyAutoState(state: AutoState): void {
@@ -134,21 +104,49 @@ export class PermissionModeRuntime {
     this.persist();
   }
 
+  beginAgentTurn(): void {
+    this.autoReviewWindow.length = 0;
+    if (this.mode !== "auto") return;
+    if (
+      this.state.auto.consecutiveDenials === 0
+      && !this.state.auto.paused
+    ) {
+      return;
+    }
+    this.state.auto = resetAutoState();
+    this.persist();
+  }
+
+  recordAutoNonDenial(): void {
+    this.recordAutoReviewOutcome(false);
+    if (this.state.auto.consecutiveDenials === 0) return;
+    this.state.auto.consecutiveDenials = 0;
+    this.persist();
+  }
+
   recordAutoReview(
     decision: "approve" | "deny",
     denialLimit: number,
   ): AutoState {
+    this.recordAutoReviewOutcome(decision === "deny");
     this.state.auto = decision === "approve"
       ? recordAutoApproval(this.state.auto)
       : recordAutoDenial(this.state.auto, denialLimit);
+    if (
+      decision === "deny"
+      && this.autoReviewWindow.filter(Boolean).length >= 10
+    ) {
+      this.state.auto.paused = true;
+    }
     this.persist();
     return this.autoState;
   }
 
   restore(entries: readonly unknown[], config: PermissionsConfig): void {
     this.state = functionalState(restorePermissionState(entries, config));
-    this.controller = new ModeController(this.state.mode, this.state.pendingMode);
+    this.controller = new ModeController(this.state.mode);
     this.activeReviewIds.clear();
+    this.autoReviewWindow.length = 0;
     this.humanApprovalActive = false;
   }
 
@@ -158,5 +156,12 @@ export class PermissionModeRuntime {
 
   private persist(): void {
     this.appendEntry("pi-permissions-state", this.snapshot());
+  }
+
+  private recordAutoReviewOutcome(denied: boolean): void {
+    this.autoReviewWindow.push(denied);
+    if (this.autoReviewWindow.length > 50) {
+      this.autoReviewWindow.splice(0, this.autoReviewWindow.length - 50);
+    }
   }
 }

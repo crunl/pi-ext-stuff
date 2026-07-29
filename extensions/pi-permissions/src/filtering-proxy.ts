@@ -18,6 +18,15 @@ export interface HostFilteringProxy {
 
 export type HostResolver = (host: string) => Promise<readonly string[]>;
 
+class DestinationResolutionError extends Error {
+  readonly proxyError = "dns-resolution-failed";
+
+  constructor(host: string, cause: unknown) {
+    super(`DNS resolution failed for ${host}`, { cause });
+    this.name = "DestinationResolutionError";
+  }
+}
+
 function normalizeHost(host: string): string {
   return host.trim().replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
 }
@@ -451,8 +460,8 @@ export async function startHostFilteringProxy(
           : await (resolveHost
               ? resolveHost(normalized)
               : defaultHostResolver(normalized, upstream, track, lifecycle.signal));
-      } catch {
-        return undefined;
+      } catch (error) {
+        throw new DestinationResolutionError(normalized, error);
       }
       if (closed) return undefined;
       const normalizedAddresses = [...new Set(addresses.map(normalizeHost))];
@@ -525,9 +534,14 @@ export async function startHostFilteringProxy(
         response.end("Upstream proxy failure");
       });
       request.pipe(proxyRequest);
-    } catch {
-      response.writeHead(400);
-      response.end("Invalid proxy request");
+    } catch (error) {
+      if (error instanceof DestinationResolutionError) {
+        response.writeHead(502, { "X-Proxy-Error": error.proxyError });
+        response.end("DNS resolution failed");
+      } else {
+        response.writeHead(400);
+        response.end("Invalid proxy request");
+      }
     }
   });
   httpServer.on("connection", track);
@@ -547,8 +561,11 @@ export async function startHostFilteringProxy(
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       tunnel.pipe(clientSocket);
       clientSocket.pipe(tunnel);
-    } catch {
-      clientSocket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    } catch (error) {
+      const proxyError = error instanceof DestinationResolutionError
+        ? `X-Proxy-Error: ${error.proxyError}\r\n`
+        : "";
+      clientSocket.end(`HTTP/1.1 502 Bad Gateway\r\n${proxyError}\r\n`);
     }
   });
 

@@ -6,16 +6,15 @@ Keep `pi-permissions` as the source of truth for the active permission mode,
 while hiding the ordinary `Default` label from the statusline editor border.
 Non-default modes such as `Auto` remain visible.
 
-The existing working-state transition semantics must remain unchanged:
+Working-state transitions follow these semantics:
 
-- A mode change requested while the agent is working updates `pendingMode`
-  without changing `activeMode`.
-- An active Auto review is not cancelled by a queued transition.
-- The queued transition is applied only after `agent_settled` and only when no
-  approval is active.
-- Repeating the cycle shortcut while working can cancel the queued transition.
-- An immediate idle transition invalidates approvals from the old permission
-  context.
+- A mode change updates the selected mode and status immediately.
+- The next tool call uses the newly selected mode without waiting for
+  `agent_settled`.
+- An active human approval or Auto review completes under its captured mode.
+- Commands, Shift+Tab, and approval-panel mode choices are applied in user
+  action order.
+- Repeating Shift+Tab while working performs each requested cycle in order.
 
 ## Design
 
@@ -62,16 +61,17 @@ and keeps the editor renderer independent of permission-mode names.
 
 Retain the existing integration coverage for:
 
-- Default to Auto queued while working.
-- Auto to Default queued while an Auto review is active.
-- A queued transition not cancelling an active reviewer.
-- A second working cycle cancelling the pending transition.
-- Applying pending state only after settlement.
+- Default to Auto taking effect for the next approval while working.
+- Auto to Default leaving the active reviewer intact while routing the next
+  approval through Default.
+- A later approval-panel choice winning over an earlier delayed Shift+Tab.
+- Repeated working cycles being applied in action order.
 
 Add only a missing assertion or test if the current coverage does not directly
 prove both transition directions.
 
 ## Scope
 
-No changes will be made to permission evaluation, sandboxing, reviewer
-behavior, approval grants, persistence format, shortcuts, or command names.
+This revision changes working mode-transition timing and removes persisted
+`pendingMode`. It does not change permission evaluation, sandboxing, reviewer
+policy, approval scope, shortcuts, or command names.

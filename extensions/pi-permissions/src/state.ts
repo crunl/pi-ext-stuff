@@ -5,7 +5,6 @@ export type PermissionMode = "default" | "plan" | "auto";
 
 export interface PermissionSessionState {
   mode: PermissionMode;
-  pendingMode?: PermissionMode;
   modeBeforePlan?: Exclude<PermissionMode, "plan">;
   plan?: { markdown: string; status: "draft" | "approved" | "revising" };
   auto: { consecutiveDenials: number; paused: boolean };
@@ -47,7 +46,6 @@ function isSessionState(value: unknown): value is PermissionSessionState {
   ) {
     return false;
   }
-  if (value.pendingMode !== undefined && !isMode(value.pendingMode)) return false;
   if (value.modeBeforePlan !== undefined && (value.modeBeforePlan !== "default" && value.modeBeforePlan !== "auto")) {
     return false;
   }

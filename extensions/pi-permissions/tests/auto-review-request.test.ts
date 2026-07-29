@@ -123,4 +123,38 @@ describe("auto review request", () => {
     expect(request.userMessages.every((message) => message.length <= 4000)).toBe(true);
     expect(request.userMessages.join("").length).toBeLessThanOrEqual(12000);
   });
+
+  it("frames an exact /approve retry as trusted override context", () => {
+    const request = buildAutoReviewRequest(
+      {
+        toolName: "bash",
+        toolCallId: "retry-call",
+        input: { command: "git push origin main" },
+      } as any,
+      {
+        action: "prompt",
+        risk: "HARD",
+        reason: "Remote mutation",
+        summary: "git push origin main",
+      },
+      "/workspace",
+      "workspace-write",
+      ["push this branch"],
+      {
+        denialId: "denial-1",
+        actionFingerprint: "exact-action",
+      },
+    );
+    const data = JSON.parse(renderAutoReviewPrompt(request));
+
+    expect(data.trustedApprovalOverride).toEqual({
+      denialId: "denial-1",
+      actionFingerprint: "exact-action",
+      scope: "one exact retry",
+    });
+    expect(data.untrustedAction).not.toHaveProperty("approvalOverride");
+    expect(AUTO_REVIEW_SYSTEM_PROMPT).toContain(
+      "trustedApprovalOverride",
+    );
+  });
 });

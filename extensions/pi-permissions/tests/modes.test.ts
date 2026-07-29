@@ -12,52 +12,20 @@ import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 describe("ModeController", () => {
   it("cycles only functional Default and Auto modes", () => {
     const controller = new ModeController("default");
-    expect(controller.cycle({ idle: true })).toBe("auto");
-    expect(controller.cycle({ idle: true })).toBe("default");
+    expect(controller.cycle()).toBe("auto");
+    expect(controller.cycle()).toBe("default");
   });
 
-  it("queues a transition while busy", () => {
+  it("applies a transition immediately while busy", () => {
     const controller = new ModeController("default");
-    expect(controller.request("plan", { idle: false, approvalActive: false })).toEqual({
-      active: "default",
-      pending: "plan",
-    });
-    expect(controller.flushPending({ idle: true, approvalActive: false })).toBe("plan");
+    expect(controller.request("auto")).toBe("auto");
+    expect(controller.active).toBe("auto");
   });
 
-  it("retains a pending transition when flushed while busy", () => {
-    const controller = new ModeController("default");
-    controller.request("plan", { idle: false, approvalActive: false });
-
-    expect(controller.flushPending({ idle: false, approvalActive: false })).toBe("default");
-    expect(controller.pending).toBe("plan");
-  });
-
-  it("retains a pending transition when flushed during approval", () => {
-    const controller = new ModeController("default");
-    controller.request("plan", { idle: false, approvalActive: false });
-
-    expect(controller.flushPending({ idle: true, approvalActive: true })).toBe("default");
-    expect(controller.pending).toBe("plan");
-  });
-
-  it("lets a second busy cycle cancel the pending transition", () => {
-    const controller = new ModeController("default");
-
-    expect(controller.cycle({ idle: false, approvalActive: true })).toEqual({
-      active: "default",
-      pending: "auto",
-    });
-    expect(controller.cycle({ idle: false, approvalActive: true })).toEqual({
-      active: "default",
-      pending: undefined,
-    });
-    expect(controller.pending).toBeUndefined();
-  });
-
-  it("does not change mode during approval", () => {
+  it("applies a transition immediately during approval", () => {
     const controller = new ModeController("auto");
-    expect(() => controller.request("default", { idle: true, approvalActive: true })).toThrow(/approval/);
+    expect(controller.request("default")).toBe("default");
+    expect(controller.active).toBe("default");
   });
 });
 

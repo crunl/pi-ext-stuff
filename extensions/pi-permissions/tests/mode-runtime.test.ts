@@ -8,7 +8,7 @@ describe("PermissionModeRuntime", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, appendEntry);
     runtime.applyAutoState({ consecutiveDenials: 3, paused: true });
 
-    expect(runtime.activate("auto", { idle: true })).toBe("auto");
+    expect(runtime.activate("auto")).toBe("auto");
     expect(runtime.autoState).toEqual({
       consecutiveDenials: 0,
       paused: false,
@@ -20,15 +20,14 @@ describe("PermissionModeRuntime", () => {
     );
   });
 
-  it("blocks transitions while any review is active but permits parallel review IDs", () => {
+  it("permits immediate transitions while preserving parallel active review IDs", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     expect(runtime.beginReview("call-1")).toBe(true);
     expect(runtime.beginReview("call-2")).toBe(true);
     expect(runtime.beginReview("call-1")).toBe(false);
-    expect(() => runtime.activate("auto", { idle: true })).toThrow(/approval/i);
+    expect(runtime.activate("auto")).toBe("auto");
     runtime.endReview("call-1");
     runtime.endReview("call-2");
-    expect(runtime.activate("auto", { idle: true })).toBe("auto");
   });
 
   it("serializes human dialogs", () => {
@@ -39,37 +38,88 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.beginHumanApproval()).toBe(true);
   });
 
-  it("uses the pending mode when cycling again while working", () => {
+  it("cycles immediately while working", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.beginReview("active-review");
 
-    expect(runtime.cycle({ idle: false })).toEqual({
-      active: "default",
-      pending: "auto",
-    });
-    expect(runtime.cycle({ idle: false })).toEqual({
-      active: "default",
-      pending: undefined,
-    });
+    expect(runtime.cycle()).toBe("auto");
+    expect(runtime.cycle()).toBe("default");
   });
 
-  it("keeps Auto active until a working transition can settle", () => {
+  it("switches from Auto to Default immediately while a review remains active", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
-    runtime.activate("auto", { idle: true });
+    runtime.activate("auto");
     runtime.beginReview("active-review");
 
-    expect(runtime.activate("default", { idle: false })).toEqual({
-      active: "auto",
-      pending: "default",
-    });
-    expect(runtime.mode).toBe("auto");
-    expect(runtime.flushPending({ idle: true })).toBe("auto");
-
+    expect(runtime.activate("default")).toBe("default");
+    expect(runtime.mode).toBe("default");
     runtime.endReview("active-review");
-    expect(runtime.flushPending({ idle: true })).toBe("default");
   });
 
-  it("restores a persisted pending transition and flushes it when settled", () => {
+  it("pauses after ten denials in the rolling fifty-review window", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+
+    for (let index = 0; index < 9; index += 1) {
+      runtime.recordAutoReview("deny", 3);
+      runtime.recordAutoReview("approve", 3);
+    }
+    expect(runtime.autoState.paused).toBe(false);
+
+    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+      consecutiveDenials: 1,
+      paused: true,
+    });
+  });
+
+  it("starts each agent turn with a fresh Auto rejection circuit", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+    runtime.recordAutoReview("deny", 3);
+    runtime.recordAutoReview("deny", 3);
+    runtime.recordAutoReview("deny", 3);
+    expect(runtime.autoState.paused).toBe(true);
+
+    runtime.beginAgentTurn();
+
+    expect(runtime.autoState).toEqual({
+      consecutiveDenials: 0,
+      paused: false,
+    });
+  });
+
+  it("resets consecutive denials after a non-denial reviewer failure", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+    runtime.recordAutoReview("deny", 3);
+    runtime.recordAutoReview("deny", 3);
+
+    runtime.recordAutoNonDenial();
+
+    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+      consecutiveDenials: 1,
+      paused: false,
+    });
+  });
+
+  it("counts reviewer failures in the rolling fifty-review window", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+    for (let index = 0; index < 9; index += 1) {
+      runtime.recordAutoReview("deny", 3);
+      runtime.recordAutoNonDenial();
+    }
+    for (let index = 0; index < 50; index += 1) {
+      runtime.recordAutoNonDenial();
+    }
+
+    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+      consecutiveDenials: 1,
+      paused: false,
+    });
+  });
+
+  it("discards a legacy persisted pending transition", () => {
     const pendingState = {
       mode: "default" as const,
       pendingMode: "auto" as const,
@@ -88,8 +138,8 @@ describe("PermissionModeRuntime", () => {
       DEFAULT_CONFIG,
     );
 
-    expect(runtime.flushPending({ idle: true })).toBe("auto");
-    expect(runtime.snapshot().pendingMode).toBeUndefined();
+    expect(runtime.mode).toBe("default");
+    expect(runtime.snapshot()).not.toHaveProperty("pendingMode");
   });
 
   it("does not activate the unimplemented Plan mode from configuration or persisted state", () => {
@@ -99,7 +149,7 @@ describe("PermissionModeRuntime", () => {
 
     expect(runtime.mode).toBe("default");
     expect(runtime.statusLabel).toBe("Default");
-    expect(() => runtime.activate("plan", { idle: true })).toThrow(
+    expect(() => runtime.activate("plan")).toThrow(
       "Plan mode is not implemented",
     );
   });

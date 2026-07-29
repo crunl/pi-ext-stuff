@@ -10,6 +10,14 @@ import {
 } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function globalConfigPath(agentDir: string): string {
   const directory = join(agentDir, "extensions", "pi-permissions");
   mkdirSync(directory, { recursive: true });
@@ -35,7 +43,7 @@ function harness(
   const notify = vi.fn();
   const confirm = vi.fn(async () => approved);
   const select = vi.fn(async () =>
-    approved ? "Yes, allow once" : undefined as string | undefined);
+    approved ? "Allow Once" : undefined as string | undefined);
   const sandboxManager = {
     initialize: vi.fn(async (_config: unknown) => undefined),
     wrapWithSandbox: vi.fn(async (command: string) => command),
@@ -55,6 +63,8 @@ function harness(
   };
   const filteringProxyFactory = vi.fn(async () => filteringProxy);
   const appendEntry = vi.fn();
+  const sendMessage = vi.fn();
+  const abort = vi.fn();
   const autoReviewer = reviewer ?? {
     review: vi.fn(async () => ({
       decision: "approve" as const,
@@ -70,6 +80,7 @@ function harness(
       shortcuts.set(key, shortcut),
     registerTool: (tool: any) => tools.set(tool.name, tool),
     appendEntry,
+    sendMessage,
   };
   registerExtension(pi as any, {
     agentDir,
@@ -90,6 +101,7 @@ function harness(
     modelRegistry: {},
     model: undefined,
     signal: undefined,
+    abort,
     ui: { setStatus, notify, confirm, select },
   };
   return {
@@ -108,6 +120,8 @@ function harness(
     filteringProxy,
     filteringProxyFactory,
     appendEntry,
+    sendMessage,
+    abort,
     autoReviewer,
   };
 }
@@ -125,6 +139,9 @@ describe("Default mode registration", () => {
     expect(app.tools.has("bash")).toBe(true);
     expect(app.tools.has("write")).toBe(true);
     expect(app.tools.has("edit")).toBe(true);
+    expect(app.tools.get("bash").renderShell).toBe("self");
+    expect(app.tools.get("write").renderShell).toBe("self");
+    expect(app.tools.get("edit").renderShell).toBe("self");
     expect(app.tools.get("write").executionMode).toBe("sequential");
     expect(app.tools.get("edit").executionMode).toBe("sequential");
     expect(app.tools.get("bash").parameters.properties).toHaveProperty("sandbox_permissions");
@@ -138,6 +155,170 @@ describe("Default mode registration", () => {
     const app = harness(agentDir);
 
     expect(app.handlers.has("user_bash")).toBe(false);
+  });
+
+  it("renders a trailing newline as one written line", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    const tool = app.tools.get("write");
+    const args = { path: "note.txt", content: "hello\n" };
+    const state = {};
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+
+    const header = tool.renderCall(
+      args,
+      theme,
+      {
+        args,
+        state,
+        cwd: agentDir,
+        isError: false,
+      },
+    );
+    const result = tool.renderResult(
+      {
+        content: [{
+          type: "text",
+          text: "Successfully wrote 6 bytes to note.txt",
+        }],
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      {
+        args,
+        state,
+        cwd: agentDir,
+        isError: false,
+      },
+    );
+
+    expect(header.render(80).join("\n")).toContain(" Wrote note.txt · +1");
+    expect(result.render(80)).toEqual([]);
+  });
+
+  it("keeps the edit header collapsed and expands the complete line diff", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    const tool = app.tools.get("edit");
+    const args = { path: "src/file.ts", edits: [] };
+    const state = {};
+    const theme = {
+      fg: (color: string, text: string) => {
+        if (color === "success" || color === "toolDiffAdded") {
+          return `\u001b[32m${text}\u001b[0m`;
+        }
+        if (color === "error" || color === "toolDiffRemoved") {
+          return `\u001b[31m${text}\u001b[0m`;
+        }
+        return text;
+      },
+      bold: (text: string) => text,
+    };
+    const context = {
+      args,
+      toolCallId: "edit-diff",
+      invalidate() {},
+      state,
+      cwd: agentDir,
+      isError: false,
+    };
+    const editResult = {
+      content: [{
+        type: "text",
+        text: "Successfully replaced 1 block(s) in src/file.ts.",
+      }],
+      details: {
+        diff: [
+          " 10 context",
+          "-11 old value",
+          "+11 new value",
+          "+12 added value",
+        ].join("\n"),
+      },
+    };
+
+    const header = tool.renderCall(args, theme, context);
+    const collapsed = tool.renderResult(
+      editResult,
+      { expanded: false, isPartial: false },
+      theme,
+      context,
+    );
+    const expanded = tool.renderResult(
+      editResult,
+      { expanded: true, isPartial: false },
+      theme,
+      context,
+    );
+    const expandedText = expanded.render(100).join("\n");
+
+    expect(header.render(100).join("\n")).toContain(
+      "\u001b[32m+2\u001b[0m \u001b[31m-1\u001b[0m",
+    );
+    expect(collapsed.render(100)).toEqual([]);
+    expect(expandedText).toContain("\u001b[31m-11 old value\u001b[0m");
+    expect(expandedText).toContain("\u001b[32m+11 new value\u001b[0m");
+    expect(expandedText).toContain("\u001b[32m+12 added value\u001b[0m");
+    expect(expandedText).not.toContain("Successfully replaced");
+  });
+
+  it("renders Bash calls with the rounded terminal icon", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    const tool = app.tools.get("bash");
+    const args = { command: "npm test" };
+    const header = tool.renderCall(args, {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    }, {
+      args,
+      toolCallId: "bash-icon",
+      invalidate() {},
+      state: {},
+      cwd: agentDir,
+      isError: false,
+    });
+
+    expect(header.render(80).join("\n")).toContain(" Running npm test");
+  });
+
+  it("renders a native Bash failure without its blank status separator", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    const tool = app.tools.get("bash");
+    const args = { command: "gh api repos/example" };
+    const state = {};
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const context = {
+      args,
+      state,
+      cwd: agentDir,
+      isError: true,
+    };
+
+    tool.renderCall(args, theme, context);
+    const result = tool.renderResult(
+      {
+        content: [{
+          type: "text",
+          text: "Forbidden\n\nCommand exited with code 1",
+        }],
+      },
+      { expanded: false, isPartial: false },
+      theme,
+      context,
+    );
+
+    expect(result.render(80)).toEqual([
+      "   └ Forbidden",
+      "     Command exited with code 1",
+    ]);
   });
 
   it("rolls back the active policy when a config reload cannot initialize", async () => {
@@ -207,25 +388,17 @@ describe("Default mode registration", () => {
     expect(app.select).toHaveBeenCalledOnce();
   });
 
-  it("approves the current call once and switches future approvals to Auto", async () => {
+  it("keeps mode switching out of the Default approval panel", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    const reviewer = {
-      review: vi.fn(async () => ({
-        decision: "approve" as const,
-        risk: "low" as const,
-        userAuthorization: "high" as const,
-        rationale: "Approved by the reviewer.",
-      })),
-    };
-    const app = harness(agentDir, false, true, {}, undefined, reviewer);
-    app.select.mockResolvedValueOnce("Yes, switch future approvals to Auto");
+    const app = harness(agentDir);
+    app.select.mockResolvedValueOnce("Allow Once");
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
     const current = {
       toolName: "bash",
-      toolCallId: "human-switch-current",
+      toolCallId: "human-allow-current",
       input: { command: "rm -rf build" },
     };
 
@@ -235,12 +408,11 @@ describe("Default mode registration", () => {
     expect(app.select).toHaveBeenCalledWith(
       expect.stringContaining("rm -rf build"),
       [
-        "Yes, allow once",
-        "Yes, switch future approvals to Auto",
-        "No, tell Pi what to do differently",
+        "Allow Once",
+        "Deny",
       ],
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
     await expect(
       app.tools.get("bash").execute(
         current.toolCallId,
@@ -250,18 +422,6 @@ describe("Default mode registration", () => {
         app.context,
       ),
     ).resolves.toBeDefined();
-
-    await expect(
-      app.handlers.get("tool_call")!(
-        {
-          toolName: "bash",
-          toolCallId: "auto-after-human-switch",
-          input: { command: "rm -rf dist" },
-        },
-        app.context,
-      ),
-    ).resolves.toBeUndefined();
-    expect(reviewer.review).toHaveBeenCalledOnce();
     expect(app.select).toHaveBeenCalledOnce();
   });
 
@@ -441,7 +601,7 @@ describe("Default mode registration", () => {
       { type: "session_tree" },
       app.context,
     );
-    resolveConfirm("Yes, allow once");
+    resolveConfirm("Allow Once");
 
     await expect(approval).resolves.toMatchObject({
       block: true,
@@ -661,7 +821,108 @@ describe("Default mode registration", () => {
     expect(app.bashExecute).not.toHaveBeenCalled();
   });
 
-  it("falls back to human approval when the reviewer is unavailable", async () => {
+  it("lets /approve authorize one exact Auto-reviewed retry", async () => {
+    const reviewer = {
+      review: vi.fn(async (request: any) =>
+        request.approvalOverride
+          ? {
+              decision: "approve" as const,
+              risk: "high" as const,
+              userAuthorization: "high" as const,
+              rationale: "The exact retry was explicitly approved.",
+            }
+          : {
+              decision: "deny" as const,
+              risk: "high" as const,
+              userAuthorization: "low" as const,
+              rationale: "Remote publication was not authorized.",
+            }),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "denied-for-override",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    app.select.mockResolvedValueOnce(
+      "1. bash: rm -rf build — Remote publication was not authorized.",
+    );
+    await app.commands.get("approve")!.handler("", app.context);
+
+    expect(app.select).toHaveBeenCalledWith(
+      "Auto-review Denials",
+      [
+        "1. bash: rm -rf build — Remote publication was not authorized.",
+      ],
+    );
+    expect(app.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customType: "pi-permissions-auto-override",
+        content: expect.stringMatching(/retry[\s\S]*rm -rf build/i),
+      }),
+      { triggerTurn: true },
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "different-action",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(reviewer.review.mock.calls[1]![0]).not.toHaveProperty(
+      "approvalOverride",
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "exact-retry",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(reviewer.review.mock.calls[2]![0]).toMatchObject({
+      approvalOverride: {
+        denialId: expect.any(String),
+        actionFingerprint: expect.any(String),
+      },
+    });
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "second-exact-retry",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(reviewer.review.mock.calls[3]![0]).not.toHaveProperty(
+      "approvalOverride",
+    );
+  });
+
+  it("fails closed without human fallback when the reviewer is unavailable", async () => {
     const reviewer = {
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("timeout", "review timed out");
@@ -687,11 +948,11 @@ describe("Default mode registration", () => {
         },
         app.context,
       ),
-    ).resolves.toBeUndefined();
-    expect(app.select).toHaveBeenCalledWith(
-      expect.stringMatching(/HARD[\s\S]*review timed out/),
-      ["Yes, allow once", "No, tell Pi what to do differently"],
-    );
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringMatching(/timed out[\s\S]*not proof/i),
+    });
+    expect(app.select).not.toHaveBeenCalled();
   });
 
   it("fails closed on reviewer failure without dialog-capable UI", async () => {
@@ -726,7 +987,39 @@ describe("Default mode registration", () => {
     });
   });
 
-  it("pauses after three denials and /auto explicitly resumes", async () => {
+  it("fails closed when the reviewer request cannot be built", async () => {
+    const reviewer = {
+      review: vi.fn(),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer as any);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "oversized-auto-request",
+          input: { command: `rm -rf ${"x".repeat(20_000)}` },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringMatching(/failed closed[\s\S]*action limit/i),
+    });
+    expect(reviewer.review).not.toHaveBeenCalled();
+    expect(app.select).not.toHaveBeenCalled();
+  });
+
+  it("pauses after three denials and resumes on the next agent turn", async () => {
     const reviewer = {
       review: vi.fn(async () => ({
         decision: "deny" as const,
@@ -756,19 +1049,25 @@ describe("Default mode registration", () => {
         app.context,
       );
     }
-    app.select.mockResolvedValueOnce(undefined);
-    await app.handlers.get("tool_call")!(
+    await expect(app.handlers.get("tool_call")!(
       {
         toolName: "bash",
-        toolCallId: "paused-human",
+        toolCallId: "paused-blocked",
         input: { command: "rm -rf build" },
       },
       app.context,
-    );
+    )).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("Auto review paused"),
+    });
     expect(reviewer.review).toHaveBeenCalledTimes(3);
-    expect(app.select).toHaveBeenCalledOnce();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.abort).toHaveBeenCalledOnce();
 
-    await app.commands.get("auto")!.handler("", app.context);
+    await app.handlers.get("agent_start")?.(
+      { type: "agent_start" },
+      app.context,
+    );
     await app.handlers.get("tool_call")!(
       {
         toolName: "bash",
@@ -835,17 +1134,20 @@ describe("Default mode registration", () => {
     }
     await Promise.all(pending);
 
-    app.select.mockResolvedValueOnce(undefined);
-    await app.handlers.get("tool_call")!(
+    await expect(app.handlers.get("tool_call")!(
       {
         toolName: "bash",
         toolCallId: "after-parallel-denials",
         input: { command: "rm -rf build" },
       },
       app.context,
-    );
+    )).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("Auto review paused"),
+    });
     expect(reviewer.review).toHaveBeenCalledTimes(3);
-    expect(app.select).toHaveBeenCalledOnce();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.abort).toHaveBeenCalled();
   });
 
   it("shows only the active mode in status", async () => {
@@ -885,82 +1187,88 @@ describe("Default mode registration", () => {
     );
   });
 
-  it("applies a working Shift+Tab transition only after the agent settles", async () => {
+  it("shows a working Shift+Tab transition immediately", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
       join(agentDir, "keybindings.json"),
       JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
     );
     const app = harness(agentDir);
-    let idle = false;
-    app.context.isIdle = () => idle;
+    app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("Auto"),
+      expect.stringContaining("Auto mode 已启用"),
       "info",
-    );
-
-    idle = true;
-    await app.handlers.get("agent_settled")?.(
-      { type: "agent_settled" },
-      app.context,
     );
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
   });
 
-  it("cancels a queued working transition when Shift+Tab is pressed again", async () => {
+  it("uses Auto for the next approval after working Shift+Tab switches the mode", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      join(agentDir, "keybindings.json"),
+      JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
+    );
+    const reviewer = {
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    const nextApproval = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "working-auto-turn",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+
+    expect(nextApproval).toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(reviewer.review).toHaveBeenCalledOnce();
+  });
+
+  it("cycles a working transition immediately when Shift+Tab is pressed again", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
       join(agentDir, "keybindings.json"),
       JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
     );
     const app = harness(agentDir);
-    let idle = false;
-    app.context.isIdle = () => idle;
+    app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
 
-    await app.shortcuts.get("shift+tab")!.handler(app.context);
-    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    const firstCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
+    const secondCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await Promise.all([firstCycle, secondCycle]);
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("切换已取消"),
+      expect.stringContaining("Default mode 已启用"),
       "info",
-    );
-
-    idle = true;
-    await app.handlers.get("agent_settled")?.(
-      { type: "agent_settled" },
-      app.context,
     );
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
-  it("does not persist mode state on agent settle without a pending transition", async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    const app = harness(agentDir);
-    await app.handlers.get("session_start")?.(
-      { type: "session_start", reason: "startup" },
-      app.context,
-    );
-    app.appendEntry.mockClear();
-
-    await app.handlers.get("agent_settled")?.(
-      { type: "agent_settled" },
-      app.context,
-    );
-
-    expect(app.appendEntry).not.toHaveBeenCalled();
-  });
-
-  it("applies a restored pending transition before the next agent run", async () => {
+  it("discards a restored legacy pending transition", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
     app.context.sessionManager.getBranch = (() => [{
@@ -980,10 +1288,10 @@ describe("Default mode registration", () => {
       app.context,
     );
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
-  it("does not cancel an active Auto review when Shift+Tab is queued", async () => {
+  it("switches to Default immediately and invalidates the current Auto review", async () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
@@ -1022,6 +1330,10 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
+    await app.handlers.get("agent_start")?.(
+      { type: "agent_start" },
+      app.context,
+    );
     const event = {
       toolName: "bash",
       toolCallId: "working-auto-review",
@@ -1031,14 +1343,18 @@ describe("Default mode registration", () => {
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(reviewSignal?.aborted).toBe(false);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(reviewSignal?.aborted).toBe(true);
     resolveReview({
       decision: "approve",
       risk: "low",
       userAuthorization: "high",
-      rationale: "Approved before the queued mode transition.",
+      rationale: "Late approval from the previous mode.",
     });
-    await expect(pendingReview).resolves.toBeUndefined();
+    await expect(pendingReview).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("permission context changed"),
+    });
     await expect(
       app.tools.get("bash").execute(
         event.toolCallId,
@@ -1047,14 +1363,93 @@ describe("Default mode registration", () => {
         undefined,
         app.context,
       ),
-    ).resolves.toBeDefined();
+    ).rejects.toThrow("no longer authorized");
 
-    idle = true;
-    await app.handlers.get("agent_settled")?.(
-      { type: "agent_settled" },
+    const nextApproval = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "working-default-after-review",
+        input: { command: "rm -rf dist" },
+      },
       app.context,
     );
+    expect(nextApproval).toMatchObject({ block: true });
+    expect(app.select).toHaveBeenCalledOnce();
+    expect(reviewer.review).toHaveBeenCalledOnce();
+
+    idle = true;
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
+  it("does not let an aborted review clear a newer review with the same tool-call ID", async () => {
+    const firstReview = deferred<{
+      decision: "approve";
+      risk: "low";
+      userAuthorization: "high";
+      rationale: string;
+    }>();
+    const secondReview = deferred<{
+      decision: "approve";
+      risk: "low";
+      userAuthorization: "high";
+      rationale: string;
+    }>();
+    const reviewer = {
+      review: vi
+        .fn()
+        .mockImplementationOnce(async () => firstReview.promise)
+        .mockImplementationOnce(async () => secondReview.promise),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    await writeFile(
+      join(agentDir, "keybindings.json"),
+      JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "reused-after-abort",
+      input: { command: "rm -rf build" },
+    };
+
+    const stale = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledTimes(1));
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+
+    const active = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledTimes(2));
+    firstReview.resolve({
+      decision: "approve",
+      risk: "low",
+      userAuthorization: "high",
+      rationale: "Stale approval.",
+    });
+    await expect(stale).resolves.toMatchObject({ block: true });
+
+    await expect(
+      app.handlers.get("tool_call")!(event, app.context),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("duplicate Auto review"),
+    });
+
+    secondReview.resolve({
+      decision: "approve",
+      risk: "low",
+      userAuthorization: "high",
+      rationale: "Current approval.",
+    });
+    await expect(active).resolves.toBeUndefined();
   });
 
   it("invalidates a late Auto approval when mode changes", async () => {

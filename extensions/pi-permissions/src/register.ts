@@ -28,6 +28,7 @@ import {
   evaluateDefaultRequest,
   type DefaultDecision,
 } from "./default-mode.ts";
+import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { buildAutoReviewRequest } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
@@ -51,6 +52,13 @@ import {
   withLocalProxy,
 } from "./sandbox.ts";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import {
+  colorizeEditDiffSummary,
+  compactBashStatusSpacing,
+  createCodexToolRendering,
+  renderEditDiff,
+  summarizeEditDiff,
+} from "../../pi-core/index.ts";
 
 export interface RegisterExtensionOptions {
   agentDir?: string;
@@ -77,9 +85,15 @@ interface ApprovedCall {
   requestFingerprint: string;
 }
 
-const ALLOW_ONCE_CHOICE = "Yes, allow once";
-const SWITCH_TO_AUTO_CHOICE = "Yes, switch future approvals to Auto";
-const DENY_CHOICE = "No, tell Pi what to do differently";
+const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
+const DEFAULT_DENY_CHOICE = "Deny";
+
+function countWrittenLines(content: string): number {
+  if (content.length === 0) return 0;
+  const normalized = content.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n").length;
+  return normalized.endsWith("\n") ? lines - 1 : lines;
+}
 
 export function registerExtension(
   pi: ExtensionAPI,
@@ -101,7 +115,10 @@ export function registerExtension(
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
   const trustedUserMessages: string[] = [];
+  const autoApprovalLedger = new AutoApprovalLedger();
   const reviewControllers = new Map<string, AbortController>();
+  let modeMutationTail: Promise<void> = Promise.resolve();
+  let modeMutationGeneration = 0;
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
@@ -117,15 +134,28 @@ export function registerExtension(
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
   };
 
+  const runModeMutation = <T>(
+    operation: (generation: number) => Promise<T>,
+  ): Promise<T | undefined> => {
+    const generation = modeMutationGeneration;
+    const execute = async (): Promise<T | undefined> => {
+      if (generation !== modeMutationGeneration) return undefined;
+      return operation(generation);
+    };
+    const result = modeMutationTail.then(execute, execute);
+    modeMutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
   const restoreModeState = (
-    ctx: Pick<ExtensionContext, "isIdle" | "sessionManager">,
+    ctx: Pick<ExtensionContext, "sessionManager">,
     config: PermissionsConfig,
   ): void => {
     if (!modeRuntime) return;
     modeRuntime.restore(ctx.sessionManager.getBranch(), config);
-    if (ctx.isIdle() && modeRuntime.snapshot().pendingMode) {
-      modeRuntime.flushPending({ idle: true });
-    }
   };
 
   const invalidatePermissionContext = (reason: string): void => {
@@ -138,9 +168,11 @@ export function registerExtension(
     approvedCalls.clear();
     approvedNetworkHosts.clear();
     approvedWriteRoots.clear();
+    autoApprovalLedger.clear();
   };
 
   const resetBranchPermissionContext = (reason: string): void => {
+    modeMutationGeneration += 1;
     trustedUserMessages.length = 0;
     invalidatePermissionContext(reason);
   };
@@ -173,11 +205,9 @@ export function registerExtension(
     config: PermissionsConfig,
     cwd: string,
     authority: "user" | "auto-review",
+    mode: "default" | "auto",
   ): void => {
     if (!event.toolCallId) return;
-    const runtime = ensureModeRuntime(config);
-    const mode = runtime.mode;
-    if (mode === "plan") throw new Error("Plan mode is not implemented");
     approvedCalls.set(event.toolCallId, {
       authority,
       mode,
@@ -351,6 +381,14 @@ export function registerExtension(
 
   pi.registerTool({
     ...baseBash,
+    ...createCodexToolRendering({
+      icon: "",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => typeof args.command === "string" ? args.command : "",
+      collapsed: "preview",
+      transformOutput: compactBashStatusSpacing,
+    }),
     label: "bash (sandboxed)",
     description: `${baseBash.description} To write outside the active sandbox, request sandbox_permissions="with_additional_permissions", list the minimum additional_permissions.file_system.write roots, and provide justification.`,
     promptGuidelines: [
@@ -451,6 +489,17 @@ export function registerExtension(
 
   pi.registerTool({
     ...baseWrite,
+    ...createCodexToolRendering({
+      icon: "",
+      runningVerb: "Writing",
+      completedVerb: "Wrote",
+      argument: (args) => typeof args.path === "string" ? args.path : "",
+      collapsed: (_result, args) => {
+        const content = typeof args.content === "string" ? args.content : "";
+        const lineCount = countWrittenLines(content);
+        return lineCount > 0 ? `+${lineCount}` : undefined;
+      },
+    }),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
@@ -476,6 +525,15 @@ export function registerExtension(
 
   pi.registerTool({
     ...baseEdit,
+    ...createCodexToolRendering({
+      icon: "",
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: (args) => typeof args.path === "string" ? args.path : "",
+      collapsed: summarizeEditDiff,
+      formatSummary: colorizeEditDiffSummary,
+      expandedOutput: renderEditDiff,
+    }),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
@@ -511,15 +569,11 @@ export function registerExtension(
     decision: Extract<DefaultDecision, { action: "prompt" }>,
     config: PermissionsConfig,
     ctx: ExtensionContext,
-    options: { fallbackReason?: string } = {},
   ): Promise<ToolCallEventResult | void> => {
     if (!ctx.hasUI) {
-      const fallback = options.fallbackReason
-        ? `; Auto reviewer failed: ${options.fallbackReason}`
-        : "";
       return {
         block: true,
-        reason: `pi-permissions: ${decision.risk} operation requires interactive approval${fallback}`,
+        reason: `pi-permissions: ${decision.risk} operation requires interactive approval`,
       };
     }
     const runtime = ensureModeRuntime(config);
@@ -544,36 +598,19 @@ export function registerExtension(
           decision.justification
             ? `\n\nJustification: ${decision.justification}`
             : ""
-        }${
-          options.fallbackReason
-            ? `\n\nAuto reviewer fallback: ${options.fallbackReason}`
-            : ""
         }`;
-      const choices = runtime.mode === "default"
-        ? [ALLOW_ONCE_CHOICE, SWITCH_TO_AUTO_CHOICE, DENY_CHOICE]
-        : [ALLOW_ONCE_CHOICE, DENY_CHOICE];
       const choice = await ctx.ui.select(
         prompt,
-        choices,
+        [DEFAULT_ALLOW_ONCE_CHOICE, DEFAULT_DENY_CHOICE],
       );
-      if (choice === ALLOW_ONCE_CHOICE || choice === SWITCH_TO_AUTO_CHOICE) {
+      if (choice === DEFAULT_ALLOW_ONCE_CHOICE) {
         if (permissionContextEpoch !== approvalEpoch) {
           return {
             block: true,
             reason: "pi-permissions: approval context changed before confirmation",
           };
         }
-        if (choice === SWITCH_TO_AUTO_CHOICE) {
-          runtime.endHumanApproval();
-          runtime.activate("auto", { idle: true });
-          invalidatePermissionContext("permission mode changed");
-          setDefaultStatus(ctx);
-          ctx.ui.notify(
-            "pi-permissions: Auto mode 已启用；后续审批将交给 reviewer",
-            "info",
-          );
-        }
-        grantApprovedCall(event, decision, config, ctx.cwd, "user");
+        grantApprovedCall(event, decision, config, ctx.cwd, "user", "default");
         return;
       }
       return {
@@ -633,24 +670,12 @@ export function registerExtension(
   });
 
   pi.on("session_shutdown", async () => {
+    modeMutationGeneration += 1;
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
       await sandboxManager.reset();
     });
-  });
-
-  pi.on("agent_settled", (_event, ctx) => {
-    if (!modeRuntime?.snapshot().pendingMode) return;
-    const previous = modeRuntime.mode;
-    const active = modeRuntime.flushPending({ idle: ctx.isIdle() });
-    if (active === previous) return;
-    invalidatePermissionContext("permission mode changed");
-    setDefaultStatus(ctx);
-    ctx.ui.notify(
-      `pi-permissions: ${modeRuntime.statusLabel} mode 已启用`,
-      "info",
-    );
   });
 
   pi.on("input", (event) => {
@@ -660,6 +685,10 @@ export function registerExtension(
     ) {
       trustedUserMessages.push(event.text);
     }
+  });
+
+  pi.on("agent_start", () => {
+    modeRuntime?.beginAgentTurn();
   });
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | void> => {
@@ -694,7 +723,15 @@ export function registerExtension(
       return { block: true, reason: `pi-permissions: ${decision.reason}` };
     }
     const runtime = ensureModeRuntime(result.config);
-    if (runtime.mode === "auto" && !runtime.autoState.paused) {
+    const effectiveMode = runtime.mode === "auto" ? "auto" : "default";
+    if (effectiveMode === "auto" && runtime.autoState.paused) {
+      return {
+        block: true,
+        reason:
+          "pi-permissions: Auto review paused after repeated denials; start a new turn or run /auto to resume",
+      };
+    }
+    if (effectiveMode === "auto") {
       const id = event.toolCallId;
       if (!id) {
         return {
@@ -711,12 +748,23 @@ export function registerExtension(
         ? AbortSignal.any([ctx.signal, reviewController.signal])
         : reviewController.signal;
       try {
+        const actionFingerprint = fingerprintValue({
+          tool: event.toolName.toLowerCase(),
+          input: event.input,
+        });
+        const configFingerprint = fingerprintConfig(result.config);
+        const approvalOverride = autoApprovalLedger.takeOverride({
+          actionFingerprint,
+          cwd: resolve(ctx.cwd),
+          configFingerprint,
+        });
         const request = buildAutoReviewRequest(
           event,
           decision,
           ctx.cwd,
           result.config.sandbox.profile,
           trustedUserMessages,
+          approvalOverride,
         );
         const auto = await reviewAutoPrompt(
           autoReviewer,
@@ -747,27 +795,67 @@ export function registerExtension(
             result.config,
             ctx.cwd,
             "auto-review",
+            effectiveMode,
           );
           return;
         }
         if (auto.action === "deny") {
-          runtime.recordAutoReview(
+          const autoState = runtime.recordAutoReview(
             "deny",
             result.config.reviewer?.maxConsecutiveDenials ?? 3,
           );
+          autoApprovalLedger.recordDenial({
+            tool: event.toolName,
+            input: event.input as Record<string, unknown>,
+            cwd: resolve(ctx.cwd),
+            configFingerprint,
+            actionFingerprint,
+            summary: decision.summary,
+            rationale: auto.review.rationale,
+          });
+          if (autoState.paused) {
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                "Auto-review interrupted this turn after repeated denials",
+                "warning",
+              );
+            }
+            ctx.abort();
+          }
           return {
             block: true,
-            reason: `pi-permissions Auto denied: ${auto.review.rationale} Take a materially safer approach.`,
+            reason:
+              `pi-permissions Auto denied: ${auto.review.rationale} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`,
           };
         }
-        return requestHumanApproval(event, decision, result.config, ctx, {
-          fallbackReason: auto.error.message,
-        });
+        const timeoutNote = auto.error.kind === "timeout"
+          ? " A timeout alone is not proof that the action is unsafe."
+          : "";
+        runtime.recordAutoNonDenial();
+        return {
+          block: true,
+          reason:
+            `pi-permissions Auto review failed closed: ${auto.error.message}.${timeoutNote} The action was not run.`,
+        };
+      } catch (error: unknown) {
+        if (reviewSignal.aborted) {
+          return {
+            block: true,
+            reason: "pi-permissions: permission context changed during Auto review",
+          };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        runtime.recordAutoNonDenial();
+        return {
+          block: true,
+          reason:
+            `pi-permissions Auto review failed closed: ${message}. The action was not run.`,
+        };
       } finally {
         if (reviewControllers.get(id) === reviewController) {
           reviewControllers.delete(id);
+          runtime.endReview(id);
         }
-        runtime.endReview(id);
       }
     }
     return requestHumanApproval(event, decision, result.config, ctx);
@@ -776,45 +864,34 @@ export function registerExtension(
   const activateMode = async (
     mode: "default" | "auto",
     ctx: ExtensionContext,
-  ): Promise<void> => {
-    try {
-      const result = await activateConfig(ctx, ctx.isIdle());
-      const runtime = ensureModeRuntime(result.config);
-      if (
-        runtime.snapshot().configFingerprint !==
-        fingerprintConfig(result.config)
-      ) {
-        runtime.restore([], result.config);
-      }
-      const transition = runtime.activate(mode, { idle: ctx.isIdle() });
-      setDefaultStatus(ctx);
-      if (typeof transition === "string") {
+  ): Promise<void> =>
+    runModeMutation(async (generation) => {
+      try {
+        const result = await activateConfig(ctx, ctx.isIdle());
+        if (generation !== modeMutationGeneration) return;
+        const runtime = ensureModeRuntime(result.config);
+        if (
+          runtime.snapshot().configFingerprint !==
+          fingerprintConfig(result.config)
+        ) {
+          runtime.restore([], result.config);
+        }
+        runtime.activate(mode);
         invalidatePermissionContext("permission mode changed");
+        setDefaultStatus(ctx);
         ctx.ui.notify(
           `pi-permissions: ${runtime.statusLabel} mode 已启用`,
           "info",
         );
-      } else if (transition.pending) {
-        const pending = transition.pending === "auto" ? "Auto" : "Default";
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDefaultStatus(ctx);
         ctx.ui.notify(
-          `pi-permissions: ${pending} mode 将在当前工作结束后启用`,
-          "info",
-        );
-      } else {
-        ctx.ui.notify(
-          `pi-permissions: mode 切换已取消；继续使用 ${runtime.statusLabel}`,
-          "info",
+          `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
+          "error",
         );
       }
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      setDefaultStatus(ctx);
-      ctx.ui.notify(
-        `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
-        "error",
-      );
-    }
-  };
+    });
 
   pi.registerCommand("default", {
     description: "Activate pi-permissions Default mode",
@@ -826,49 +903,104 @@ export function registerExtension(
     handler: async (_args, ctx) => activateMode("auto", ctx),
   });
 
-  const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {
-    try {
-      const result = await activateConfig(ctx);
-      const runtime = ensureModeRuntime(result.config);
-      const transition = runtime.cycle({ idle: ctx.isIdle() });
-      setDefaultStatus(ctx);
-      if (typeof transition === "string") {
-        invalidatePermissionContext("permission mode changed");
-        ctx.ui.notify(
-          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
-          "info",
-        );
-      } else if (transition.pending) {
-        const pending = transition.pending === "auto" ? "Auto" : "Default";
-        ctx.ui.notify(
-          `pi-permissions: ${pending} mode 将在当前工作结束后启用`,
-          "info",
-        );
-      } else {
-        ctx.ui.notify(
-          `pi-permissions: mode 切换已取消；继续使用 ${runtime.statusLabel}`,
-          "info",
-        );
+  pi.registerCommand("approve", {
+    description: "Approve one exact retry of a recent Auto-review denial",
+    handler: async (_args, ctx) => {
+      let result: LoadedPermissionsConfig;
+      try {
+        result = await activateConfig(ctx);
+      } catch (error: unknown) {
+        reportConfigError(ctx, error);
+        return;
       }
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      setDefaultStatus(ctx);
-      ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
-    }
-  };
-
-  pi.registerShortcut("shift+tab", {
-    description: "Cycle pi-permissions mode",
-    handler: async (ctx) => {
-      if (await shiftTabAvailability(agentDir) !== "available") {
+      const runtime = ensureModeRuntime(result.config);
+      if (runtime.mode !== "auto") {
         ctx.ui.notify(
-          "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
+          "/approve is available only while Auto mode is active",
           "warning",
         );
         return;
       }
-      await cyclePermissionMode(ctx);
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/approve requires an interactive UI", "warning");
+        return;
+      }
+      const denials = autoApprovalLedger.listDenials().reverse();
+      if (denials.length === 0) {
+        ctx.ui.notify("No recent Auto-review denials", "info");
+        return;
+      }
+      const choices = denials.map((denial, index) => {
+        const summary = denial.summary.replace(/\s+/g, " ").trim().slice(0, 120);
+        const rationale = denial.rationale
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 160);
+        return `${index + 1}. ${denial.tool}: ${summary} — ${rationale}`;
+      });
+      const choice = await ctx.ui.select("Auto-review Denials", choices);
+      if (choice === undefined) return;
+      const selectedIndex = choices.indexOf(choice);
+      if (selectedIndex < 0) return;
+      const selected = autoApprovalLedger.approveDenial(
+        denials[selectedIndex]!.id,
+      );
+      if (!selected) {
+        ctx.ui.notify("That Auto-review denial is no longer available", "warning");
+        return;
+      }
+      pi.sendMessage(
+        {
+          customType: "pi-permissions-auto-override",
+          content: [
+            "The user approved one retry of this exact Auto-review denial.",
+            `Tool: ${selected.tool}`,
+            `Input: ${JSON.stringify(selected.input)}`,
+            `Working directory: ${selected.cwd}`,
+            `Previous denial: ${selected.rationale}`,
+            "Retry this exact action once. Do not broaden or alter it; the retry still requires Auto-review.",
+          ].join("\n"),
+          display: true,
+          details: {
+            denialId: selected.id,
+            actionFingerprint: selected.actionFingerprint,
+          },
+        },
+        { triggerTurn: true },
+      );
     },
+  });
+
+  const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> =>
+    runModeMutation(async (generation) => {
+      try {
+        if (await shiftTabAvailability(agentDir) !== "available") {
+          ctx.ui.notify(
+            "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
+            "warning",
+          );
+          return;
+        }
+        const result = await activateConfig(ctx);
+        if (generation !== modeMutationGeneration) return;
+        const runtime = ensureModeRuntime(result.config);
+        runtime.cycle();
+        invalidatePermissionContext("permission mode changed");
+        setDefaultStatus(ctx);
+        ctx.ui.notify(
+          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
+          "info",
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDefaultStatus(ctx);
+        ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
+      }
+    });
+
+  pi.registerShortcut("shift+tab", {
+    description: "Cycle pi-permissions mode",
+    handler: cyclePermissionMode,
   });
 
   pi.registerCommand("permissions", {

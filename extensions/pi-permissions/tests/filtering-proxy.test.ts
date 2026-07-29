@@ -53,14 +53,51 @@ function readAtLeast(socket: Socket, size: number): Promise<Buffer> {
   });
 }
 
-async function httpConnectStatus(proxyPort: number, authority: string): Promise<number> {
+function readHttpHeaders(socket: Socket): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let length = 0;
+    const cleanup = (): void => {
+      socket.off("data", onData);
+      socket.off("error", onError);
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer): void => {
+      chunks.push(chunk);
+      length += chunk.length;
+      const response = Buffer.concat(chunks, length);
+      const boundary = response.indexOf("\r\n\r\n");
+      if (boundary < 0) return;
+      cleanup();
+      resolve(response.subarray(0, boundary).toString("latin1"));
+    };
+    socket.on("data", onData);
+    socket.once("error", onError);
+  });
+}
+
+async function httpConnectResponse(
+  proxyPort: number,
+  authority: string,
+): Promise<{ status: number; proxyError?: string }> {
   const socket = await open(proxyPort);
   socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
-  const response = await readAtLeast(socket, 12);
+  const text = await readHttpHeaders(socket);
   socket.destroy();
-  const status = /^HTTP\/1\.1\s+(\d{3})/.exec(response.toString("latin1"))?.[1];
-  if (!status) throw new Error(`invalid HTTP proxy response: ${response.toString("latin1")}`);
-  return Number(status);
+  const status = /^HTTP\/1\.1\s+(\d{3})/.exec(text)?.[1];
+  if (!status) throw new Error(`invalid HTTP proxy response: ${text}`);
+  const proxyError = /^X-Proxy-Error:\s*(\S+)/im.exec(text)?.[1];
+  return {
+    status: Number(status),
+    ...(proxyError ? { proxyError } : {}),
+  };
+}
+
+async function httpConnectStatus(proxyPort: number, authority: string): Promise<number> {
+  return (await httpConnectResponse(proxyPort, authority)).status;
 }
 
 async function socksConnectStatus(proxyPort: number, host: string, port: number): Promise<number> {
@@ -246,8 +283,11 @@ describe("host filtering proxy", () => {
       },
     );
 
-    await expect(httpConnectStatus(filteringProxy.ports.http, "missing.example:443"))
-      .resolves.toBe(403);
+    await expect(httpConnectResponse(filteringProxy.ports.http, "missing.example:443"))
+      .resolves.toEqual({
+        status: 502,
+        proxyError: "dns-resolution-failed",
+      });
     expect(upstreamConnections).toBe(0);
   });
 

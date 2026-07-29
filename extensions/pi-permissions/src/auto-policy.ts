@@ -16,7 +16,7 @@ import {
 export type AutoPolicyResult =
   | { action: "approve"; review: AutoReviewResult; state: AutoState }
   | { action: "deny"; review: AutoReviewResult; state: AutoState }
-  | { action: "fallback"; error: AutoReviewerFailure; state: AutoState };
+  | { action: "error"; error: AutoReviewerFailure; state: AutoState };
 
 export async function reviewAutoPrompt(
   reviewer: AutoReviewer,
@@ -43,11 +43,11 @@ export async function reviewAutoPrompt(
   } catch (error) {
     if (error instanceof AutoReviewerFailure) {
       if (error.kind === "cancelled") throw error;
-      return { action: "fallback", error, state };
+      return { action: "error", error, state };
     }
     const message = error instanceof Error ? error.message : String(error);
     return {
-      action: "fallback",
+      action: "error",
       error: new AutoReviewerFailure(
         "provider",
         `Auto reviewer failed: ${message}`,
