@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -49,6 +49,14 @@ describe("permissions config", () => {
     expect(DEFAULT_CONFIG.sandbox.filesystem.denyWrite).toEqual(
       expect.arrayContaining([".env", ".env.*", "*.pem", "*.key"]),
     );
+  });
+
+  it("ships a schema-valid complete example config", async () => {
+    const contents = await readFile(
+      join(import.meta.dirname, "..", "config.example.json"),
+      "utf8",
+    );
+    expect(() => validatePermissionsConfig(JSON.parse(contents))).not.toThrow();
   });
 
   it("does not let a project allow override a global deny", () => {
