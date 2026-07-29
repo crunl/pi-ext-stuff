@@ -1,12 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyAutocompleteAbove,
-  computePanelRow,
-  type FloatingTui,
   frameLines,
-  locateEditor,
   registerAutocompleteAbove,
 } from "../src/tui/autocomplete-above.ts";
+import type { FloatingTui } from "../src/tui/editor-float-panel.ts";
 
 const EDITOR_LINES = ["────", " > input", "────"];
 
@@ -68,59 +66,6 @@ describe("frameLines", () => {
     expect(lines[0]).toBe(`<╭${"─".repeat(7)}╮>`);
     expect(lines[1]).toBe("<│ >x< │>"); // content outside color wrapping
     expect(color).toHaveBeenCalledTimes(3); // top, left, right
-  });
-});
-
-describe("locateEditor", () => {
-  it("finds the editor nested in a root child container", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor);
-    expect(locateEditor(tui, editor)).toEqual({ childIndex: 1 });
-  });
-
-  it("finds an overlay-hosted editor via the overlay stack", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(fakeEditor());
-    (tui as any).overlayStack = [{ component: editor }];
-    expect(locateEditor(tui, editor)).toEqual({ overlay: true });
-  });
-
-  it("returns null when the editor is nowhere", () => {
-    const tui = fakeTui(fakeEditor());
-    expect(locateEditor(tui, fakeEditor())).toBeNull();
-    expect(locateEditor(undefined, fakeEditor())).toBeNull();
-  });
-});
-
-describe("computePanelRow", () => {
-  it("anchors the panel to the editor top border on a full screen", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor, { rows: 24, footerHeight: 2 });
-    // 24 - footer(2) - editor(3) - panel(2) = 17
-    expect(computePanelRow(tui, editor, 3, 2)).toBe(17);
-  });
-
-  it("returns null when session content is shorter than the screen", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor);
-    tui.cursorRow = 10; // top-aligned content
-    expect(computePanelRow(tui, editor, 3, 2)).toBeNull();
-  });
-
-  it("returns null when the editor is not among tui children", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(fakeEditor());
-    expect(computePanelRow(tui, editor, 3, 2)).toBeNull();
-  });
-
-  it("returns null when there is no room above the editor", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor, { rows: 6, footerHeight: 2 });
-    expect(computePanelRow(tui, editor, 3, 2)).toBeNull();
-  });
-
-  it("returns null without tui internals", () => {
-    expect(computePanelRow(undefined, {}, 3, 2)).toBeNull();
   });
 });
 
