@@ -41,11 +41,6 @@ export interface CodexToolRendererSpec {
   collapsed: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
   renderExpandedResult?: ExpandedResultRenderer;
-  expandedOutput?: (
-    result: AgentToolResult<unknown>,
-    args: Record<string, unknown>,
-    theme: Theme,
-  ) => string | undefined;
   maxOutputRows?: number;
   transformOutput?: (text: string) => string;
 }
@@ -119,25 +114,6 @@ export function colorizeEditDiffSummary(
   const match = summary.match(/^(\+\d+)\s+(-\d+)$/);
   if (!match) return theme.fg("dim", summary);
   return `${theme.fg("success", match[1])} ${theme.fg("error", match[2])}`;
-}
-
-export function renderEditDiff(
-  result: AgentToolResult<unknown>,
-  _args: Record<string, unknown>,
-  theme: Theme,
-): string | undefined {
-  const details = result.details as { diff?: unknown } | undefined;
-  if (typeof details?.diff !== "string" || details.diff.length === 0) {
-    return undefined;
-  }
-  return details.diff
-    .split(/\r?\n/)
-    .map((line) => {
-      if (line.startsWith("+")) return theme.fg("toolDiffAdded", line);
-      if (line.startsWith("-")) return theme.fg("toolDiffRemoved", line);
-      return theme.fg("toolDiffContext", line);
-    })
-    .join("\n");
 }
 
 function headerText(
@@ -268,12 +244,9 @@ export function createCodexToolRendering(
       const text = spec.transformOutput
         ? spec.transformOutput(rawText)
         : rawText;
-      const expandedText = options.expanded && !context.isError
-        ? spec.expandedOutput?.(result, context.args, theme) ?? text
-        : text;
-      if (options.expanded && expandedText.length > 0) {
+      if (options.expanded && text.length > 0) {
         return new ToolOutputComponent(
-          expandedText,
+          text,
           true,
           spec.maxOutputRows ?? 5,
           (line) => theme.fg(context.isError ? "error" : "toolOutput", line),

@@ -63,6 +63,7 @@ describe("createEditDiffBox", () => {
     const rendered = component.render(40);
     const plain = stripAnsi(rendered.join("\n"));
 
+    expect(rendered).toHaveLength(3);
     expect(plain).toContain("  9 │ before");
     expect(plain).toContain("- 10 │ old value");
     expect(plain).toContain("+ 10 │ new value");

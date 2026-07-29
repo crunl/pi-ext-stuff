@@ -17,7 +17,6 @@ export {
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
   createCodexToolRendering,
-  renderEditDiff,
   summarizeEditDiff,
   type CodexToolRendererSpec,
   type ExpandedResultRenderer,
