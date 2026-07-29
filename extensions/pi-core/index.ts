@@ -10,7 +10,6 @@ export {
   applyAutocompleteAbove,
   registerAutocompleteAbove,
 } from "./src/tui/autocomplete-above.ts";
-export { applyPinnedBottom, computeBottomPadding } from "./src/tui/pinned-bottom.ts";
 export {
   createEditDiffBox,
   parseEditDiff,
