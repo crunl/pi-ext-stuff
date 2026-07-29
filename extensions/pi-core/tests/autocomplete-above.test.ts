@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyAutocompleteAbove,
   computePanelRow,
+  frameLines,
   locateEditor,
   registerAutocompleteAbove,
   type FloatingTui,
@@ -43,6 +44,24 @@ function activateAutocomplete(editor: any, items: string[]) {
   editor.autocompleteState = { itemRange: [0, 0] };
   editor.autocompleteList = { render: () => [...items] };
 }
+
+describe("frameLines", () => {
+  it("adds a rounded top border and side verticals at exact frame width", () => {
+    const inner = "item-a".padEnd(16); // frameWidth 20 - overhead 4
+    const lines = frameLines([inner], 20, (t) => t);
+    expect(lines[0]).toBe(`╭${"─".repeat(18)}╮`);
+    expect(lines[1]).toBe(`│ ${inner} │`);
+    for (const line of lines) expect(line).toHaveLength(20); // width conserved
+  });
+
+  it("colors only the border, not the content", () => {
+    const color = vi.fn((t: string) => `<${t}>`);
+    const lines = frameLines(["x"], 9, color);
+    expect(lines[0]).toBe(`<╭${"─".repeat(7)}╮>`);
+    expect(lines[1]).toBe("<│ >x< │>"); // content outside color wrapping
+    expect(color).toHaveBeenCalledTimes(3); // top, left, right
+  });
+});
 
 describe("locateEditor", () => {
   it("finds the editor nested in a root child container", () => {
@@ -110,8 +129,12 @@ describe("applyAutocompleteAbove - floating mode", () => {
     expect(tui.showOverlay).toHaveBeenCalledOnce();
     const [component, options] = (tui.showOverlay as any).mock.calls[0];
     expect(options.nonCapturing).toBe(true);
-    expect(options.row).toBe(24 - 2 - 3 - 2);
-    expect(component.render(0)[0]).toContain("item-a");
+    // panel = top border + 2 items = 3 rows
+    expect(options.row).toBe(24 - 2 - 3 - 3);
+    const panelLines = component.render(0);
+    expect(panelLines[0]).toContain("╭"); // rounded top border
+    expect(panelLines[1]).toContain("item-a");
+    expect(panelLines[1]).toContain("│"); // side verticals
   });
 
   it("live-updates overlay options instead of re-creating the overlay", () => {
@@ -125,7 +148,8 @@ describe("applyAutocompleteAbove - floating mode", () => {
     editor.render(20);
 
     expect(tui.showOverlay).toHaveBeenCalledOnce();
-    expect(tui.overlays[0].options.row).toBe(24 - 2 - 3 - 1);
+    // panel = top border + 1 item = 2 rows
+    expect(tui.overlays[0].options.row).toBe(24 - 2 - 3 - 2);
   });
 
   it("self-heals: empties and removes the overlay when the editor is swapped out", async () => {
@@ -171,9 +195,10 @@ describe("applyAutocompleteAbove - inline fallback", () => {
 
     const lines = editor.render(20);
 
-    expect(lines[0]).toContain("item-a");
-    expect(lines[1]).toContain("item-b");
-    expect(lines[2]).toContain("────");
+    expect(lines[0]).toContain("╭"); // top border first
+    expect(lines[1]).toContain("item-a");
+    expect(lines[2]).toContain("item-b");
+    expect(lines[3]).toContain("────");
     expect(editor.autocompleteList).toBeDefined(); // re-attached
   });
 
@@ -186,7 +211,8 @@ describe("applyAutocompleteAbove - inline fallback", () => {
 
     const lines = editor.render(20);
 
-    expect(lines[0]).toContain("item-a");
+    expect(lines[0]).toContain("╭");
+    expect(lines[1]).toContain("item-a");
     expect(tui.showOverlay).not.toHaveBeenCalled();
   });
 

@@ -5,6 +5,8 @@ interface EditorInternals {
   autocompleteList?: { render(width: number): string[] };
   autocompleteState?: unknown;
   tui?: FloatingTui;
+  /** Public on pi-tui Editor; kept dynamic by the host (thinking/bash mode). */
+  borderColor?: (text: string) => string;
   __autocompleteAbove?: boolean;
 }
 
@@ -155,6 +157,31 @@ export function computePanelRow(
   return row >= 0 ? row : null;
 }
 
+/** Horizontal columns consumed by the frame: "│ " left + " │" right. */
+const FRAME_OVERHEAD = 4;
+
+/**
+ * Wrap panel lines with a rounded top border and left/right verticals. The
+ * editor's own top border below the panel closes the frame visually:
+ *
+ *   ╭────────────╮
+ *   │ → item   │
+ *   ──────────────  <- editor top border
+ *
+ * Lines must already be padded to frameWidth - FRAME_OVERHEAD.
+ */
+export function frameLines(
+  lines: string[],
+  frameWidth: number,
+  color: (text: string) => string,
+): string[] {
+  const innerWidth = Math.max(1, frameWidth - FRAME_OVERHEAD);
+  const top = color(`╭${"─".repeat(innerWidth + 2)}╮`);
+  const left = color("│ ");
+  const right = color(" │");
+  return [top, ...lines.map((line) => `${left}${line}${right}`)];
+}
+
 /**
  * Patch an editor instance so its autocomplete panel appears ABOVE the input
  * box. When the surrounding TUI allows it, the panel floats as a nonCapturing
@@ -202,10 +229,15 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T 
     const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
     const paddingX = Math.min(editor.getPaddingX?.() ?? 0, maxPadding);
     const contentWidth = Math.max(1, width - paddingX * 2);
-    const listLines = list.render(contentWidth).map((line) => {
-      const fill = " ".repeat(Math.max(0, contentWidth - visibleWidth(line)));
+    // Render the list narrower so the frame fits within contentWidth, then
+    // pad each line to the frame's inner width before framing.
+    const innerWidth = Math.max(1, contentWidth - FRAME_OVERHEAD);
+    const rawLines = list.render(innerWidth).map((line) => {
+      const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(line)));
       return `${line}${fill}`;
     });
+    const borderColor = internals.borderColor ?? ((text: string) => text);
+    const listLines = frameLines(rawLines, contentWidth, borderColor);
 
     // Floating mode: composite the panel over existing content, zero layout shift.
     const tui = internals.tui;
