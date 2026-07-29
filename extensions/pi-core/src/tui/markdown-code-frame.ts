@@ -136,4 +136,3 @@ function renderCodeFrame(
   }
   return lines;
 }
-
