@@ -143,12 +143,13 @@ function updateHeader(
   context: RenderContext,
   theme: Theme,
   outputPad: OutputPad,
-): void {
+): Text {
   if (!state.header || state.outputPad !== outputPad) {
     state.header = new Text("", outputPad, 0);
     state.outputPad = outputPad;
   }
-  state.header?.setText(headerText(spec, state, args, context, theme));
+  state.header.setText(headerText(spec, state, args, context, theme));
+  return state.header;
 }
 
 export function createCodexToolRendering(
@@ -160,15 +161,8 @@ export function createCodexToolRendering(
     renderCall(args, theme, context) {
       const state = context.state;
       paddingSource.track(context.toolCallId, context.invalidate);
-      const outputPad = paddingSource.getOutputPad();
       state.status ??= "running";
-      if (!state.header || state.outputPad !== outputPad) {
-        state.header = new Text("", outputPad, 0);
-        state.outputPad = outputPad;
-      }
-      const header = state.header;
-      header.setText(headerText(spec, state, args, context, theme));
-      return header;
+      return updateHeader(spec, state, args, context, theme, paddingSource.getOutputPad());
     },
     renderResult(result, options, theme, context) {
       const state = context.state;

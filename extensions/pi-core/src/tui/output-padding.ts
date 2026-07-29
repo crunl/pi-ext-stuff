@@ -14,6 +14,9 @@ interface OutputPadSetting {
   value?: unknown;
 }
 
+/** Upper bound on retained per-tool-call invalidate callbacks. */
+const MAX_TRACKED_INVALIDATORS = 200;
+
 function readOutputPad(settingsPath: string): OutputPadSetting {
   try {
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
@@ -82,6 +85,15 @@ export class OutputPaddingController implements OutputPaddingSource {
   }
 
   track(toolCallId: string, invalidate: () => void): void {
+    // Cap retained invalidators: entries for finished tool calls are only
+    // dropped when they throw during refresh(), so a long session would
+    // otherwise accumulate one closure per tool call. Rendered tool calls
+    // re-track on every render, so trimming the oldest entries is safe —
+    // anything still on screen re-registers immediately.
+    if (!this.invalidators.has(toolCallId) && this.invalidators.size >= MAX_TRACKED_INVALIDATORS) {
+      const oldest = this.invalidators.keys().next().value;
+      if (oldest !== undefined) this.invalidators.delete(oldest);
+    }
     this.invalidators.set(toolCallId, invalidate);
   }
 

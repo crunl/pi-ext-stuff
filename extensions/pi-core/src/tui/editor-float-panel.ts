@@ -174,11 +174,15 @@ export class EditorFloatPanel {
   private readonly component = new PanelComponent();
   private handle: FloatingOverlayHandle | undefined;
   private options: FloatingOverlayOptions | undefined;
+  private readonly tui: FloatingTui | undefined;
+  private readonly anchor: unknown;
 
-  constructor(
-    private readonly tui: FloatingTui | undefined,
-    private readonly anchor: unknown,
-  ) {}
+  // Explicit assignment (not parameter properties) keeps this file loadable
+  // under node's strip-only TypeScript mode used by sibling extensions.
+  constructor(tui: FloatingTui | undefined, anchor: unknown) {
+    this.tui = tui;
+    this.anchor = anchor;
+  }
 
   get visible(): boolean {
     return this.handle !== undefined;
