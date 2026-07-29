@@ -7,6 +7,10 @@ export default function piCore(pi: ExtensionAPI): void {
 
 export { registerExtension };
 export {
+  applyAutocompleteAbove,
+  registerAutocompleteAbove,
+} from "./src/tui/autocomplete-above.ts";
+export {
   createEditDiffBox,
   parseEditDiff,
   type EditDiffBoxOptions,
