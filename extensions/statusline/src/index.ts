@@ -52,7 +52,7 @@ export default function statusline(pi: ExtensionAPI) {
 			editor.getModelInfo = modelInfo;
 			editor.getStats = stats;
 			editor.getPermissionsMode = () => permissionsMode.get();
-			return applyAutocompleteAbove(editor);
+			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
 	};
 
