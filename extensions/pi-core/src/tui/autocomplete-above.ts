@@ -1,10 +1,12 @@
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui } from "./editor-float-panel.ts";
+import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
 
 interface EditorInternals {
   autocompleteList?: { render(width: number): string[]; handleInput?(data: string): void };
   autocompleteState?: unknown;
+  /** Fallback only: used when the caller cannot pass the factory's tui. */
   tui?: FloatingTui;
   /** Public on pi-tui Editor; kept dynamic by the host (thinking/bash mode). */
   borderColor?: (text: string) => string;
@@ -24,9 +26,9 @@ const FRAME_OVERHEAD = 4;
  * Wrap panel lines with a rounded top border and left/right verticals. The
  * editor's own top border below the panel closes the frame visually:
  *
- *   ╭────────────╮
+ *   ╭──────────╮
  *   │ → item   │
- *   ──────────────  <- editor top border
+ *   ────────────  <- editor top border
  *
  * Lines must already be padded to frameWidth - FRAME_OVERHEAD.
  */
@@ -48,9 +50,16 @@ export function frameLines(
  * EditorFloatPanel (no layout shift); otherwise it degrades to inline lines
  * prepended above the editor. Also remaps tab/shift+tab to panel navigation
  * while the panel is open. Idempotent.
+ *
+ * Pass the TUI from the editor factory when available (official parameter);
+ * reading the editor's private tui field is only a fallback for callers
+ * that do not have it.
  */
-export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T {
+export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui?: FloatingTui): T {
   const internals = editor as unknown as EditorInternals;
+  // Resolve lazily: the private-field fallback may be assigned after patching.
+  const resolveTui = () => tui ?? internals.tui;
+  setSelectorNavAnchor(resolveTui, editor);
   if (internals.__autocompleteAbove) return editor;
   internals.__autocompleteAbove = true;
 
@@ -90,7 +99,7 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T 
 
     // Floating mode: zero layout shift. Lazily create the panel so the
     // anchor is this editor instance.
-    panel ??= new EditorFloatPanel(internals.tui, editor);
+    panel ??= new EditorFloatPanel(resolveTui(), editor);
     const floated = panel.show(listLines, {
       editorHeight: editorLines.length,
       col: paddingX,
@@ -149,8 +158,11 @@ export function registerAutocompleteAbove(pi: ExtensionAPI): void {
       keybindings: Parameters<NonNullable<typeof previous>>[2],
     ) =>
       previous
-        ? applyAutocompleteAbove(previous(tui, theme, keybindings))
-        : applyAutocompleteAbove(new CustomEditor(tui, theme, keybindings));
+        ? applyAutocompleteAbove(previous(tui, theme, keybindings), tui as unknown as FloatingTui)
+        : applyAutocompleteAbove(
+            new CustomEditor(tui, theme, keybindings),
+            tui as unknown as FloatingTui,
+          );
     (factory as { __autocompleteAbove?: boolean }).__autocompleteAbove = true;
     ctx.ui.setEditorComponent(factory);
   });
