@@ -26,7 +26,13 @@ function fakeTui(editor: unknown, { rows = 24, cols = 80, footerHeight = 2 } = {
     showOverlay: vi.fn((component: any, options: any) => {
       const entry = { component, options, hidden: false };
       overlays.push(entry);
-      return { hide: () => overlays.splice(overlays.indexOf(entry), 1) };
+      return {
+        hide: () => overlays.splice(overlays.indexOf(entry), 1),
+        setHidden: (hidden: boolean) => {
+          entry.hidden = hidden;
+        },
+        isHidden: () => entry.hidden,
+      };
     }),
   } as any;
   return tui;
@@ -115,7 +121,7 @@ describe("EditorFloatPanel", () => {
     expect(tui.overlays[0].options.width).toBe(20);
   });
 
-  it("returns false and hides when floating placement is unavailable", () => {
+  it("returns false and conceals when floating placement is unavailable", () => {
     const editor = fakeEditor();
     const tui = fakeTui(editor);
     const panel = new EditorFloatPanel(tui, editor);
@@ -127,16 +133,65 @@ describe("EditorFloatPanel", () => {
 
     expect(ok).toBe(false);
     expect(panel.visible).toBe(false);
-    expect(tui.overlays).toHaveLength(0);
+    // Entry stays mounted (hidden) for cheap re-show; editor is still alive.
+    expect(tui.overlays).toHaveLength(1);
+    expect(tui.overlays[0].hidden).toBe(true);
   });
 
-  it("hide() removes the overlay", () => {
+  it("hide() conceals the overlay entry and show() re-reveals it", () => {
     const editor = fakeEditor();
     const tui = fakeTui(editor);
     const panel = new EditorFloatPanel(tui, editor);
     panel.show(["a"], { editorHeight: 3, col: 1, width: 18 });
 
     panel.hide();
+
+    expect(panel.visible).toBe(false);
+    expect(tui.overlays).toHaveLength(1); // mounted but hidden
+    expect(tui.overlays[0].hidden).toBe(true);
+
+    panel.show(["b"], { editorHeight: 3, col: 1, width: 18 });
+    expect(panel.visible).toBe(true);
+    expect(tui.overlays[0].hidden).toBe(false);
+    expect(tui.showOverlay).toHaveBeenCalledOnce(); // stack untouched
+  });
+
+  it("hide() removes the entry when the anchor editor is already gone", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    const panel = new EditorFloatPanel(tui, editor);
+    panel.show(["a"], { editorHeight: 3, col: 1, width: 18 });
+
+    (tui.children as any[])[1] = { children: [fakeEditor()] }; // anchor detached
+    panel.hide();
+
+    expect(tui.overlays).toHaveLength(0); // no orphan left in the stack
+  });
+
+  it("hide() falls back to removal without setHidden support", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    const legacyShow = tui.showOverlay as any;
+    tui.showOverlay = vi.fn((component: any, options: any) => {
+      const handle = legacyShow(component, options);
+      return { hide: handle.hide }; // no setHidden
+    }) as any;
+    const panel = new EditorFloatPanel(tui, editor);
+    panel.show(["a"], { editorHeight: 3, col: 1, width: 18 });
+
+    panel.hide();
+
+    expect(panel.visible).toBe(false);
+    expect(tui.overlays).toHaveLength(0);
+  });
+
+  it("dispose() removes the overlay entry", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    const panel = new EditorFloatPanel(tui, editor);
+    panel.show(["a"], { editorHeight: 3, col: 1, width: 18 });
+
+    panel.dispose();
 
     expect(panel.visible).toBe(false);
     expect(tui.overlays).toHaveLength(0);

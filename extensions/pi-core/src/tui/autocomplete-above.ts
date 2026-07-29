@@ -23,6 +23,14 @@ interface PatchableEditor {
 const FRAME_OVERHEAD = 4;
 
 /**
+ * Panel owned by the previously patched editor. Disposed when a new editor
+ * is patched: a swapped-out editor's concealed panel can no longer self-heal
+ * (hidden overlays are skipped by the compositor, so its render() never
+ * runs), and would otherwise leak one overlay entry per editor swap.
+ */
+let activePanel: EditorFloatPanel | undefined;
+
+/**
  * Wrap panel lines with a rounded top border and left/right verticals. The
  * editor's own top border below the panel closes the frame visually:
  *
@@ -60,6 +68,8 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   // Resolve lazily: the private-field fallback may be assigned after patching.
   const resolveTui = () => tui ?? internals.tui;
   setSelectorNavAnchor(resolveTui, editor);
+  activePanel?.dispose();
+  activePanel = undefined;
   if (internals.__autocompleteAbove) return editor;
   internals.__autocompleteAbove = true;
 
@@ -99,7 +109,10 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
 
     // Floating mode: zero layout shift. Lazily create the panel so the
     // anchor is this editor instance.
-    panel ??= new EditorFloatPanel(resolveTui(), editor);
+    if (!panel) {
+      panel = new EditorFloatPanel(resolveTui(), editor);
+      activePanel = panel;
+    }
     const floated = panel.show(listLines, {
       editorHeight: editorLines.length,
       col: paddingX,

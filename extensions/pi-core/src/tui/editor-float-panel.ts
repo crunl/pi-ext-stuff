@@ -16,6 +16,9 @@ interface FloatingComponent {
 
 interface FloatingOverlayHandle {
   hide(): void;
+  /** Present on pi-tui >= 0.x; toggles visibility without removing the entry. */
+  setHidden?(hidden: boolean): void;
+  isHidden?(): boolean;
 }
 
 interface FloatingOverlayOptions {
@@ -167,8 +170,13 @@ export interface EditorFloatPanelShowOptions {
  *
  * show() places (or live-updates) the panel; returns false when floating
  * placement is unavailable so the caller can degrade (e.g. render inline).
- * hide() removes the overlay. The panel self-heals if the anchor editor
+ * hide() conceals the panel. The panel self-heals if the anchor editor
  * disappears: it renders empty and removes its overlay on the next frame.
+ *
+ * The overlay entry is mounted once and toggled via the handle's
+ * setHidden() (public OverlayHandle API), keeping the overlay stack stable
+ * across rapid show/hide cycles while typing; dispose() (or self-healing)
+ * removes the entry for good.
  */
 export class EditorFloatPanel {
   private readonly component = new PanelComponent();
@@ -185,7 +193,7 @@ export class EditorFloatPanel {
   }
 
   get visible(): boolean {
-    return this.handle !== undefined;
+    return this.handle !== undefined && !(this.handle.isHidden?.() ?? false);
   }
 
   show(lines: string[], opts: EditorFloatPanelShowOptions): boolean {
@@ -207,16 +215,33 @@ export class EditorFloatPanel {
       this.options.row = row;
       this.options.col = opts.col;
       this.options.width = opts.width;
+      this.handle.setHidden?.(false);
     } else {
       this.component.isAlive = () => locateEditor(this.tui, this.anchor) !== null;
-      this.component.onDead = () => this.hide();
+      // Self-healing removes the entry permanently: a dead anchor never
+      // comes back, so the orphaned overlay must not linger in the stack.
+      this.component.onDead = () => this.dispose();
       this.options = { row, col: opts.col, width: opts.width, nonCapturing: true };
       this.handle = tui.showOverlay(this.component, this.options);
     }
     return true;
   }
 
+  /** Conceal the panel, keeping the overlay entry mounted for reuse. */
   hide(): void {
+    if (!this.handle) return;
+    // Hidden entries are skipped by the compositor, so render()-based
+    // self-healing cannot fire while concealed. If the anchor is already
+    // gone, remove the entry now instead of leaving it in the stack.
+    if (!this.handle.setHidden || locateEditor(this.tui, this.anchor) === null) {
+      this.dispose();
+      return;
+    }
+    this.handle.setHidden(true);
+  }
+
+  /** Remove the overlay entry permanently. */
+  dispose(): void {
     try {
       this.handle?.hide();
     } finally {
