@@ -1,8 +1,8 @@
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 
 interface EditorInternals {
-  autocompleteList?: { render(width: number): string[] };
+  autocompleteList?: { render(width: number): string[]; handleInput?(data: string): void };
   autocompleteState?: unknown;
   tui?: FloatingTui;
   /** Public on pi-tui Editor; kept dynamic by the host (thinking/bash mode). */
@@ -12,6 +12,7 @@ interface EditorInternals {
 
 interface PatchableEditor {
   render(width: number): string[];
+  handleInput?(data: string): void;
   getPaddingX?(): number;
 }
 
@@ -272,6 +273,32 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T 
     const pad = " ".repeat(paddingX);
     return [...listLines.map((line) => `${pad}${line}${pad}`), ...editorLines];
   };
+
+  // Tab / shift+tab navigate the open panel instead of their default
+  // meanings (tab = apply completion, shift+tab = extension shortcut such
+  // as the pi-permissions mode cycle). This wrapper runs before
+  // CustomEditor.handleInput, so it wins while the panel is open and is
+  // fully transparent when it is closed. Navigation is forwarded to the
+  // SelectList as arrow-key sequences (its own up/down bindings, with
+  // wrap-around).
+  const SELECT_UP = "\x1b[A";
+  const SELECT_DOWN = "\x1b[B";
+  const originalHandleInput = editor.handleInput?.bind(editor);
+  patched.handleInput = (data: string): void => {
+    const list = internals.autocompleteList;
+    if (internals.autocompleteState && list && typeof list.handleInput === "function") {
+      if (matchesKey(data, "tab")) {
+        list.handleInput(SELECT_DOWN);
+        return;
+      }
+      if (matchesKey(data, "shift+tab")) {
+        list.handleInput(SELECT_UP);
+        return;
+      }
+    }
+    originalHandleInput?.(data);
+  };
+
   return editor;
 }
 

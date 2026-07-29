@@ -11,9 +11,12 @@ import {
 const EDITOR_LINES = ["────", " > input", "────"];
 
 function fakeEditor() {
+  const received: string[] = [];
   const editor: any = {
     getPaddingX: () => 1,
     render: (_width: number) => [...EDITOR_LINES],
+    handleInput: (data: string) => received.push(data),
+    __received: received,
   };
   return editor;
 }
@@ -42,7 +45,12 @@ function fakeTui(editor: unknown, { rows = 24, cols = 80, footerHeight = 2 } = {
 
 function activateAutocomplete(editor: any, items: string[]) {
   editor.autocompleteState = { itemRange: [0, 0] };
-  editor.autocompleteList = { render: () => [...items] };
+  const listReceived: string[] = [];
+  editor.autocompleteList = {
+    render: () => [...items],
+    handleInput: (data: string) => listReceived.push(data),
+    __received: listReceived,
+  };
 }
 
 describe("frameLines", () => {
@@ -222,6 +230,51 @@ describe("applyAutocompleteAbove - inline fallback", () => {
 
     const lines = editor.render(20);
     expect(lines.filter((l: string) => l.includes("item-a"))).toHaveLength(1);
+  });
+});
+
+describe("applyAutocompleteAbove - tab navigation", () => {
+  const TAB = "\t";
+  const SHIFT_TAB = "\x1b[Z";
+
+  it("tab moves selection down while the panel is open", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateAutocomplete(editor, ["a", "b"]);
+
+    editor.handleInput(TAB);
+
+    expect(editor.autocompleteList.__received).toEqual(["\x1b[B"]);
+    expect(editor.__received).toEqual([]); // original chain not reached
+  });
+
+  it("shift+tab moves selection up while the panel is open", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateAutocomplete(editor, ["a", "b"]);
+
+    editor.handleInput(SHIFT_TAB);
+
+    expect(editor.autocompleteList.__received).toEqual(["\x1b[A"]);
+    expect(editor.__received).toEqual([]); // pi-permissions shortcut not reached
+  });
+
+  it("passes tab and shift+tab through when the panel is closed", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+
+    editor.handleInput(TAB);
+    editor.handleInput(SHIFT_TAB);
+
+    expect(editor.__received).toEqual([TAB, SHIFT_TAB]);
+  });
+
+  it("passes other keys through while the panel is open", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateAutocomplete(editor, ["a"]);
+
+    editor.handleInput("x");
+    editor.handleInput("\r"); // enter still confirms via original chain
+
+    expect(editor.__received).toEqual(["x", "\r"]);
+    expect(editor.autocompleteList.__received).toEqual([]);
   });
 });
 
