@@ -14,6 +14,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { applyAutocompleteAbove } from "../../pi-core/src/tui/autocomplete-above.ts";
 import { installFooter } from "./footer.ts";
 import { ModelLineEditor } from "./model-editor.ts";
 import { PermissionsModeState } from "./status-mode.ts";
@@ -51,7 +52,7 @@ export default function statusline(pi: ExtensionAPI) {
 			editor.getModelInfo = modelInfo;
 			editor.getStats = stats;
 			editor.getPermissionsMode = () => permissionsMode.get();
-			return editor;
+			return applyAutocompleteAbove(editor);
 		});
 	};
 
