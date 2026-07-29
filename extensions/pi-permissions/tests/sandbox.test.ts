@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.ts";
+import { defaultProtectedWritePaths } from "../src/filesystem-policy.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -25,6 +26,15 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.pi/permissions.json");
     expect(runtime.network.allowedDomains).toEqual([]);
+  });
+
+  it("protects the plugin-local global configuration path", () => {
+    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent"))
+      .toContain(
+        "/workspace/agent/extensions/pi-permissions/config.json",
+      );
+    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent"))
+      .not.toContain("/workspace/agent/permissions.json");
   });
 
   it("removes project write roots in read-only profile", () => {

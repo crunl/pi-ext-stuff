@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPathAllowed } from "../src/permissions/paths.ts";
 import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
@@ -104,6 +104,20 @@ describe("narrow static risk contract", () => {
   it("keeps ordinary workspace writes low", () => {
     expect(classifyRisk(normalizeToolCall("write", { path: "notes.txt" }, "/work/repo"))).toBe("LOW");
     expect(classifyRisk(normalizeToolCall("edit", { path: ".pi/permissions.json" }, "/work/repo"))).toBe("HARD");
+    expect(classifyRisk(normalizeToolCall(
+      "edit",
+      {
+        path: join(
+          homedir(),
+          ".pi",
+          "agent",
+          "extensions",
+          "pi-permissions",
+          "config.json",
+        ),
+      },
+      "/work/repo",
+    ))).toBe("HARD");
   });
 
   it.each([

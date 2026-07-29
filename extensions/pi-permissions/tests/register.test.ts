@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,12 @@ import {
   type AutoReviewer,
 } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
+
+function globalConfigPath(agentDir: string): string {
+  const directory = join(agentDir, "extensions", "pi-permissions");
+  mkdirSync(directory, { recursive: true });
+  return join(directory, "config.json");
+}
 
 function harness(
   agentDir: string,
@@ -138,7 +145,7 @@ describe("Default mode registration", () => {
     const app = harness(agentDir);
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ sandbox: { network: { allowedDomains: ["candidate.example"] } } }),
     );
     app.sandboxManager.initialize.mockImplementation(async (config: any) => {
@@ -261,7 +268,7 @@ describe("Default mode registration", () => {
   it("routes only Default prompts through Auto reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const reviewer = {
@@ -304,7 +311,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -352,7 +359,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -454,7 +461,7 @@ describe("Default mode registration", () => {
   it("never sends deterministic blocks to the reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const reviewer = { review: vi.fn() };
@@ -481,7 +488,7 @@ describe("Default mode registration", () => {
   it("never reviews nested secrets or encoded private network targets", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const reviewer = { review: vi.fn() };
@@ -532,7 +539,7 @@ describe("Default mode registration", () => {
   it("binds automatic approval to one exact execution", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true);
@@ -584,7 +591,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -627,7 +634,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -662,7 +669,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, true, true, {}, undefined, reviewer);
@@ -695,7 +702,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, false, {}, undefined, reviewer);
@@ -730,7 +737,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -797,7 +804,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -1001,7 +1008,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     await writeFile(
@@ -1072,7 +1079,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -1131,7 +1138,7 @@ describe("Default mode registration", () => {
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
@@ -1185,7 +1192,7 @@ describe("Default mode registration", () => {
 
     await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ rules: [{ action: "deny", tool: "bash", pattern: "rm *" }] }),
     );
     await app.commands.get("default")!.handler("", app.context);
@@ -1225,7 +1232,7 @@ describe("Default mode registration", () => {
 
     beforeShared = async () => {
       await writeFile(
-        join(agentDir, "permissions.json"),
+        globalConfigPath(agentDir),
         JSON.stringify({ rules: [{ action: "deny", tool: "bash", pattern: "rm *" }] }),
       );
       await app.commands.get("default")!.handler("", app.context);
@@ -1323,7 +1330,7 @@ describe("Default mode registration", () => {
   it("keeps concurrent Auto network capabilities isolated by tool-call ID", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir);
@@ -1466,7 +1473,7 @@ describe("Default mode registration", () => {
   it("keeps concurrent Auto write roots isolated and never grants filesystem root", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
     const app = harness(agentDir);
@@ -1666,7 +1673,7 @@ describe("Default mode registration", () => {
   it("uses the native bash backend only when sandbox is explicitly disabled", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
-      join(agentDir, "permissions.json"),
+      globalConfigPath(agentDir),
       JSON.stringify({ sandbox: { enabled: false } }),
     );
     const app = harness(agentDir);

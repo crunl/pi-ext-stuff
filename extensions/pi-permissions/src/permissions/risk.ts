@@ -488,7 +488,10 @@ function isWithin(path: string, root: string): boolean {
 
 function writeRisk(request: PermissionRequest): Risk {
   const projectConfig = resolve(request.cwd, ".pi/permissions.json");
-  const globalConfig = resolve(homedir(), ".pi/agent/permissions.json");
+  const globalConfig = resolve(
+    homedir(),
+    ".pi/agent/extensions/pi-permissions/config.json",
+  );
   if (request.resolvedPaths.some((path) => path === projectConfig || path === globalConfig)) return "HARD";
   return request.resolvedPaths.length > 0 && request.resolvedPaths.every((path) => isWithin(path, request.cwd)) ? "LOW" : "REVIEW";
 }
