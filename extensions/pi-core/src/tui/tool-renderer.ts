@@ -26,6 +26,13 @@ export type CollapsedResult =
       args: Record<string, unknown>,
     ) => string | undefined);
 
+export type ExpandedResultRenderer = (
+  result: AgentToolResult<unknown>,
+  args: Record<string, unknown>,
+  theme: Theme,
+  outputPad: OutputPad,
+) => Component;
+
 export interface CodexToolRendererSpec {
   icon?: string;
   runningVerb: string;
@@ -33,6 +40,7 @@ export interface CodexToolRendererSpec {
   argument: (args: Record<string, unknown>, cwd: string) => string;
   collapsed: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
+  renderExpandedResult?: ExpandedResultRenderer;
   expandedOutput?: (
     result: AgentToolResult<unknown>,
     args: Record<string, unknown>,
@@ -241,6 +249,20 @@ export function createCodexToolRendering(
         theme,
         outputPad,
       );
+
+      if (
+        options.expanded
+        && !options.isPartial
+        && !context.isError
+        && spec.renderExpandedResult
+      ) {
+        return spec.renderExpandedResult(
+          result,
+          context.args,
+          theme,
+          outputPad,
+        );
+      }
 
       const rawText = resultText(result);
       const text = spec.transformOutput

@@ -1,3 +1,4 @@
+import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import {
   compactBashStatusSpacing,
@@ -202,6 +203,91 @@ describe("createCodexToolRendering", () => {
       "call-1",
       renderContext.invalidate,
     );
+  });
+
+  it("uses a custom component for a successful expanded result", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: () => "file.ts",
+      collapsed: summarizeEditDiff,
+      renderExpandedResult: (_result, _args, _theme, outputPad) =>
+        new Text(`custom diff at pad ${outputPad}`, 0, 0),
+    }, {
+      getOutputPad: () => 1,
+      track() {},
+    });
+    const state = {};
+    const result = rendering.renderResult!(
+      {
+        content: [{
+          type: "text",
+          text: "Successfully replaced 1 block.",
+        }],
+        details: { diff: "+1 added" },
+      } as any,
+      { expanded: true, isPartial: false },
+      theme,
+      context(state, { args: { path: "file.ts" } }),
+    );
+    const output = result.render(80).join("\n");
+
+    expect(output).toContain("custom diff at pad 1");
+    expect(output).not.toContain("Successfully replaced");
+  });
+
+  it("does not invoke the custom component renderer while collapsed", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: () => "file.ts",
+      collapsed: summarizeEditDiff,
+      renderExpandedResult: () => {
+        throw new Error("collapsed rendering must not create the diff panel");
+      },
+    });
+    const result = rendering.renderResult!(
+      {
+        content: [{
+          type: "text",
+          text: "Successfully replaced 1 block.",
+        }],
+        details: { diff: "+1 added" },
+      } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context({}, { args: { path: "file.ts" } }),
+    );
+
+    expect(result.render(80)).toEqual([]);
+  });
+
+  it("keeps expanded failures on the existing error output path", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: () => "file.ts",
+      collapsed: summarizeEditDiff,
+      renderExpandedResult: () => {
+        throw new Error("failed rendering must not create the diff panel");
+      },
+    });
+    const result = rendering.renderResult!(
+      {
+        content: [{
+          type: "text",
+          text: "oldText did not match",
+        }],
+      } as any,
+      { expanded: true, isPartial: false },
+      theme,
+      context({}, {
+        args: { path: "file.ts" },
+        isError: true,
+      }),
+    );
+
+    expect(result.render(80).join("\n")).toContain("oldText did not match");
   });
 });
 

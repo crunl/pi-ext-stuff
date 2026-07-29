@@ -7,10 +7,18 @@ export default function piCore(pi: ExtensionAPI): void {
 
 export { registerExtension };
 export {
+  createEditDiffBox,
+  parseEditDiff,
+  type EditDiffBoxOptions,
+  type EditDiffKind,
+  type EditDiffRow,
+} from "./src/tui/edit-diff.ts";
+export {
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
   createCodexToolRendering,
   renderEditDiff,
   summarizeEditDiff,
   type CodexToolRendererSpec,
+  type ExpandedResultRenderer,
 } from "./src/tui/tool-renderer.ts";
