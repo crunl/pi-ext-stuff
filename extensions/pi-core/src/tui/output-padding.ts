@@ -1,15 +1,6 @@
-import {
-  type Stats,
-  readFileSync,
-  unwatchFile,
-  watchFile,
-} from "node:fs";
+import { readFileSync, type Stats, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
-import {
-  CONFIG_DIR_NAME,
-  getAgentDir,
-  type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export type OutputPad = 0 | 1;
 
@@ -26,11 +17,7 @@ interface OutputPadSetting {
 function readOutputPad(settingsPath: string): OutputPadSetting {
   try {
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
-    if (
-      typeof settings === "object"
-      && settings !== null
-      && Object.hasOwn(settings, "outputPad")
-    ) {
+    if (typeof settings === "object" && settings !== null && Object.hasOwn(settings, "outputPad")) {
       return {
         found: true,
         value: (settings as { outputPad: unknown }).outputPad,
@@ -46,10 +33,7 @@ export class OutputPaddingController implements OutputPaddingSource {
   private outputPad: OutputPad = 1;
   private projectSettingsPath: string | undefined;
   private readonly invalidators = new Map<string, () => void>();
-  private readonly watchedPaths = new Map<
-    string,
-    (current: Stats, previous: Stats) => void
-  >();
+  private readonly watchedPaths = new Map<string, (current: Stats, previous: Stats) => void>();
 
   constructor(private readonly agentDir: string) {}
 
@@ -106,33 +90,22 @@ export class OutputPaddingController implements OutputPaddingSource {
     const projectSetting = this.projectSettingsPath
       ? readOutputPad(this.projectSettingsPath)
       : { found: false };
-    const effectiveOutputPad = projectSetting.found
-      ? projectSetting.value
-      : globalSetting.value;
+    const effectiveOutputPad = projectSetting.found ? projectSetting.value : globalSetting.value;
     return effectiveOutputPad === 0 ? 0 : 1;
   }
 
   private watch(settingsPath: string): void {
     const listener = (_current: Stats, _previous: Stats) => this.refresh();
-    watchFile(
-      settingsPath,
-      { interval: 100, persistent: false },
-      listener,
-    );
+    watchFile(settingsPath, { interval: 100, persistent: false }, listener);
     this.watchedPaths.set(settingsPath, listener);
   }
 }
 
-export const outputPaddingController = new OutputPaddingController(
-  getAgentDir(),
-);
+export const outputPaddingController = new OutputPaddingController(getAgentDir());
 
 export function registerOutputPaddingSync(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, context) => {
-    outputPaddingController.start(
-      context.cwd,
-      context.isProjectTrusted(),
-    );
+    outputPaddingController.start(context.cwd, context.isProjectTrusted());
   });
   pi.on("session_shutdown", () => {
     outputPaddingController.stop();

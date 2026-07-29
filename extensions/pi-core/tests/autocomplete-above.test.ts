@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyAutocompleteAbove,
   computePanelRow,
+  type FloatingTui,
   frameLines,
   locateEditor,
   registerAutocompleteAbove,
-  type FloatingTui,
 } from "../src/tui/autocomplete-above.ts";
 
 const EDITOR_LINES = ["────", " > input", "────"];

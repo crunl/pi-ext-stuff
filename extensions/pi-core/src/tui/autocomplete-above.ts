@@ -36,7 +36,10 @@ interface FloatingOverlayOptions {
 export interface FloatingTui {
   terminal?: { rows: number; columns: number };
   children?: unknown[];
-  showOverlay?(component: FloatingComponent, options: FloatingOverlayOptions): FloatingOverlayHandle;
+  showOverlay?(
+    component: FloatingComponent,
+    options: FloatingOverlayOptions,
+  ): FloatingOverlayHandle;
   /** Private in pi-tui: logical end-of-content row from the previous frame. */
   cursorRow?: number;
   /** Private in pi-tui: active overlay entries ({ component, ... }). */
@@ -150,9 +153,10 @@ export function computePanelRow(
   panelHeight: number,
 ): number | null {
   const layout = resolveLayout(tui, editor);
-  if (!layout || !layout.bottomAnchored) return null;
+  if (!layout?.bottomAnchored) return null;
 
-  const termHeight = tui!.terminal!.rows;
+  const termHeight = tui?.terminal?.rows;
+  if (!termHeight) return null;
   const row = termHeight - layout.suffixHeight - editorHeight - panelHeight;
   return row >= 0 ? row : null;
 }

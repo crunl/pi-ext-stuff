@@ -1,30 +1,20 @@
-import {
-  type AgentToolResult,
-  type Theme,
-  type ToolRenderResultOptions,
+import type {
+  AgentToolResult,
+  Theme,
+  ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
+import { type Component, Container, Text } from "@earendil-works/pi-tui";
 import {
-  Container,
-  Text,
-  type Component,
-} from "@earendil-works/pi-tui";
-import {
-  buildExpandedOutput,
-  buildOutputPreview,
-} from "./tool-output.ts";
-import {
-  outputPaddingController,
   type OutputPad,
   type OutputPaddingSource,
+  outputPaddingController,
 } from "./output-padding.ts";
+import { buildExpandedOutput, buildOutputPreview } from "./tool-output.ts";
 
 export type CollapsedResult =
   | "hidden"
   | "preview"
-  | ((
-      result: AgentToolResult<unknown>,
-      args: Record<string, unknown>,
-    ) => string | undefined);
+  | ((result: AgentToolResult<unknown>, args: Record<string, unknown>) => string | undefined);
 
 export type ExpandedResultRenderer = (
   result: AgentToolResult<unknown>,
@@ -63,11 +53,7 @@ interface RenderContext {
 
 export interface CodexToolRendering {
   renderShell: "self";
-  renderCall: (
-    args: Record<string, unknown>,
-    theme: Theme,
-    context: RenderContext,
-  ) => Component;
+  renderCall: (args: Record<string, unknown>, theme: Theme, context: RenderContext) => Component;
   renderResult: (
     result: AgentToolResult<unknown>,
     options: ToolRenderResultOptions,
@@ -78,7 +64,7 @@ export interface CodexToolRendering {
 
 function resultText(result: AgentToolResult<unknown>): string {
   return result.content
-    .flatMap((part) => part.type === "text" ? [part.text] : [])
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
     .filter(Boolean)
     .join("\n");
 }
@@ -90,9 +76,7 @@ export function compactBashStatusSpacing(text: string): string {
   );
 }
 
-export function summarizeEditDiff(
-  result: AgentToolResult<unknown>,
-): string | undefined {
+export function summarizeEditDiff(result: AgentToolResult<unknown>): string | undefined {
   const details = result.details as { diff?: unknown } | undefined;
   if (typeof details?.diff !== "string") return undefined;
 
@@ -102,15 +86,10 @@ export function summarizeEditDiff(
     if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
     if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
   }
-  return additions > 0 || deletions > 0
-    ? `+${additions} -${deletions}`
-    : undefined;
+  return additions > 0 || deletions > 0 ? `+${additions} -${deletions}` : undefined;
 }
 
-export function colorizeEditDiffSummary(
-  summary: string,
-  theme: Theme,
-): string {
+export function colorizeEditDiffSummary(summary: string, theme: Theme): string {
   const match = summary.match(/^(\+\d+)\s+(-\d+)$/);
   if (!match) return theme.fg("dim", summary);
   return `${theme.fg("success", match[1])} ${theme.fg("error", match[2])}`;
@@ -124,16 +103,9 @@ function headerText(
   theme: Theme,
 ): string {
   const status = state.status ?? "running";
-  const bulletColor = status === "failed"
-    ? "error"
-    : status === "completed"
-      ? "success"
-      : "dim";
-  const verb = status === "failed"
-    ? "Failed"
-    : status === "completed"
-      ? spec.completedVerb
-      : spec.runningVerb;
+  const bulletColor = status === "failed" ? "error" : status === "completed" ? "success" : "dim";
+  const verb =
+    status === "failed" ? "Failed" : status === "completed" ? spec.completedVerb : spec.runningVerb;
   const argument = spec.argument(args, context.cwd);
   const suffix = argument.length > 0 ? ` ${theme.fg("muted", argument)}` : "";
   const summary = state.summary
@@ -157,12 +129,7 @@ class ToolOutputComponent implements Component {
   render(width: number): string[] {
     const lines = this.expanded
       ? buildExpandedOutput(this.text, width, this.outputPad)
-      : buildOutputPreview(
-          this.text,
-          width,
-          this.maxRows,
-          this.outputPad,
-        );
+      : buildOutputPreview(this.text, width, this.maxRows, this.outputPad);
     return lines.map(this.style);
   }
 
@@ -207,43 +174,19 @@ export function createCodexToolRendering(
       const state = context.state;
       paddingSource.track(context.toolCallId, context.invalidate);
       const outputPad = paddingSource.getOutputPad();
-      state.status = options.isPartial
-        ? "running"
-        : context.isError
-          ? "failed"
-          : "completed";
-      state.summary = typeof spec.collapsed === "function"
-        && !options.isPartial
-        && !context.isError
-        ? spec.collapsed(result, context.args)
-        : undefined;
-      updateHeader(
-        spec,
-        state,
-        context.args,
-        context,
-        theme,
-        outputPad,
-      );
+      state.status = options.isPartial ? "running" : context.isError ? "failed" : "completed";
+      state.summary =
+        typeof spec.collapsed === "function" && !options.isPartial && !context.isError
+          ? spec.collapsed(result, context.args)
+          : undefined;
+      updateHeader(spec, state, context.args, context, theme, outputPad);
 
-      if (
-        options.expanded
-        && !options.isPartial
-        && !context.isError
-        && spec.renderExpandedResult
-      ) {
-        return spec.renderExpandedResult(
-          result,
-          context.args,
-          theme,
-          outputPad,
-        );
+      if (options.expanded && !options.isPartial && !context.isError && spec.renderExpandedResult) {
+        return spec.renderExpandedResult(result, context.args, theme, outputPad);
       }
 
       const rawText = resultText(result);
-      const text = spec.transformOutput
-        ? spec.transformOutput(rawText)
-        : rawText;
+      const text = spec.transformOutput ? spec.transformOutput(rawText) : rawText;
       if (options.expanded && text.length > 0) {
         return new ToolOutputComponent(
           text,

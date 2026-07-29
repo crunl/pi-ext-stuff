@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, it } from "vitest";
 import {
   buildExpandedOutput,
   buildOutputPreview,
@@ -20,11 +20,7 @@ describe("buildOutputPreview", () => {
   });
 
   it("applies the row budget after wrapping", () => {
-    const lines = buildOutputPreview(
-      "alpha beta gamma delta epsilon zeta eta theta\nlast",
-      12,
-      5,
-    );
+    const lines = buildOutputPreview("alpha beta gamma delta epsilon zeta eta theta\nlast", 12, 5);
 
     expect(lines.length).toBeLessThanOrEqual(5);
     expect(lines.some((line) => line.includes("… +"))).toBe(true);
@@ -32,10 +28,7 @@ describe("buildOutputPreview", () => {
   });
 
   it("preserves ANSI and respects terminal width for CJK output", () => {
-    const lines = buildExpandedOutput(
-      "\u001b[31m红色 输出 内容\u001b[0m",
-      12,
-    );
+    const lines = buildExpandedOutput("\u001b[31m红色 输出 内容\u001b[0m", 12);
 
     expect(lines.join("")).toContain("红色");
     expect(lines.join("")).toContain("\u001b[31m");
@@ -43,14 +36,8 @@ describe("buildOutputPreview", () => {
   });
 
   it("applies output padding before the nested output prefix", () => {
-    expect(buildOutputPreview("first\nsecond", 80, 5, 1)).toEqual([
-      "   └ first",
-      "     second",
-    ]);
-    expect(buildExpandedOutput("first\nsecond", 80, 1)).toEqual([
-      "   └ first",
-      "     second",
-    ]);
+    expect(buildOutputPreview("first\nsecond", 80, 5, 1)).toEqual(["   └ first", "     second"]);
+    expect(buildExpandedOutput("first\nsecond", 80, 1)).toEqual(["   └ first", "     second"]);
   });
 });
 

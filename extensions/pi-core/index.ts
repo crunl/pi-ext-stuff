@@ -5,23 +5,23 @@ export default function piCore(pi: ExtensionAPI): void {
   registerExtension(pi);
 }
 
-export { registerExtension };
 export {
   applyAutocompleteAbove,
   registerAutocompleteAbove,
 } from "./src/tui/autocomplete-above.ts";
 export {
   createEditDiffBox,
-  parseEditDiff,
   type EditDiffBoxOptions,
   type EditDiffKind,
   type EditDiffRow,
+  parseEditDiff,
 } from "./src/tui/edit-diff.ts";
 export {
+  type CodexToolRendererSpec,
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
   createCodexToolRendering,
-  summarizeEditDiff,
-  type CodexToolRendererSpec,
   type ExpandedResultRenderer,
+  summarizeEditDiff,
 } from "./src/tui/tool-renderer.ts";
+export { registerExtension };

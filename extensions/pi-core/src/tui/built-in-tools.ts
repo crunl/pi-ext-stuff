@@ -1,22 +1,16 @@
 import {
+  type AgentToolResult,
   createFindTool,
   createGrepTool,
   createLsTool,
   createReadTool,
-  type AgentToolResult,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import {
-  countNonEmptyLines,
-} from "./tool-output.ts";
-import {
-  createCodexToolRendering,
-} from "./tool-renderer.ts";
+import { countNonEmptyLines } from "./tool-output.ts";
+import { createCodexToolRendering } from "./tool-renderer.ts";
 
 function textOutput(result: AgentToolResult<unknown>): string {
-  return result.content
-    .flatMap((part) => part.type === "text" ? [part.text] : [])
-    .join("\n");
+  return result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 }
 
 function countSummary(noun: string, plural = `${noun}s`) {
@@ -99,7 +93,7 @@ export function registerBuiltInToolRendering(pi: ExtensionAPI): void {
       icon: "",
       runningVerb: "Listing",
       completedVerb: "Listed",
-      argument: (args) => typeof args.path === "string" ? args.path : ".",
+      argument: (args) => (typeof args.path === "string" ? args.path : "."),
       collapsed: countSummary("entry", "entries"),
     }),
     execute(id, params, signal, onUpdate, ctx) {

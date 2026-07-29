@@ -39,7 +39,7 @@ describe("pi-core registration", () => {
         name: "grep",
         args: { pattern: "renderCall", path: "src" },
         output: "src/a.ts:1\nsrc/b.ts:2",
-        expected: " Searched \"renderCall\" in src · 2 matches",
+        expected: ' Searched "renderCall" in src · 2 matches',
       },
       {
         name: "find",

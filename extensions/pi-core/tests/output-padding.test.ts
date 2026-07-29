@@ -1,9 +1,4 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,10 +14,7 @@ function createDirectory(): string {
 
 function writeSettings(directory: string, outputPad: 0 | 1): void {
   mkdirSync(directory, { recursive: true });
-  writeFileSync(
-    join(directory, "settings.json"),
-    JSON.stringify({ outputPad }),
-  );
+  writeFileSync(join(directory, "settings.json"), JSON.stringify({ outputPad }));
 }
 
 afterEach(() => {

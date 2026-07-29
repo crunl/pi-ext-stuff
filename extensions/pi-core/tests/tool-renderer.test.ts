@@ -76,15 +76,11 @@ describe("createCodexToolRendering", () => {
     const rendering = createCodexToolRendering({
       runningVerb: "Searching",
       completedVerb: "Searched",
-      argument: () => "\"renderCall\" in src",
+      argument: () => '"renderCall" in src',
       collapsed: () => "12 matches",
     });
     const state = {};
-    const header = rendering.renderCall!(
-      { pattern: "renderCall" } as any,
-      theme,
-      context(state),
-    );
+    const header = rendering.renderCall!({ pattern: "renderCall" } as any, theme, context(state));
     const result = rendering.renderResult!(
       { content: [{ type: "text", text: "12 matching lines" }] } as any,
       { expanded: false, isPartial: false },
@@ -92,9 +88,7 @@ describe("createCodexToolRendering", () => {
       context(state),
     );
 
-    expect(header.render(80).join("\n")).toContain(
-      "• Searched \"renderCall\" in src · 12 matches",
-    );
+    expect(header.render(80).join("\n")).toContain('• Searched "renderCall" in src · 12 matches');
     expect(result.render(80)).toEqual([]);
   });
 
@@ -107,11 +101,7 @@ describe("createCodexToolRendering", () => {
       collapsed: "hidden",
     });
     const state = {};
-    const header = rendering.renderCall!(
-      { command: "npm test" } as any,
-      theme,
-      context(state),
-    );
+    const header = rendering.renderCall!({ command: "npm test" } as any, theme, context(state));
 
     expect(header.render(80).join("\n")).toContain(" Running npm test");
 
@@ -125,39 +115,37 @@ describe("createCodexToolRendering", () => {
   });
 
   it("removes only the blank separator before a trailing Bash status", () => {
-    const rendering = createCodexToolRendering({
-      icon: "",
-      runningVerb: "Running",
-      completedVerb: "Ran",
-      argument: (args) => String(args.command),
-      collapsed: "preview",
-      transformOutput: compactBashStatusSpacing,
-    }, {
-      getOutputPad: () => 0,
-      track() {},
-    });
-    const state = {};
-    rendering.renderCall!(
-      { command: "gh api repos/example" } as any,
-      theme,
-      context(state),
+    const rendering = createCodexToolRendering(
+      {
+        icon: "",
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "preview",
+        transformOutput: compactBashStatusSpacing,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
     );
+    const state = {};
+    rendering.renderCall!({ command: "gh api repos/example" } as any, theme, context(state));
     const result = rendering.renderResult!(
       {
-        content: [{
-          type: "text",
-          text: "Forbidden\n\nCommand exited with code 1",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Forbidden\n\nCommand exited with code 1",
+          },
+        ],
       } as any,
       { expanded: false, isPartial: false },
       theme,
       context(state, { isError: true }),
     );
 
-    expect(result.render(80)).toEqual([
-      "  └ Forbidden",
-      "    Command exited with code 1",
-    ]);
+    expect(result.render(80)).toEqual(["  └ Forbidden", "    Command exited with code 1"]);
     expect(compactBashStatusSpacing("first\n\nsecond")).toBe("first\n\nsecond");
   });
 
@@ -167,12 +155,15 @@ describe("createCodexToolRendering", () => {
       getOutputPad: () => outputPad,
       track: vi.fn(),
     };
-    const rendering = createCodexToolRendering({
-      runningVerb: "Running",
-      completedVerb: "Ran",
-      argument: (args) => String(args.command),
-      collapsed: "preview",
-    }, paddingSource);
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "preview",
+      },
+      paddingSource,
+    );
     const state = {};
     const renderContext = context(state);
 
@@ -198,32 +189,34 @@ describe("createCodexToolRendering", () => {
 
     expect(paddedHeader).not.toBe(unpaddedHeader);
     expect(paddedHeader.render(80)[0]).toMatch(/^ • Running/);
-    expect(result.render(80)[0]).toMatch(/^   └ ok/);
-    expect(paddingSource.track).toHaveBeenCalledWith(
-      "call-1",
-      renderContext.invalidate,
-    );
+    expect(result.render(80)[0]).toMatch(/^ {3}└ ok/);
+    expect(paddingSource.track).toHaveBeenCalledWith("call-1", renderContext.invalidate);
   });
 
   it("uses a custom component for a successful expanded result", () => {
-    const rendering = createCodexToolRendering({
-      runningVerb: "Editing",
-      completedVerb: "Edited",
-      argument: () => "file.ts",
-      collapsed: summarizeEditDiff,
-      renderExpandedResult: (_result, _args, _theme, outputPad) =>
-        new Text(`custom diff at pad ${outputPad}`, 0, 0),
-    }, {
-      getOutputPad: () => 1,
-      track() {},
-    });
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Editing",
+        completedVerb: "Edited",
+        argument: () => "file.ts",
+        collapsed: summarizeEditDiff,
+        renderExpandedResult: (_result, _args, _theme, outputPad) =>
+          new Text(`custom diff at pad ${outputPad}`, 0, 0),
+      },
+      {
+        getOutputPad: () => 1,
+        track() {},
+      },
+    );
     const state = {};
     const result = rendering.renderResult!(
       {
-        content: [{
-          type: "text",
-          text: "Successfully replaced 1 block.",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Successfully replaced 1 block.",
+          },
+        ],
         details: { diff: "+1 added" },
       } as any,
       { expanded: true, isPartial: false },
@@ -248,10 +241,12 @@ describe("createCodexToolRendering", () => {
     });
     const result = rendering.renderResult!(
       {
-        content: [{
-          type: "text",
-          text: "Successfully replaced 1 block.",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Successfully replaced 1 block.",
+          },
+        ],
         details: { diff: "+1 added" },
       } as any,
       { expanded: false, isPartial: false },
@@ -274,17 +269,22 @@ describe("createCodexToolRendering", () => {
     });
     const result = rendering.renderResult!(
       {
-        content: [{
-          type: "text",
-          text: "oldText did not match",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "oldText did not match",
+          },
+        ],
       } as any,
       { expanded: true, isPartial: false },
       theme,
-      context({}, {
-        args: { path: "file.ts" },
-        isError: true,
-      }),
+      context(
+        {},
+        {
+          args: { path: "file.ts" },
+          isError: true,
+        },
+      ),
     );
 
     expect(result.render(80).join("\n")).toContain("oldText did not match");
@@ -293,19 +293,21 @@ describe("createCodexToolRendering", () => {
 
 describe("summarizeEditDiff", () => {
   it("counts additions and deletions without counting diff headers", () => {
-    expect(summarizeEditDiff({
-      content: [],
-      details: {
-        diff: [
-          "--- a/file.ts",
-          "+++ b/file.ts",
-          "@@ -1,2 +1,3 @@",
-          "-old",
-          "+new",
-          "+added",
-          " unchanged",
-        ].join("\n"),
-      },
-    } as any)).toBe("+2 -1");
+    expect(
+      summarizeEditDiff({
+        content: [],
+        details: {
+          diff: [
+            "--- a/file.ts",
+            "+++ b/file.ts",
+            "@@ -1,2 +1,3 @@",
+            "-old",
+            "+new",
+            "+added",
+            " unchanged",
+          ].join("\n"),
+        },
+      } as any),
+    ).toBe("+2 -1");
   });
 });

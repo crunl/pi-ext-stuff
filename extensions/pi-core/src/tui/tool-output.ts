@@ -8,15 +8,8 @@ export function countNonEmptyLines(text: string): number {
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
 }
 
-function wrappedRows(
-  text: string,
-  width: number,
-  outputPad: OutputPad,
-): string[] {
-  const contentWidth = Math.max(
-    1,
-    width - outputPad - NEXT_PREFIX.length,
-  );
+function wrappedRows(text: string, width: number, outputPad: OutputPad): string[] {
+  const contentWidth = Math.max(1, width - outputPad - NEXT_PREFIX.length);
   const rows: string[] = [];
   for (const logicalLine of text.replace(/\r\n?/g, "\n").split("\n")) {
     const wrapped = wrapTextWithAnsi(logicalLine, contentWidth);
@@ -25,15 +18,9 @@ function wrappedRows(
   return rows;
 }
 
-function withPrefixes(
-  rows: readonly string[],
-  outputPad: OutputPad,
-): string[] {
+function withPrefixes(rows: readonly string[], outputPad: OutputPad): string[] {
   const padding = " ".repeat(outputPad);
-  return rows.map(
-    (row, index) =>
-      `${padding}${index === 0 ? FIRST_PREFIX : NEXT_PREFIX}${row}`,
-  );
+  return rows.map((row, index) => `${padding}${index === 0 ? FIRST_PREFIX : NEXT_PREFIX}${row}`);
 }
 
 export function buildOutputPreview(
@@ -67,8 +54,5 @@ export function buildExpandedOutput(
   outputPad: OutputPad = 0,
 ): string[] {
   if (text.length === 0) return [];
-  return withPrefixes(
-    wrappedRows(text, width, outputPad),
-    outputPad,
-  );
+  return withPrefixes(wrappedRows(text, width, outputPad), outputPad);
 }

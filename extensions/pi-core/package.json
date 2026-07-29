@@ -3,15 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "exports": {
     ".": "./src/tui/tool-renderer.ts"
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
     "test": "vitest --run"
   },
   "peerDependencies": {
