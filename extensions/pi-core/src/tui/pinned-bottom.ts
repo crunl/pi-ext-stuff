@@ -2,7 +2,7 @@ import { locateEditor, type FloatingTui } from "./autocomplete-above.ts";
 
 interface PinnableTui extends FloatingTui {
   render?(width: number): string[];
-  __pinnedBottomRef?: { editor: unknown; container?: unknown };
+  __pinnedBottomRef?: { editor: unknown };
 }
 
 interface RenderableChild {
@@ -21,36 +21,19 @@ export function computeBottomPadding(
   editor: unknown,
   totalLines: number,
   width: number,
-  container?: unknown,
 ): { insertAt: number; count: number } | null {
   const rows = tui.terminal?.rows;
   if (!rows || totalLines >= rows) return null;
 
+  const location = locateEditor(tui, editor);
+  if (!location || !("childIndex" in location)) return null;
+
   const children = tui.children as RenderableChild[] | undefined;
   if (!Array.isArray(children)) return null;
 
-  // Primary: locate the current editor. Fallback: locate the remembered
-  // editorContainer - the host swaps editor instances inside the same
-  // container (setCustomEditorComponent clears + re-adds), so the container
-  // keeps pinning alive when our editor reference goes stale (e.g. the
-  // /statusline toggle restoring the default editor).
-  const location = locateEditor(tui, editor);
-  let childIndex: number;
-  if (location && "childIndex" in location) {
-    childIndex = location.childIndex;
-  } else if (container !== undefined) {
-    childIndex = children.indexOf(container as RenderableChild);
-    if (childIndex === -1) return null;
-  } else {
-    return null;
-  }
-
   // Pinned tail starts at widgetContainerAbove: the sibling right before the
   // editor container. Guard against the editor being the first child.
-  // NOTE: positional coupling with interactive-mode's child order - if the
-  // host ever inserts a container between widgetContainerAbove and the
-  // editor, this start index must be revisited.
-  const pinnedStart = Math.max(0, childIndex - 1);
+  const pinnedStart = Math.max(0, location.childIndex - 1);
   let pinnedHeight = 0;
   for (let i = pinnedStart; i < children.length; i++) {
     const child = children[i];
@@ -84,7 +67,7 @@ export function applyPinnedBottom(tui: unknown, editor: unknown): void {
     return;
   }
   if (typeof target.render !== "function") return;
-  const ref: { editor: unknown; container?: unknown } = { editor };
+  const ref = { editor };
   target.__pinnedBottomRef = ref;
 
   const originalRender = target.render.bind(target);
@@ -92,16 +75,7 @@ export function applyPinnedBottom(tui: unknown, editor: unknown): void {
     const lines = originalRender(width);
     let padding: { insertAt: number; count: number } | null = null;
     try {
-      // Remember the editor's container while the editor is locatable, so
-      // future frames survive an editor swap we were not told about (e.g.
-      // /statusline toggle restoring the default editor). Refreshed every
-      // frame, not just when padding applies - a session can start beyond
-      // one screen and swap editors before ever needing padding.
-      const location = locateEditor(target, ref.editor);
-      if (location && "childIndex" in location) {
-        ref.container = (target.children as unknown[])[location.childIndex];
-      }
-      padding = computeBottomPadding(target, ref.editor, lines.length, width, ref.container);
+      padding = computeBottomPadding(target, ref.editor, lines.length, width);
     } catch {
       padding = null;
     }

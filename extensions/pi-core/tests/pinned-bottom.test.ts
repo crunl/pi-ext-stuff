@@ -101,34 +101,13 @@ describe("applyPinnedBottom", () => {
     applyPinnedBottom(tui, editor);
     applyPinnedBottom(tui, editor); // second call must not double-wrap
     expect(tui.render(80)).toHaveLength(24);
-  });
 
-  it("keeps pinning via the container when the editor is swapped silently", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor);
-    applyPinnedBottom(tui, editor);
-    tui.render(80); // learn the container while the editor is locatable
-
-    // Host swaps the editor inside the SAME container without telling us
-    // (setCustomEditorComponent(undefined): container.clear() + addChild).
-    const container = (tui.children as any[])[2];
-    container.children = [fakeEditor()];
-
-    expect(tui.render(80)).toHaveLength(24); // container fallback keeps pinning
-  });
-
-  it("recovers when the whole container is replaced and a new editor is registered", () => {
-    const editor = fakeEditor();
-    const tui = fakeTui(editor);
-    applyPinnedBottom(tui, editor);
-    tui.render(80);
-
-    // Container replaced wholesale: both editor ref and container ref stale.
+    // Swap the editor (session switch): old ref would fail locateEditor,
+    // refreshing via a new applyPinnedBottom call restores pinning.
     const newEditor = fakeEditor();
     (tui.children as any[])[2] = { children: [newEditor], render: () => ["──", ">", "──"] };
-    expect(tui.render(80)).toHaveLength(CONTENT_HEIGHT + PINNED); // pinning off
-
-    applyPinnedBottom(tui, newEditor); // e.g. next session_start
+    expect(tui.render(80)).toHaveLength(CONTENT_HEIGHT + PINNED); // stale ref: no padding
+    applyPinnedBottom(tui, newEditor);
     expect(tui.render(80)).toHaveLength(24); // pinned again
   });
 
