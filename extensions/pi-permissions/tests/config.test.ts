@@ -30,6 +30,10 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(value));
 }
 
+function globalConfigPath(agentDir: string): string {
+  return join(agentDir, "extensions", "pi-permissions", "config.json");
+}
+
 describe("permissions config", () => {
   it("defaults to sandboxed default mode", () => {
     expect(DEFAULT_CONFIG.defaultMode).toBe("default");
@@ -93,7 +97,8 @@ describe("permissions config", () => {
 
   it("reports the exact path for invalid JSON", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      const path = join(agentDir, "permissions.json");
+      const path = globalConfigPath(agentDir);
+      await mkdir(dirname(path), { recursive: true });
       await writeFile(path, "{");
       await expect(loadPermissionsConfig(cwd, agentDir, false)).rejects.toEqual(
         expect.objectContaining<Partial<ConfigError>>({ name: "ConfigError", message: expect.stringContaining(path) }),
@@ -101,9 +106,29 @@ describe("permissions config", () => {
     });
   });
 
-  it("applies trusted project deny rules without applying requested write or network expansions", async () => {
+  it("loads global configuration from the plugin directory", async () => {
+    await withConfigRoots(async ({ agentDir, cwd }) => {
+      await writeJson(globalConfigPath(agentDir), {
+        sandbox: { profile: "read-only" },
+      });
+      const loaded = await loadPermissionsConfig(cwd, agentDir, false);
+      expect(loaded.globalConfig.sandbox.profile).toBe("read-only");
+    });
+  });
+
+  it("ignores the legacy agent-level permissions file", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(join(agentDir, "permissions.json"), {
+        sandbox: { profile: "read-only" },
+      });
+      const loaded = await loadPermissionsConfig(cwd, agentDir, false);
+      expect(loaded.globalConfig.sandbox.profile).toBe("workspace-write");
+    });
+  });
+
+  it("applies trusted project deny rules without applying requested write or network expansions", async () => {
+    await withConfigRoots(async ({ agentDir, cwd }) => {
+      await writeJson(globalConfigPath(agentDir), {
         sandbox: { network: { allowedDomains: ["github.com"] } },
       });
       await writeJson(join(cwd, ".pi", "permissions.json"), {
@@ -128,7 +153,7 @@ describe("permissions config", () => {
 
   it("does not let a project elevate a read-only global sandbox profile", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(join(agentDir, "permissions.json"), { sandbox: { profile: "read-only" } });
+      await writeJson(globalConfigPath(agentDir), { sandbox: { profile: "read-only" } });
       await writeJson(join(cwd, ".pi", "permissions.json"), { sandbox: { profile: "workspace-write" } });
       const loaded = await loadPermissionsConfig(cwd, agentDir, true);
       expect(loaded.config.sandbox.profile).toBe("read-only");
@@ -137,7 +162,7 @@ describe("permissions config", () => {
 
   it("allows global configuration to disable the sandbox", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(join(agentDir, "permissions.json"), { sandbox: { enabled: false } });
+      await writeJson(globalConfigPath(agentDir), { sandbox: { enabled: false } });
       const loaded = await loadPermissionsConfig(cwd, agentDir, false);
       expect(loaded.globalConfig.sandbox.enabled).toBe(false);
       expect(loaded.config.sandbox.enabled).toBe(false);
@@ -146,7 +171,7 @@ describe("permissions config", () => {
 
   it("does not let a project expand an empty global network allowlist", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(join(agentDir, "permissions.json"), { sandbox: { network: { allowedDomains: [] } } });
+      await writeJson(globalConfigPath(agentDir), { sandbox: { network: { allowedDomains: [] } } });
       await writeJson(join(cwd, ".pi", "permissions.json"), { sandbox: { network: { allowedDomains: ["api.example.test"] } } });
       const loaded = await loadPermissionsConfig(cwd, agentDir, true);
       expect(loaded.config.sandbox.network.allowedDomains).toEqual([]);
@@ -158,7 +183,7 @@ describe("permissions config", () => {
 
   it("does not let project config enable Auto or replace the reviewer", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(join(agentDir, "permissions.json"), {
+      await writeJson(globalConfigPath(agentDir), {
         defaultMode: "default",
         reviewer: {
           provider: "openai-codex",

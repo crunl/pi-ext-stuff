@@ -357,7 +357,12 @@ export async function loadPermissionsConfig(
   agentDir: string,
   projectTrusted: boolean,
 ): Promise<LoadedPermissionsConfig> {
-  const globalPath = join(agentDir, "permissions.json");
+  const globalPath = join(
+    agentDir,
+    "extensions",
+    "pi-permissions",
+    "config.json",
+  );
   const globalOverlay = await readConfigFile(globalPath);
   const globalConfig = globalOverlay ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, globalOverlay) : cloneConfig(DEFAULT_CONFIG);
   if (!projectTrusted) return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
