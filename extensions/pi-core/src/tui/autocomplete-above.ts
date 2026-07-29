@@ -1,5 +1,6 @@
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { applyPinnedBottom } from "./pinned-bottom.ts";
 
 interface EditorInternals {
   autocompleteList?: { render(width: number): string[] };
@@ -163,6 +164,10 @@ export function computePanelRow(
  */
 export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T {
   const internals = editor as unknown as EditorInternals;
+  // Pin the editor area + footer to the bottom of the viewport. Runs on
+  // every call (not gated by the idempotency flag below) so a recreated
+  // editor refreshes the reference tracked by the TUI-level patch.
+  applyPinnedBottom(internals.tui, editor);
   if (internals.__autocompleteAbove) return editor;
   internals.__autocompleteAbove = true;
 
