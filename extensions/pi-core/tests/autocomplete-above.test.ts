@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyAutocompleteAbove,
   computePanelRow,
+  locateEditor,
   registerAutocompleteAbove,
   type FloatingTui,
 } from "../src/tui/autocomplete-above.ts";
@@ -42,6 +43,27 @@ function activateAutocomplete(editor: any, items: string[]) {
   editor.autocompleteState = { itemRange: [0, 0] };
   editor.autocompleteList = { render: () => [...items] };
 }
+
+describe("locateEditor", () => {
+  it("finds the editor nested in a root child container", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    expect(locateEditor(tui, editor)).toEqual({ childIndex: 1 });
+  });
+
+  it("finds an overlay-hosted editor via the overlay stack", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(fakeEditor());
+    (tui as any).overlayStack = [{ component: editor }];
+    expect(locateEditor(tui, editor)).toEqual({ overlay: true });
+  });
+
+  it("returns null when the editor is nowhere", () => {
+    const tui = fakeTui(fakeEditor());
+    expect(locateEditor(tui, fakeEditor())).toBeNull();
+    expect(locateEditor(undefined, fakeEditor())).toBeNull();
+  });
+});
 
 describe("computePanelRow", () => {
   it("anchors the panel to the editor top border on a full screen", () => {
@@ -104,6 +126,24 @@ describe("applyAutocompleteAbove - floating mode", () => {
 
     expect(tui.showOverlay).toHaveBeenCalledOnce();
     expect(tui.overlays[0].options.row).toBe(24 - 2 - 3 - 1);
+  });
+
+  it("self-heals: empties and removes the overlay when the editor is swapped out", async () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    const tui = fakeTui(editor);
+    editor.tui = tui;
+    activateAutocomplete(editor, ["item-a"]);
+    editor.render(20);
+    expect(tui.overlays).toHaveLength(1);
+    const panel = tui.overlays[0].component;
+
+    // Simulate the host replacing the editor (e.g. /statusline toggle):
+    // the old editor is detached and never rendered again.
+    (tui.children as any[])[1] = { children: [fakeEditor()] };
+
+    expect(panel.render(20)).toEqual([]); // invisible this frame
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(tui.overlays).toHaveLength(0); // removed from the stack
   });
 
   it("hides the overlay when autocomplete deactivates", () => {
@@ -205,5 +245,18 @@ describe("registerAutocompleteAbove", () => {
     expect(previous).toHaveBeenCalledOnce();
     expect(produced).toBe(inner);
     expect((produced as any).__autocompleteAbove).toBe(true);
+  });
+
+  it("does not re-wrap its own factory on repeated session_start", () => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+    registerAutocompleteAbove(fakePi(handlers));
+
+    const { ctx, getFactory } = sessionStartContext();
+    handlers.get("session_start")?.({}, ctx);
+    const first = getFactory();
+    handlers.get("session_start")?.({}, ctx); // host did NOT reset
+    handlers.get("session_start")?.({}, ctx);
+
+    expect(getFactory()).toBe(first); // unchanged, no nesting
   });
 });

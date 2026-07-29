@@ -37,21 +37,102 @@ export interface FloatingTui {
   showOverlay?(component: FloatingComponent, options: FloatingOverlayOptions): FloatingOverlayHandle;
   /** Private in pi-tui: logical end-of-content row from the previous frame. */
   cursorRow?: number;
+  /** Private in pi-tui: active overlay entries ({ component, ... }). */
+  overlayStack?: { component?: unknown }[];
 }
 
 /** Stateless overlay component that mirrors the autocomplete list lines. */
 class FloatingPanel implements FloatingComponent {
   private lines: string[] = [];
+  /** When set and returning false, the panel renders empty and schedules removal. */
+  isAlive?: () => boolean;
+  /** Invoked (once) from render when isAlive() turns false. */
+  onDead?: () => void;
+  private deadNotified = false;
 
   setLines(lines: string[]): void {
     this.lines = lines;
   }
 
   render(_width: number): string[] {
+    // Self-healing: if the patched editor was swapped out while the panel
+    // was floating, nobody calls hideOverlay() anymore. Render nothing and
+    // schedule removal outside the composite pass.
+    if (this.isAlive && !this.isAlive()) {
+      if (!this.deadNotified) {
+        this.deadNotified = true;
+        if (this.onDead) queueMicrotask(this.onDead);
+      }
+      return [];
+    }
+    this.deadNotified = false;
     return this.lines;
   }
 
   invalidate(): void {}
+}
+
+/**
+ * Single seam for "where is the editor in the TUI": searches the root
+ * children (and one nesting level, e.g. editorContainer) plus the overlay
+ * stack. computePanelRow and the panel's isAlive check share this so their
+ * verdicts can never diverge. If a future pi pins the editor as an overlay,
+ * only this function needs to learn the new location.
+ */
+export function locateEditor(
+  tui: FloatingTui | undefined,
+  editor: unknown,
+): { childIndex: number } | { overlay: true } | null {
+  const children = tui?.children;
+  if (Array.isArray(children)) {
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i] as { children?: unknown[] };
+      if (child === editor || (Array.isArray(child.children) && child.children.includes(editor))) {
+        return { childIndex: i };
+      }
+    }
+  }
+  const overlays = tui?.overlayStack;
+  if (Array.isArray(overlays) && overlays.some((entry) => entry?.component === editor)) {
+    return { overlay: true };
+  }
+  return null;
+}
+
+interface PanelLayout {
+  /** Rendered height of everything below the editor (widgets, footer). */
+  suffixHeight: number;
+  /** True when the editor sits at the bottom of the viewport. */
+  bottomAnchored: boolean;
+}
+
+/**
+ * Resolve the layout facts computePanelRow needs. bottomAnchored is false
+ * for short top-aligned sessions today; a future pinned-bottom layout only
+ * needs to make this return bottomAnchored: true for its new structure.
+ */
+function resolveLayout(tui: FloatingTui | undefined, editor: unknown): PanelLayout | null {
+  const termHeight = tui?.terminal?.rows;
+  const termWidth = tui?.terminal?.columns;
+  if (!termHeight || !termWidth) return null;
+
+  const location = locateEditor(tui, editor);
+  if (!location) return null;
+  if (!("childIndex" in location)) return null; // overlay-hosted editor: not supported yet
+
+  const children = tui?.children as { render?(width: number): string[] }[];
+  let suffixHeight = 0;
+  for (let i = location.childIndex + 1; i < children.length; i++) {
+    const sibling = children[i];
+    if (typeof sibling.render !== "function") return null;
+    suffixHeight += sibling.render(termWidth).length;
+  }
+
+  // Content shorter than one screen renders top-aligned (cursorRow is the
+  // previous frame's end-of-content row).
+  const cursorRow = tui?.cursorRow;
+  const bottomAnchored = typeof cursorRow === "number" && cursorRow + 1 >= termHeight;
+  return { suffixHeight, bottomAnchored };
 }
 
 /**
@@ -66,36 +147,11 @@ export function computePanelRow(
   editorHeight: number,
   panelHeight: number,
 ): number | null {
-  const termHeight = tui?.terminal?.rows;
-  const termWidth = tui?.terminal?.columns;
-  const children = tui?.children;
-  if (!termHeight || !termWidth || !Array.isArray(children)) return null;
+  const layout = resolveLayout(tui, editor);
+  if (!layout || !layout.bottomAnchored) return null;
 
-  // Content shorter than one screen renders top-aligned; the bottom-anchored
-  // math below would detach the panel from the editor. Fall back to inline.
-  const cursorRow = tui?.cursorRow;
-  if (typeof cursorRow !== "number" || cursorRow + 1 < termHeight) return null;
-
-  // Locate the editor (or its container) among the TUI root children, then
-  // sum the rendered height of everything below it (widgets, footer).
-  let editorIndex = -1;
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i] as { children?: unknown[] };
-    if (child === editor || (Array.isArray(child.children) && child.children.includes(editor))) {
-      editorIndex = i;
-      break;
-    }
-  }
-  if (editorIndex === -1) return null;
-
-  let suffixHeight = 0;
-  for (let i = editorIndex + 1; i < children.length; i++) {
-    const sibling = children[i] as { render?(width: number): string[] };
-    if (typeof sibling.render !== "function") return null;
-    suffixHeight += sibling.render(termWidth).length;
-  }
-
-  const row = termHeight - suffixHeight - editorHeight - panelHeight;
+  const termHeight = tui!.terminal!.rows;
+  const row = termHeight - layout.suffixHeight - editorHeight - panelHeight;
   return row >= 0 ? row : null;
 }
 
@@ -167,6 +223,8 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T 
         overlayOptions.col = paddingX;
         overlayOptions.width = contentWidth;
       } else {
+        panel.isAlive = () => locateEditor(internals.tui, editor) !== null;
+        panel.onDead = hideOverlay;
         overlayOptions = { row, col: paddingX, width: contentWidth, nonCapturing: true };
         handle = tui.showOverlay(panel, overlayOptions);
       }
@@ -189,10 +247,19 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T): T 
 export function registerAutocompleteAbove(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     const previous = ctx.ui.getEditorComponent();
-    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+    // The host resets the editor factory before re-emitting session_start,
+    // but guard anyway: never wrap our own factory (would grow the closure
+    // chain across resumes/forks if that reset ever changes).
+    if ((previous as { __autocompleteAbove?: boolean } | undefined)?.__autocompleteAbove) return;
+    const factory = (
+      tui: Parameters<NonNullable<typeof previous>>[0],
+      theme: Parameters<NonNullable<typeof previous>>[1],
+      keybindings: Parameters<NonNullable<typeof previous>>[2],
+    ) =>
       previous
         ? applyAutocompleteAbove(previous(tui, theme, keybindings))
-        : applyAutocompleteAbove(new CustomEditor(tui, theme, keybindings)),
-    );
+        : applyAutocompleteAbove(new CustomEditor(tui, theme, keybindings));
+    (factory as { __autocompleteAbove?: boolean }).__autocompleteAbove = true;
+    ctx.ui.setEditorComponent(factory);
   });
 }
