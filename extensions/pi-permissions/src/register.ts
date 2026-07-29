@@ -56,7 +56,7 @@ import {
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
   createCodexToolRendering,
-  renderEditDiff,
+  createEditDiffBox,
   summarizeEditDiff,
 } from "../../pi-core/index.ts";
 
@@ -532,7 +532,14 @@ export function registerExtension(
       argument: (args) => typeof args.path === "string" ? args.path : "",
       collapsed: summarizeEditDiff,
       formatSummary: colorizeEditDiffSummary,
-      expandedOutput: renderEditDiff,
+      renderExpandedResult: (result, _args, theme, outputPad) => {
+        const details = result.details as { diff?: unknown } | undefined;
+        return createEditDiffBox(
+          typeof details?.diff === "string" ? details.diff : "",
+          theme,
+          { outputPad },
+        );
+      },
     }),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {

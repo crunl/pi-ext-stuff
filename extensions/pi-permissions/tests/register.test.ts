@@ -205,6 +205,9 @@ describe("Default mode registration", () => {
     const tool = app.tools.get("edit");
     const args = { path: "src/file.ts", edits: [] };
     const state = {};
+    const bgStart = "\u001b[48;5;22m";
+    const ansi = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+    const stripAnsi = (text: string): string => text.replace(ansi, "");
     const theme = {
       fg: (color: string, text: string) => {
         if (color === "success" || color === "toolDiffAdded") {
@@ -215,6 +218,8 @@ describe("Default mode registration", () => {
         }
         return text;
       },
+      bg: (_color: string, text: string) =>
+        `${bgStart}${text}\u001b[0m`,
       bold: (text: string) => text,
     };
     const context = {
@@ -253,15 +258,20 @@ describe("Default mode registration", () => {
       theme,
       context,
     );
-    const expandedText = expanded.render(100).join("\n");
+    const expandedLines = expanded.render(100);
+    const expandedText = expandedLines.join("\n");
+    const plainExpandedText = stripAnsi(expandedText);
 
     expect(header.render(100).join("\n")).toContain(
       "\u001b[32m+2\u001b[0m \u001b[31m-1\u001b[0m",
     );
     expect(collapsed.render(100)).toEqual([]);
-    expect(expandedText).toContain("\u001b[31m-11 old value\u001b[0m");
-    expect(expandedText).toContain("\u001b[32m+11 new value\u001b[0m");
-    expect(expandedText).toContain("\u001b[32m+12 added value\u001b[0m");
+    expect(plainExpandedText).toContain("- 11 │ old value");
+    expect(plainExpandedText).toContain("+ 11 │ new value");
+    expect(plainExpandedText).toContain("+ 12 │ added value");
+    expect(expandedLines.some((line: string) => line.includes(bgStart))).toBe(
+      true,
+    );
     expect(expandedText).not.toContain("Successfully replaced");
   });
 
