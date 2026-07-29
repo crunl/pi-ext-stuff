@@ -9,6 +9,7 @@ import {
   createBashTool,
   createEditTool,
   createWriteTool,
+  getLanguageFromPath,
 } from "@earendil-works/pi-coding-agent";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { homedir } from "node:os";
@@ -532,12 +533,15 @@ export function registerExtension(
       argument: (args) => typeof args.path === "string" ? args.path : "",
       collapsed: summarizeEditDiff,
       formatSummary: colorizeEditDiffSummary,
-      renderExpandedResult: (result, _args, theme, outputPad) => {
+      renderExpandedResult: (result, args, theme, outputPad) => {
         const details = result.details as { diff?: unknown } | undefined;
         return createEditDiffBox(
           typeof details?.diff === "string" ? details.diff : "",
           theme,
-          { outputPad },
+          {
+            outputPad,
+            lang: typeof args.path === "string" ? getLanguageFromPath(args.path) : undefined,
+          },
         );
       },
     }),
