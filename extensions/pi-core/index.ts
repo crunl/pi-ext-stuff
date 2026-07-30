@@ -7,7 +7,6 @@ export default function piCore(pi: ExtensionAPI): void {
 
 export {
   applyAutocompleteAbove,
-  frameLines,
   registerAutocompleteAbove,
 } from "./src/tui/autocomplete-above.ts";
 export {
@@ -24,6 +23,8 @@ export {
   type FloatingTui,
   locateEditor,
 } from "./src/tui/editor-float-panel.ts";
+export { FRAME_OVERHEAD, frameLines } from "./src/tui/frame.ts";
+export { installSelectorFloat } from "./src/tui/selector-float.ts";
 export {
   type CodexToolRendererSpec,
   colorizeEditDiffSummary,

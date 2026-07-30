@@ -1,7 +1,12 @@
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui } from "./editor-float-panel.ts";
+import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
+import { installSelectorFloat } from "./selector-float.ts";
 import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
+
+// Re-exported for backwards compatibility (previously defined here).
+export { frameLines } from "./frame.ts";
 
 interface EditorInternals {
   autocompleteList?: { render(width: number): string[]; handleInput?(data: string): void };
@@ -19,9 +24,6 @@ interface PatchableEditor {
   getPaddingX?(): number;
 }
 
-/** Horizontal columns consumed by the frame: "│ " left + " │" right. */
-const FRAME_OVERHEAD = 4;
-
 /**
  * Panel owned by the previously patched editor. Disposed when a new editor
  * is patched: a swapped-out editor's concealed panel can no longer self-heal
@@ -29,28 +31,6 @@ const FRAME_OVERHEAD = 4;
  * runs), and would otherwise leak one overlay entry per editor swap.
  */
 let activePanel: EditorFloatPanel | undefined;
-
-/**
- * Wrap panel lines with a rounded top border and left/right verticals. The
- * editor's own top border below the panel closes the frame visually:
- *
- *   ╭──────────╮
- *   │ → item   │
- *   ────────────  <- editor top border
- *
- * Lines must already be padded to frameWidth - FRAME_OVERHEAD.
- */
-export function frameLines(
-  lines: string[],
-  frameWidth: number,
-  color: (text: string) => string,
-): string[] {
-  const innerWidth = Math.max(1, frameWidth - FRAME_OVERHEAD);
-  const top = color(`╭${"─".repeat(innerWidth + 2)}╮`);
-  const left = color("│ ");
-  const right = color(" │");
-  return [top, ...lines.map((line) => `${left}${line}${right}`)];
-}
 
 /**
  * Patch an editor instance so its autocomplete panel appears ABOVE the input
@@ -76,8 +56,19 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   const originalRender = editor.render.bind(editor);
   const patched = editor as PatchableEditor;
   let panel: EditorFloatPanel | undefined;
+  let selectorFloatInstalled = false;
 
   patched.render = (width: number): string[] => {
+    // Install the selector-float container patch once the editor is mounted
+    // (the editorContainer can only be located while the editor sits in it).
+    if (!selectorFloatInstalled) {
+      selectorFloatInstalled = installSelectorFloat(
+        resolveTui(),
+        editor,
+        () => internals.borderColor ?? ((text: string) => text),
+      );
+    }
+
     const list = internals.autocompleteList;
     if (!internals.autocompleteState || !list) {
       panel?.hide();
