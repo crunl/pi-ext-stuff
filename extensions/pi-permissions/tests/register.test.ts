@@ -2920,7 +2920,10 @@ describe("Default mode registration", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
     await mkdir(join(project, ".git"));
+    await writeFile(join(project, ".git", "HEAD"), "ref: refs/heads/main\n");
     await writeFile(join(project, ".git", "config"), "");
+    await mkdir(join(project, ".git", "objects"));
+    await mkdir(join(project, ".git", "refs"));
     const app = harness(agentDir, true);
     app.context.cwd = project;
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
