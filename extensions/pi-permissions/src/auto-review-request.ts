@@ -292,17 +292,23 @@ export function parseAutoReviewResult(text: string): AutoReviewResult {
   }
   if (
     parsed.risk_level !== undefined &&
+    parsed.risk_level !== null &&
     !new Set<unknown>(["low", "medium", "high", "critical"]).has(parsed.risk_level)
   ) {
     throw new Error("Invalid reviewer output: invalid risk");
   }
   if (
     parsed.user_authorization !== undefined &&
+    parsed.user_authorization !== null &&
     !new Set<unknown>(["unknown", "low", "medium", "high"]).has(parsed.user_authorization)
   ) {
     throw new Error("Invalid reviewer output: invalid user authorization");
   }
-  if (parsed.rationale !== undefined && typeof parsed.rationale !== "string") {
+  if (
+    parsed.rationale !== undefined &&
+    parsed.rationale !== null &&
+    typeof parsed.rationale !== "string"
+  ) {
     throw new Error("Invalid reviewer output: rationale is required");
   }
   const decision = parsed.outcome === "allow" ? "approve" : "deny";

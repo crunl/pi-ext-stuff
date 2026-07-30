@@ -50,6 +50,27 @@ describe("auto review result", () => {
     expect(parseAutoReviewResult(JSON.stringify(payload))).toEqual(expected);
   });
 
+  it.each([
+    ["risk", { outcome: "allow", risk_level: null }, { risk: "low" }],
+    [
+      "user authorization",
+      { outcome: "allow", user_authorization: null },
+      { userAuthorization: "unknown" },
+    ],
+    [
+      "null rationale",
+      { outcome: "allow", rationale: null },
+      { rationale: "Auto-review returned a low-risk allow decision." },
+    ],
+    [
+      "blank rationale",
+      { outcome: "allow", rationale: "   " },
+      { rationale: "Auto-review returned a low-risk allow decision." },
+    ],
+  ])("treats a null or blank %s field as an absent Codex optional", (_name, payload, expected) => {
+    expect(parseAutoReviewResult(JSON.stringify(payload))).toMatchObject(expected);
+  });
+
   it("recovers one JSON object wrapped in surrounding prose", () => {
     expect(
       parseAutoReviewResult('assessment follows: {"outcome":"allow","risk_level":"medium"} done'),
@@ -66,12 +87,6 @@ describe("auto review result", () => {
     "approve",
   ])("rejects malformed output: %s", (text) => {
     expect(() => parseAutoReviewResult(text)).toThrow(/reviewer output/i);
-  });
-
-  it("uses the Codex fallback for a blank rationale", () => {
-    expect(parseAutoReviewResult('{"outcome":"allow","rationale":"   "}')).toMatchObject({
-      rationale: "Auto-review returned a low-risk allow decision.",
-    });
   });
 
   it.each([
