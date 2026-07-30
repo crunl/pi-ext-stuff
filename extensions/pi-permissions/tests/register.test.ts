@@ -136,16 +136,7 @@ describe("Default mode registration", () => {
   it("fails closed when configured YOLO lacks the core execution abort gate", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
-    const app = harness(
-      agentDir,
-      false,
-      true,
-      {},
-      undefined,
-      undefined,
-      undefined,
-      () => false,
-    );
+    const app = harness(agentDir, false, true, {}, undefined, undefined, undefined, () => false);
 
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
@@ -170,16 +161,7 @@ describe("Default mode registration", () => {
 
   it("refuses a live switch to YOLO when the core gate is absent", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    const app = harness(
-      agentDir,
-      false,
-      true,
-      {},
-      undefined,
-      undefined,
-      undefined,
-      () => false,
-    );
+    const app = harness(agentDir, false, true, {}, undefined, undefined, undefined, () => false);
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
 
     await app.commands.get("yolo")!.handler("", app.context);
