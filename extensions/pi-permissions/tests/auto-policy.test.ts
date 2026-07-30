@@ -16,13 +16,7 @@ describe("Auto review policy", () => {
       })),
     };
     await expect(
-      reviewAutoPrompt(
-        reviewer,
-        request,
-        context,
-        { consecutiveDenials: 2, paused: false },
-        3,
-      ),
+      reviewAutoPrompt(reviewer, request, context, { consecutiveDenials: 2, paused: false }),
     ).resolves.toEqual({
       action: "approve",
       review: {
@@ -45,13 +39,7 @@ describe("Auto review policy", () => {
       })),
     };
     await expect(
-      reviewAutoPrompt(
-        reviewer,
-        request,
-        context,
-        { consecutiveDenials: 2, paused: false },
-        3,
-      ),
+      reviewAutoPrompt(reviewer, request, context, { consecutiveDenials: 2, paused: false }),
     ).resolves.toMatchObject({
       action: "deny",
       state: { consecutiveDenials: 3, paused: true },
@@ -65,8 +53,10 @@ describe("Auto review policy", () => {
       }),
     };
     const state = { consecutiveDenials: 1, paused: false };
-    await expect(reviewAutoPrompt(reviewer, request, context, state, 3))
-      .resolves.toMatchObject({ action: "error", state });
+    await expect(reviewAutoPrompt(reviewer, request, context, state)).resolves.toMatchObject({
+      action: "error",
+      state,
+    });
   });
 
   it("propagates caller cancellation instead of requesting fallback", async () => {
@@ -76,13 +66,7 @@ describe("Auto review policy", () => {
       }),
     };
     await expect(
-      reviewAutoPrompt(
-        reviewer,
-        request,
-        context,
-        { consecutiveDenials: 0, paused: false },
-        3,
-      ),
+      reviewAutoPrompt(reviewer, request, context, { consecutiveDenials: 0, paused: false }),
     ).rejects.toMatchObject({ kind: "cancelled" });
   });
 });

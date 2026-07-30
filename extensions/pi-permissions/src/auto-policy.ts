@@ -1,17 +1,10 @@
-import type {
-  AutoReviewRequest,
-  AutoReviewResult,
-} from "./auto-review-request.ts";
+import type { AutoReviewRequest, AutoReviewResult } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
   type AutoReviewerContext,
   AutoReviewerFailure,
 } from "./auto-reviewer.ts";
-import {
-  type AutoState,
-  recordAutoApproval,
-  recordAutoDenial,
-} from "./modes/auto.ts";
+import { type AutoState, recordAutoApproval, recordAutoDenial } from "./modes/auto.ts";
 
 export type AutoPolicyResult =
   | { action: "approve"; review: AutoReviewResult; state: AutoState }
@@ -23,7 +16,6 @@ export async function reviewAutoPrompt(
   request: AutoReviewRequest,
   context: AutoReviewerContext,
   state: AutoState,
-  limit: number,
   signal?: AbortSignal,
 ): Promise<AutoPolicyResult> {
   try {
@@ -38,7 +30,7 @@ export async function reviewAutoPrompt(
     return {
       action: "deny",
       review,
-      state: recordAutoDenial(state, limit),
+      state: recordAutoDenial(state),
     };
   } catch (error) {
     if (error instanceof AutoReviewerFailure) {
@@ -48,11 +40,9 @@ export async function reviewAutoPrompt(
     const message = error instanceof Error ? error.message : String(error);
     return {
       action: "error",
-      error: new AutoReviewerFailure(
-        "provider",
-        `Auto reviewer failed: ${message}`,
-        { cause: error },
-      ),
+      error: new AutoReviewerFailure("provider", `Auto reviewer failed: ${message}`, {
+        cause: error,
+      }),
       state,
     };
   }

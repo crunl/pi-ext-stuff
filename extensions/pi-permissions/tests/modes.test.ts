@@ -84,14 +84,14 @@ describe("permission session state", () => {
 
 describe("recordAutoDecision", () => {
   it("resets consecutive denials after approval", () => {
-    expect(recordAutoDecision({ consecutiveDenials: 2, paused: true }, "approve", 3)).toEqual({
+    expect(recordAutoDecision({ consecutiveDenials: 2, paused: true }, "approve")).toEqual({
       consecutiveDenials: 0,
       paused: false,
     });
   });
 
   it("pauses on the third denial", () => {
-    expect(recordAutoDecision({ consecutiveDenials: 2, paused: false }, "deny", 3)).toEqual({
+    expect(recordAutoDecision({ consecutiveDenials: 2, paused: false }, "deny")).toEqual({
       consecutiveDenials: 3,
       paused: true,
     });

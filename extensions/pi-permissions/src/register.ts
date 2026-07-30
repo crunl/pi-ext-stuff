@@ -31,7 +31,6 @@ import {
 } from "./default-mode.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { buildAutoReviewRequest } from "./auto-review-request.ts";
-import { MAX_CONSECUTIVE_GUARDIAN_DENIALS } from "./guardian-policy.ts";
 import {
   type AutoReviewer,
   PiAutoReviewer,
@@ -785,9 +784,10 @@ export function registerExtension(
             modelRegistry: ctx.modelRegistry,
             activeModel: ctx.model,
             reviewer: result.config.reviewer,
+            cwd: resolve(ctx.cwd),
+            configFingerprint,
           },
           runtime.autoState,
-          MAX_CONSECUTIVE_GUARDIAN_DENIALS,
           reviewSignal,
         );
         if (reviewSignal.aborted) {

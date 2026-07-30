@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type {
   Api,
   AssistantMessage,
@@ -9,22 +7,32 @@ import type {
   TextContent,
 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
-import type { PermissionsConfig } from "./config.ts";
-import { resolveGuardianModel } from "./guardian-model.ts";
-import { GUARDIAN_REVIEW_TIMEOUT_MS } from "./guardian-policy.ts";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
-  AUTO_REVIEW_SYSTEM_PROMPT,
   type AutoReviewRequest,
   type AutoReviewResult,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
 } from "./auto-review-request.ts";
+import type { PermissionsConfig } from "./config.ts";
+import { resolveGuardianModel } from "./guardian-model.ts";
+import {
+  GUARDIAN_REVIEW_MAX_ATTEMPTS,
+  GUARDIAN_REVIEW_TIMEOUT_MS,
+  guardianRetryDelayMs,
+} from "./guardian-policy.ts";
+import { GuardianReviewSessionManager } from "./guardian-session.ts";
 
 export interface AutoReviewerContext {
   modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
   activeModel?: Model<Api>;
   reviewer?: PermissionsConfig["reviewer"];
+  cwd: string;
+  configFingerprint: string;
 }
+
+type PiAutoReviewerContext = Omit<AutoReviewerContext, "cwd" | "configFingerprint"> &
+  Partial<Pick<AutoReviewerContext, "cwd" | "configFingerprint">>;
 
 export interface AutoReviewer {
   review(
@@ -58,27 +66,161 @@ type Complete = (
   options?: ProviderStreamOptions,
 ) => Promise<AssistantMessage>;
 
+type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
+
 const DEFAULT_REVIEW_REASONING = "medium";
+const RETRYABLE_PROVIDER_STATUSES = new Set([500, 502, 503, 504]);
+const RETRYABLE_PROVIDER_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "API_CONNECTION_ERROR",
+  "CONNECTION_ERROR",
+  "OVERLOADED",
+  "OVERLOADED_ERROR",
+  "SERVER_ERROR",
+  "SERVICE_UNAVAILABLE",
+  "STREAM_DISCONNECTED",
+  "STREAM_ERROR",
+  "WEBSOCKET_ERROR",
+]);
+const RETRYABLE_PROVIDER_MESSAGE =
+  /\b(?:500|502|503|504|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETDOWN|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT)\b|overload|service.?unavailable|upstream.?connect|connection.?(?:error|failed|lost|refused|reset)|fetch failed|other side closed|socket hang up|socket connection was closed|websocket.?(?:closed|error)|stream ended (?:before|without)|http2 request did not get a response|reset before headers/i;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function errorRecord(error: unknown): Record<string, unknown> | undefined {
+  return typeof error === "object" && error !== null
+    ? (error as Record<string, unknown>)
+    : undefined;
+}
+
+function isTransientProviderFailure(error: unknown): boolean {
+  let current: unknown = error;
+  let transientCodeOrMessage = false;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const record = errorRecord(current);
+    if (!record) break;
+    if (typeof record.status === "number") {
+      return RETRYABLE_PROVIDER_STATUSES.has(record.status);
+    }
+    if (
+      typeof record.code === "string" &&
+      RETRYABLE_PROVIDER_CODES.has(record.code.toUpperCase())
+    ) {
+      transientCodeOrMessage = true;
+    }
+    if (typeof record.message === "string" && RETRYABLE_PROVIDER_MESSAGE.test(record.message)) {
+      transientCodeOrMessage = true;
+    }
+    current = record.cause;
+  }
+  return transientCodeOrMessage;
+}
+
+function cancelledFailure(): AutoReviewerFailure {
+  return new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+}
+
+function timeoutFailure(): AutoReviewerFailure {
+  return new AutoReviewerFailure("timeout", "Auto review timed out");
+}
+
+function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("Auto review aborted"));
+      return;
+    }
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timeout = setTimeout(finish, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(signal?.reason ?? new Error("Auto review aborted"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function completeWithAbort<T>(request: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new Error("Auto review aborted"));
+      return;
+    }
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const abort = () => {
+      cleanup();
+      reject(signal.reason ?? new Error("Auto review aborted"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    request.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function waitBeforeRetry(
+  sleep: Sleep,
+  attempt: number,
+  deadline: number,
+  callerSignal?: AbortSignal,
+): Promise<void> {
+  const delayMs = guardianRetryDelayMs(attempt);
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= delayMs) throw timeoutFailure();
+  const deadlineSignal = AbortSignal.timeout(remainingMs);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, deadlineSignal]) : deadlineSignal;
+  try {
+    await sleep(delayMs, signal);
+  } catch (error) {
+    if (callerSignal?.aborted) throw cancelledFailure();
+    if (deadlineSignal.aborted || Date.now() >= deadline) throw timeoutFailure();
+    throw error;
+  }
+  if (callerSignal?.aborted) throw cancelledFailure();
+  if (Date.now() >= deadline) throw timeoutFailure();
+}
+
 export class PiAutoReviewer implements AutoReviewer {
-  constructor(private readonly invoke: Complete = complete) {}
+  constructor(
+    private readonly invoke: Complete = complete,
+    private readonly sessions = new GuardianReviewSessionManager(),
+    private readonly sleep: Sleep = sleepWithAbort,
+  ) {}
 
   async review(
     request: AutoReviewRequest,
-    context: AutoReviewerContext,
+    context: PiAutoReviewerContext,
     callerSignal?: AbortSignal,
   ): Promise<AutoReviewResult> {
     if (callerSignal?.aborted) {
-      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+      throw cancelledFailure();
     }
 
     const guardian = await resolveGuardianModel(context);
     if (callerSignal?.aborted) {
-      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+      throw cancelledFailure();
     }
     const model = guardian.model;
 
@@ -98,91 +240,110 @@ export class PiAutoReviewer implements AutoReviewer {
       );
     }
     if (callerSignal?.aborted) {
-      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+      throw cancelledFailure();
     }
 
-    const timeoutMs = GUARDIAN_REVIEW_TIMEOUT_MS;
-    const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const signal = callerSignal
-      ? AbortSignal.any([callerSignal, timeoutSignal])
-      : timeoutSignal;
-    const reviewContext: Context = {
-      systemPrompt: AUTO_REVIEW_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: renderAutoReviewPrompt(request),
-          timestamp: Date.now(),
-        },
-      ],
-    };
-
-    let response: AssistantMessage;
-    const abortResponse = new Promise<never>((_resolve, reject) => {
-      const abort = () => reject(signal.reason ?? new Error("Auto review aborted"));
-      if (signal.aborted) abort();
-      else signal.addEventListener("abort", abort, { once: true });
-    });
+    const lease = this.sessions.open(
+      {
+        cwd: context.cwd ?? request.cwd,
+        configFingerprint: context.configFingerprint ?? "legacy",
+        provider: model.provider,
+        model: model.id,
+      },
+      renderAutoReviewPrompt(request),
+    );
+    const deadline = Date.now() + GUARDIAN_REVIEW_TIMEOUT_MS;
     try {
-      response = await Promise.race([
-        this.invoke(model, reviewContext, {
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          env: auth.env,
-          reasoningEffort:
-            context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
-          timeoutMs,
-          maxRetries: 0,
-          cacheRetention: "none",
-          signal,
-          sessionId: `pi-permissions-auto-${randomUUID()}`,
-        }),
-        abortResponse,
-      ]);
-    } catch {
-      if (callerSignal?.aborted) {
-        throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
-      }
-      if (timeoutSignal.aborted) {
-        throw new AutoReviewerFailure("timeout", "Auto review timed out");
+      for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
+        if (callerSignal?.aborted) throw cancelledFailure();
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw timeoutFailure();
+        const deadlineSignal = AbortSignal.timeout(remainingMs);
+        const signal = callerSignal
+          ? AbortSignal.any([callerSignal, deadlineSignal])
+          : deadlineSignal;
+
+        let response: AssistantMessage;
+        try {
+          response = await completeWithAbort(
+            this.invoke(model, lease.context, {
+              apiKey: auth.apiKey,
+              headers: auth.headers,
+              env: auth.env,
+              reasoningEffort: context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
+              timeoutMs: remainingMs,
+              maxRetries: 0,
+              cacheRetention: "none",
+              signal,
+              sessionId: lease.sessionId,
+            }),
+            signal,
+          );
+        } catch (error) {
+          if (callerSignal?.aborted) throw cancelledFailure();
+          if (deadlineSignal.aborted || Date.now() >= deadline) {
+            throw timeoutFailure();
+          }
+          if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS || !isTransientProviderFailure(error)) {
+            throw new AutoReviewerFailure("provider", "Auto reviewer request failed", {
+              cause: error,
+            });
+          }
+          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+          continue;
+        }
+
+        if (callerSignal?.aborted) throw cancelledFailure();
+        if (deadlineSignal.aborted || Date.now() >= deadline) {
+          throw timeoutFailure();
+        }
+        if (response.stopReason !== "stop") {
+          const failure = new AutoReviewerFailure(
+            "provider",
+            `Auto reviewer stopped with ${response.stopReason}`,
+          );
+          if (
+            attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
+            response.stopReason !== "error" ||
+            !isTransientProviderFailure(new Error(response.errorMessage ?? ""))
+          ) {
+            throw failure;
+          }
+          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+          continue;
+        }
+
+        const text = response.content
+          .filter((part): part is TextContent => part.type === "text")
+          .map((part) => part.text)
+          .join("");
+        try {
+          const result = parseAutoReviewResult(text);
+          lease.commit(text);
+          return {
+            ...result,
+            guardian: {
+              provider: model.provider,
+              model: model.id,
+              source: guardian.source,
+              ...(guardian.fallbackNotice === undefined
+                ? {}
+                : { fallbackNotice: guardian.fallbackNotice }),
+            },
+          };
+        } catch (error) {
+          const failure = new AutoReviewerFailure(
+            "parse",
+            `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
+            { cause: error },
+          );
+          if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS) throw failure;
+          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+        }
       }
       throw new AutoReviewerFailure("provider", "Auto reviewer request failed");
-    }
-    if (callerSignal?.aborted) {
-      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
-    }
-    if (timeoutSignal.aborted) {
-      throw new AutoReviewerFailure("timeout", "Auto review timed out");
-    }
-
-    if (response.stopReason !== "stop") {
-      throw new AutoReviewerFailure(
-        "provider",
-        `Auto reviewer stopped with ${response.stopReason}`,
-      );
-    }
-    const text = response.content
-      .filter((part): part is TextContent => part.type === "text")
-      .map((part) => part.text)
-      .join("");
-    try {
-      return {
-        ...parseAutoReviewResult(text),
-        guardian: {
-          provider: model.provider,
-          model: model.id,
-          source: guardian.source,
-          ...(guardian.fallbackNotice === undefined
-            ? {}
-            : { fallbackNotice: guardian.fallbackNotice }),
-        },
-      };
-    } catch (error) {
-      throw new AutoReviewerFailure(
-        "parse",
-        `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
-        { cause: error },
-      );
+    } finally {
+      lease.release();
     }
   }
 }

@@ -1,10 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
-import {
-  GUARDIAN_DENIAL_WINDOW_SIZE,
-  MAX_CONSECUTIVE_GUARDIAN_DENIALS,
-  MAX_RECENT_GUARDIAN_DENIALS,
-} from "./guardian-policy.ts";
+import { GUARDIAN_DENIAL_WINDOW_SIZE, MAX_RECENT_GUARDIAN_DENIALS } from "./guardian-policy.ts";
 import {
   type AutoState,
   recordAutoApproval,
@@ -131,12 +127,13 @@ export class PermissionModeRuntime {
 
   recordAutoReview(decision: "approve" | "deny"): AutoState {
     this.recordAutoReviewOutcome(decision === "deny");
-    this.state.auto = decision === "approve"
-      ? recordAutoApproval(this.state.auto)
-      : recordAutoDenial(this.state.auto, MAX_CONSECUTIVE_GUARDIAN_DENIALS);
+    this.state.auto =
+      decision === "approve"
+        ? recordAutoApproval(this.state.auto)
+        : recordAutoDenial(this.state.auto);
     if (
-      decision === "deny"
-      && this.autoReviewWindow.filter(Boolean).length >= MAX_RECENT_GUARDIAN_DENIALS
+      decision === "deny" &&
+      this.autoReviewWindow.filter(Boolean).length >= MAX_RECENT_GUARDIAN_DENIALS
     ) {
       this.state.auto.paused = true;
     }
