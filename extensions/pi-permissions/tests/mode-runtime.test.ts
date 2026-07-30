@@ -43,6 +43,7 @@ describe("PermissionModeRuntime", () => {
     runtime.beginReview("active-review");
 
     expect(runtime.cycle()).toBe("auto");
+    expect(runtime.cycle()).toBe("yolo");
     expect(runtime.cycle()).toBe("default");
   });
 
@@ -154,12 +155,12 @@ describe("PermissionModeRuntime", () => {
     expect(() => runtime.activate("plan")).toThrow("Plan mode is not implemented");
   });
 
-  it("downgrades a YOLO configuration to Default until YOLO is implemented", () => {
-    const config = structuredClone(DEFAULT_CONFIG);
-    config.defaultMode = "yolo";
-    const runtime = new PermissionModeRuntime(config, vi.fn());
+  it("activates and reports YOLO without mutating Auto state", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.applyAutoState({ consecutiveDenials: 2, paused: true });
 
-    expect(runtime.mode).toBe("default");
-    expect(runtime.statusLabel).toBe("Default");
+    expect(runtime.activate("yolo")).toBe("yolo");
+    expect(runtime.statusLabel).toBe("YOLO");
+    expect(runtime.autoState).toEqual({ consecutiveDenials: 2, paused: true });
   });
 });

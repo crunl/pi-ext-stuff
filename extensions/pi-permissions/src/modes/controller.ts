@@ -1,6 +1,6 @@
 import type { PermissionMode } from "../state.ts";
 
-const cycleOrder: PermissionMode[] = ["default", "auto"];
+const cycleOrder: PermissionMode[] = ["default", "auto", "yolo"];
 
 export class ModeController {
   private activeMode: PermissionMode;

@@ -218,6 +218,7 @@ describe("Default mode registration", () => {
 
     expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
     expect(app.commands.has("default")).toBe(true);
+    expect(app.commands.has("yolo")).toBe(true);
     expect(app.commands.has("permissions")).toBe(true);
     expect(app.tools.has("bash")).toBe(true);
     expect(app.tools.has("write")).toBe(true);
@@ -1597,11 +1598,18 @@ describe("Default mode registration", () => {
     );
     await app.commands.get("auto")!.handler("", app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    await app.commands.get("yolo")!.handler("", app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await app.commands.get("permissions")!.handler("", app.context);
+    expect(app.notify).toHaveBeenLastCalledWith(
+      "YOLO · Full Access · sandbox off · approvals never",
+      "info",
+    );
     await app.commands.get("default")!.handler("", app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
-  it("cycles Default and Auto with Shift+Tab after thinking is migrated", async () => {
+  it("cycles Default, Auto, and YOLO with Shift+Tab after thinking is migrated", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
       join(agentDir, "keybindings.json"),
@@ -1615,6 +1623,8 @@ describe("Default mode registration", () => {
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
@@ -1678,7 +1688,7 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledOnce();
   });
 
-  it("cycles a working transition immediately when Shift+Tab is pressed again", async () => {
+  it("cycles a working transition to YOLO immediately when Shift+Tab is pressed again", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
       join(agentDir, "keybindings.json"),
@@ -1695,10 +1705,10 @@ describe("Default mode registration", () => {
     const secondCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
     await Promise.all([firstCycle, secondCycle]);
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("Default mode 已启用"),
+      expect.stringContaining("YOLO mode 已启用"),
       "info",
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
   });
 
   it("discards a restored legacy pending transition", async () => {
@@ -1726,7 +1736,7 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
-  it("switches to Default immediately and invalidates the current Auto review", async () => {
+  it("switches to YOLO immediately and invalidates the current Auto review", async () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
@@ -1771,7 +1781,7 @@ describe("Default mode registration", () => {
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
     expect(reviewSignal?.aborted).toBe(true);
     resolveReview({
       decision: "approve",
@@ -1802,7 +1812,7 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledOnce();
 
     idle = true;
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
   });
 
   it("does not let an aborted review clear a newer review with the same tool-call ID", async () => {
@@ -1845,6 +1855,7 @@ describe("Default mode registration", () => {
 
     const stale = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledTimes(1));
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     await app.shortcuts.get("shift+tab")!.handler(app.context);
 

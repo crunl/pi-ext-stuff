@@ -49,9 +49,10 @@ export class PermissionModeRuntime {
     return this.humanApprovalActive || this.activeReviewIds.size > 0;
   }
 
-  get statusLabel(): "Default" | "Auto" {
+  get statusLabel(): "Default" | "Auto" | "YOLO" {
     if (this.mode === "default") return "Default";
     if (this.mode === "auto") return "Auto";
+    if (this.mode === "yolo") return "YOLO";
     throw new Error("Plan mode is not implemented");
   }
 

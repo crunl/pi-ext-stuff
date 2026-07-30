@@ -43,6 +43,7 @@ import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
+import type { PermissionMode } from "./state.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -80,6 +81,8 @@ interface ApprovedCall {
   cwd: string;
   requestFingerprint: string;
 }
+
+type ExecutablePermissionMode = Exclude<PermissionMode, "plan">;
 
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
@@ -863,7 +866,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     },
   );
 
-  const activateMode = async (mode: "default" | "auto", ctx: ExtensionContext): Promise<void> =>
+  const activateMode = async (mode: ExecutablePermissionMode, ctx: ExtensionContext): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
         const result = await activateConfig(ctx, ctx.isIdle());
@@ -891,6 +894,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.registerCommand("auto", {
     description: "Activate pi-permissions Auto mode",
     handler: async (_args, ctx) => activateMode("auto", ctx),
+  });
+
+  pi.registerCommand("yolo", {
+    description: "Activate pi-permissions YOLO Full Access mode",
+    handler: async (_args, ctx) => activateMode("yolo", ctx),
   });
 
   pi.registerCommand("approve", {
@@ -995,6 +1003,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.restore(ctx.sessionManager.getBranch(), config);
         }
         setDefaultStatus(ctx);
+        if (runtime.mode === "yolo") {
+          ctx.ui.notify("YOLO · Full Access · sandbox off · approvals never", "info");
+          return;
+        }
         const sandboxSummary =
           sandboxState.kind === "ready"
             ? `${sandboxState.profile} sandbox on`

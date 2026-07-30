@@ -10,9 +10,10 @@ import {
 } from "../src/state.ts";
 
 describe("ModeController", () => {
-  it("cycles only functional Default and Auto modes", () => {
+  it("cycles Default, Auto, and YOLO immediately", () => {
     const controller = new ModeController("default");
     expect(controller.cycle()).toBe("auto");
+    expect(controller.cycle()).toBe("yolo");
     expect(controller.cycle()).toBe("default");
   });
 
@@ -65,6 +66,20 @@ describe("permission session state", () => {
 
     expect(state).toEqual(latest);
     expect(malformed).toHaveLength(1);
+  });
+
+  it("restores a persisted YOLO session state", () => {
+    const state = {
+      ...createPermissionSessionState(DEFAULT_CONFIG),
+      mode: "yolo" as const,
+    };
+
+    expect(
+      reducePermissionEntries(
+        [{ type: "custom", customType: "pi-permissions-state", data: state }],
+        DEFAULT_CONFIG,
+      ),
+    ).toEqual(state);
   });
 
   it("discards persisted state from a different config fingerprint", () => {
