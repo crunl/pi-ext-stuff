@@ -67,10 +67,7 @@ registry preference:
   "reviewer": {
     "provider": "deepseek",
     "model": "registered-model-id",
-    "reasoningEffort": "medium",
-    "timeoutMs": 90000,
-    "maxAttempts": 3,
-    "maxConsecutiveDenials": 3
+    "reasoningEffort": "medium"
   }
 }
 ```
@@ -110,6 +107,18 @@ After a model is selected, the selection is fixed for the whole review:
 There is deliberately no second-model fallback after a request has started.
 That avoids hidden policy changes, duplicate long waits, and accidental extra
 provider cost. This matches Codex's same-model retry/fail-closed behavior.
+
+The following are Guardian policy constants, not deployment configuration:
+
+| Constant | Value | Codex-equivalent purpose |
+|---|---:|---|
+| `GUARDIAN_REVIEW_TIMEOUT_MS` | 90,000 | One aggregate review deadline |
+| `GUARDIAN_REVIEW_MAX_ATTEMPTS` | 3 | Same-model retry limit inside that deadline |
+| `MAX_CONSECUTIVE_GUARDIAN_DENIALS` | 3 | Pause the Auto turn after repeated denials |
+| `MAX_RECENT_GUARDIAN_DENIALS` | 10 in 50 reviews | Secondary denial circuit breaker |
+
+They are deliberately hard-coded. Exposing them in `config.json` would let a
+local configuration silently diverge from Codex approval semantics.
 
 ### Guardian review-session manager
 
@@ -155,8 +164,12 @@ implicit side effect of `Auto`.
 
 - Existing configurations without `reviewer` retain their current active-model
   behavior.
-- Existing complete `reviewer` objects remain valid. `timeoutMs` defaults to
-  90,000 and `maxAttempts` to 3 when omitted by a migrated configuration.
+- `reviewer` contains only model-selection fields. `timeoutMs`, `maxAttempts`,
+  and `maxConsecutiveDenials` are removed from the public schema and from the
+  example configuration.
+- A legacy configuration containing one of those removed policy fields fails
+  with a migration message that tells the user to delete it; the extension must
+  never silently accept or ignore a policy override.
 - `fallbackToActive` is not exposed initially: active-model fallback is the
   fixed Codex-equivalent behavior for an unavailable preferred reviewer.
 - The config parser will require `provider` and `model` together, reject
