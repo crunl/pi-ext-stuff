@@ -106,28 +106,36 @@ function splitShellSegments(command: string): string[] {
 function shellWords(source: string): string[] {
   const words: string[] = [];
   let current = "";
+  let tokenStarted = false;
   let quote: "'" | '"' | undefined;
   let escaped = false;
   const flush = (): void => {
-    if (current) words.push(current);
+    if (tokenStarted) words.push(current);
     current = "";
+    tokenStarted = false;
   };
   for (const character of source) {
     if (escaped) {
       current += character;
+      tokenStarted = true;
       escaped = false;
       continue;
     }
     if (character === "\\" && quote !== "'") {
+      tokenStarted = true;
       escaped = true;
       continue;
     }
     if (quote) {
       if (character === quote) quote = undefined;
-      else current += character;
+      else {
+        current += character;
+        tokenStarted = true;
+      }
       continue;
     }
     if (character === "'" || character === '"') {
+      tokenStarted = true;
       quote = character;
       continue;
     }
@@ -136,6 +144,7 @@ function shellWords(source: string): string[] {
       continue;
     }
     current += character;
+    tokenStarted = true;
   }
   flush();
   return words;
@@ -541,14 +550,35 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
   return false;
 }
 
+function segmentUsesImplicitGitNetwork(segment: CommandSegment): boolean {
+  return (
+    segment.executable === "git" &&
+    invocationUsesNetwork(segment) &&
+    !segment.args.some(
+      (arg) => /^https?:\/\//i.test(arg) || arg.includes("@") || /^[^\s/:]+:[^\s]+$/.test(arg),
+    )
+  );
+}
+
 export function shellCommandUsesImplicitGitNetwork(command: string): boolean {
-  return parseCommandSegments(command).some(
-    (segment) =>
-      segment.executable === "git" &&
-      invocationUsesNetwork(segment) &&
-      !segment.args.some(
-        (arg) => /^https?:\/\//i.test(arg) || arg.includes("@") || /^[^\s/:]+:[^\s]+$/.test(arg),
-      ),
+  return parseCommandSegments(command).some(segmentUsesImplicitGitNetwork);
+}
+
+export function shellCommandUsesDirectImplicitGitPush(command: string): boolean {
+  const segments = parseCommandSegments(command);
+  const segment = segments.length === 1 ? segments[0] : undefined;
+  if (!segment) return false;
+  const subcommand = segment.args
+    .map((arg) => arg.toLowerCase())
+    .find((arg) => !arg.startsWith("-"));
+  return (
+    command.trim() === segment.source &&
+    executableIndex(shellWords(segment.source)) === 0 &&
+    subcommand === "push" &&
+    segmentUsesImplicitGitNetwork(segment) &&
+    !segment.hasRedirect &&
+    !segment.hasSubstitution &&
+    !segment.nestedShell
   );
 }
 

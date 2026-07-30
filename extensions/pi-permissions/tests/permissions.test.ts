@@ -9,6 +9,7 @@ import {
   isPublicNetworkHost,
   normalizeToolCall,
   shellCommandCanGrantGitMetadata,
+  shellCommandUsesDirectImplicitGitPush,
 } from "../src/permissions/risk.ts";
 import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
 
@@ -113,6 +114,8 @@ describe("Git metadata eligibility", () => {
     ["git add docs/fish.md", true],
     ["git init", true],
     ["git init .", true],
+    ['git init ""', false],
+    ["git init ''", false],
     ["git init elsewhere", false],
     ["git init --bare", false],
     ['bash -c "git add README.md"', false],
@@ -127,6 +130,17 @@ describe("Git metadata eligibility", () => {
     ["git add README.md > result.txt", false],
   ] as const)("decides Git metadata eligibility for %s", (command, expected) => {
     expect(shellCommandCanGrantGitMetadata(command)).toBe(expected);
+  });
+
+  it.each([
+    ["git push origin main", true],
+    ["/usr/bin/git push origin main", true],
+    ["git fetch origin", false],
+    ["git push https://github.com/owner/repo.git main", false],
+    ["env git push origin main", false],
+    ['bash -c "git push origin main"', false],
+  ] as const)("identifies direct implicit Git push in %s", (command, expected) => {
+    expect(shellCommandUsesDirectImplicitGitPush(command)).toBe(expected);
   });
 });
 

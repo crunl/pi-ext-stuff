@@ -6,6 +6,14 @@ export type GitMetadataResult =
   | { ok: true; configPath: string; writeRoots: string[] }
   | { ok: false; reason: string };
 
+export type GitInitializationMetadataResult =
+  | { ok: true; writeRoots: string[] }
+  | { ok: false; reason: string };
+
+type GitMetadataInspectionResult =
+  | GitMetadataResult
+  | { ok: false; reason: string; notFound: true };
+
 function isFilesystemRoot(path: string): boolean {
   return path === parse(path).root;
 }
@@ -120,7 +128,10 @@ function filesystemErrorReason(error: unknown): string {
   return error instanceof Error ? error.message : "Git metadata filesystem error";
 }
 
-async function inspectGitMetadata(cwd: string, searchParents: boolean): Promise<GitMetadataResult> {
+async function inspectGitMetadata(
+  cwd: string,
+  searchParents: boolean,
+): Promise<GitMetadataInspectionResult> {
   let directory = resolve(cwd);
   const root = parse(directory).root;
   while (true) {
@@ -133,7 +144,11 @@ async function inspectGitMetadata(cwd: string, searchParents: boolean): Promise<
         return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
       }
       if (!searchParents || directory === root) {
-        return { ok: false, reason: "unsafe Git metadata: repository not found" };
+        return {
+          ok: false,
+          reason: "unsafe Git metadata: repository not found",
+          notFound: true,
+        };
       }
       directory = dirname(directory);
       continue;
@@ -223,15 +238,33 @@ async function inspectGitMetadata(cwd: string, searchParents: boolean): Promise<
   }
 }
 
-export function inspectRepositoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
-  return inspectGitMetadata(cwd, true);
+export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
+  const result = await inspectGitMetadata(cwd, true);
+  return result.ok ? result : { ok: false, reason: result.reason };
 }
 
-export function inspectCurrentDirectoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
-  return inspectGitMetadata(cwd, false);
+export async function inspectCurrentDirectoryGitInitialization(
+  cwd: string,
+): Promise<GitInitializationMetadataResult> {
+  const result = await inspectGitMetadata(cwd, false);
+  if (result.ok) return { ok: true, writeRoots: result.writeRoots };
+  if (!("notFound" in result)) return result;
+  try {
+    return {
+      ok: true,
+      writeRoots: [join(await realpath(cwd), ".git")],
+    };
+  } catch (error) {
+    return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+  }
 }
 
-export async function readRepositoryRemoteHosts(configPath: string | undefined): Promise<string[]> {
+export type GitRemotePurpose = "fetch" | "push";
+
+export async function readRepositoryRemoteHosts(
+  configPath: string | undefined,
+  purpose: GitRemotePurpose,
+): Promise<string[]> {
   if (!configPath) return [];
   let contents: string;
   try {
@@ -239,18 +272,32 @@ export async function readRepositoryRemoteHosts(configPath: string | undefined):
   } catch {
     return [];
   }
-  const hosts = new Set<string>();
-  let inRemote = false;
+  const remotes = new Map<string, { urls: string[]; pushUrls: string[]; hasPushUrl: boolean }>();
+  let remote: { urls: string[]; pushUrls: string[]; hasPushUrl: boolean } | undefined;
   for (const line of contents.split(/\r?\n/)) {
     const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1];
     if (section !== undefined) {
-      inRemote = /^remote\s+"/i.test(section);
+      const name = /^remote\s+"([^"]+)"$/i.exec(section)?.[1];
+      if (!name) {
+        remote = undefined;
+        continue;
+      }
+      remote = remotes.get(name) ?? { urls: [], pushUrls: [], hasPushUrl: false };
+      remotes.set(name, remote);
       continue;
     }
-    if (!inRemote) continue;
-    const value = /^\s*(?:push)?url\s*=\s*(.+?)\s*$/i.exec(line)?.[1];
-    const host = value ? remoteHost(value) : undefined;
-    if (host) hosts.add(host.toLowerCase());
+    if (!remote) continue;
+    const match = /^\s*(url|pushurl)\s*=\s*(.+?)\s*$/i.exec(line);
+    const isPushUrl = match?.[1]?.toLowerCase() === "pushurl";
+    if (isPushUrl) remote.hasPushUrl = true;
+    const host = match?.[2] ? remoteHost(match[2]) : undefined;
+    if (!host) continue;
+    (isPushUrl ? remote.pushUrls : remote.urls).push(host.toLowerCase());
+  }
+  const hosts = new Set<string>();
+  for (const values of remotes.values()) {
+    const selected = purpose === "push" && values.hasPushUrl ? values.pushUrls : values.urls;
+    for (const host of selected) hosts.add(host);
   }
   return [...hosts];
 }

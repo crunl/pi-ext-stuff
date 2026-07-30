@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "../src/git-metadata.ts";
+import {
+  inspectCurrentDirectoryGitInitialization,
+  inspectRepositoryGitMetadata,
+  readRepositoryRemoteHosts,
+} from "../src/git-metadata.ts";
 
 async function createGitDirectory(path: string, config = ""): Promise<void> {
   await mkdir(path, { recursive: true });
@@ -29,6 +33,29 @@ describe("Git metadata ownership", () => {
     await mkdir(join(cwd, ".git"));
 
     await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
+  });
+
+  it("returns only the prospective child root when initializing inside a parent repository", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-git-metadata-"));
+    const cwd = join(parent, "child");
+    await createGitDirectory(join(parent, ".git"));
+    await mkdir(cwd);
+
+    await expect(inspectCurrentDirectoryGitInitialization(cwd)).resolves.toEqual({
+      ok: true,
+      writeRoots: [join(await realpath(cwd), ".git")],
+    });
+  });
+
+  it("fails initialization closed for malformed current-directory metadata", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-git-metadata-"));
+    const cwd = join(parent, "child");
+    await createGitDirectory(join(parent, ".git"));
+    await mkdir(join(cwd, ".git"), { recursive: true });
+
+    await expect(inspectCurrentDirectoryGitInitialization(cwd)).resolves.toMatchObject({
+      ok: false,
+    });
   });
 
   it("rejects a .git symbolic link before resolving its target", async () => {
@@ -170,22 +197,35 @@ describe("Git metadata ownership", () => {
     const contents = '[remote "origin"]\n\turl = git@github.com:owner/repo.git\n';
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath)).resolves.toEqual(["github.com"]);
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual(["github.com"]);
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
   });
 
-  it("includes pushurl hosts without rewriting the config", async () => {
+  it("selects fetch and push hosts without rewriting the config", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
     const configPath = join(cwd, "config");
     const contents = [
       '[remote "origin"]',
       "\turl = git@github.com:owner/repo.git",
       "\tpushurl = ssh://git@127.1/owner/repo.git",
+      '[remote "mirror"]',
+      "\turl = ssh://git@gitlab.example/group/repo.git",
+      '[remote "local"]',
+      "\turl = https://fallback.example/owner/repo.git",
+      "\tpushurl = ../local.git",
       "",
     ].join("\n");
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath)).resolves.toEqual(["github.com", "127.1"]);
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual([
+      "github.com",
+      "gitlab.example",
+      "fallback.example",
+    ]);
+    await expect(readRepositoryRemoteHosts(configPath, "push")).resolves.toEqual([
+      "127.1",
+      "gitlab.example",
+    ]);
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
   });
 
@@ -201,7 +241,7 @@ describe("Git metadata ownership", () => {
     ].join("\n");
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath)).resolves.toEqual([
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual([
       "github.com",
       "gitlab.example",
     ]);

@@ -180,6 +180,27 @@ describe("Default mode gate", () => {
     });
   });
 
+  it("uses only the public fetch URL for Git fetch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      [
+        '[remote "origin"]',
+        "\turl = git@github.com:openai/codex.git",
+        "\tpushurl = ssh://git@127.1/openai/codex.git",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git fetch origin" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: ["github.com"],
+    });
+  });
+
   it("includes the requested public host in network approval", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
@@ -260,6 +281,21 @@ describe("Default mode gate", () => {
       filesystemWriteRoots: [prospectiveGitRoot],
     });
   });
+
+  it.each(['git init ""', "git init ''"])(
+    "blocks an explicit empty repository path in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-empty-git-init-"));
+
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("single Git mutation"),
+      });
+    },
+  );
 
   it("keeps a missing repository fail-closed for non-init Git mutations", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-no-repository-"));
