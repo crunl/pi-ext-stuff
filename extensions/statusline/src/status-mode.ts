@@ -4,13 +4,8 @@ export interface ModelStatusInfo {
 	effort: string | undefined;
 }
 
-export function formatModelStatus(
-	info: ModelStatusInfo,
-	mode: string | undefined,
-): string {
-	if (mode) {
-		return `${mode}•(${info.provider}) ${info.modelId}${info.effort ? `•${info.effort}` : ""}`;
-	}
+/** Bottom-border label: model identity only (mode lives in the top border). */
+export function formatModelStatus(info: ModelStatusInfo): string {
 	return `(${info.provider}) ${info.modelId}${info.effort ? ` • ${info.effort}` : ""}`;
 }
 

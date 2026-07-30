@@ -46,12 +46,17 @@ export default function statusline(pi: ExtensionAPI) {
 	const install = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		currentCtx = ctx;
-		installFooter(ctx, permissionsMode);
+		// Captured from the footer factory's theme (full Theme, not EditorTheme).
+		let warningFgAnsi: string | undefined;
+		installFooter(ctx, permissionsMode, (theme) => {
+			warningFgAnsi = theme.getFgAnsi("warning");
+		});
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			const editor = new ModelLineEditor(tui, theme, keybindings);
 			editor.getModelInfo = modelInfo;
 			editor.getStats = stats;
 			editor.getPermissionsMode = () => permissionsMode.get();
+			editor.getWarningFgAnsi = () => warningFgAnsi;
 			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
 	};

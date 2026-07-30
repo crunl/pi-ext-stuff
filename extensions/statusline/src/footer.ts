@@ -19,10 +19,16 @@ const METER_CELLS = 10;
 export function installFooter(
 	ctx: ExtensionContext,
 	permissionsMode: PermissionsModeState,
+	onTheme?: (theme: { getFgAnsi(color: string): string }) => void,
 ): void {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
+		try {
+			onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
+		} catch {
+			// theme without getFgAnsi: badge falls back to inverse video
+		}
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 
 		return {

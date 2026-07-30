@@ -13,24 +13,14 @@ const info = {
 	effort: "xhigh",
 };
 
-test("formats compact non-default mode, provider, model, and effort", () => {
-	assert.equal(
-		formatModelStatus(info, "Auto"),
-		"Auto•(tuzi) gpt-5.6-sol-fast•xhigh",
-	);
+test("formats provider, model, and effort for the bottom border", () => {
+	assert.equal(formatModelStatus(info), "(tuzi) gpt-5.6-sol-fast • xhigh");
 });
 
-test("preserves the existing label when the mode is absent", () => {
+test("omits the effort segment when effort is absent", () => {
 	assert.equal(
-		formatModelStatus(info, undefined),
-		"(tuzi) gpt-5.6-sol-fast • xhigh",
-	);
-});
-
-test("omits the effort separator when effort is absent", () => {
-	assert.equal(
-		formatModelStatus({ ...info, effort: undefined }, "Auto"),
-		"Auto•(tuzi) gpt-5.6-sol-fast",
+		formatModelStatus({ ...info, effort: undefined }),
+		"(tuzi) gpt-5.6-sol-fast",
 	);
 });
 

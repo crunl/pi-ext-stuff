@@ -1,9 +1,13 @@
 /**
  * Model-line editor — a CustomEditor whose borders embed status info:
  *
- *   ──────────────────────────────── ↑284k ↓37.3k ──  <- top border, right side
+ *   ──▐Auto▌───────────── ↑284k ↓37.3k ──  <- top: mode badge left, stats right
  *    > user input here…
- *   ── Default•(provider) model•effort ───────────────  <- bottom border, left side
+ *   ── (provider) model•effort ───────────────  <- bottom border, left side
+ *
+ * The mode badge uses the theme's warning color as background (yellow —
+ * "attention, not alarm": Auto hands tool approval to the auto-reviewer).
+ * Falls back to inverse video without truecolor theme data.
  *
  * Pattern follows examples/extensions/modal-editor.ts: subclass CustomEditor,
  * post-process super.render() output, splice labels into the border lines.
@@ -13,9 +17,8 @@
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatTokens } from "./format.ts";
-import { formatModelStatus } from "./status-mode.ts";
+import { makeModeBadgeDecorator } from "./badge.ts";
+import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
 
 export interface ModelInfoProvider {
 	(): { provider: string; modelId: string; effort: string | undefined } | undefined;
@@ -36,6 +39,8 @@ export class ModelLineEditor extends CustomEditor {
 	getStats: StatsProvider = () => undefined;
 	/** Injected callback returning the mode published by pi-permissions. */
 	getPermissionsMode: PermissionsModeProvider = () => undefined;
+	/** Warning-color ANSI provider (captured lazily from the footer theme). */
+	getWarningFgAnsi: () => string | undefined = () => undefined;
 
 	render(width: number): string[] {
 		const lines = super.render(width);
@@ -52,26 +57,29 @@ export class ModelLineEditor extends CustomEditor {
 			}
 		}
 
-		// Top border: right-aligned token stats  ───── ↑284k ↓37.3k ──
-		const stats = this.getStats();
-		if (stats && topIdx !== -1 && (stats.input > 0 || stats.output > 0)) {
-			const label = ` ↑${formatTokens(stats.input)} ↓${formatTokens(stats.output)} ──`;
-			const labelWidth = visibleWidth(label);
-			if (labelWidth < width) {
-				const leading = "─".repeat(width - labelWidth);
-				lines[topIdx] = this.borderColor(truncateToWidth(leading + label, width, ""));
+		// Top border: mode badge on the left, token stats on the right
+		//   ──▐Auto▌────────── ↑284k ↓37.3k ──
+		// Mode is omitted for Default (only non-default modes are called out).
+		// Border runs and the badge are colored separately: the badge's own
+		// fg/bg codes must not leak into (or cut) the border color.
+		if (topIdx !== -1) {
+			const top = buildTopBorder(width, this.getPermissionsMode(), this.getStats());
+			if (top !== undefined) {
+				// Builders guarantee pre+mode+post is exactly `width` (tested),
+				// so no re-truncation is needed here.
+				const decorate = makeModeBadgeDecorator(this.getWarningFgAnsi());
+				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
+				lines[topIdx] =
+					this.borderColor(top.pre) + badge + this.borderColor(top.post);
 			}
 		}
 
-		// Bottom border: mode + model info  ── Default•(provider) model•effort ──
+		// Bottom border: model info  ── (provider) model•effort ──
 		const info = this.getModelInfo();
 		if (info && bottomIdx !== -1 && bottomIdx !== topIdx) {
-			const label = formatModelStatus(info, this.getPermissionsMode());
-			const decorated = `── ${label} `;
-			const labelWidth = visibleWidth(decorated);
-			if (labelWidth < width) {
-				const rest = "─".repeat(width - labelWidth);
-				lines[bottomIdx] = this.borderColor(truncateToWidth(decorated + rest, width, ""));
+			const bottom = buildBottomBorder(width, info);
+			if (bottom !== undefined) {
+				lines[bottomIdx] = this.borderColor(bottom);
 			}
 		}
 
