@@ -14,8 +14,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-// Deep-import on purpose: avoid loading pi-core's register graph into this jiti instance.
-import { applyAutocompleteAbove } from "../../pi-core/src/tui/autocomplete-above.ts";
+// standalone.ts is pi-core's side-effect-free surface: no register graph
+// gets pulled into this jiti instance.
+import { applyAutocompleteAbove } from "../../pi-core/standalone.ts";
 import { installFooter } from "./footer.ts";
 import { ModelLineEditor } from "./model-editor.ts";
 import { PermissionsModeState } from "./status-mode.ts";
