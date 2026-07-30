@@ -153,4 +153,13 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.statusLabel).toBe("Default");
     expect(() => runtime.activate("plan")).toThrow("Plan mode is not implemented");
   });
+
+  it("downgrades a YOLO configuration to Default until YOLO is implemented", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.defaultMode = "yolo";
+    const runtime = new PermissionModeRuntime(config, vi.fn());
+
+    expect(runtime.mode).toBe("default");
+    expect(runtime.statusLabel).toBe("Default");
+  });
 });
