@@ -159,6 +159,27 @@ describe("Default mode gate", () => {
     });
   });
 
+  it("blocks a private Git pushurl even when the fetch URL is public", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      [
+        '[remote "origin"]',
+        "\turl = git@github.com:openai/codex.git",
+        "\tpushurl = ssh://git@127.1/openai/codex.git",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git push origin main" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("Private"),
+    });
+  });
+
   it("includes the requested public host in network approval", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
@@ -206,6 +227,50 @@ describe("Default mode gate", () => {
         filesystemWriteRoots: [gitRoot],
       });
     }
+  });
+
+  it.each(["git init", "git init ."])(
+    "grants the prospective current-directory metadata root for %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-init-"));
+      const prospectiveGitRoot = join(await realpath(cwd), ".git");
+
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+        filesystemWriteRoots: [prospectiveGitRoot],
+      });
+    },
+  );
+
+  it("grants a child prospective root for git init inside an existing parent repository", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-repository-"));
+    const cwd = join(parent, "child");
+    await createGitDirectory(join(parent, ".git"));
+    await mkdir(cwd);
+    const prospectiveGitRoot = join(await realpath(cwd), ".git");
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git init" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "REVIEW",
+      filesystemWriteRoots: [prospectiveGitRoot],
+    });
+  });
+
+  it("keeps a missing repository fail-closed for non-init Git mutations", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-no-repository-"));
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("repository not found"),
+    });
   });
 
   it.each([

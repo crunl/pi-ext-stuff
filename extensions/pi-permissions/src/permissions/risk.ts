@@ -292,9 +292,38 @@ export function shellCommandUsesGitMutation(command: string): boolean {
   return parseCommandSegments(command).some(segmentUsesGitMutation);
 }
 
+function segmentInitializesCurrentDirectory(segment: CommandSegment): boolean {
+  const args = segment.args.map((arg) => arg.toLowerCase());
+  return (
+    segment.executable === "git" &&
+    (args.length === 1 || (args.length === 2 && args[1] === ".")) &&
+    args[0] === "init"
+  );
+}
+
+export function shellCommandInitializesCurrentDirectory(command: string): boolean {
+  const segments = parseCommandSegments(command);
+  const segment = segments.length === 1 ? segments[0] : undefined;
+  if (!segment) return false;
+  const words = shellWords(segment.source);
+  return (
+    command.trim() === segment.source &&
+    executableIndex(words) === 0 &&
+    segmentInitializesCurrentDirectory(segment) &&
+    !segment.hasRedirect &&
+    !segment.hasSubstitution &&
+    !segment.nestedShell
+  );
+}
+
 export function shellCommandCanGrantGitMetadata(command: string): boolean {
   const segments = parseCommandSegments(command);
   const segment = segments.length === 1 ? segments[0] : undefined;
+  const gitSubcommand =
+    segment?.executable === "git"
+      ? segment.args.map((arg) => arg.toLowerCase()).find((arg) => !arg.startsWith("-"))
+      : undefined;
+  if (gitSubcommand === "init") return shellCommandInitializesCurrentDirectory(command);
   return Boolean(
     segment &&
       segmentUsesGitMutation(segment) &&
@@ -436,6 +465,10 @@ function isSpecialIp(host: string): boolean {
         (groups[0] === 0x2001 && groups[1] === 0x0002);
 }
 
+function looksLikeAmbiguousNumericIp(host: string): boolean {
+  return isIP(host) === 0 && /^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$/i.test(host);
+}
+
 export function isPublicNetworkHost(value: string): boolean {
   const host = value
     .trim()
@@ -446,7 +479,8 @@ export function isPublicNetworkHost(value: string): boolean {
     !host ||
     host === "localhost" ||
     host.endsWith(".localhost") ||
-    host === "metadata.google.internal"
+    host === "metadata.google.internal" ||
+    looksLikeAmbiguousNumericIp(host)
   )
     return false;
   return !isSpecialIp(host);

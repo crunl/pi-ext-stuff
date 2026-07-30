@@ -111,6 +111,10 @@ describe("Git metadata eligibility", () => {
   it.each([
     ['git commit -m "document bash support"', true],
     ["git add docs/fish.md", true],
+    ["git init", true],
+    ["git init .", true],
+    ["git init elsewhere", false],
+    ["git init --bare", false],
     ['bash -c "git add README.md"', false],
     ['git add "$(printf README.md)"', false],
     ['git add "$' + '{ touch .git/hooks/pre-commit; }"', false],
@@ -269,4 +273,11 @@ describe("narrow static risk contract", () => {
     expect(isPublicNetworkHost("127.0.0.1")).toBe(false);
     expect(isPublicNetworkHost("service.localhost")).toBe(false);
   });
+
+  it.each(["127.1", "2130706433", "0x7f000001"])(
+    "rejects ambiguous numeric network host %s",
+    (host) => {
+      expect(isPublicNetworkHost(host)).toBe(false);
+    },
+  );
 });

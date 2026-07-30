@@ -28,12 +28,21 @@ function remoteHost(value: string): string | undefined {
 async function hasGitDirectoryStructure(directory: string): Promise<boolean> {
   try {
     const [head, config, objects, refs] = await Promise.all([
-      stat(join(directory, "HEAD")),
-      stat(join(directory, "config")),
-      stat(join(directory, "objects")),
-      stat(join(directory, "refs")),
+      lstat(join(directory, "HEAD")),
+      lstat(join(directory, "config")),
+      lstat(join(directory, "objects")),
+      lstat(join(directory, "refs")),
     ]);
-    return head.isFile() && config.isFile() && objects.isDirectory() && refs.isDirectory();
+    return (
+      !head.isSymbolicLink() &&
+      head.isFile() &&
+      !config.isSymbolicLink() &&
+      config.isFile() &&
+      !objects.isSymbolicLink() &&
+      objects.isDirectory() &&
+      !refs.isSymbolicLink() &&
+      refs.isDirectory()
+    );
   } catch {
     return false;
   }
@@ -41,14 +50,25 @@ async function hasGitDirectoryStructure(directory: string): Promise<boolean> {
 
 async function hasWorktreeGitDirectoryStructure(directory: string): Promise<boolean> {
   try {
-    return (await stat(join(directory, "HEAD"))).isFile();
+    const head = await lstat(join(directory, "HEAD"));
+    return !head.isSymbolicLink() && head.isFile();
   } catch {
     return false;
   }
 }
 
+async function canonicalConfigPath(directory: string): Promise<string | undefined> {
+  try {
+    const configPath = await realpath(join(directory, "config"));
+    return dirname(configPath) === directory ? configPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function coreWorktree(config: string): string | undefined {
   let inCore = false;
+  let worktree: string | undefined;
   for (const line of config.split(/\r?\n/)) {
     const section = /^\s*\[([^\]]+)\]\s*$/.exec(line)?.[1];
     if (section) {
@@ -57,9 +77,11 @@ function coreWorktree(config: string): string | undefined {
     }
     if (!inCore) continue;
     const value = /^\s*worktree\s*=\s*(.+?)\s*$/i.exec(line)?.[1];
-    if (value) return value.replace(/^"(.*)"$/, "$1");
+    if (!value) continue;
+    if (worktree !== undefined) return undefined;
+    worktree = value.replace(/^"(.*)"$/, "$1");
   }
-  return undefined;
+  return worktree;
 }
 
 async function worktreeGitDirectoryPointsBack(
@@ -98,7 +120,7 @@ function filesystemErrorReason(error: unknown): string {
   return error instanceof Error ? error.message : "Git metadata filesystem error";
 }
 
-export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
+async function inspectGitMetadata(cwd: string, searchParents: boolean): Promise<GitMetadataResult> {
   let directory = resolve(cwd);
   const root = parse(directory).root;
   while (true) {
@@ -110,7 +132,7 @@ export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMeta
       if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
         return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
       }
-      if (directory === root) {
+      if (!searchParents || directory === root) {
         return { ok: false, reason: "unsafe Git metadata: repository not found" };
       }
       directory = dirname(directory);
@@ -126,9 +148,11 @@ export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMeta
         if (isFilesystemRoot(gitDirectory) || !(await hasGitDirectoryStructure(gitDirectory))) {
           return { ok: false, reason: "unsafe Git metadata path" };
         }
+        const configPath = await canonicalConfigPath(gitDirectory);
+        if (!configPath) return { ok: false, reason: "unsafe Git config path" };
         return {
           ok: true,
-          configPath: join(gitDirectory, "config"),
+          configPath,
           writeRoots: [...new Set([gitDirectory])],
         };
       } catch (error) {
@@ -173,25 +197,38 @@ export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMeta
       if (
         commonDirectory === gitDirectory ||
         isFilesystemRoot(commonDirectory) ||
+        dirname(gitDirectory) !== join(commonDirectory, "worktrees") ||
         !(await hasGitDirectoryStructure(commonDirectory))
       ) {
         return { ok: false, reason: "unsafe Git common metadata path" };
       }
+      const configPath = await canonicalConfigPath(commonDirectory);
+      if (!configPath) return { ok: false, reason: "unsafe Git config path" };
       return {
         ok: true,
-        configPath: join(commonDirectory, "config"),
+        configPath,
         writeRoots: [...new Set([gitDirectory, commonDirectory])],
       };
     }
     if (await submoduleGitDirectoryBelongsToWorktree(gitDirectory, directory)) {
+      const configPath = await canonicalConfigPath(gitDirectory);
+      if (!configPath) return { ok: false, reason: "unsafe Git config path" };
       return {
         ok: true,
-        configPath: join(gitDirectory, "config"),
+        configPath,
         writeRoots: [...new Set([gitDirectory])],
       };
     }
     return { ok: false, reason: "unsafe Git metadata ownership" };
   }
+}
+
+export function inspectRepositoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
+  return inspectGitMetadata(cwd, true);
+}
+
+export function inspectCurrentDirectoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
+  return inspectGitMetadata(cwd, false);
 }
 
 export async function readRepositoryRemoteHosts(configPath: string | undefined): Promise<string[]> {
@@ -211,7 +248,7 @@ export async function readRepositoryRemoteHosts(configPath: string | undefined):
       continue;
     }
     if (!inRemote) continue;
-    const value = /^\s*url\s*=\s*(.+?)\s*$/i.exec(line)?.[1];
+    const value = /^\s*(?:push)?url\s*=\s*(.+?)\s*$/i.exec(line)?.[1];
     const host = value ? remoteHost(value) : undefined;
     if (host) hosts.add(host.toLowerCase());
   }

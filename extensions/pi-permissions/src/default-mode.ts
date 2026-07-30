@@ -1,6 +1,12 @@
+import { realpath } from "node:fs/promises";
+import { join } from "node:path";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
-import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
+import {
+  inspectCurrentDirectoryGitMetadata,
+  inspectRepositoryGitMetadata,
+  readRepositoryRemoteHosts,
+} from "./git-metadata.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import {
   classifyRisk,
@@ -8,6 +14,7 @@ import {
   normalizeToolCall,
   type Risk,
   shellCommandCanGrantGitMetadata,
+  shellCommandInitializesCurrentDirectory,
   shellCommandUsesGitMutation,
   shellCommandUsesImplicitGitNetwork,
 } from "./permissions/risk.ts";
@@ -59,6 +66,8 @@ export async function evaluateDefaultRequest(
     request.operation === "execute" && command && shellCommandUsesImplicitGitNetwork(command);
   const usesGitMutation =
     request.operation === "execute" && command && shellCommandUsesGitMutation(command);
+  const initializesCurrentDirectory =
+    usesGitMutation && command && shellCommandInitializesCurrentDirectory(command);
   if (usesGitMutation && command && !shellCommandCanGrantGitMetadata(command)) {
     return {
       action: "block",
@@ -67,8 +76,25 @@ export async function evaluateDefaultRequest(
     };
   }
   const gitMetadata =
-    usesImplicitGitNetwork || usesGitMutation ? await inspectRepositoryGitMetadata(cwd) : undefined;
-  if (gitMetadata && !gitMetadata.ok) {
+    usesImplicitGitNetwork || usesGitMutation
+      ? await (initializesCurrentDirectory
+          ? inspectCurrentDirectoryGitMetadata(cwd)
+          : inspectRepositoryGitMetadata(cwd))
+      : undefined;
+  let prospectiveGitRoot: string | undefined;
+  if (
+    initializesCurrentDirectory &&
+    gitMetadata &&
+    !gitMetadata.ok &&
+    gitMetadata.reason === "unsafe Git metadata: repository not found"
+  ) {
+    try {
+      prospectiveGitRoot = join(await realpath(cwd), ".git");
+    } catch {
+      // Preserve the repository inspection failure below.
+    }
+  }
+  if (gitMetadata && !gitMetadata.ok && !prospectiveGitRoot) {
     return { action: "block", risk: "HARD", reason: gitMetadata.reason };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
@@ -79,7 +105,13 @@ export async function evaluateDefaultRequest(
       ]),
     ];
   }
-  const gitWriteRoots = usesGitMutation && gitMetadata?.ok ? gitMetadata.writeRoots : [];
+  const gitWriteRoots = usesGitMutation
+    ? gitMetadata?.ok
+      ? gitMetadata.writeRoots
+      : prospectiveGitRoot
+        ? [prospectiveGitRoot]
+        : []
+    : [];
   const additionalWriteRoots = await resolveAdditionalWriteRoots(
     input,
     cwd,

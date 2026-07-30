@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -41,6 +41,27 @@ describe("Git metadata ownership", () => {
     });
   });
 
+  it.each([
+    ["HEAD", "file"],
+    ["config", "file"],
+    ["objects", "directory"],
+    ["refs", "directory"],
+  ] as const)("rejects a symbolic link used as the Git %s structure", async (entry, kind) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-structure-"));
+    const gitDirectory = join(cwd, ".git");
+    const external = join(cwd, `external-${entry}`);
+    await createGitDirectory(gitDirectory);
+    await rm(join(gitDirectory, entry), { recursive: true });
+    if (kind === "file") {
+      await writeFile(external, "");
+    } else {
+      await mkdir(external);
+    }
+    await symlink(external, join(gitDirectory, entry));
+
+    await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
+  });
+
   it("rejects a gitdir pointer to the filesystem root", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
     await writeFile(join(cwd, ".git"), "gitdir: /\n");
@@ -75,6 +96,22 @@ describe("Git metadata ownership", () => {
       configPath: await realpath(join(commonGit, "config")),
       writeRoots: [await realpath(worktreeGit), await realpath(commonGit)],
     });
+  });
+
+  it("rejects a forged worktree directory that points at an unrelated common repository", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-forged-worktree-"));
+    const cwd = join(parent, "worktree");
+    const forgedWorktreeGit = join(parent, "forged-worktree.git");
+    const victimGit = join(parent, "victim.git");
+    await mkdir(cwd);
+    await mkdir(forgedWorktreeGit);
+    await writeFile(join(forgedWorktreeGit, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(forgedWorktreeGit, "gitdir"), `${join(cwd, ".git")}\n`);
+    await writeFile(join(forgedWorktreeGit, "commondir"), "../victim.git\n");
+    await createGitDirectory(victimGit);
+    await writeFile(join(cwd, ".git"), `gitdir: ${forgedWorktreeGit}\n`);
+
+    await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
   });
 
   it("rejects linked worktree metadata without a valid common Git directory", async () => {
@@ -114,6 +151,19 @@ describe("Git metadata ownership", () => {
     await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
   });
 
+  it("rejects duplicate core.worktree values even when the first matches", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-submodule-worktree-"));
+    const elsewhere = await mkdtemp(join(tmpdir(), "pi-permissions-other-worktree-"));
+    const gitDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-submodule-git-"));
+    await createGitDirectory(
+      gitDirectory,
+      `[core]\n\tworktree = "${cwd}"\n\tworktree = "${elsewhere}"\n`,
+    );
+    await writeFile(join(cwd, ".git"), `gitdir: ${gitDirectory}\n`);
+
+    await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
+  });
+
   it("reads SSH remote hosts without rewriting the config", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
     const configPath = join(cwd, "config");
@@ -121,6 +171,21 @@ describe("Git metadata ownership", () => {
     await writeFile(configPath, contents);
 
     await expect(readRepositoryRemoteHosts(configPath)).resolves.toEqual(["github.com"]);
+    await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
+  });
+
+  it("includes pushurl hosts without rewriting the config", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
+    const configPath = join(cwd, "config");
+    const contents = [
+      '[remote "origin"]',
+      "\turl = git@github.com:owner/repo.git",
+      "\tpushurl = ssh://git@127.1/owner/repo.git",
+      "",
+    ].join("\n");
+    await writeFile(configPath, contents);
+
+    await expect(readRepositoryRemoteHosts(configPath)).resolves.toEqual(["github.com", "127.1"]);
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
   });
 
