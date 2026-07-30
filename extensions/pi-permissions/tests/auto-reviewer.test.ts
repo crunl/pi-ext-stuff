@@ -88,9 +88,7 @@ describe("PiAutoReviewer", () => {
     expect(complete).toHaveBeenCalledWith(
       configuredModel,
       expect.objectContaining({
-        systemPrompt: expect.stringContaining(
-          "You are judging one planned coding-agent action.",
-        ),
+        systemPrompt: expect.stringContaining("You are judging one planned coding-agent action."),
         messages: expect.any(Array),
       }),
       expect.objectContaining({
@@ -109,9 +107,7 @@ describe("PiAutoReviewer", () => {
     expect(reviewContext.systemPrompt).toContain(
       '"user_authorization": "unknown" | "low" | "medium" | "high"',
     );
-    expect(reviewContext.systemPrompt).not.toContain(
-      "{{ tenant_policy_config }}",
-    );
+    expect(reviewContext.systemPrompt).not.toContain("{{ tenant_policy_config }}");
   });
 
   it("uses the active model when reviewer config is absent", async () => {
@@ -127,11 +123,7 @@ describe("PiAutoReviewer", () => {
       modelRegistry,
       activeModel,
     });
-    expect(complete).toHaveBeenCalledWith(
-      activeModel,
-      expect.any(Object),
-      expect.any(Object),
-    );
+    expect(complete).toHaveBeenCalledWith(activeModel, expect.any(Object), expect.any(Object));
   });
 
   it("carries active-fallback identity on a selected reviewer failure", async () => {
@@ -199,15 +191,45 @@ describe("PiAutoReviewer", () => {
     ).rejects.toMatchObject({ kind: "parse" });
   });
 
+  it("returns a high-risk allow response without retrying it as a parse failure", async () => {
+    const highRiskAllow = {
+      ...response,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            risk_level: "high",
+            user_authorization: "unknown",
+            outcome: "allow",
+            rationale: "Policy selected allow.",
+          }),
+        },
+      ],
+    };
+    const complete = vi.fn(async () => highRiskAllow);
+    const reviewer = new PiAutoReviewer(complete as any);
+    const context = {
+      guardianSession,
+      modelRegistry: {
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
+      } as any,
+      activeModel: { provider: "openai", id: "main" } as any,
+    };
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+      risk: "high",
+    });
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
   it("reports caller cancellation without converting it to a timeout", async () => {
     const controller = new AbortController();
     const complete = vi.fn(async (_model, _context, options) => {
       await new Promise((_resolve, reject) => {
-        options.signal.addEventListener(
-          "abort",
-          () => reject(options.signal.reason),
-          { once: true },
-        );
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+          once: true,
+        });
       });
     });
     const reviewer = new PiAutoReviewer(complete as any);
@@ -298,14 +320,9 @@ describe("PiAutoReviewer", () => {
 
   it("enforces timeout when a provider ignores the abort signal", async () => {
     const timeout = new AbortController();
-    const timeoutSpy = vi
-      .spyOn(AbortSignal, "timeout")
-      .mockReturnValue(timeout.signal);
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
     const reviewer = new PiAutoReviewer(
-      vi.fn(
-        async () =>
-          new Promise<typeof response>(() => {}),
-      ) as any,
+      vi.fn(async () => new Promise<typeof response>(() => {})) as any,
     );
 
     const pending = reviewer.review(request, {

@@ -1502,7 +1502,9 @@ describe("Default mode registration", () => {
     expect(app.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         customType: "pi-permissions-auto-override",
-        content: expect.stringMatching(/retry[\s\S]*rm -rf build/i),
+        content: expect.stringMatching(
+          /^The user has manually approved a specific action that was previously `Rejected`\./,
+        ),
       }),
       { triggerTurn: true },
     );

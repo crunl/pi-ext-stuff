@@ -24,7 +24,10 @@ import {
 } from "../../pi-core/index.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { reviewAutoPrompt } from "./auto-policy.ts";
-import { buildAutoReviewRequest } from "./auto-review-request.ts";
+import {
+  AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
+  buildAutoReviewRequest,
+} from "./auto-review-request.ts";
 import {
   type AutoReviewer,
   type AutoReviewerFailureKind,
@@ -1063,7 +1066,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         {
           customType: "pi-permissions-auto-override",
           content: [
-            "The user approved one retry of this exact Auto-review denial.",
+            AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
             `Tool: ${selected.tool}`,
             `Input: ${JSON.stringify(selected.input)}`,
             `Working directory: ${selected.cwd}`,
