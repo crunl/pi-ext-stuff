@@ -1,10 +1,16 @@
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  isPublicNetworkHost,
+  normalizeNetworkHost,
+  parseGitRemoteTarget,
+} from "../network-host.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 
 export type Risk = "LOW" | "REVIEW" | "HARD";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
+export { isPublicNetworkHost };
 
 const directNetworkExecutables = new Set([
   "curl",
@@ -150,29 +156,88 @@ function shellWords(source: string): string[] {
   return words;
 }
 
-function executableIndex(words: readonly string[]): number {
+interface ExecutableContext {
+  index: number;
+  safe: boolean;
+  direct: boolean;
+}
+
+function assignmentName(token: string): string | undefined {
+  return /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
+}
+
+function isUnsafeGitContextVariable(name: string): boolean {
+  return name === "PATH" || name.startsWith("GIT_");
+}
+
+function isTrustedWrapperToken(token: string, wrapper: string): boolean {
+  return token === wrapper || token === `/usr/bin/${wrapper}` || token === `/bin/${wrapper}`;
+}
+
+function executableContext(words: readonly string[]): ExecutableContext {
   let index = 0;
-  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] ?? "")) index += 1;
+  let safe = true;
+  let direct = true;
   while (index < words.length) {
-    const wrapper = basename(words[index] ?? "").toLowerCase();
+    const name = assignmentName(words[index] ?? "");
+    if (!name) break;
+    if (isUnsafeGitContextVariable(name)) safe = false;
+    index += 1;
+    direct = false;
+  }
+  while (index < words.length) {
+    const wrapperToken = words[index] ?? "";
+    const wrapper = basename(wrapperToken).toLowerCase();
     if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup") {
+      safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
       index += 1;
-      while (index < words.length && words[index]?.startsWith("-")) index += 1;
+      direct = false;
+      while (index < words.length && words[index]?.startsWith("-")) {
+        if (words[index] === "-p") safe = false;
+        index += 1;
+      }
       continue;
     }
     if (wrapper === "env") {
+      safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
       index += 1;
+      direct = false;
       while (index < words.length) {
         const token = words[index] ?? "";
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) || token === "--") {
+        const name = assignmentName(token);
+        if (name) {
+          if (isUnsafeGitContextVariable(name)) safe = false;
           index += 1;
           continue;
         }
-        if (token === "-u" || token === "--unset" || token === "-C" || token === "--chdir") {
+        if (token === "--") {
+          index += 1;
+          break;
+        }
+        if (token === "-u" || token === "--unset") {
+          const unsetName = words[index + 1];
+          if (!unsetName || isUnsafeGitContextVariable(unsetName)) safe = false;
           index += 2;
           continue;
         }
+        if (token.startsWith("--unset=")) {
+          if (isUnsafeGitContextVariable(token.slice("--unset=".length))) safe = false;
+          index += 1;
+          continue;
+        }
+        if (
+          token === "-C" ||
+          token === "--chdir" ||
+          token.startsWith("--chdir=") ||
+          token === "-i" ||
+          token === "--ignore-environment"
+        ) {
+          safe = false;
+          index += token === "-C" || token === "--chdir" ? 2 : 1;
+          continue;
+        }
         if (token.startsWith("-")) {
+          safe = false;
           index += 1;
           continue;
         }
@@ -181,26 +246,43 @@ function executableIndex(words: readonly string[]): number {
       continue;
     }
     if (wrapper !== "sudo") break;
+    safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
     index += 1;
+    direct = false;
     while (index < words.length) {
       const token = words[index] ?? "";
-      if (token === "-u" || token === "-g" || token === "-h" || token === "-p" || token === "-C") {
+      if (token === "-u" || token === "-g" || token === "-h" || token === "-p") {
         index += 2;
         continue;
       }
+      if (token === "-C" || token === "--chdir" || token.startsWith("--chdir=")) {
+        safe = false;
+        index += token === "-C" || token === "--chdir" ? 2 : 1;
+        continue;
+      }
+      if (new Set(["-n", "-S", "-H", "-k", "-K", "-b"]).has(token)) {
+        index += 1;
+        continue;
+      }
       if (token.startsWith("-")) {
+        safe = false;
         index += 1;
         continue;
       }
       break;
     }
   }
-  return index;
+  return { index, safe, direct };
+}
+
+function isTrustedExecutableToken(token: string, executable: string): boolean {
+  return token === executable || token === `/usr/bin/${executable}`;
 }
 
 interface ShellSyntax {
   hasExecutableSubstitution: boolean;
   hasActiveRedirect: boolean;
+  hasActiveControl: boolean;
 }
 
 function scanShellSyntax(source: string): ShellSyntax {
@@ -208,6 +290,7 @@ function scanShellSyntax(source: string): ShellSyntax {
   let escaped = false;
   let hasExecutableSubstitution = false;
   let hasActiveRedirect = false;
+  let hasActiveControl = false;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (escaped) {
@@ -244,13 +327,25 @@ function scanShellSyntax(source: string): ShellSyntax {
     if (quote === undefined && (character === "<" || character === ">")) {
       hasActiveRedirect = true;
     }
+    if (
+      quote === undefined &&
+      (character === "&" ||
+        character === ";" ||
+        character === "|" ||
+        character === "\n" ||
+        character === "(" ||
+        character === ")")
+    ) {
+      hasActiveControl = true;
+    }
   }
-  return { hasExecutableSubstitution, hasActiveRedirect };
+  return { hasExecutableSubstitution, hasActiveRedirect, hasActiveControl };
 }
 
 function parseCommandSegment(source: string): CommandSegment {
   const words = shellWords(source);
-  const index = executableIndex(words);
+  const context = executableContext(words);
+  const { index } = context;
   const executableToken = words[index] ?? "";
   const executable = basename(executableToken).toLowerCase();
   const args = words.slice(index + 1);
@@ -262,6 +357,8 @@ function parseCommandSegment(source: string): CommandSegment {
     source,
     executableToken,
     executable,
+    executableTrusted: context.safe && isTrustedExecutableToken(executableToken, executable),
+    directExecutable: context.direct,
     args,
     hasRedirect: syntax.hasActiveRedirect,
     hasSubstitution: syntax.hasExecutableSubstitution,
@@ -282,43 +379,165 @@ function parseCommandSegments(command: string): CommandSegment[] {
   return [...segments, ...nested];
 }
 
-function segmentUsesGitMutation(segment: CommandSegment): boolean {
-  const args = segment.args.map((arg) => arg.toLowerCase());
-  if (segment.executable === "git") {
-    const subcommand = args.find((arg) => !arg.startsWith("-"));
-    if (!subcommand) return false;
-    if (subcommand === "config") {
-      return !args.some((arg) => arg === "--global" || arg === "--system" || arg === "--file");
-    }
-    return gitMutationSubcommands.has(subcommand);
+const safeGitGlobalOptions = new Set([
+  "--no-pager",
+  "--paginate",
+  "-p",
+  "--no-replace-objects",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-optional-locks",
+  "--no-lazy-fetch",
+  "--no-advice",
+]);
+const unsafeGitGlobalValueOptions = new Set([
+  "-c",
+  "-C",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree",
+]);
+const recognizedGitSubcommands = new Set([
+  ...gitMutationSubcommands,
+  ...gitNetworkSubcommands,
+  "config",
+  "submodule",
+]);
+
+interface GitInvocation {
+  segment: CommandSegment;
+  kind: "git" | "gh";
+  subcommand?: string;
+  arguments: string[];
+  mutation: boolean;
+  globalOptionsSafe: boolean;
+  trusted: boolean;
+}
+
+function relevantGitSubcommandIndex(args: readonly string[], start: number): number | undefined {
+  for (let index = start; index < args.length; index += 1) {
+    if (recognizedGitSubcommands.has((args[index] ?? "").toLowerCase())) return index;
   }
-  if (segment.executable !== "gh") return false;
-  const positional = args.filter((arg) => !arg.startsWith("-"));
-  return positional[0] === "pr" && positional[1] === "checkout";
+  return undefined;
+}
+
+function parseGitSubcommand(args: readonly string[]): {
+  index?: number;
+  safe: boolean;
+} {
+  let index = 0;
+  let safe = true;
+  while (index < args.length) {
+    const token = args[index] ?? "";
+    if (token === "--") {
+      const candidate = args[index + 1];
+      return candidate ? { index: index + 1, safe } : { safe: false };
+    }
+    if (!token.startsWith("-") || token === "-") return { index, safe };
+    if (safeGitGlobalOptions.has(token)) {
+      index += 1;
+      continue;
+    }
+    const optionName = token.split("=", 1)[0] ?? token;
+    if (
+      unsafeGitGlobalValueOptions.has(optionName) ||
+      token.startsWith("-c") ||
+      token.startsWith("-C")
+    ) {
+      safe = false;
+      const hasAttachedValue =
+        token.includes("=") ||
+        (token.length > 2 && (token.startsWith("-c") || token.startsWith("-C")));
+      index += hasAttachedValue ? 1 : 2;
+      continue;
+    }
+    safe = false;
+    const candidate = relevantGitSubcommandIndex(args, index + 1);
+    return candidate === undefined ? { safe } : { index: candidate, safe };
+  }
+  return { safe };
+}
+
+function parseGitInvocation(segment: CommandSegment): GitInvocation | undefined {
+  if (segment.executable !== "git" && segment.executable !== "gh") return undefined;
+  if (segment.executable === "gh") {
+    const positional = segment.args.filter((argument) => !argument.startsWith("-"));
+    const checkout =
+      positional[0]?.toLowerCase() === "pr" && positional[1]?.toLowerCase() === "checkout";
+    return {
+      segment,
+      kind: "gh",
+      subcommand: positional[0]?.toLowerCase(),
+      arguments: positional.slice(1),
+      mutation: checkout,
+      globalOptionsSafe: true,
+      trusted: segment.executableTrusted,
+    };
+  }
+
+  const parsed = parseGitSubcommand(segment.args);
+  const subcommand =
+    parsed.index === undefined ? undefined : segment.args[parsed.index]?.toLowerCase();
+  const commandArguments = parsed.index === undefined ? [] : segment.args.slice(parsed.index + 1);
+  const mutation =
+    subcommand === "config"
+      ? !commandArguments.some(
+          (argument) =>
+            argument === "--global" ||
+            argument === "--system" ||
+            argument === "--file" ||
+            argument.startsWith("--file="),
+        )
+      : subcommand !== undefined && gitMutationSubcommands.has(subcommand);
+  return {
+    segment,
+    kind: "git",
+    subcommand,
+    arguments: commandArguments,
+    mutation,
+    globalOptionsSafe: parsed.safe,
+    trusted: segment.executableTrusted,
+  };
+}
+
+function parsedGitInvocations(command: string): GitInvocation[] {
+  return parseCommandSegments(command).flatMap((segment) => {
+    const invocation = parseGitInvocation(segment);
+    return invocation ? [invocation] : [];
+  });
 }
 
 export function shellCommandUsesGitMutation(command: string): boolean {
-  return parseCommandSegments(command).some(segmentUsesGitMutation);
+  return parsedGitInvocations(command).some((invocation) => invocation.mutation);
 }
 
-function segmentInitializesCurrentDirectory(segment: CommandSegment): boolean {
-  const args = segment.args.map((arg) => arg.toLowerCase());
+function invocationInitializesCurrentDirectory(invocation: GitInvocation): boolean {
   return (
-    segment.executable === "git" &&
-    (args.length === 1 || (args.length === 2 && args[1] === ".")) &&
-    args[0] === "init"
+    invocation.kind === "git" &&
+    invocation.subcommand === "init" &&
+    (invocation.arguments.length === 0 ||
+      (invocation.arguments.length === 1 && invocation.arguments[0] === "."))
   );
 }
 
 export function shellCommandInitializesCurrentDirectory(command: string): boolean {
   const segments = parseCommandSegments(command);
   const segment = segments.length === 1 ? segments[0] : undefined;
-  if (!segment) return false;
-  const words = shellWords(segment.source);
+  const invocation = segment ? parseGitInvocation(segment) : undefined;
+  if (!segment || !invocation) return false;
+  const syntax = scanShellSyntax(command);
   return (
     command.trim() === segment.source &&
-    executableIndex(words) === 0 &&
-    segmentInitializesCurrentDirectory(segment) &&
+    segment.directExecutable &&
+    invocation.trusted &&
+    invocation.globalOptionsSafe &&
+    invocationInitializesCurrentDirectory(invocation) &&
+    !syntax.hasActiveControl &&
     !segment.hasRedirect &&
     !segment.hasSubstitution &&
     !segment.nestedShell
@@ -328,14 +547,16 @@ export function shellCommandInitializesCurrentDirectory(command: string): boolea
 export function shellCommandCanGrantGitMetadata(command: string): boolean {
   const segments = parseCommandSegments(command);
   const segment = segments.length === 1 ? segments[0] : undefined;
-  const gitSubcommand =
-    segment?.executable === "git"
-      ? segment.args.map((arg) => arg.toLowerCase()).find((arg) => !arg.startsWith("-"))
-      : undefined;
-  if (gitSubcommand === "init") return shellCommandInitializesCurrentDirectory(command);
+  const invocation = segment ? parseGitInvocation(segment) : undefined;
+  if (invocation?.subcommand === "init") {
+    return shellCommandInitializesCurrentDirectory(command);
+  }
   return Boolean(
     segment &&
-      segmentUsesGitMutation(segment) &&
+      invocation?.mutation &&
+      invocation.trusted &&
+      invocation.globalOptionsSafe &&
+      !scanShellSyntax(command).hasActiveControl &&
       !segment.hasRedirect &&
       !segment.hasSubstitution &&
       !segment.nestedShell,
@@ -395,118 +616,244 @@ export function normalizeToolCall(
   };
 }
 
-function isSpecialIpv4(host: string): boolean {
-  const [first, second, third] = host.split(".").map(Number);
-  return (
-    first === 0 ||
-    first === 10 ||
-    first === 127 ||
-    (first === 100 && second >= 64 && second <= 127) ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && (second === 0 || second === 88 || second === 168)) ||
-    (first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) ||
-    (first === 203 && second === 0 && third === 113) ||
-    first >= 224
-  );
-}
-
-function ipv6Groups(host: string): number[] | undefined {
-  let normalized = host;
-  if (host.includes(".")) {
-    const separator = host.lastIndexOf(":");
-    const ipv4 = host.slice(separator + 1);
-    if (separator < 0 || isIP(ipv4) !== 4) return undefined;
-    const octets = ipv4.split(".").map(Number);
-    normalized = `${host.slice(0, separator)}:${(((octets[0] ?? 0) << 8) | (octets[1] ?? 0)).toString(16)}:${(((octets[2] ?? 0) << 8) | (octets[3] ?? 0)).toString(16)}`;
-  }
-  const pieces = normalized.split("::");
-  if (pieces.length > 2) return undefined;
-  const left = pieces[0] ? pieces[0].split(":") : [];
-  const right = pieces[1] ? pieces[1].split(":") : [];
-  const missing = 8 - left.length - right.length;
-  if (pieces.length === 1 ? missing !== 0 : missing < 1) return undefined;
-  const groups = [...left, ...Array(missing).fill("0"), ...right].map((group) =>
-    Number.parseInt(group, 16),
-  );
-  return groups.length === 8 && groups.every((group) => Number.isInteger(group))
-    ? groups
-    : undefined;
-}
-
-function ipv4FromGroups(groups: readonly number[], offset: number): string {
-  return [
-    (groups[offset] ?? 0) >> 8,
-    (groups[offset] ?? 0) & 255,
-    (groups[offset + 1] ?? 0) >> 8,
-    (groups[offset + 1] ?? 0) & 255,
-  ].join(".");
-}
-
-function isSpecialIp(host: string): boolean {
-  if (isIP(host) === 4) return isSpecialIpv4(host);
-  if (isIP(host) !== 6) return false;
-  const groups = ipv6Groups(host);
-  if (!groups) return true;
-  const first = groups[0] ?? 0;
-  const embeddedIpv4 =
-    groups.slice(0, 6).every((group) => group === 0) ||
-    (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) ||
-    (groups[0] === 0x64 &&
-      groups[1] === 0xff9b &&
-      groups.slice(2, 6).every((group) => group === 0)) ||
-    (groups[0] === 0x64 &&
-      groups[1] === 0xff9b &&
-      groups[2] === 1 &&
-      groups.slice(3, 6).every((group) => group === 0))
-      ? ipv4FromGroups(groups, 6)
-      : groups[0] === 0x2002
-        ? ipv4FromGroups(groups, 1)
-        : undefined;
-  return embeddedIpv4
-    ? isSpecialIpv4(embeddedIpv4)
-    : groups.every((group) => group === 0) ||
-        (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
-        (first & 0xfe00) === 0xfc00 ||
-        (first & 0xffc0) === 0xfe80 ||
-        (first & 0xff00) === 0xff00 ||
-        (groups[0] === 0x2001 && groups[1] === 0x0db8) ||
-        (groups[0] === 0x2001 && groups[1] === 0x0002);
-}
-
-function looksLikeAmbiguousNumericIp(host: string): boolean {
-  return isIP(host) === 0 && /^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$/i.test(host);
-}
-
-export function isPublicNetworkHost(value: string): boolean {
-  const host = value
-    .trim()
-    .replace(/^\[|\]$/g, "")
-    .replace(/\.+$/, "")
-    .toLowerCase();
-  if (
-    !host ||
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "metadata.google.internal" ||
-    looksLikeAmbiguousNumericIp(host)
-  )
-    return false;
-  return !isSpecialIp(host);
-}
-
 function normalizeHostToken(value: string): string | undefined {
   let token = value.trim().replace(/^['"]|['"],?$/g, "");
   if (!token) return undefined;
   try {
-    if (/^https?:\/\//i.test(token)) return new URL(token).hostname;
+    if (/^https?:\/\//i.test(token)) return normalizeNetworkHost(new URL(token).hostname);
   } catch {
     return undefined;
   }
   token = token.replace(/^[^@]+@/, "");
-  if (token.startsWith("[")) return /^\[([^\]]+)\]/.exec(token)?.[1];
+  if (token.startsWith("[")) {
+    return normalizeNetworkHost(/^\[([^\]]+)\]/.exec(token)?.[1] ?? "");
+  }
   token = token.replace(/:.*$/, "");
-  return /^(?:[a-z0-9-]+\.)*[a-z0-9-]+$/i.test(token) || isIP(token) !== 0 ? token : undefined;
+  return normalizeNetworkHost(token);
+}
+
+type GitRemotePurpose = "fetch" | "push";
+
+type ParsedGitRemote =
+  | { kind: "implicit"; purpose: GitRemotePurpose }
+  | { kind: "host"; purpose: GitRemotePurpose; host: string }
+  | { kind: "local"; purpose: GitRemotePurpose }
+  | { kind: "unsafe"; purpose: GitRemotePurpose; reason: string };
+
+interface GitRemoteOptionGrammar {
+  flags: ReadonlySet<string>;
+  values: ReadonlySet<string>;
+  optionalValues: ReadonlySet<string>;
+}
+
+function optionSet(options: string): ReadonlySet<string> {
+  return new Set(options.split(/\s+/).filter(Boolean));
+}
+
+const gitRemoteOptionGrammar = new Map<string, GitRemoteOptionGrammar>([
+  [
+    "clone",
+    {
+      flags: optionSet(
+        "--bare --dissociate --ipv4 --ipv6 --local --mirror --no-checkout --no-hardlinks --no-reject-shallow --no-single-branch --no-tags --progress --quiet --reject-shallow --shared --single-branch --sparse --verbose -4 -6 -n -q -s -v",
+      ),
+      values: optionSet(
+        "--branch --config --depth --filter --jobs --origin --reference --reference-if-able --revision --separate-git-dir --server-option --shallow-exclude --shallow-since --template --upload-pack -b -c -j -o -u",
+      ),
+      optionalValues: optionSet("--recurse-submodules"),
+    },
+  ],
+  [
+    "fetch",
+    {
+      flags: optionSet(
+        "--all --append --atomic --auto-maintenance --dry-run --force --ipv4 --ipv6 --keep --multiple --no-auto-maintenance --no-recurse-submodules --no-tags --prune --prune-tags --quiet --show-forced-updates --tags --update-head-ok --verbose --write-commit-graph -4 -6 -a -f -k -p -q -t -v",
+      ),
+      values: optionSet(
+        "--deepen --depth --filter --jobs --negotiation-tip --refmap --server-option --shallow-exclude --shallow-since --submodule-prefix --upload-pack -j -o -u",
+      ),
+      optionalValues: optionSet("--recurse-submodules"),
+    },
+  ],
+  [
+    "pull",
+    {
+      flags: optionSet(
+        "--all --autostash --ff --ff-only --force --no-autostash --no-commit --no-edit --no-ff --no-rebase --no-stat --no-tags --prune --quiet --signoff --stat --tags --verbose -f -n -q -r -s -v",
+      ),
+      values: optionSet(
+        "--cleanup --depth --gpg-sign --jobs --server-option --strategy --strategy-option --upload-pack -j -S -s -u -X",
+      ),
+      optionalValues: optionSet("--rebase"),
+    },
+  ],
+  [
+    "push",
+    {
+      flags: optionSet(
+        "--all --atomic --delete --dry-run --follow-tags --force --force-if-includes --ipv4 --ipv6 --mirror --no-thin --no-verify --porcelain --prune --quiet --set-upstream --tags --thin --verbose -4 -6 -f -n -q -u -v",
+      ),
+      values: optionSet("--exec --push-option --receive-pack --repo -o"),
+      optionalValues: optionSet("--force-with-lease --signed"),
+    },
+  ],
+  [
+    "ls-remote",
+    {
+      flags: optionSet(
+        "--branches --exit-code --get-url --heads --quiet --refs --symref --tags -q",
+      ),
+      values: optionSet("--sort --upload-pack -u"),
+      optionalValues: new Set(),
+    },
+  ],
+]);
+
+function gitInvocationUsesNetwork(invocation: GitInvocation): boolean {
+  if (invocation.kind !== "git" || !invocation.subcommand) return false;
+  return (
+    gitNetworkSubcommands.has(invocation.subcommand) ||
+    (invocation.subcommand === "submodule" &&
+      invocation.arguments.some((argument) => argument === "add" || argument === "update"))
+  );
+}
+
+function remotePurpose(invocation: GitInvocation): GitRemotePurpose {
+  return invocation.subcommand === "push" ? "push" : "fetch";
+}
+
+function classifyGitRemoteOperand(operand: string, purpose: GitRemotePurpose): ParsedGitRemote {
+  const explicit =
+    operand.startsWith("/") ||
+    operand.startsWith("./") ||
+    operand.startsWith("../") ||
+    operand.startsWith("~/") ||
+    operand.includes("/") ||
+    operand.includes(":");
+  if (!explicit) return { kind: "implicit", purpose };
+  const target = parseGitRemoteTarget(operand);
+  if (target.kind === "host") return { kind: "host", purpose, host: target.host };
+  if (target.kind === "local") return { kind: "local", purpose };
+  return { kind: "unsafe", purpose, reason: target.reason };
+}
+
+function parsedGitRemote(invocation: GitInvocation): ParsedGitRemote | undefined {
+  if (!gitInvocationUsesNetwork(invocation)) return undefined;
+  const purpose = remotePurpose(invocation);
+  if (!invocation.trusted) {
+    return { kind: "unsafe", purpose, reason: "untrusted Git executable or wrapper context" };
+  }
+  if (!invocation.globalOptionsSafe) {
+    return { kind: "unsafe", purpose, reason: "unsafe Git global option" };
+  }
+  const subcommand = invocation.subcommand ?? "";
+  if (subcommand === "submodule") {
+    const actionIndex = invocation.arguments.findIndex(
+      (argument) => argument === "add" || argument === "update",
+    );
+    if (actionIndex < 0) return undefined;
+    if (invocation.arguments[actionIndex] === "update") {
+      return { kind: "implicit", purpose };
+    }
+    const operand = invocation.arguments
+      .slice(actionIndex + 1)
+      .find((argument) => !argument.startsWith("-"));
+    return operand
+      ? classifyGitRemoteOperand(operand, purpose)
+      : { kind: "unsafe", purpose, reason: "missing Git submodule remote operand" };
+  }
+
+  const grammar = gitRemoteOptionGrammar.get(subcommand);
+  const noValueOptions = grammar?.flags ?? new Set<string>();
+  const valueOptions = grammar?.values ?? new Set<string>();
+  const optionalValueOptions = grammar?.optionalValues ?? new Set<string>();
+  let repositoryOption: string | undefined;
+  for (let index = 0; index < invocation.arguments.length; index += 1) {
+    const token = invocation.arguments[index] ?? "";
+    if (token === "--") {
+      const operand = invocation.arguments[index + 1];
+      return operand
+        ? classifyGitRemoteOperand(operand, purpose)
+        : { kind: "unsafe", purpose, reason: "missing Git remote operand" };
+    }
+    if (!token.startsWith("-") || token === "-") {
+      return classifyGitRemoteOperand(repositoryOption ?? token, purpose);
+    }
+    const equals = token.indexOf("=");
+    const option = equals < 0 ? token : token.slice(0, equals);
+    if (optionalValueOptions.has(option)) {
+      if (equals >= 0 && token.slice(equals + 1).length === 0) {
+        return { kind: "unsafe", purpose, reason: "missing Git remote option value" };
+      }
+      continue;
+    }
+    if (noValueOptions.has(option)) {
+      if (equals >= 0) {
+        return { kind: "unsafe", purpose, reason: "malformed Git remote option" };
+      }
+      continue;
+    }
+    if (valueOptions.has(option)) {
+      const value = equals >= 0 ? token.slice(equals + 1) : invocation.arguments[index + 1];
+      if (!value) return { kind: "unsafe", purpose, reason: "missing Git remote option value" };
+      if (equals < 0) index += 1;
+      if (option === "--repo") repositoryOption = value;
+      continue;
+    }
+    const shortOptionWithValue = [...valueOptions].find(
+      (candidate) =>
+        candidate.startsWith("-") &&
+        !candidate.startsWith("--") &&
+        token.startsWith(candidate) &&
+        token.length > candidate.length,
+    );
+    if (shortOptionWithValue) continue;
+    if (
+      /^-[A-Za-z]+$/.test(token) &&
+      [...token.slice(1)].every((character) => noValueOptions.has(`-${character}`))
+    ) {
+      continue;
+    }
+    return { kind: "unsafe", purpose, reason: "unrecognized Git remote option" };
+  }
+  if (repositoryOption) return classifyGitRemoteOperand(repositoryOption, purpose);
+  if (subcommand === "push" || subcommand === "fetch" || subcommand === "pull") {
+    return { kind: "implicit", purpose };
+  }
+  return { kind: "unsafe", purpose, reason: "missing Git remote operand" };
+}
+
+export interface ShellGitNetworkAnalysis {
+  usesImplicitNetwork: boolean;
+  directImplicitPurpose?: GitRemotePurpose;
+  explicitHosts: string[];
+  unsafeReason?: string;
+}
+
+export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis {
+  const segments = parseCommandSegments(command);
+  const syntax = scanShellSyntax(command);
+  const remotes = parsedGitInvocations(command).flatMap((invocation) => {
+    const remote = parsedGitRemote(invocation);
+    return remote ? [{ invocation, remote }] : [];
+  });
+  const unsafeReason = remotes.find(({ remote }) => remote.kind === "unsafe")?.remote;
+  const direct = remotes.length === 1 ? remotes[0] : undefined;
+  const directImplicitPurpose =
+    segments.length === 1 &&
+    direct?.remote.kind === "implicit" &&
+    !syntax.hasActiveControl &&
+    !direct.invocation.segment.hasRedirect &&
+    !direct.invocation.segment.hasSubstitution &&
+    !direct.invocation.segment.nestedShell
+      ? direct.remote.purpose
+      : undefined;
+  return {
+    usesImplicitNetwork: remotes.some(({ remote }) => remote.kind === "implicit"),
+    ...(directImplicitPurpose ? { directImplicitPurpose } : {}),
+    explicitHosts: remotes.flatMap(({ remote }) => (remote.kind === "host" ? [remote.host] : [])),
+    ...(unsafeReason?.kind === "unsafe" ? { unsafeReason: unsafeReason.reason } : {}),
+  };
 }
 
 function invocationUsesNetwork(segment: CommandSegment): boolean {
@@ -529,10 +876,8 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
     );
   }
   if (segment.executable === "git") {
-    return (
-      args.some((arg) => gitNetworkSubcommands.has(arg)) ||
-      (args.includes("submodule") && args.some((arg) => arg === "add" || arg === "update"))
-    );
+    const invocation = parseGitInvocation(segment);
+    return invocation ? gitInvocationUsesNetwork(invocation) : false;
   }
   if (new Set(["npm", "pnpm", "yarn", "bun"]).has(segment.executable)) {
     const subcommand = args.find((arg) => !arg.startsWith("-"));
@@ -550,41 +895,25 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
   return false;
 }
 
-function segmentUsesImplicitGitNetwork(segment: CommandSegment): boolean {
-  return (
-    segment.executable === "git" &&
-    invocationUsesNetwork(segment) &&
-    !segment.args.some(
-      (arg) => /^https?:\/\//i.test(arg) || arg.includes("@") || /^[^\s/:]+:[^\s]+$/.test(arg),
-    )
-  );
-}
-
 export function shellCommandUsesImplicitGitNetwork(command: string): boolean {
-  return parseCommandSegments(command).some(segmentUsesImplicitGitNetwork);
+  return analyzeShellGitNetwork(command).usesImplicitNetwork;
 }
 
 export function shellCommandUsesDirectImplicitGitPush(command: string): boolean {
-  const segments = parseCommandSegments(command);
-  const segment = segments.length === 1 ? segments[0] : undefined;
-  if (!segment) return false;
-  const subcommand = segment.args
-    .map((arg) => arg.toLowerCase())
-    .find((arg) => !arg.startsWith("-"));
-  return (
-    subcommand === "push" &&
-    segmentUsesImplicitGitNetwork(segment) &&
-    !segment.hasRedirect &&
-    !segment.hasSubstitution &&
-    !segment.nestedShell
-  );
+  return analyzeShellGitNetwork(command).directImplicitPurpose === "push";
 }
 
 export function extractShellNetworkHosts(command: string): string[] {
-  const hosts = new Set<string>();
+  const gitNetwork = analyzeShellGitNetwork(command);
+  const hosts = new Set<string>(gitNetwork.explicitHosts);
   const segments = parseCommandSegments(command);
   for (const segment of segments) {
-    if (!invocationUsesNetwork(segment) || segment.executable === "gh") continue;
+    if (
+      !invocationUsesNetwork(segment) ||
+      segment.executable === "git" ||
+      segment.executable === "gh"
+    )
+      continue;
     for (const match of segment.source.matchAll(/https?:\/\/[^\s"'`<>]+/gi)) {
       const host = normalizeHostToken(match[0]);
       if (host) hosts.add(host.toLowerCase());
@@ -593,6 +922,7 @@ export function extractShellNetworkHosts(command: string): string[] {
 
   for (const segment of segments) {
     if (!invocationUsesNetwork(segment)) continue;
+    if (segment.executable === "git") continue;
     if (segment.executable === "gh") {
       hosts.add("api.github.com");
       hosts.add("github.com");

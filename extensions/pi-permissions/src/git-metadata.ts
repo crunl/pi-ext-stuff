@@ -1,6 +1,7 @@
 import type { Stats } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
+import { parseGitRemoteTarget, unquoteGitConfigValue } from "./network-host.ts";
 
 export type GitMetadataResult =
   | { ok: true; configPath: string; writeRoots: string[] }
@@ -16,21 +17,6 @@ type GitMetadataInspectionResult =
 
 function isFilesystemRoot(path: string): boolean {
   return path === parse(path).root;
-}
-
-function remoteHost(value: string): string | undefined {
-  try {
-    const parsed = new URL(value);
-    if (new Set(["http:", "https:", "ssh:", "git:"]).has(parsed.protocol)) {
-      return parsed.hostname;
-    }
-  } catch {
-    // Fall through to Git's SCP-like remote syntax.
-  }
-  if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) {
-    return undefined;
-  }
-  return /^(?:[^@\s]+@)?([^:/\s]+):.+$/.exec(value)?.[1];
 }
 
 async function hasGitDirectoryStructure(directory: string): Promise<boolean> {
@@ -261,16 +247,21 @@ export async function inspectCurrentDirectoryGitInitialization(
 
 export type GitRemotePurpose = "fetch" | "push";
 
+export type GitRemoteHostsResult = { ok: true; hosts: string[] } | { ok: false; reason: string };
+
 export async function readRepositoryRemoteHosts(
   configPath: string | undefined,
   purpose: GitRemotePurpose,
-): Promise<string[]> {
-  if (!configPath) return [];
+): Promise<GitRemoteHostsResult> {
+  if (!configPath) return { ok: true, hosts: [] };
   let contents: string;
   try {
     contents = await readFile(configPath, "utf8");
-  } catch {
-    return [];
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `unsafe Git remote config: ${filesystemErrorReason(error)}`,
+    };
   }
   const remotes = new Map<string, { urls: string[]; pushUrls: string[]; hasPushUrl: boolean }>();
   let remote: { urls: string[]; pushUrls: string[]; hasPushUrl: boolean } | undefined;
@@ -288,16 +279,28 @@ export async function readRepositoryRemoteHosts(
     }
     if (!remote) continue;
     const match = /^\s*(url|pushurl)\s*=\s*(.+?)\s*$/i.exec(line);
+    if (!match && /^\s*(?:url|pushurl)\s*=/i.test(line)) {
+      return { ok: false, reason: "unsafe Git remote config value" };
+    }
     const isPushUrl = match?.[1]?.toLowerCase() === "pushurl";
     if (isPushUrl) remote.hasPushUrl = true;
-    const host = match?.[2] ? remoteHost(match[2]) : undefined;
-    if (!host) continue;
-    (isPushUrl ? remote.pushUrls : remote.urls).push(host.toLowerCase());
+    if (!match?.[2]) continue;
+    const value = unquoteGitConfigValue(match[2]);
+    if (value === undefined) {
+      return { ok: false, reason: "unsafe quoted Git remote config value" };
+    }
+    const target = parseGitRemoteTarget(value);
+    if (target.kind === "unsafe") {
+      return { ok: false, reason: target.reason };
+    }
+    if (target.kind === "host") {
+      (isPushUrl ? remote.pushUrls : remote.urls).push(target.host);
+    }
   }
   const hosts = new Set<string>();
   for (const values of remotes.values()) {
     const selected = purpose === "push" && values.hasPushUrl ? values.pushUrls : values.urls;
     for (const host of selected) hosts.add(host);
   }
-  return [...hosts];
+  return { ok: true, hosts: [...hosts] };
 }

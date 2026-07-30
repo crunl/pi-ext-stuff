@@ -186,6 +186,98 @@ describe("Default mode gate", () => {
     );
   });
 
+  it.each(["git push origin HEAD:main", "git push --porcelain origin HEAD:main"])(
+    "uses the remote operand rather than a push refspec for %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+      await createGitDirectory(
+        join(cwd, ".git"),
+        [
+          '[remote "origin"]',
+          "\turl = git@github.com:openai/codex.git",
+          "\tpushurl = ssh://git@127.1/openai/codex.git",
+          "",
+        ].join("\n"),
+      );
+
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("Private"),
+      });
+    },
+  );
+
+  it.each([
+    "git push ssh://git@127.1/owner/repo.git HEAD:main",
+    "git push git://2130706433/owner/repo.git HEAD:main",
+    "git push 0x7f000001:owner/repo.git HEAD:main",
+  ])("blocks a private explicit Git remote operand in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("Private"),
+      },
+    );
+  });
+
+  it("keeps a public SSH Git remote explicit", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "git push ssh://git@github.com/openai/codex.git HEAD:main" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: ["github.com"],
+    });
+  });
+
+  it("keeps a local Git remote operand out of network policy", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+    const gitRoot = await realpath(join(cwd, ".git"));
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git push ../local.git HEAD:main" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: undefined,
+      filesystemWriteRoots: [gitRoot],
+    });
+  });
+
+  it("fails closed when a Git remote option cannot be parsed reliably", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "git push --future-option origin HEAD:main" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("Git network"),
+    });
+  });
+
   it("uses only the public fetch URL for Git fetch", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(
@@ -200,6 +292,27 @@ describe("Default mode gate", () => {
 
     await expect(
       evaluateDefaultRequest("bash", { command: "git fetch origin" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: ["github.com"],
+    });
+  });
+
+  it("does not mistake a fetch refspec for the remote operand", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = git@github.com:openai/codex.git\n',
+    );
+
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "git fetch --prune origin HEAD:refs/remotes/origin/main" },
+        cwd,
+        config(),
+      ),
     ).resolves.toMatchObject({
       action: "prompt",
       risk: "HARD",
@@ -254,6 +367,74 @@ describe("Default mode gate", () => {
         filesystemWriteRoots: [gitRoot],
       });
     }
+  });
+
+  it.each([
+    "git -C child commit -am update",
+    "git --git-dir ../repo.git commit -am update",
+    "git --work-tree ../tree commit -am update",
+    "git -c core.hooksPath=/tmp/hooks commit -am update",
+    "git --config-env=core.hooksPath=HOOKS commit -am update",
+    "git --unknown-global commit -am update",
+  ])("blocks Git metadata grants through unsafe global options in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("single Git mutation"),
+      },
+    );
+  });
+
+  it.each([
+    "./git commit -am update",
+    "/tmp/git commit -am update",
+    "./gh pr checkout 123",
+    "PATH=/tmp git commit -am update",
+    "env PATH=/tmp git commit -am update",
+    "GIT_DIR=/tmp/repo.git git add README.md",
+    "env GIT_WORK_TREE=/tmp/tree git add README.md",
+    "env -C /tmp git add README.md",
+    "sudo -C /tmp git push origin main",
+    "sudo --chdir /tmp git push origin main",
+  ])(
+    "blocks Git metadata grants through an untrusted executable context in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "block",
+        risk: "HARD",
+      });
+    },
+  );
+
+  it.each([
+    "git add README.md &",
+    "(git add README.md)",
+    "; git add README.md",
+    "git add README.md;",
+    "| git add README.md",
+    "git add README.md |",
+    "\ngit add README.md",
+    "git add README.md\n",
+  ])("blocks Git metadata grants with top-level shell controls in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("single Git mutation"),
+      },
+    );
   });
 
   it.each(["git init", "git init ."])(

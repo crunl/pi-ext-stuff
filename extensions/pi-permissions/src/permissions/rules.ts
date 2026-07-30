@@ -19,6 +19,8 @@ export interface CommandSegment {
   /** Raw executable token before basename normalization. */
   executableToken: string;
   executable: string;
+  executableTrusted: boolean;
+  directExecutable: boolean;
   args: string[];
   hasRedirect: boolean;
   hasSubstitution: boolean;
@@ -33,23 +35,28 @@ export interface RuleMatch {
 const actionRank: Record<PermissionRule["action"], number> = { allow: 1, ask: 2, deny: 3 };
 
 function globMatches(value: string, pattern: string): boolean {
-  const expression = pattern
-    .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
-    .replace(/\*/g, "[\\s\\S]*");
+  const expression = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&").replace(/\*/g, "[\\s\\S]*");
   return new RegExp(`^${expression}$`).test(value);
 }
 
 function requestText(request: PermissionRequest): string {
   if (typeof request.input.command === "string") return request.input.command;
-  if (request.commandSegments) return request.commandSegments.map((segment) => segment.source).join(" ");
+  if (request.commandSegments)
+    return request.commandSegments.map((segment) => segment.source).join(" ");
   return JSON.stringify(request.input);
 }
 
-export function matchRules(request: PermissionRequest, rules: PermissionRule[]): RuleMatch | undefined {
+export function matchRules(
+  request: PermissionRequest,
+  rules: PermissionRule[],
+): RuleMatch | undefined {
   const text = requestText(request);
-  const matches = rules.filter((rule) => rule.tool === request.tool && (!rule.pattern || globMatches(text, rule.pattern)));
+  const matches = rules.filter(
+    (rule) => rule.tool === request.tool && (!rule.pattern || globMatches(text, rule.pattern)),
+  );
   return matches.reduce<RuleMatch | undefined>((best, rule) => {
-    if (!best || actionRank[rule.action] > actionRank[best.action]) return { action: rule.action, rule };
+    if (!best || actionRank[rule.action] > actionRank[best.action])
+      return { action: rule.action, rule };
     return best;
   }, undefined);
 }

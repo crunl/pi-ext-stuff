@@ -10,6 +10,7 @@ import {
   normalizeToolCall,
   shellCommandCanGrantGitMetadata,
   shellCommandUsesDirectImplicitGitPush,
+  shellCommandUsesGitMutation,
 } from "../src/permissions/risk.ts";
 import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
 
@@ -109,6 +110,78 @@ describe("permission rules", () => {
 });
 
 describe("Git metadata eligibility", () => {
+  it.each([
+    "git -C child commit -am update",
+    "git --git-dir ../repo.git commit -am update",
+    "git --git-dir=../repo.git commit -am update",
+    "git --work-tree ../tree commit -am update",
+    "git --work-tree=../tree commit -am update",
+    "git -c core.hooksPath=/tmp/hooks commit -am update",
+    "git --config-env=core.hooksPath=HOOKS commit -am update",
+    "git --unknown-global commit -am update",
+    "git -C child --unknown-global push origin main",
+  ])("recognizes but cannot grant metadata for unsafe Git global options in %s", (command) => {
+    expect(shellCommandUsesGitMutation(command)).toBe(true);
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(false);
+  });
+
+  it("allows a known value-free Git global option", () => {
+    expect(shellCommandUsesGitMutation("git --no-pager commit -am update")).toBe(true);
+    expect(shellCommandCanGrantGitMetadata("git --no-pager commit -am update")).toBe(true);
+  });
+
+  it.each([
+    "./git commit -am update",
+    "/tmp/git commit -am update",
+    "./gh pr checkout 123",
+    "PATH=/tmp git commit -am update",
+    "env PATH=/tmp git commit -am update",
+    "GIT_DIR=/tmp/repo.git git add README.md",
+    "env GIT_WORK_TREE=/tmp/tree git add README.md",
+    "env -C /tmp git add README.md",
+    "sudo -C /tmp git push origin main",
+    "sudo --chdir /tmp git push origin main",
+  ])("recognizes but cannot grant metadata through an untrusted Git context in %s", (command) => {
+    expect(shellCommandUsesGitMutation(command)).toBe(true);
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(false);
+  });
+
+  it.each([
+    "git add README.md",
+    "gh pr checkout 123",
+    "/usr/bin/git add README.md",
+    "X=1 git add README.md",
+    "env X=1 git add README.md",
+    "command git add README.md",
+    "sudo -u root git add README.md",
+  ])("keeps a trusted Git executable context eligible in %s", (command) => {
+    expect(shellCommandUsesGitMutation(command)).toBe(true);
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(true);
+  });
+
+  it.each([
+    "git add README.md &",
+    "(git add README.md)",
+    "; git add README.md",
+    "git add README.md;",
+    "| git add README.md",
+    "git add README.md |",
+    "\ngit add README.md",
+    "git add README.md\n",
+  ])("rejects active top-level shell control syntax in %s", (command) => {
+    expect(shellCommandUsesGitMutation(command)).toBe(true);
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(false);
+  });
+
+  it.each([
+    "git commit -m 'background & group (safe); pipe |'",
+    'git commit -m "background & group (safe); pipe |"',
+    "git add README\\&copy.md",
+    "git add README\\(copy\\).md",
+  ])("keeps quoted or escaped shell control literals eligible in %s", (command) => {
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(true);
+  });
+
   it.each([
     ['git commit -m "document bash support"', true],
     ["git add docs/fish.md", true],

@@ -197,7 +197,10 @@ describe("Git metadata ownership", () => {
     const contents = '[remote "origin"]\n\turl = git@github.com:owner/repo.git\n';
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual(["github.com"]);
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual({
+      ok: true,
+      hosts: ["github.com"],
+    });
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
   });
 
@@ -217,15 +220,14 @@ describe("Git metadata ownership", () => {
     ].join("\n");
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual([
-      "github.com",
-      "gitlab.example",
-      "fallback.example",
-    ]);
-    await expect(readRepositoryRemoteHosts(configPath, "push")).resolves.toEqual([
-      "127.1",
-      "gitlab.example",
-    ]);
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual({
+      ok: true,
+      hosts: ["github.com", "gitlab.example", "fallback.example"],
+    });
+    await expect(readRepositoryRemoteHosts(configPath, "push")).resolves.toEqual({
+      ok: true,
+      hosts: ["127.1", "gitlab.example"],
+    });
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
   });
 
@@ -241,10 +243,32 @@ describe("Git metadata ownership", () => {
     ].join("\n");
     await writeFile(configPath, contents);
 
-    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual([
-      "github.com",
-      "gitlab.example",
-    ]);
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual({
+      ok: true,
+      hosts: ["github.com", "gitlab.example"],
+    });
     await expect(readFile(configPath, "utf8")).resolves.toBe(contents);
+  });
+
+  it("dequotes a quoted Git config URL before extracting its host", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
+    const configPath = join(cwd, "config");
+    await writeFile(configPath, '[remote "origin"]\n\turl = "ssh://git@127.1/owner/repo.git"\n');
+
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toEqual({
+      ok: true,
+      hosts: ["127.1"],
+    });
+  });
+
+  it("fails closed for a non-local remote URL that cannot be parsed", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
+    const configPath = join(cwd, "config");
+    await writeFile(configPath, '[remote "origin"]\n\turl = ssh://[broken/repo.git\n');
+
+    await expect(readRepositoryRemoteHosts(configPath, "fetch")).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("remote"),
+    });
   });
 });

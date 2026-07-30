@@ -7,15 +7,14 @@ import {
 } from "./git-metadata.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import {
+  analyzeShellGitNetwork,
   classifyRisk,
   isPublicNetworkHost,
   normalizeToolCall,
   type Risk,
   shellCommandCanGrantGitMetadata,
   shellCommandInitializesCurrentDirectory,
-  shellCommandUsesDirectImplicitGitPush,
   shellCommandUsesGitMutation,
-  shellCommandUsesImplicitGitNetwork,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
@@ -61,8 +60,16 @@ export async function evaluateDefaultRequest(
 ): Promise<DefaultDecision> {
   const request = normalizeToolCall(tool, input, cwd);
   const command = typeof input.command === "string" ? input.command : undefined;
+  const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
+  if (request.operation === "execute" && gitNetwork?.unsafeReason) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: `Unsafe Git network invocation: ${gitNetwork.unsafeReason}`,
+    };
+  }
   const usesImplicitGitNetwork =
-    request.operation === "execute" && command && shellCommandUsesImplicitGitNetwork(command);
+    request.operation === "execute" && Boolean(gitNetwork?.usesImplicitNetwork);
   const usesGitMutation =
     request.operation === "execute" && command && shellCommandUsesGitMutation(command);
   const initializesCurrentDirectory =
@@ -88,14 +95,15 @@ export async function evaluateDefaultRequest(
     return { action: "block", risk: "HARD", reason: gitMetadata.reason };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
+    const remoteHosts = await readRepositoryRemoteHosts(
+      gitMetadata.configPath,
+      gitNetwork?.directImplicitPurpose === "push" ? "push" : "fetch",
+    );
+    if (!remoteHosts.ok) {
+      return { action: "block", risk: "HARD", reason: remoteHosts.reason };
+    }
     request.networkTargets = [
-      ...new Set([
-        ...(request.networkTargets ?? []),
-        ...(await readRepositoryRemoteHosts(
-          gitMetadata.configPath,
-          command && shellCommandUsesDirectImplicitGitPush(command) ? "push" : "fetch",
-        )),
-      ]),
+      ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
     ];
   }
   const gitWriteRoots = usesGitMutation
