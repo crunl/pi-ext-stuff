@@ -221,7 +221,15 @@ function scanShellSyntax(source: string): ShellSyntax {
       quote = quote === '"' ? undefined : '"';
       continue;
     }
-    if (character === "`" || (character === "$" && source[index + 1] === "(")) {
+    const isBashAlternateCommandSubstitution =
+      character === "$" &&
+      source[index + 1] === "{" &&
+      (/\s/.test(source[index + 2] ?? "") || source[index + 2] === "|");
+    if (
+      character === "`" ||
+      (character === "$" && source[index + 1] === "(") ||
+      isBashAlternateCommandSubstitution
+    ) {
       hasExecutableSubstitution = true;
     }
     if (quote === undefined && (character === "<" || character === ">")) {

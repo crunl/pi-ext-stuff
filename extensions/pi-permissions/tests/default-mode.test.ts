@@ -177,6 +177,10 @@ describe("Default mode gate", () => {
       "git commit -m 'document input > output'",
       'git commit -m "document bash support"',
       "git add docs/fish.md",
+      "git add '$" + "{ touch .git/hooks/pre-commit; }'",
+      'git add "\\$' + '{ touch .git/hooks/pre-commit; }"',
+      "git add '$" + "{| touch .git/hooks/pre-commit; }'",
+      'git add "\\$' + '{| touch .git/hooks/pre-commit; }"',
     ]) {
       await expect(
         evaluateDefaultRequest("bash", { command }, cwd, config()),
@@ -193,6 +197,8 @@ describe("Default mode gate", () => {
     'bash -c "git add README.md"',
     'fish -c "git add README.md"',
     'git add "$(printf README.md)"',
+    'git add "$' + '{ touch .git/hooks/pre-commit; }"',
+    'git add "$' + '{| touch .git/hooks/pre-commit; }"',
     "git add README.md | tee result.txt",
   ])("blocks Git metadata grants for compound shell effects in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));

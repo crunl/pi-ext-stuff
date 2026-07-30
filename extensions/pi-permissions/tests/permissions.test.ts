@@ -113,6 +113,13 @@ describe("Git metadata eligibility", () => {
     ["git add docs/fish.md", true],
     ['bash -c "git add README.md"', false],
     ['git add "$(printf README.md)"', false],
+    ['git add "$' + '{ touch .git/hooks/pre-commit; }"', false],
+    ['git add "$' + '{| touch .git/hooks/pre-commit; }"', false],
+    ['git add "$' + '{variable}"', true],
+    ["git add '$" + "{ touch .git/hooks/pre-commit; }'", true],
+    ['git add "\\$' + '{ touch .git/hooks/pre-commit; }"', true],
+    ["git add '$" + "{| touch .git/hooks/pre-commit; }'", true],
+    ['git add "\\$' + '{| touch .git/hooks/pre-commit; }"', true],
     ["git add README.md > result.txt", false],
   ] as const)("decides Git metadata eligibility for %s", (command, expected) => {
     expect(shellCommandCanGrantGitMetadata(command)).toBe(expected);
