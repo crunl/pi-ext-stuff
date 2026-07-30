@@ -31,6 +31,7 @@ import {
 } from "./default-mode.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { buildAutoReviewRequest } from "./auto-review-request.ts";
+import { MAX_CONSECUTIVE_GUARDIAN_DENIALS } from "./guardian-policy.ts";
 import {
   type AutoReviewer,
   PiAutoReviewer,
@@ -786,7 +787,7 @@ export function registerExtension(
             reviewer: result.config.reviewer,
           },
           runtime.autoState,
-          result.config.reviewer?.maxConsecutiveDenials ?? 3,
+          MAX_CONSECUTIVE_GUARDIAN_DENIALS,
           reviewSignal,
         );
         if (reviewSignal.aborted) {
@@ -796,10 +797,7 @@ export function registerExtension(
           };
         }
         if (auto.action === "approve") {
-          runtime.recordAutoReview(
-            "approve",
-            result.config.reviewer?.maxConsecutiveDenials ?? 3,
-          );
+          runtime.recordAutoReview("approve");
           grantApprovedCall(
             event,
             decision,
@@ -811,10 +809,7 @@ export function registerExtension(
           return;
         }
         if (auto.action === "deny") {
-          const autoState = runtime.recordAutoReview(
-            "deny",
-            result.config.reviewer?.maxConsecutiveDenials ?? 3,
-          );
+          const autoState = runtime.recordAutoReview("deny");
           autoApprovalLedger.recordDenial({
             tool: event.toolName,
             input: event.input as Record<string, unknown>,

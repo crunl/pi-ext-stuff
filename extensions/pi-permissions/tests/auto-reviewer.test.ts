@@ -53,8 +53,6 @@ describe("PiAutoReviewer", () => {
           provider: "openai-codex",
           model: "reviewer",
           reasoningEffort: "medium",
-          timeoutMs: 60_000,
-          maxConsecutiveDenials: 3,
         },
       }),
     ).resolves.toMatchObject({ decision: "approve" });
@@ -73,7 +71,7 @@ describe("PiAutoReviewer", () => {
         headers: { "x-test": "yes" },
         env: { TEST_ENV: "yes" },
         reasoningEffort: "medium",
-        timeoutMs: 60_000,
+        timeoutMs: 90_000,
         maxRetries: 0,
         cacheRetention: "none",
         signal: expect.any(AbortSignal),
@@ -119,8 +117,6 @@ describe("PiAutoReviewer", () => {
           provider: "missing",
           model: "missing",
           reasoningEffort: "medium",
-          timeoutMs: 1000,
-          maxConsecutiveDenials: 3,
         },
       }),
     ).rejects.toMatchObject({ kind: "unavailable" });
@@ -169,31 +165,33 @@ describe("PiAutoReviewer", () => {
   });
 
   it("enforces timeout when a provider ignores the abort signal", async () => {
+    const timeout = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValue(timeout.signal);
     const reviewer = new PiAutoReviewer(
       vi.fn(
         async () =>
-          new Promise<typeof response>((resolve) => {
-            setTimeout(() => resolve(response), 20);
-          }),
+          new Promise<typeof response>(() => {}),
       ) as any,
     );
 
-    await expect(
-      reviewer.review(request, {
-        modelRegistry: {
-          find: () => ({ provider: "openai", id: "main" }),
-          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
-        } as any,
-        activeModel: { provider: "openai", id: "main" } as any,
-        reviewer: {
-          provider: "openai",
-          model: "main",
-          reasoningEffort: "medium",
-          timeoutMs: 1,
-          maxConsecutiveDenials: 3,
-        },
-      }),
-    ).rejects.toMatchObject({ kind: "timeout" });
+    const pending = reviewer.review(request, {
+      modelRegistry: {
+        find: () => ({ provider: "openai", id: "main" }),
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
+      } as any,
+      activeModel: { provider: "openai", id: "main" } as any,
+      reviewer: {
+        provider: "openai",
+        model: "main",
+        reasoningEffort: "medium",
+      },
+    });
+    timeout.abort();
+
+    await expect(pending).rejects.toMatchObject({ kind: "timeout" });
+    timeoutSpy.mockRestore();
   });
 
   it("exposes typed reviewer failures", () => {

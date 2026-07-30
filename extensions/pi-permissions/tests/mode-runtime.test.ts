@@ -61,12 +61,12 @@ describe("PermissionModeRuntime", () => {
     runtime.activate("auto");
 
     for (let index = 0; index < 9; index += 1) {
-      runtime.recordAutoReview("deny", 3);
-      runtime.recordAutoReview("approve", 3);
+      runtime.recordAutoReview("deny");
+      runtime.recordAutoReview("approve");
     }
     expect(runtime.autoState.paused).toBe(false);
 
-    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+    expect(runtime.recordAutoReview("deny")).toEqual({
       consecutiveDenials: 1,
       paused: true,
     });
@@ -75,9 +75,9 @@ describe("PermissionModeRuntime", () => {
   it("starts each agent turn with a fresh Auto rejection circuit", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.activate("auto");
-    runtime.recordAutoReview("deny", 3);
-    runtime.recordAutoReview("deny", 3);
-    runtime.recordAutoReview("deny", 3);
+    runtime.recordAutoReview("deny");
+    runtime.recordAutoReview("deny");
+    runtime.recordAutoReview("deny");
     expect(runtime.autoState.paused).toBe(true);
 
     runtime.beginAgentTurn();
@@ -91,12 +91,12 @@ describe("PermissionModeRuntime", () => {
   it("resets consecutive denials after a non-denial reviewer failure", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.activate("auto");
-    runtime.recordAutoReview("deny", 3);
-    runtime.recordAutoReview("deny", 3);
+    runtime.recordAutoReview("deny");
+    runtime.recordAutoReview("deny");
 
     runtime.recordAutoNonDenial();
 
-    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+    expect(runtime.recordAutoReview("deny")).toEqual({
       consecutiveDenials: 1,
       paused: false,
     });
@@ -106,14 +106,14 @@ describe("PermissionModeRuntime", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.activate("auto");
     for (let index = 0; index < 9; index += 1) {
-      runtime.recordAutoReview("deny", 3);
+      runtime.recordAutoReview("deny");
       runtime.recordAutoNonDenial();
     }
     for (let index = 0; index < 50; index += 1) {
       runtime.recordAutoNonDenial();
     }
 
-    expect(runtime.recordAutoReview("deny", 3)).toEqual({
+    expect(runtime.recordAutoReview("deny")).toEqual({
       consecutiveDenials: 1,
       paused: false,
     });

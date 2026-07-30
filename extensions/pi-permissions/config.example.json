@@ -4,9 +4,7 @@
   "reviewer": {
     "provider": "openai-codex",
     "model": "gpt-5.6",
-    "reasoningEffort": "high",
-    "timeoutMs": 60000,
-    "maxConsecutiveDenials": 3
+    "reasoningEffort": "high"
   },
   "sandbox": {
     "enabled": true,

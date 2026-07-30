@@ -1,6 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import {
+  GUARDIAN_DENIAL_WINDOW_SIZE,
+  MAX_CONSECUTIVE_GUARDIAN_DENIALS,
+  MAX_RECENT_GUARDIAN_DENIALS,
+} from "./guardian-policy.ts";
+import {
   type AutoState,
   recordAutoApproval,
   recordAutoDenial,
@@ -124,17 +129,14 @@ export class PermissionModeRuntime {
     this.persist();
   }
 
-  recordAutoReview(
-    decision: "approve" | "deny",
-    denialLimit: number,
-  ): AutoState {
+  recordAutoReview(decision: "approve" | "deny"): AutoState {
     this.recordAutoReviewOutcome(decision === "deny");
     this.state.auto = decision === "approve"
       ? recordAutoApproval(this.state.auto)
-      : recordAutoDenial(this.state.auto, denialLimit);
+      : recordAutoDenial(this.state.auto, MAX_CONSECUTIVE_GUARDIAN_DENIALS);
     if (
       decision === "deny"
-      && this.autoReviewWindow.filter(Boolean).length >= 10
+      && this.autoReviewWindow.filter(Boolean).length >= MAX_RECENT_GUARDIAN_DENIALS
     ) {
       this.state.auto.paused = true;
     }
@@ -160,8 +162,8 @@ export class PermissionModeRuntime {
 
   private recordAutoReviewOutcome(denied: boolean): void {
     this.autoReviewWindow.push(denied);
-    if (this.autoReviewWindow.length > 50) {
-      this.autoReviewWindow.splice(0, this.autoReviewWindow.length - 50);
+    if (this.autoReviewWindow.length > GUARDIAN_DENIAL_WINDOW_SIZE) {
+      this.autoReviewWindow.splice(0, this.autoReviewWindow.length - GUARDIAN_DENIAL_WINDOW_SIZE);
     }
   }
 }

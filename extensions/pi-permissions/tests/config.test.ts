@@ -80,27 +80,21 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig({ sandbox: { unknownSandbox: true } })).toThrow(/sandbox\.unknownSandbox/);
     expect(() => validatePermissionsConfig({ sandbox: { filesystem: { unknownFilesystem: true } } })).toThrow(/sandbox\.filesystem\.unknownFilesystem/);
     expect(() => validatePermissionsConfig({ sandbox: { network: { unknownNetwork: true } } })).toThrow(/sandbox\.network\.unknownNetwork/);
-    expect(() => validatePermissionsConfig({ reviewer: { provider: "openai", model: "x", reasoningEffort: "low", timeoutMs: 1, maxConsecutiveDenials: 1, unknownReviewer: true } })).toThrow(/reviewer\.unknownReviewer/);
+    expect(() => validatePermissionsConfig({ reviewer: { provider: "openai", model: "x", reasoningEffort: "low", unknownReviewer: true } })).toThrow(/reviewer\.unknownReviewer/);
     expect(() => validatePermissionsConfig({ rules: [{ action: "deny", tool: "bash", unknownRule: true }] })).toThrow(/rules\[0\]\.unknownRule/);
   });
 
-  it.each([
-    { timeoutMs: 0, maxConsecutiveDenials: 3, field: "timeoutMs" },
-    { timeoutMs: 1000.5, maxConsecutiveDenials: 3, field: "timeoutMs" },
-    { timeoutMs: 1000, maxConsecutiveDenials: 0, field: "maxConsecutiveDenials" },
-    { timeoutMs: 1000, maxConsecutiveDenials: 1.5, field: "maxConsecutiveDenials" },
-  ])("rejects invalid reviewer $field", ({ timeoutMs, maxConsecutiveDenials, field }) => {
+  it.each(["timeoutMs", "maxAttempts", "maxConsecutiveDenials"] as const)("rejects removed reviewer policy field %s", (field) => {
     expect(() =>
       validatePermissionsConfig({
         reviewer: {
           provider: "openai-codex",
           model: "gpt-5.6-sol-fast",
           reasoningEffort: "medium",
-          timeoutMs,
-          maxConsecutiveDenials,
+          [field]: field === "timeoutMs" ? 60_000 : 3,
         },
       }),
-    ).toThrow(field);
+    ).toThrow(new RegExp(`reviewer\\.${field}.*remove`, "i"));
   });
 
   it("reports the exact path for invalid JSON", async () => {
@@ -197,8 +191,6 @@ describe("permissions config", () => {
           provider: "openai-codex",
           model: "trusted-reviewer",
           reasoningEffort: "medium",
-          timeoutMs: 60_000,
-          maxConsecutiveDenials: 3,
         },
       });
       await writeJson(join(cwd, ".pi", "permissions.json"), {
@@ -207,8 +199,6 @@ describe("permissions config", () => {
           provider: "attacker",
           model: "approve-all",
           reasoningEffort: "minimal",
-          timeoutMs: 1,
-          maxConsecutiveDenials: 999,
         },
       });
 

@@ -9,8 +9,6 @@ export interface PermissionsConfig {
     provider: string;
     model: string;
     reasoningEffort: "minimal" | "low" | "medium" | "high";
-    timeoutMs: number;
-    maxConsecutiveDenials: number;
   };
   sandbox: {
     enabled: boolean;
@@ -111,14 +109,6 @@ function expectNumber(value: unknown, path: string): number {
   return value;
 }
 
-function expectPositiveSafeInteger(value: unknown, path: string): number {
-  const parsed = expectNumber(value, path);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new ConfigError(`${path} must be a positive safe integer`);
-  }
-  return parsed;
-}
-
 function expectStrings(value: unknown, path: string): string[] {
   if (!Array.isArray(value)) throw new ConfigError(`${path} must be an array of strings`);
   return value.map((entry, index) => expectString(entry, `${path}[${index}]`));
@@ -154,7 +144,18 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
   if ("reviewer" in input && input.reviewer !== undefined) {
     if (!isRecord(input.reviewer)) throw new ConfigError("reviewer must be an object");
     const reviewer = input.reviewer;
-    rejectUnknownKeys(reviewer, ["provider", "model", "reasoningEffort", "timeoutMs", "maxConsecutiveDenials"], "reviewer");
+    const removedReviewerPolicyKeys = [
+      "timeoutMs",
+      "maxAttempts",
+      "maxConsecutiveDenials",
+    ] as const;
+    const removedKey = removedReviewerPolicyKeys.find((key) => key in reviewer);
+    if (removedKey) {
+      throw new ConfigError(
+        `reviewer.${removedKey} is fixed by Codex-equivalent Guardian policy; remove it from config`,
+      );
+    }
+    rejectUnknownKeys(reviewer, ["provider", "model", "reasoningEffort"], "reviewer");
     const reasoningEffort = expectString(reviewer.reasoningEffort, "reviewer.reasoningEffort");
     if (!efforts.has(reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"])) {
       throw new ConfigError("reviewer.reasoningEffort is invalid");
@@ -163,11 +164,6 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
       provider: expectString(reviewer.provider, "reviewer.provider"),
       model: expectString(reviewer.model, "reviewer.model"),
       reasoningEffort: reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"],
-      timeoutMs: expectPositiveSafeInteger(reviewer.timeoutMs, "reviewer.timeoutMs"),
-      maxConsecutiveDenials: expectPositiveSafeInteger(
-        reviewer.maxConsecutiveDenials,
-        "reviewer.maxConsecutiveDenials",
-      ),
     };
   }
   if ("sandbox" in input && input.sandbox !== undefined) {

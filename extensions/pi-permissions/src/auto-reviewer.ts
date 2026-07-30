@@ -10,6 +10,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import type { PermissionsConfig } from "./config.ts";
+import { GUARDIAN_REVIEW_TIMEOUT_MS } from "./guardian-policy.ts";
 import {
   AUTO_REVIEW_SYSTEM_PROMPT,
   type AutoReviewRequest,
@@ -56,7 +57,6 @@ type Complete = (
   options?: ProviderStreamOptions,
 ) => Promise<AssistantMessage>;
 
-const DEFAULT_REVIEW_TIMEOUT_MS = 60_000;
 const DEFAULT_REVIEW_REASONING = "medium";
 
 function errorMessage(error: unknown): string {
@@ -99,7 +99,7 @@ export class PiAutoReviewer implements AutoReviewer {
       throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
     }
 
-    const timeoutMs = context.reviewer?.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
+    const timeoutMs = GUARDIAN_REVIEW_TIMEOUT_MS;
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const signal = callerSignal
       ? AbortSignal.any([callerSignal, timeoutSignal])
