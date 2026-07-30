@@ -93,4 +93,29 @@ describe("selector tab navigation", () => {
     handlers.get("session_start")?.({}, { hasUI: false, ui: { onTerminalInput } });
     expect(onTerminalInput).not.toHaveBeenCalled();
   });
+
+  it("shares the anchor via globalThis across module copies (jiti isolation)", () => {
+    const key = Symbol.for("@x1a2h1/pi-core:selector-tab-nav-anchor");
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+
+    // Writer path: setSelectorNavAnchor must land on the shared key.
+    setSelectorNavAnchor(tui, editor);
+    const stored = (globalThis as Record<symbol, { editor: unknown } | undefined>)[key];
+    expect(stored?.editor).toBe(editor);
+
+    // Reader path: a foreign jiti copy writing the same key is visible here.
+    const foreignEditor = fakeEditor();
+    const foreignTui = fakeTui(foreignEditor);
+    (globalThis as Record<symbol, unknown>)[key] = {
+      resolveTui: () => foreignTui,
+      editor: foreignEditor,
+    };
+    expect(isSelectorOpen()).toBe(false);
+    expect(rewriteSelectorNavInput(SHIFT_TAB)).toBeUndefined();
+
+    (foreignTui.children as any[])[1] = { children: [{ render: () => ["selector"] }] };
+    expect(isSelectorOpen()).toBe(true);
+    expect(rewriteSelectorNavInput(SHIFT_TAB)).toEqual({ data: UP });
+  });
 });

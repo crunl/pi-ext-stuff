@@ -25,30 +25,57 @@ import { type FloatingTui, locateEditor } from "./editor-float-panel.ts";
 const SELECT_UP = "\x1b[A";
 const SELECT_DOWN = "\x1b[B";
 
+/**
+ * Cross-extension shared anchor. pi loads each extension through its own
+ * jiti instance with `moduleCache: false`, so a plain module-level `let` is
+ * NOT shared: statusline's import of this file and pi-core's
+ * `registerSelectorTabNav` each get their own copy. The listener is bound to
+ * pi-core's copy; the live editor is usually patched from statusline's copy
+ * (it replaces the factory rather than wrapping). The listener then saw a
+ * stale/empty anchor, `isSelectorOpen()` stuck true, and shift+tab was always
+ * rewritten to ↑ — killing pi-permissions mode cycling in the normal editor.
+ *
+ * Same pattern pi uses for its theme singleton. Last writer wins: whoever
+ * last called applyAutocompleteAbove holds the mounted editor.
+ */
+const ANCHOR_KEY = Symbol.for("@x1a2h1/pi-core:selector-tab-nav-anchor");
+
 interface Anchor {
   resolveTui: () => FloatingTui | undefined;
   editor: unknown;
 }
 
-let anchor: Anchor | undefined;
+function getAnchor(): Anchor | undefined {
+  return (globalThis as Record<symbol, Anchor | undefined>)[ANCHOR_KEY];
+}
+
+function setAnchor(next: Anchor | undefined): void {
+  (globalThis as Record<symbol, Anchor | undefined>)[ANCHOR_KEY] = next;
+}
 
 /**
  * Remember the active editor instance and how to reach its TUI. Called by
  * applyAutocompleteAbove whenever an editor is (re)patched, so the input
  * rewrite can tell "selector open" (editor swapped out) from normal
- * editing. Module-level because pi has exactly one active editor slot.
- * The tui is resolved lazily; a plain value is also accepted.
+ * editing. Stored on globalThis so every jiti copy of this module sees the
+ * same (most-recently-mounted) editor. The tui is resolved lazily; a plain
+ * value is also accepted.
  */
 export function setSelectorNavAnchor(
   tui: FloatingTui | undefined | (() => FloatingTui | undefined),
   editor: unknown,
 ): void {
+  if (tui === undefined && editor === undefined) {
+    setAnchor(undefined);
+    return;
+  }
   const resolveTui = typeof tui === "function" ? tui : () => tui;
-  anchor = { resolveTui, editor };
+  setAnchor({ resolveTui, editor });
 }
 
 /** True while a selector (not the editor) occupies the editor slot. */
 export function isSelectorOpen(): boolean {
+  const anchor = getAnchor();
   if (!anchor) return false;
   const tui = anchor.resolveTui();
   if (!tui) return false;
