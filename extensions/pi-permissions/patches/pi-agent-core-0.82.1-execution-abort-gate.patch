@@ -1,0 +1,13 @@
+--- a/dist/agent-loop.js
++++ b/dist/agent-loop.js
+@@
+ import { EventStream, validateToolArguments, } from "@earendil-works/pi-ai";
+ import { getDefaultStreamFn } from "./stream-fn.js";
++globalThis[Symbol.for("pi-permissions.core.execution-abort-gate.v1")] = 1;
+@@
+ async function executePreparedToolCall(prepared, signal, emit) {
++    if (signal?.aborted) {
++        return { result: createErrorToolResult("Operation aborted"), isError: true };
++    }
+     const updateEvents = [];
+

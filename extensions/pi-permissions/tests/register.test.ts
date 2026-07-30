@@ -34,6 +34,7 @@ function harness(
   },
   reviewer?: AutoReviewer,
   riskEvaluator?: (...args: any[]) => Promise<DefaultDecision>,
+  coreExecutionAbortGateAvailable: () => boolean = () => true,
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -94,6 +95,7 @@ function harness(
     sandboxCoordinator,
     autoReviewer,
     riskEvaluator,
+    coreExecutionAbortGateAvailable,
   });
   const context = {
     cwd: agentDir,
@@ -131,6 +133,64 @@ function harness(
 }
 
 describe("Default mode registration", () => {
+  it("fails closed when configured YOLO lacks the core execution abort gate", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(
+      agentDir,
+      false,
+      true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    expect(app.setStatus).not.toHaveBeenCalledWith("pi-permissions", "YOLO");
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("core execution abort gate"),
+      "error",
+    );
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "unsafe-yolo", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("core execution abort gate"),
+    });
+  });
+
+  it("refuses a live switch to YOLO when the core gate is absent", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(
+      agentDir,
+      false,
+      true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    await app.commands.get("yolo")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("core execution abort gate"),
+      "error",
+    );
+  });
+
   it("bypasses hard blocks and every reviewer in YOLO", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));

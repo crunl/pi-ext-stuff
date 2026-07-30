@@ -3,10 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package"],
-  "pi": { "extensions": ["./index.ts"] },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
   "scripts": {
     "check": "tsc --noEmit",
+    "core:check": "node scripts/install-core-patch.mjs --check",
+    "core:install": "node scripts/install-core-patch.mjs",
+    "core:test": "PI_PERMISSIONS_CORE_REGRESSION=1 vitest --run tests/core-execution-gate.test.ts",
     "test": "vitest --run"
   },
   "dependencies": {

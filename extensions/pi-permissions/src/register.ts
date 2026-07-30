@@ -38,6 +38,7 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
+import { hasCoreExecutionAbortGate } from "./core-capability.ts";
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
@@ -73,6 +74,7 @@ export interface RegisterExtensionOptions {
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
   riskEvaluator?: typeof evaluateDefaultRequest;
+  coreExecutionAbortGateAvailable?: () => boolean;
 }
 
 interface ApprovedCall {
@@ -122,6 +124,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
+  const coreExecutionAbortGateAvailable =
+    options.coreExecutionAbortGateAvailable ?? hasCoreExecutionAbortGate;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
@@ -245,6 +249,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
+  const assertYoloCapability = (mode: ExecutablePermissionMode): void => {
+    if (mode === "yolo" && !coreExecutionAbortGateAvailable()) {
+      throw new Error(
+        "pi-permissions: YOLO requires the patched core execution abort gate; run npm run core:install",
+      );
+    }
+  };
 
   const activateConfigUnlocked = async (
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
@@ -257,6 +268,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
     if (!force && loaded && loadedKey === key) {
       const effectiveCachedMode = cachedMode ?? executableMode(loaded.config.defaultMode);
+      assertYoloCapability(effectiveCachedMode);
       if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
         return loaded;
       }
@@ -273,6 +285,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw error;
     }
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
+    assertYoloCapability(effectiveMode);
     const previous = {
       loaded,
       loadedKey,
