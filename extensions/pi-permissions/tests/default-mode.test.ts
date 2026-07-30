@@ -227,6 +227,43 @@ describe("Default mode gate", () => {
     );
   });
 
+  it.each([
+    "git push --repo=ssh://git@127.1/owner/repo.git -- HEAD:main",
+    "git fetch --multiple https://github.com/openai/codex.git ssh://git@127.1/owner/repo.git",
+    "git submodule add -b main ssh://git@127.1/owner/repo.git child",
+    "git fetch ext::/tmp/network-helper",
+  ])("fails closed for a private or unsupported Git remote in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "block",
+        risk: "HARD",
+      },
+    );
+  });
+
+  it.each([
+    ["git push --repo=ssh://git@github.com/openai/codex.git -- HEAD:main", ["github.com"]],
+    [
+      "git fetch --multiple https://github.com/openai/codex.git ssh://git@gitlab.com/openai/codex.git",
+      ["github.com", "gitlab.com"],
+    ],
+    ["git submodule add -b main ssh://git@github.com/openai/codex.git child", ["github.com"]],
+  ] as const)("preserves public Git remote operands in %s", async (command, networkHosts) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "prompt",
+        risk: "HARD",
+        networkHosts,
+      },
+    );
+  });
+
   it("keeps a public SSH Git remote explicit", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));

@@ -737,30 +737,80 @@ function classifyGitRemoteOperand(operand: string, purpose: GitRemotePurpose): P
   return { kind: "unsafe", purpose, reason: target.reason };
 }
 
-function parsedGitRemote(invocation: GitInvocation): ParsedGitRemote | undefined {
-  if (!gitInvocationUsesNetwork(invocation)) return undefined;
+const gitSubmoduleAddFlags = optionSet("--dissociate --force --progress --quiet -f -q");
+const gitSubmoduleAddValueOptions = optionSet(
+  "--branch --depth --name --reference --ref-format -b",
+);
+
+function parseGitSubmoduleAddRemote(
+  args: readonly string[],
+  purpose: GitRemotePurpose,
+): ParsedGitRemote {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] ?? "";
+    if (token === "--") {
+      const operand = args[index + 1];
+      return operand
+        ? classifyGitRemoteOperand(operand, purpose)
+        : { kind: "unsafe", purpose, reason: "missing Git submodule remote operand" };
+    }
+    if (!token.startsWith("-") || token === "-") {
+      return classifyGitRemoteOperand(token, purpose);
+    }
+    const equals = token.indexOf("=");
+    const option = equals < 0 ? token : token.slice(0, equals);
+    if (gitSubmoduleAddFlags.has(option)) {
+      if (equals >= 0) {
+        return { kind: "unsafe", purpose, reason: "malformed Git submodule option" };
+      }
+      continue;
+    }
+    if (gitSubmoduleAddValueOptions.has(option)) {
+      const value = equals >= 0 ? token.slice(equals + 1) : args[index + 1];
+      if (!value) {
+        return { kind: "unsafe", purpose, reason: "missing Git submodule option value" };
+      }
+      if (equals < 0) index += 1;
+      continue;
+    }
+    const shortOptionWithValue = [...gitSubmoduleAddValueOptions].find(
+      (candidate) =>
+        candidate.startsWith("-") &&
+        !candidate.startsWith("--") &&
+        token.startsWith(candidate) &&
+        token.length > candidate.length,
+    );
+    if (shortOptionWithValue) continue;
+    if (
+      /^-[A-Za-z]+$/.test(token) &&
+      [...token.slice(1)].every((character) => gitSubmoduleAddFlags.has(`-${character}`))
+    ) {
+      continue;
+    }
+    return { kind: "unsafe", purpose, reason: "unrecognized Git submodule option" };
+  }
+  return { kind: "unsafe", purpose, reason: "missing Git submodule remote operand" };
+}
+
+function parsedGitRemotes(invocation: GitInvocation): ParsedGitRemote[] {
+  if (!gitInvocationUsesNetwork(invocation)) return [];
   const purpose = remotePurpose(invocation);
   if (!invocation.trusted) {
-    return { kind: "unsafe", purpose, reason: "untrusted Git executable or wrapper context" };
+    return [{ kind: "unsafe", purpose, reason: "untrusted Git executable or wrapper context" }];
   }
   if (!invocation.globalOptionsSafe) {
-    return { kind: "unsafe", purpose, reason: "unsafe Git global option" };
+    return [{ kind: "unsafe", purpose, reason: "unsafe Git global option" }];
   }
   const subcommand = invocation.subcommand ?? "";
   if (subcommand === "submodule") {
     const actionIndex = invocation.arguments.findIndex(
       (argument) => argument === "add" || argument === "update",
     );
-    if (actionIndex < 0) return undefined;
+    if (actionIndex < 0) return [];
     if (invocation.arguments[actionIndex] === "update") {
-      return { kind: "implicit", purpose };
+      return [{ kind: "implicit", purpose }];
     }
-    const operand = invocation.arguments
-      .slice(actionIndex + 1)
-      .find((argument) => !argument.startsWith("-"));
-    return operand
-      ? classifyGitRemoteOperand(operand, purpose)
-      : { kind: "unsafe", purpose, reason: "missing Git submodule remote operand" };
+    return [parseGitSubmoduleAddRemote(invocation.arguments.slice(actionIndex + 1), purpose)];
   }
 
   const grammar = gitRemoteOptionGrammar.get(subcommand);
@@ -768,34 +818,49 @@ function parsedGitRemote(invocation: GitInvocation): ParsedGitRemote | undefined
   const valueOptions = grammar?.values ?? new Set<string>();
   const optionalValueOptions = grammar?.optionalValues ?? new Set<string>();
   let repositoryOption: string | undefined;
+  let multipleFetch = false;
+  const multipleFetchOperands: string[] = [];
   for (let index = 0; index < invocation.arguments.length; index += 1) {
     const token = invocation.arguments[index] ?? "";
     if (token === "--") {
-      const operand = invocation.arguments[index + 1];
+      if (repositoryOption) return [classifyGitRemoteOperand(repositoryOption, purpose)];
+      const operands = invocation.arguments.slice(index + 1);
+      if (multipleFetch) {
+        return operands.length > 0
+          ? operands.map((operand) => classifyGitRemoteOperand(operand, purpose))
+          : [{ kind: "unsafe", purpose, reason: "missing Git remote operand" }];
+      }
+      const operand = operands[0];
       return operand
-        ? classifyGitRemoteOperand(operand, purpose)
-        : { kind: "unsafe", purpose, reason: "missing Git remote operand" };
+        ? [classifyGitRemoteOperand(operand, purpose)]
+        : [{ kind: "unsafe", purpose, reason: "missing Git remote operand" }];
     }
     if (!token.startsWith("-") || token === "-") {
-      return classifyGitRemoteOperand(repositoryOption ?? token, purpose);
+      if (repositoryOption) return [classifyGitRemoteOperand(repositoryOption, purpose)];
+      if (multipleFetch) {
+        multipleFetchOperands.push(token);
+        continue;
+      }
+      return [classifyGitRemoteOperand(token, purpose)];
     }
     const equals = token.indexOf("=");
     const option = equals < 0 ? token : token.slice(0, equals);
     if (optionalValueOptions.has(option)) {
       if (equals >= 0 && token.slice(equals + 1).length === 0) {
-        return { kind: "unsafe", purpose, reason: "missing Git remote option value" };
+        return [{ kind: "unsafe", purpose, reason: "missing Git remote option value" }];
       }
       continue;
     }
     if (noValueOptions.has(option)) {
       if (equals >= 0) {
-        return { kind: "unsafe", purpose, reason: "malformed Git remote option" };
+        return [{ kind: "unsafe", purpose, reason: "malformed Git remote option" }];
       }
+      if (subcommand === "fetch" && option === "--multiple") multipleFetch = true;
       continue;
     }
     if (valueOptions.has(option)) {
       const value = equals >= 0 ? token.slice(equals + 1) : invocation.arguments[index + 1];
-      if (!value) return { kind: "unsafe", purpose, reason: "missing Git remote option value" };
+      if (!value) return [{ kind: "unsafe", purpose, reason: "missing Git remote option value" }];
       if (equals < 0) index += 1;
       if (option === "--repo") repositoryOption = value;
       continue;
@@ -814,13 +879,18 @@ function parsedGitRemote(invocation: GitInvocation): ParsedGitRemote | undefined
     ) {
       continue;
     }
-    return { kind: "unsafe", purpose, reason: "unrecognized Git remote option" };
+    return [{ kind: "unsafe", purpose, reason: "unrecognized Git remote option" }];
   }
-  if (repositoryOption) return classifyGitRemoteOperand(repositoryOption, purpose);
+  if (repositoryOption) return [classifyGitRemoteOperand(repositoryOption, purpose)];
+  if (multipleFetch) {
+    return multipleFetchOperands.length > 0
+      ? multipleFetchOperands.map((operand) => classifyGitRemoteOperand(operand, purpose))
+      : [{ kind: "unsafe", purpose, reason: "missing Git remote operand" }];
+  }
   if (subcommand === "push" || subcommand === "fetch" || subcommand === "pull") {
-    return { kind: "implicit", purpose };
+    return [{ kind: "implicit", purpose }];
   }
-  return { kind: "unsafe", purpose, reason: "missing Git remote operand" };
+  return [{ kind: "unsafe", purpose, reason: "missing Git remote operand" }];
 }
 
 export interface ShellGitNetworkAnalysis {
@@ -834,8 +904,7 @@ export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis
   const segments = parseCommandSegments(command);
   const syntax = scanShellSyntax(command);
   const remotes = parsedGitInvocations(command).flatMap((invocation) => {
-    const remote = parsedGitRemote(invocation);
-    return remote ? [{ invocation, remote }] : [];
+    return parsedGitRemotes(invocation).map((remote) => ({ invocation, remote }));
   });
   const unsafeReason = remotes.find(({ remote }) => remote.kind === "unsafe")?.remote;
   const direct = remotes.length === 1 ? remotes[0] : undefined;

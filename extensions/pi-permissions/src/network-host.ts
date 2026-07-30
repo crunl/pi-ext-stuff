@@ -173,6 +173,10 @@ export function parseGitRemoteTarget(value: string): GitRemoteTarget {
 
   if (/^[A-Za-z]:[\\/]/.test(remote)) return { kind: "local" };
 
+  if (/^[a-z][a-z0-9+.-]*::/i.test(remote)) {
+    return { kind: "unsafe", reason: "unsupported Git remote helper syntax" };
+  }
+
   const scp = /^(?:[^@\s/:]+@)?(\[[^\]]+\]|[^:/\s]+):(.+)$/.exec(remote);
   if (scp) {
     const host = normalizeNetworkHost(scp[1] ?? "");
