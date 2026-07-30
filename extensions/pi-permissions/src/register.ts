@@ -137,6 +137,13 @@ export function registerExtension(
     | { kind: "ready"; profile: LoadedPermissionsConfig["config"]["sandbox"]["profile"] }
     | { kind: "failed"; error: string } = { kind: "pending" };
 
+  const revokeApprovedCall = (toolCallId: string | undefined): void => {
+    if (!toolCallId) return;
+    approvedCalls.delete(toolCallId);
+    approvedNetworkHosts.delete(toolCallId);
+    approvedWriteRoots.delete(toolCallId);
+  };
+
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
   };
@@ -607,6 +614,7 @@ export function registerExtension(
       };
     }
     const approvalEpoch = permissionContextEpoch;
+    let transitionGrantCreated = false;
 
     try {
       const guardianFailure = options.guardianFailure === undefined
@@ -652,6 +660,7 @@ export function registerExtension(
             "user",
             "user-transition",
           );
+          transitionGrantCreated = true;
           runtime.activate("auto");
           setDefaultStatus(ctx);
           ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
@@ -673,6 +682,13 @@ export function registerExtension(
         reason: `pi-permissions: user denied ${decision.risk} operation`,
       };
     } catch (error: unknown) {
+      if (transitionGrantCreated) {
+        revokeApprovedCall(event.toolCallId);
+        return {
+          block: true,
+          reason: "pi-permissions approval failed",
+        };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return {
         block: true,
@@ -680,7 +696,7 @@ export function registerExtension(
       };
     } finally {
       runtime.endHumanApproval();
-      setDefaultStatus(ctx);
+      if (!transitionGrantCreated) setDefaultStatus(ctx);
     }
   };
 
@@ -850,13 +866,13 @@ export function registerExtension(
           && ctx.hasUI
         ) {
           const preferred = result.config.reviewer;
-          const active = ctx.model;
+          const guardian = auto.review.guardian;
           const noticeKey = fingerprintValue({
             configFingerprint,
             preferredProvider: preferred?.provider,
             preferredModel: preferred?.model,
-            activeProvider: active?.provider,
-            activeModel: active?.id,
+            activeProvider: guardian.provider,
+            activeModel: guardian.model,
           });
           if (!guardianFallbackNoticeKeys.has(noticeKey)) {
             guardianFallbackNoticeKeys.add(noticeKey);
@@ -919,19 +935,18 @@ export function registerExtension(
           reason:
             "pi-permissions Auto review failed closed; interactive approval is required",
         };
-      } catch (error: unknown) {
+      } catch {
         if (reviewSignal.aborted) {
           return {
             block: true,
             reason: "pi-permissions: permission context changed during Auto review",
           };
         }
-        const message = error instanceof Error ? error.message : String(error);
         runtime.recordAutoNonDenial();
         return {
           block: true,
           reason:
-            `pi-permissions Auto review failed closed: ${message}. The action was not run.`,
+            "pi-permissions Auto review failed closed; the action was not run",
         };
       } finally {
         if (reviewControllers.get(id) === reviewController) {

@@ -581,6 +581,107 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
   });
 
+  it("revokes the transition approval when the Auto status update throws", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.select.mockResolvedValueOnce(
+      "Allow, switch future approvals to Auto",
+    );
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.setStatus.mockImplementationOnce(() => {
+      throw new Error("status rendering failed");
+    });
+    const current = {
+      toolName: "bash",
+      toolCallId: "transition-status-failure",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(
+      app.handlers.get("tool_call")!(current, app.context),
+    ).resolves.toMatchObject({ block: true });
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        current.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it("does not leak transition network or write grants when notification throws", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.select.mockResolvedValueOnce(
+      "Allow, switch future approvals to Auto",
+    );
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.notify.mockImplementationOnce(() => {
+      throw new Error("notification rendering failed");
+    });
+    const outputName = `pi-permissions-transition-${Date.now()}`;
+    const outputRoot = join("/var/tmp", outputName);
+    const canonicalOutputRoot = join(await realpath("/var/tmp"), outputName);
+    const current = {
+      toolName: "bash",
+      toolCallId: "transition-capability-failure",
+      input: {
+        command: `curl https://example.com -o ${outputRoot}/artifact`,
+        sandbox_permissions: "with_additional_permissions",
+        additional_permissions: {
+          file_system: { write: [outputRoot] },
+        },
+        justification: "Write the requested artifact",
+      },
+    };
+
+    await expect(
+      app.handlers.get("tool_call")!(current, app.context),
+    ).resolves.toMatchObject({ block: true });
+    const resetCount = app.sandboxManager.reset.mock.calls.length;
+    const initializeCount = app.sandboxManager.initialize.mock.calls.length;
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        { command: "pwd" },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).resolves.toBeDefined();
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetCount);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(initializeCount);
+
+    const options = app.bashToolFactory.mock.calls.at(-1)?.[1] as any;
+    await options.operations.exec("pwd", agentDir, {
+      onData: () => undefined,
+    });
+    const executionConfig = (
+      app.sandboxManager.wrapWithSandbox.mock.calls as any[]
+    ).at(-1)?.[2];
+    expect(executionConfig.network.allowedDomains).not.toContain("example.com");
+    expect(executionConfig.filesystem.allowWrite).not.toContain(
+      canonicalOutputRoot,
+    );
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        current.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
   it("routes only Default prompts through Auto reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
@@ -1184,6 +1285,58 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
+  it("sanitizes cancellation and unknown reviewer failures", async () => {
+    const cancelledRaw = "credential token at https://guardian.invalid";
+    const unknownRaw = "provider secret from https://unknown.invalid";
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new AutoReviewerFailure("cancelled", cancelledRaw),
+        )
+        .mockRejectedValueOnce(new Error(unknownRaw)),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, false, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    const cancelled = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "cancelled-review",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(cancelled).toEqual({
+      block: true,
+      reason:
+        "pi-permissions Auto review failed closed; the action was not run",
+    });
+    expect(cancelled?.reason).not.toContain(cancelledRaw);
+
+    const unknown = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "unknown-review",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(unknown).toMatchObject({ block: true });
+    expect(unknown?.reason).not.toContain(unknownRaw);
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
   it("notifies once when configured Guardian selection falls back to the active model", async () => {
     const response = {
       role: "assistant",
@@ -1255,6 +1408,100 @@ describe("Default mode registration", () => {
     ).toHaveLength(1);
   });
 
+  it("deduplicates fallback notices by the Guardian result model during an active-model race", async () => {
+    const firstReview = deferred<{
+      decision: "approve";
+      risk: "low";
+      userAuthorization: "high";
+      rationale: string;
+      guardian: {
+        provider: string;
+        model: string;
+        source: "active-fallback";
+        fallbackNotice: "configured-reviewer-unavailable";
+      };
+    }>();
+    const fallbackFor = (provider: string, model: string) => ({
+      decision: "approve" as const,
+      risk: "low" as const,
+      userAuthorization: "high" as const,
+      rationale: "Authorized.",
+      guardian: {
+        provider,
+        model,
+        source: "active-fallback" as const,
+        fallbackNotice: "configured-reviewer-unavailable" as const,
+      },
+    });
+    const firstResult = fallbackFor("race-provider", "race-model-a");
+    const secondResult = fallbackFor("race-provider", "race-model-b");
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi
+        .fn()
+        .mockImplementationOnce(async () => firstReview.promise)
+        .mockImplementation(async () => secondResult),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "auto",
+        reviewer: {
+          provider: "race-configured-provider",
+          model: "race-configured-model",
+          reasoningEffort: "medium",
+        },
+      }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.model = {
+      provider: "race-provider",
+      id: "race-model-a",
+    } as any;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    const pending = app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "fallback-race-a",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
+    app.context.model = {
+      provider: "race-provider",
+      id: "race-model-b",
+    } as any;
+    firstReview.resolve(firstResult);
+    await expect(pending).resolves.toBeUndefined();
+
+    for (const toolCallId of ["fallback-race-b-1", "fallback-race-b-2"]) {
+      await expect(
+        app.handlers.get("tool_call")!(
+          {
+            toolName: "bash",
+            toolCallId,
+            input: { command: "rm -rf build" },
+          },
+          app.context,
+        ),
+      ).resolves.toBeUndefined();
+    }
+
+    expect(
+      app.notify.mock.calls.filter(
+        ([message]) =>
+          message ===
+          "Guardian preferred model unavailable; using active model",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("fails closed when the reviewer request cannot be built", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
@@ -1282,7 +1529,8 @@ describe("Default mode registration", () => {
       ),
     ).resolves.toMatchObject({
       block: true,
-      reason: expect.stringMatching(/failed closed[\s\S]*action limit/i),
+      reason:
+        "pi-permissions Auto review failed closed; the action was not run",
     });
     expect(reviewer.review).not.toHaveBeenCalled();
     expect(app.select).not.toHaveBeenCalled();
