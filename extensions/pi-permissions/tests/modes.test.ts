@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 import { recordAutoDecision } from "../src/modes/auto.ts";
 import { ModeController } from "../src/modes/controller.ts";
 import {
@@ -7,7 +8,6 @@ import {
   reducePermissionEntries,
   restorePermissionState,
 } from "../src/state.ts";
-import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 
 describe("ModeController", () => {
   it("cycles only functional Default and Auto modes", () => {
@@ -47,7 +47,11 @@ describe("permission session state", () => {
       sandboxProfile: "workspace-write" as const,
       configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
     };
-    const latest = { ...first, mode: "auto" as const, auto: { consecutiveDenials: 2, paused: true } };
+    const latest = {
+      ...first,
+      mode: "auto" as const,
+      auto: { consecutiveDenials: 2, paused: true },
+    };
 
     const state = reducePermissionEntries(
       [

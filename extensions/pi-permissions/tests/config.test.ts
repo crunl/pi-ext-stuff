@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ConfigError } from "../src/config.ts";
 import {
   DEFAULT_CONFIG,
   fingerprintConfig,
@@ -9,7 +10,6 @@ import {
   mergePermissionsConfig,
   validatePermissionsConfig,
 } from "../src/config.ts";
-import type { ConfigError } from "../src/config.ts";
 
 async function withConfigRoots(
   run: (paths: { root: string; cwd: string; agentDir: string }) => Promise<void>,
@@ -52,10 +52,7 @@ describe("permissions config", () => {
   });
 
   it("ships a schema-valid complete example config", async () => {
-    const contents = await readFile(
-      join(import.meta.dirname, "..", "config.example.json"),
-      "utf8",
-    );
+    const contents = await readFile(join(import.meta.dirname, "..", "config.example.json"), "utf8");
     expect(() => validatePermissionsConfig(JSON.parse(contents))).not.toThrow();
   });
 
@@ -68,34 +65,53 @@ describe("permissions config", () => {
   });
 
   it("rejects an unknown mode", () => {
-    expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).toThrow(/defaultMode/);
+    expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).toThrow(
+      /defaultMode/,
+    );
   });
 
   it("produces stable fingerprints", () => {
-    expect(fingerprintConfig(DEFAULT_CONFIG)).toBe(fingerprintConfig(structuredClone(DEFAULT_CONFIG)));
+    expect(fingerprintConfig(DEFAULT_CONFIG)).toBe(
+      fingerprintConfig(structuredClone(DEFAULT_CONFIG)),
+    );
   });
 
   it("rejects unknown keys at every configuration object level", () => {
     expect(() => validatePermissionsConfig({ unknownRoot: true })).toThrow(/unknownRoot/);
-    expect(() => validatePermissionsConfig({ sandbox: { unknownSandbox: true } })).toThrow(/sandbox\.unknownSandbox/);
-    expect(() => validatePermissionsConfig({ sandbox: { filesystem: { unknownFilesystem: true } } })).toThrow(/sandbox\.filesystem\.unknownFilesystem/);
-    expect(() => validatePermissionsConfig({ sandbox: { network: { unknownNetwork: true } } })).toThrow(/sandbox\.network\.unknownNetwork/);
-    expect(() => validatePermissionsConfig({ reviewer: { provider: "openai", model: "x", reasoningEffort: "low", unknownReviewer: true } })).toThrow(/reviewer\.unknownReviewer/);
-    expect(() => validatePermissionsConfig({ rules: [{ action: "deny", tool: "bash", unknownRule: true }] })).toThrow(/rules\[0\]\.unknownRule/);
-  });
-
-  it.each(["timeoutMs", "maxAttempts", "maxConsecutiveDenials"] as const)("rejects removed reviewer policy field %s", (field) => {
+    expect(() => validatePermissionsConfig({ sandbox: { unknownSandbox: true } })).toThrow(
+      /sandbox\.unknownSandbox/,
+    );
+    expect(() =>
+      validatePermissionsConfig({ sandbox: { filesystem: { unknownFilesystem: true } } }),
+    ).toThrow(/sandbox\.filesystem\.unknownFilesystem/);
+    expect(() =>
+      validatePermissionsConfig({ sandbox: { network: { unknownNetwork: true } } }),
+    ).toThrow(/sandbox\.network\.unknownNetwork/);
     expect(() =>
       validatePermissionsConfig({
-        reviewer: {
-          provider: "openai-codex",
-          model: "gpt-5.6-sol-fast",
-          reasoningEffort: "medium",
-          [field]: field === "timeoutMs" ? 60_000 : 3,
-        },
+        reviewer: { provider: "openai", model: "x", reasoningEffort: "low", unknownReviewer: true },
       }),
-    ).toThrow(new RegExp(`reviewer\\.${field}.*remove`, "i"));
+    ).toThrow(/reviewer\.unknownReviewer/);
+    expect(() =>
+      validatePermissionsConfig({ rules: [{ action: "deny", tool: "bash", unknownRule: true }] }),
+    ).toThrow(/rules\[0\]\.unknownRule/);
   });
+
+  it.each(["timeoutMs", "maxAttempts", "maxConsecutiveDenials"] as const)(
+    "rejects removed reviewer policy field %s",
+    (field) => {
+      expect(() =>
+        validatePermissionsConfig({
+          reviewer: {
+            provider: "openai-codex",
+            model: "gpt-5.6-sol-fast",
+            reasoningEffort: "medium",
+            [field]: field === "timeoutMs" ? 60_000 : 3,
+          },
+        }),
+      ).toThrow(new RegExp(`reviewer\\.${field}.*remove`, "i"));
+    },
+  );
 
   it("reports the exact path for invalid JSON", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
@@ -103,7 +119,10 @@ describe("permissions config", () => {
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, "{");
       await expect(loadPermissionsConfig(cwd, agentDir, false)).rejects.toEqual(
-        expect.objectContaining<Partial<ConfigError>>({ name: "ConfigError", message: expect.stringContaining(path) }),
+        expect.objectContaining<Partial<ConfigError>>({
+          name: "ConfigError",
+          message: expect.stringContaining(path),
+        }),
       );
     });
   });
@@ -136,7 +155,10 @@ describe("permissions config", () => {
       await writeJson(join(cwd, ".pi", "permissions.json"), {
         sandbox: {
           filesystem: { allowWrite: [".", "generated"], denyWrite: ["secrets/*"] },
-          network: { allowedDomains: ["github.com", "api.example.test"], deniedDomains: ["internal.example.test"] },
+          network: {
+            allowedDomains: ["github.com", "api.example.test"],
+            deniedDomains: ["internal.example.test"],
+          },
         },
         rules: [{ action: "deny", tool: "bash", pattern: "curl *" }],
       });
@@ -145,7 +167,11 @@ describe("permissions config", () => {
       expect(loaded.config.sandbox.filesystem.denyWrite).toContain("secrets/*");
       expect(loaded.config.sandbox.network.allowedDomains).toEqual(["github.com"]);
       expect(loaded.config.sandbox.network.deniedDomains).toContain("internal.example.test");
-      expect(loaded.config.rules).toContainEqual({ action: "deny", tool: "bash", pattern: "curl *" });
+      expect(loaded.config.rules).toContainEqual({
+        action: "deny",
+        tool: "bash",
+        pattern: "curl *",
+      });
       expect(loaded.projectExpansions).toEqual([
         { kind: "write-root", value: "generated" },
         { kind: "network-domain", value: "api.example.test" },
@@ -156,7 +182,9 @@ describe("permissions config", () => {
   it("does not let a project elevate a read-only global sandbox profile", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(globalConfigPath(agentDir), { sandbox: { profile: "read-only" } });
-      await writeJson(join(cwd, ".pi", "permissions.json"), { sandbox: { profile: "workspace-write" } });
+      await writeJson(join(cwd, ".pi", "permissions.json"), {
+        sandbox: { profile: "workspace-write" },
+      });
       const loaded = await loadPermissionsConfig(cwd, agentDir, true);
       expect(loaded.config.sandbox.profile).toBe("read-only");
     });
@@ -174,7 +202,9 @@ describe("permissions config", () => {
   it("does not let a project expand an empty global network allowlist", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(globalConfigPath(agentDir), { sandbox: { network: { allowedDomains: [] } } });
-      await writeJson(join(cwd, ".pi", "permissions.json"), { sandbox: { network: { allowedDomains: ["api.example.test"] } } });
+      await writeJson(join(cwd, ".pi", "permissions.json"), {
+        sandbox: { network: { allowedDomains: ["api.example.test"] } },
+      });
       const loaded = await loadPermissionsConfig(cwd, agentDir, true);
       expect(loaded.config.sandbox.network.allowedDomains).toEqual([]);
       expect(loaded.projectExpansions).toEqual([

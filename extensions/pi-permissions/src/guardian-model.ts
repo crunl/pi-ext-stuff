@@ -1,7 +1,7 @@
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { AutoReviewerFailure } from "./auto-reviewer.ts";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AutoReviewerContext } from "./auto-reviewer.ts";
+import { AutoReviewerFailure } from "./auto-reviewer.ts";
 
 export interface GuardianModelSelection {
   model: Model<Api>;

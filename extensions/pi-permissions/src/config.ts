@@ -27,8 +27,7 @@ export interface LoadedPermissionsConfig {
   config: PermissionsConfig;
   globalConfig: PermissionsConfig;
   projectExpansions: Array<
-    | { kind: "write-root"; value: string }
-    | { kind: "network-domain"; value: string }
+    { kind: "write-root"; value: string } | { kind: "network-domain"; value: string }
   >;
 }
 
@@ -107,7 +106,11 @@ function expectStrings(value: unknown, path: string): string[] {
   return value.map((entry, index) => expectString(entry, `${path}[${index}]`));
 }
 
-function rejectUnknownKeys(input: Record<string, unknown>, allowed: readonly string[], path: string): void {
+function rejectUnknownKeys(
+  input: Record<string, unknown>,
+  allowed: readonly string[],
+  path: string,
+): void {
   for (const key of Object.keys(input)) {
     if (!allowed.includes(key)) {
       throw new ConfigError(`${path}${path ? "." : ""}${key} is not allowed`);
@@ -129,7 +132,10 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
     overlay.version = 1;
   }
   if ("defaultMode" in input && input.defaultMode !== undefined) {
-    if (typeof input.defaultMode !== "string" || !modes.has(input.defaultMode as PermissionsConfig["defaultMode"])) {
+    if (
+      typeof input.defaultMode !== "string" ||
+      !modes.has(input.defaultMode as PermissionsConfig["defaultMode"])
+    ) {
       throw new ConfigError("defaultMode must be one of default, plan, or auto");
     }
     overlay.defaultMode = input.defaultMode as PermissionsConfig["defaultMode"];
@@ -150,41 +156,93 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
     }
     rejectUnknownKeys(reviewer, ["provider", "model", "reasoningEffort"], "reviewer");
     const reasoningEffort = expectString(reviewer.reasoningEffort, "reviewer.reasoningEffort");
-    if (!efforts.has(reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"])) {
+    if (
+      !efforts.has(reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"])
+    ) {
       throw new ConfigError("reviewer.reasoningEffort is invalid");
     }
     overlay.reviewer = {
       provider: expectString(reviewer.provider, "reviewer.provider"),
       model: expectString(reviewer.model, "reviewer.model"),
-      reasoningEffort: reasoningEffort as NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"],
+      reasoningEffort: reasoningEffort as NonNullable<
+        PermissionsConfig["reviewer"]
+      >["reasoningEffort"],
     };
   }
   if ("sandbox" in input && input.sandbox !== undefined) {
     if (!isRecord(input.sandbox)) throw new ConfigError("sandbox must be an object");
     rejectUnknownKeys(input.sandbox, ["enabled", "profile", "filesystem", "network"], "sandbox");
     const sandbox: NonNullable<PermissionsConfigOverlay["sandbox"]> = {};
-    if ("enabled" in input.sandbox && input.sandbox.enabled !== undefined) sandbox.enabled = expectBoolean(input.sandbox.enabled, "sandbox.enabled");
+    if ("enabled" in input.sandbox && input.sandbox.enabled !== undefined)
+      sandbox.enabled = expectBoolean(input.sandbox.enabled, "sandbox.enabled");
     if ("profile" in input.sandbox && input.sandbox.profile !== undefined) {
-      if (typeof input.sandbox.profile !== "string" || !profiles.has(input.sandbox.profile as PermissionsConfig["sandbox"]["profile"])) {
+      if (
+        typeof input.sandbox.profile !== "string" ||
+        !profiles.has(input.sandbox.profile as PermissionsConfig["sandbox"]["profile"])
+      ) {
         throw new ConfigError("sandbox.profile is invalid");
       }
       sandbox.profile = input.sandbox.profile as PermissionsConfig["sandbox"]["profile"];
     }
     if ("filesystem" in input.sandbox && input.sandbox.filesystem !== undefined) {
-      if (!isRecord(input.sandbox.filesystem)) throw new ConfigError("sandbox.filesystem must be an object");
-      rejectUnknownKeys(input.sandbox.filesystem, ["allowWrite", "denyRead", "denyWrite"], "sandbox.filesystem");
-      const filesystem: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["filesystem"]> = {};
-      if ("allowWrite" in input.sandbox.filesystem && input.sandbox.filesystem.allowWrite !== undefined) filesystem.allowWrite = expectStrings(input.sandbox.filesystem.allowWrite, "sandbox.filesystem.allowWrite");
-      if ("denyRead" in input.sandbox.filesystem && input.sandbox.filesystem.denyRead !== undefined) filesystem.denyRead = expectStrings(input.sandbox.filesystem.denyRead, "sandbox.filesystem.denyRead");
-      if ("denyWrite" in input.sandbox.filesystem && input.sandbox.filesystem.denyWrite !== undefined) filesystem.denyWrite = expectStrings(input.sandbox.filesystem.denyWrite, "sandbox.filesystem.denyWrite");
+      if (!isRecord(input.sandbox.filesystem))
+        throw new ConfigError("sandbox.filesystem must be an object");
+      rejectUnknownKeys(
+        input.sandbox.filesystem,
+        ["allowWrite", "denyRead", "denyWrite"],
+        "sandbox.filesystem",
+      );
+      const filesystem: NonNullable<
+        NonNullable<PermissionsConfigOverlay["sandbox"]>["filesystem"]
+      > = {};
+      if (
+        "allowWrite" in input.sandbox.filesystem &&
+        input.sandbox.filesystem.allowWrite !== undefined
+      )
+        filesystem.allowWrite = expectStrings(
+          input.sandbox.filesystem.allowWrite,
+          "sandbox.filesystem.allowWrite",
+        );
+      if ("denyRead" in input.sandbox.filesystem && input.sandbox.filesystem.denyRead !== undefined)
+        filesystem.denyRead = expectStrings(
+          input.sandbox.filesystem.denyRead,
+          "sandbox.filesystem.denyRead",
+        );
+      if (
+        "denyWrite" in input.sandbox.filesystem &&
+        input.sandbox.filesystem.denyWrite !== undefined
+      )
+        filesystem.denyWrite = expectStrings(
+          input.sandbox.filesystem.denyWrite,
+          "sandbox.filesystem.denyWrite",
+        );
       sandbox.filesystem = filesystem;
     }
     if ("network" in input.sandbox && input.sandbox.network !== undefined) {
-      if (!isRecord(input.sandbox.network)) throw new ConfigError("sandbox.network must be an object");
-      rejectUnknownKeys(input.sandbox.network, ["allowedDomains", "deniedDomains"], "sandbox.network");
+      if (!isRecord(input.sandbox.network))
+        throw new ConfigError("sandbox.network must be an object");
+      rejectUnknownKeys(
+        input.sandbox.network,
+        ["allowedDomains", "deniedDomains"],
+        "sandbox.network",
+      );
       const network: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["network"]> = {};
-      if ("allowedDomains" in input.sandbox.network && input.sandbox.network.allowedDomains !== undefined) network.allowedDomains = expectStrings(input.sandbox.network.allowedDomains, "sandbox.network.allowedDomains");
-      if ("deniedDomains" in input.sandbox.network && input.sandbox.network.deniedDomains !== undefined) network.deniedDomains = expectStrings(input.sandbox.network.deniedDomains, "sandbox.network.deniedDomains");
+      if (
+        "allowedDomains" in input.sandbox.network &&
+        input.sandbox.network.allowedDomains !== undefined
+      )
+        network.allowedDomains = expectStrings(
+          input.sandbox.network.allowedDomains,
+          "sandbox.network.allowedDomains",
+        );
+      if (
+        "deniedDomains" in input.sandbox.network &&
+        input.sandbox.network.deniedDomains !== undefined
+      )
+        network.deniedDomains = expectStrings(
+          input.sandbox.network.deniedDomains,
+          "sandbox.network.deniedDomains",
+        );
       sandbox.network = network;
     }
     overlay.sandbox = sandbox;
@@ -210,7 +268,10 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
   return overlay;
 }
 
-function applyOverlay(base: PermissionsConfig, overlay: PermissionsConfigOverlay): PermissionsConfig {
+function applyOverlay(
+  base: PermissionsConfig,
+  overlay: PermissionsConfigOverlay,
+): PermissionsConfig {
   const config = cloneConfig(base);
   if (overlay.version !== undefined) config.version = overlay.version;
   if (overlay.defaultMode !== undefined) config.defaultMode = overlay.defaultMode;
@@ -218,11 +279,16 @@ function applyOverlay(base: PermissionsConfig, overlay: PermissionsConfigOverlay
   if (overlay.sandbox !== undefined) {
     if (overlay.sandbox.enabled !== undefined) config.sandbox.enabled = overlay.sandbox.enabled;
     if (overlay.sandbox.profile !== undefined) config.sandbox.profile = overlay.sandbox.profile;
-    if (overlay.sandbox.filesystem?.allowWrite !== undefined) config.sandbox.filesystem.allowWrite = [...overlay.sandbox.filesystem.allowWrite];
-    if (overlay.sandbox.filesystem?.denyRead !== undefined) config.sandbox.filesystem.denyRead = [...overlay.sandbox.filesystem.denyRead];
-    if (overlay.sandbox.filesystem?.denyWrite !== undefined) config.sandbox.filesystem.denyWrite = [...overlay.sandbox.filesystem.denyWrite];
-    if (overlay.sandbox.network?.allowedDomains !== undefined) config.sandbox.network.allowedDomains = [...overlay.sandbox.network.allowedDomains];
-    if (overlay.sandbox.network?.deniedDomains !== undefined) config.sandbox.network.deniedDomains = [...overlay.sandbox.network.deniedDomains];
+    if (overlay.sandbox.filesystem?.allowWrite !== undefined)
+      config.sandbox.filesystem.allowWrite = [...overlay.sandbox.filesystem.allowWrite];
+    if (overlay.sandbox.filesystem?.denyRead !== undefined)
+      config.sandbox.filesystem.denyRead = [...overlay.sandbox.filesystem.denyRead];
+    if (overlay.sandbox.filesystem?.denyWrite !== undefined)
+      config.sandbox.filesystem.denyWrite = [...overlay.sandbox.filesystem.denyWrite];
+    if (overlay.sandbox.network?.allowedDomains !== undefined)
+      config.sandbox.network.allowedDomains = [...overlay.sandbox.network.allowedDomains];
+    if (overlay.sandbox.network?.deniedDomains !== undefined)
+      config.sandbox.network.deniedDomains = [...overlay.sandbox.network.deniedDomains];
   }
   if (overlay.rules !== undefined) config.rules = structuredClone(overlay.rules);
   return config;
@@ -232,17 +298,24 @@ export function validatePermissionsConfig(input: unknown): PermissionsConfig {
   return applyOverlay(DEFAULT_CONFIG, parseOverlay(input));
 }
 
-export function mergePermissionsConfig(base: PermissionsConfig, overlay: PermissionsConfigOverlay): PermissionsConfig {
+export function mergePermissionsConfig(
+  base: PermissionsConfig,
+  overlay: PermissionsConfigOverlay,
+): PermissionsConfig {
   const parsedOverlay = parseOverlay(overlay);
   const merged = applyOverlay(base, { ...parsedOverlay, rules: undefined });
-  if (base.sandbox.enabled && parsedOverlay.sandbox?.enabled === false) merged.sandbox.enabled = true;
+  if (base.sandbox.enabled && parsedOverlay.sandbox?.enabled === false)
+    merged.sandbox.enabled = true;
   const globalDenies = base.rules.filter((rule) => rule.action === "deny");
   const remainingRules = base.rules.filter((rule) => rule.action !== "deny");
   merged.rules = [...globalDenies, ...remainingRules, ...(parsedOverlay.rules ?? [])];
   return merged;
 }
 
-function mergeGlobalPermissionsConfig(base: PermissionsConfig, overlay: PermissionsConfigOverlay): PermissionsConfig {
+function mergeGlobalPermissionsConfig(
+  base: PermissionsConfig,
+  overlay: PermissionsConfigOverlay,
+): PermissionsConfig {
   const parsedOverlay = parseOverlay(overlay);
   const merged = applyOverlay(base, { ...parsedOverlay, rules: undefined });
   const baseDenies = base.rules.filter((rule) => rule.action === "deny");
@@ -259,7 +332,10 @@ function intersect(values: string[], permitted: string[]): string[] {
   return values.filter((value) => permitted.includes(value));
 }
 
-function projectRestrictions(globalConfig: PermissionsConfig, project: PermissionsConfigOverlay): PermissionsConfig {
+function projectRestrictions(
+  globalConfig: PermissionsConfig,
+  project: PermissionsConfigOverlay,
+): PermissionsConfig {
   const projectDefaultMode =
     project.defaultMode === "auto" && globalConfig.defaultMode !== "auto"
       ? globalConfig.defaultMode
@@ -274,16 +350,20 @@ function projectRestrictions(globalConfig: PermissionsConfig, project: Permissio
         ...baseRestricted,
         sandbox: {
           ...project.sandbox,
-          enabled: project.sandbox.enabled === false && globalConfig.sandbox.enabled ? true : project.sandbox.enabled,
+          enabled:
+            project.sandbox.enabled === false && globalConfig.sandbox.enabled
+              ? true
+              : project.sandbox.enabled,
           profile:
-            globalConfig.sandbox.profile === "read-only"
-              ? "read-only"
-              : project.sandbox.profile,
+            globalConfig.sandbox.profile === "read-only" ? "read-only" : project.sandbox.profile,
           filesystem: project.sandbox.filesystem
             ? {
                 ...project.sandbox.filesystem,
                 allowWrite: project.sandbox.filesystem.allowWrite
-                  ? intersect(project.sandbox.filesystem.allowWrite, globalConfig.sandbox.filesystem.allowWrite)
+                  ? intersect(
+                      project.sandbox.filesystem.allowWrite,
+                      globalConfig.sandbox.filesystem.allowWrite,
+                    )
                   : undefined,
               }
             : undefined,
@@ -346,18 +426,17 @@ export async function loadPermissionsConfig(
   agentDir: string,
   projectTrusted: boolean,
 ): Promise<LoadedPermissionsConfig> {
-  const globalPath = join(
-    agentDir,
-    "extensions",
-    "pi-permissions",
-    "config.json",
-  );
+  const globalPath = join(agentDir, "extensions", "pi-permissions", "config.json");
   const globalOverlay = await readConfigFile(globalPath);
-  const globalConfig = globalOverlay ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, globalOverlay) : cloneConfig(DEFAULT_CONFIG);
-  if (!projectTrusted) return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
+  const globalConfig = globalOverlay
+    ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, globalOverlay)
+    : cloneConfig(DEFAULT_CONFIG);
+  if (!projectTrusted)
+    return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
 
   const projectOverlay = await readConfigFile(join(cwd, ".pi", "permissions.json"));
-  if (!projectOverlay) return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
+  if (!projectOverlay)
+    return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
 
   const projectExpansions: LoadedPermissionsConfig["projectExpansions"] = [
     ...(projectOverlay.sandbox?.filesystem?.allowWrite ?? [])
@@ -367,19 +446,29 @@ export async function loadPermissionsConfig(
       .filter((value) => !globalConfig.sandbox.network.allowedDomains.includes(value))
       .map((value) => ({ kind: "network-domain" as const, value })),
   ];
-  return { config: projectRestrictions(globalConfig, projectOverlay), globalConfig, projectExpansions };
+  return {
+    config: projectRestrictions(globalConfig, projectOverlay),
+    globalConfig,
+    projectExpansions,
+  };
 }
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableValue(value[key])]),
+    );
   }
   return value;
 }
 
 export function fingerprintValue(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(stableValue(value))).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(stableValue(value)))
+    .digest("hex");
 }
 
 export function fingerprintConfig(config: PermissionsConfig): string {

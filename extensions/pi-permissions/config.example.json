@@ -10,34 +10,13 @@
     "enabled": true,
     "profile": "workspace-write",
     "filesystem": {
-      "allowWrite": [
-        ".",
-        "/tmp"
-      ],
-      "denyRead": [
-        "~/.ssh",
-        "~/.aws",
-        "~/.gnupg",
-        ".env",
-        ".env.*",
-        "*.pem",
-        "*.key"
-      ],
-      "denyWrite": [
-        ".env",
-        ".env.*",
-        "*.pem",
-        "*.key"
-      ]
+      "allowWrite": [".", "/tmp"],
+      "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg", ".env", ".env.*", "*.pem", "*.key"],
+      "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
     },
     "network": {
       "allowedDomains": [],
-      "deniedDomains": [
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "169.254.169.254"
-      ]
+      "deniedDomains": ["localhost", "127.0.0.1", "::1", "169.254.169.254"]
     }
   },
   "rules": []

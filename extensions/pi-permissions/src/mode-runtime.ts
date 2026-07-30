@@ -7,9 +7,7 @@ import {
   recordAutoDenial,
   resetAutoState,
 } from "./modes/auto.ts";
-import {
-  ModeController,
-} from "./modes/controller.ts";
+import { ModeController } from "./modes/controller.ts";
 import {
   createPermissionSessionState,
   type PermissionMode,
@@ -108,10 +106,7 @@ export class PermissionModeRuntime {
   beginAgentTurn(): void {
     this.autoReviewWindow.length = 0;
     if (this.mode !== "auto") return;
-    if (
-      this.state.auto.consecutiveDenials === 0
-      && !this.state.auto.paused
-    ) {
+    if (this.state.auto.consecutiveDenials === 0 && !this.state.auto.paused) {
       return;
     }
     this.state.auto = resetAutoState();

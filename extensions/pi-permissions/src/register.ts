@@ -1,3 +1,7 @@
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type {
   BashOperations,
   ExtensionAPI,
@@ -11,38 +15,33 @@ import {
   createWriteTool,
   getLanguageFromPath,
 } from "@earendil-works/pi-coding-agent";
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
-  startHostFilteringProxy,
-  type HostFilteringProxy,
-} from "./filtering-proxy.ts";
-import {
-  fingerprintConfig,
-  fingerprintValue,
-  loadPermissionsConfig,
-  type LoadedPermissionsConfig,
-  type PermissionsConfig,
-} from "./config.ts";
-import {
-  evaluateDefaultRequest,
-  type DefaultDecision,
-} from "./default-mode.ts";
+  colorizeEditDiffSummary,
+  compactBashStatusSpacing,
+  createCodexToolRendering,
+  createEditDiffBox,
+  summarizeEditDiff,
+} from "../../pi-core/index.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
+import { reviewAutoPrompt } from "./auto-policy.ts";
 import { buildAutoReviewRequest } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
   type AutoReviewerFailureKind,
   PiAutoReviewer,
 } from "./auto-reviewer.ts";
-import { reviewAutoPrompt } from "./auto-policy.ts";
+import {
+  fingerprintConfig,
+  fingerprintValue,
+  type LoadedPermissionsConfig,
+  loadPermissionsConfig,
+  type PermissionsConfig,
+} from "./config.ts";
+import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
-import { GuardianReviewSessionManager } from "./guardian-session.ts";
+import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
+import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
-import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
-import { shiftTabAvailability } from "./shortcut-config.ts";
-import { permissionedBashParameters } from "./shell-permissions.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -54,14 +53,9 @@ import {
   withAllowedDomains,
   withLocalProxy,
 } from "./sandbox.ts";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import {
-  colorizeEditDiffSummary,
-  compactBashStatusSpacing,
-  createCodexToolRendering,
-  createEditDiffBox,
-  summarizeEditDiff,
-} from "../../pi-core/index.ts";
+import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
+import { permissionedBashParameters } from "./shell-permissions.ts";
+import { shiftTabAvailability } from "./shortcut-config.ts";
 
 export interface RegisterExtensionOptions {
   agentDir?: string;
@@ -73,10 +67,7 @@ export interface RegisterExtensionOptions {
     upstream: LocalProxyPorts,
     deniedHosts?: readonly string[],
   ) => Promise<HostFilteringProxy>;
-  sandboxCoordinator?: Pick<
-    SandboxExecutionCoordinator,
-    "runShared" | "runExclusive"
-  >;
+  sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
 }
@@ -101,10 +92,7 @@ function countWrittenLines(content: string): number {
   return normalized.endsWith("\n") ? lines - 1 : lines;
 }
 
-export function registerExtension(
-  pi: ExtensionAPI,
-  options: RegisterExtensionOptions = {},
-): void {
+export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
   const sandboxManager = options.sandboxManager ?? SandboxManager;
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
@@ -192,10 +180,7 @@ export function registerExtension(
     invalidatePermissionContext(reason);
   };
 
-  const oneCallWriteRoots = (
-    event: ToolCallEvent,
-    cwd: string,
-  ): string[] => {
+  const oneCallWriteRoots = (event: ToolCallEvent, cwd: string): string[] => {
     const tool = event.toolName.toLowerCase();
     if (tool !== "write" && tool !== "edit") return [];
     const input = event.input as Record<string, unknown>;
@@ -204,13 +189,8 @@ export function registerExtension(
     return [path, dirname(path)];
   };
 
-  const ensureModeRuntime = (
-    config: PermissionsConfig,
-  ): PermissionModeRuntime => {
-    modeRuntime ??= new PermissionModeRuntime(
-      config,
-      pi.appendEntry.bind(pi),
-    );
+  const ensureModeRuntime = (config: PermissionsConfig): PermissionModeRuntime => {
+    modeRuntime ??= new PermissionModeRuntime(config, pi.appendEntry.bind(pi));
     return modeRuntime;
   };
 
@@ -236,18 +216,15 @@ export function registerExtension(
     if (decision.networkHosts?.length) {
       approvedNetworkHosts.set(event.toolCallId, [...decision.networkHosts]);
     }
-    const writeRoots = [...new Set([
-      ...oneCallWriteRoots(event, cwd),
-      ...(decision.filesystemWriteRoots ?? []),
-    ])];
+    const writeRoots = [
+      ...new Set([...oneCallWriteRoots(event, cwd), ...(decision.filesystemWriteRoots ?? [])]),
+    ];
     if (writeRoots.length > 0) {
       approvedWriteRoots.set(event.toolCallId, writeRoots);
     }
   };
 
-  const configKey = (
-    ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">,
-  ): string => {
+  const configKey = (ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">): string => {
     const projectTrusted = ctx.isProjectTrusted();
     return `${ctx.cwd}\0${projectTrusted}`;
   };
@@ -260,11 +237,7 @@ export function registerExtension(
     if (!force && loaded && loadedKey === key) return loaded;
     if (!force && activationFailure?.key === key) throw activationFailure.error;
 
-    const candidate = await loadPermissionsConfig(
-      ctx.cwd,
-      agentDir,
-      ctx.isProjectTrusted(),
-    );
+    const candidate = await loadPermissionsConfig(ctx.cwd, agentDir, ctx.isProjectTrusted());
     const previous = {
       loaded,
       loadedKey,
@@ -295,9 +268,8 @@ export function registerExtension(
           sandboxState = { kind: "failed", error: message };
         }
       } catch (rollbackError: unknown) {
-        const message = rollbackError instanceof Error
-          ? rollbackError.message
-          : String(rollbackError);
+        const message =
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
         sandboxState = { kind: "failed", error: `rollback failed: ${message}` };
       }
       loaded = previous.loaded;
@@ -339,12 +311,16 @@ export function registerExtension(
     input: Record<string, unknown>,
     ctx: Pick<ExtensionContext, "cwd">,
   ): Promise<void> => {
+    const activeConfig = loaded?.config;
+    if (!activeConfig) {
+      throw new Error("pi-permissions: active configuration is unavailable");
+    }
     const approval = approvedCalls.get(id);
     approvedCalls.delete(id);
     const approved =
       approval !== undefined &&
       approval.cwd === resolve(ctx.cwd) &&
-      approval.configFingerprint === fingerprintConfig(loaded!.config) &&
+      approval.configFingerprint === fingerprintConfig(activeConfig) &&
       (approval.mode === "user-transition" || approval.mode === modeRuntime?.mode) &&
       approval.requestFingerprint ===
         fingerprintValue({
@@ -355,45 +331,30 @@ export function registerExtension(
       tool,
       input,
       ctx.cwd,
-      loaded!.config,
+      activeConfig,
       defaultProtectedWritePaths(ctx.cwd, agentDir),
     );
-    if (
-      currentDecision.action === "block"
-      || currentDecision.action === "prompt" && !approved
-    ) {
+    if (currentDecision.action === "block" || (currentDecision.action === "prompt" && !approved)) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
   };
 
-  const sandboxOperations = (
-    customConfig?: SandboxRuntimeConfig,
-  ): BashOperations => {
+  const sandboxOperations = (customConfig?: SandboxRuntimeConfig): BashOperations => {
     if (sandboxState.kind !== "ready") {
-      const reason = sandboxState.kind === "failed"
-        ? sandboxState.error
-        : `sandbox is ${sandboxState.kind}`;
+      const reason =
+        sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
     return createSandboxedBashOperations(sandboxManager, customConfig);
   };
 
-  const sandboxFileOperations = (
-    writeRoots: readonly string[],
-    signal?: AbortSignal,
-  ) => {
+  const sandboxFileOperations = (writeRoots: readonly string[], signal?: AbortSignal) => {
     if (sandboxState.kind !== "ready" || !baseSandboxConfig) {
-      const reason = sandboxState.kind === "failed"
-        ? sandboxState.error
-        : `sandbox is ${sandboxState.kind}`;
+      const reason =
+        sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
-    return createSandboxedFileOperations(
-      sandboxManager,
-      baseSandboxConfig,
-      writeRoots,
-      signal,
-    );
+    return createSandboxedFileOperations(sandboxManager, baseSandboxConfig, writeRoots, signal);
   };
 
   pi.registerTool({
@@ -402,7 +363,7 @@ export function registerExtension(
       icon: "",
       runningVerb: "Running",
       completedVerb: "Ran",
-      argument: (args) => typeof args.command === "string" ? args.command : "",
+      argument: (args) => (typeof args.command === "string" ? args.command : ""),
       collapsed: "preview",
       transformOutput: compactBashStatusSpacing,
     }),
@@ -417,39 +378,32 @@ export function registerExtension(
       await activateConfig(ctx);
       const needsExclusiveLease = (approvedNetworkHosts.get(id)?.length ?? 0) > 0;
 
-      const executeWithSnapshot = async (
-        allowNetworkEscalation: boolean,
-      ) => {
+      const executeWithSnapshot = async (allowNetworkEscalation: boolean) => {
         const networkHosts = approvedNetworkHosts.get(id) ?? [];
         approvedNetworkHosts.delete(id);
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
-          "bash",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-        );
+        await assertExecutionAuthorized("bash", id, params as Record<string, unknown>, ctx);
 
         if (!loaded?.config.sandbox.enabled) {
           return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
         }
         if (sandboxState.kind !== "ready" || !baseSandboxConfig) {
-          const reason = sandboxState.kind === "failed"
-            ? sandboxState.error
-            : `sandbox is ${sandboxState.kind}`;
+          const reason =
+            sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
           throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
         }
 
         const baseConfig = baseSandboxConfig;
-        let commandConfig = writeRoots.length > 0
-          ? withAdditionalWriteRoots(baseConfig, writeRoots)
-          : baseConfig;
+        let commandConfig =
+          writeRoots.length > 0 ? withAdditionalWriteRoots(baseConfig, writeRoots) : baseConfig;
         let filteringProxy: HostFilteringProxy | undefined;
         try {
           if (networkHosts.length > 0) {
             if (!allowNetworkEscalation) {
-              throw new Error("pi-permissions network escalation requires an exclusive sandbox lease");
+              throw new Error(
+                "pi-permissions network escalation requires an exclusive sandbox lease",
+              );
             }
             const allowedDomains = [
               ...new Set([...baseConfig.network.allowedDomains, ...networkHosts]),
@@ -492,15 +446,9 @@ export function registerExtension(
       };
 
       if (needsExclusiveLease) {
-        return sandboxCoordinator.runExclusive(
-          () => executeWithSnapshot(true),
-          signal,
-        );
+        return sandboxCoordinator.runExclusive(() => executeWithSnapshot(true), signal);
       }
-      return sandboxCoordinator.runShared(
-        () => executeWithSnapshot(false),
-        signal,
-      );
+      return sandboxCoordinator.runShared(() => executeWithSnapshot(false), signal);
     },
   });
 
@@ -510,7 +458,7 @@ export function registerExtension(
       icon: "",
       runningVerb: "Writing",
       completedVerb: "Wrote",
-      argument: (args) => typeof args.path === "string" ? args.path : "",
+      argument: (args) => (typeof args.path === "string" ? args.path : ""),
       collapsed: (_result, args) => {
         const content = typeof args.content === "string" ? args.content : "";
         const lineCount = countWrittenLines(content);
@@ -523,12 +471,7 @@ export function registerExtension(
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
-          "write",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-        );
+        await assertExecutionAuthorized("write", id, params as Record<string, unknown>, ctx);
         if (!loaded?.config.sandbox.enabled) {
           return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
@@ -546,19 +489,15 @@ export function registerExtension(
       icon: "",
       runningVerb: "Editing",
       completedVerb: "Edited",
-      argument: (args) => typeof args.path === "string" ? args.path : "",
+      argument: (args) => (typeof args.path === "string" ? args.path : ""),
       collapsed: summarizeEditDiff,
       formatSummary: colorizeEditDiffSummary,
       renderExpandedResult: (result, args, theme, outputPad) => {
         const details = result.details as { diff?: unknown } | undefined;
-        return createEditDiffBox(
-          typeof details?.diff === "string" ? details.diff : "",
-          theme,
-          {
-            outputPad,
-            lang: typeof args.path === "string" ? getLanguageFromPath(args.path) : undefined,
-          },
-        );
+        return createEditDiffBox(typeof details?.diff === "string" ? details.diff : "", theme, {
+          outputPad,
+          lang: typeof args.path === "string" ? getLanguageFromPath(args.path) : undefined,
+        });
       },
     }),
     executionMode: "sequential",
@@ -567,12 +506,7 @@ export function registerExtension(
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
-          "edit",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-        );
+        await assertExecutionAuthorized("edit", id, params as Record<string, unknown>, ctx);
         if (!loaded?.config.sandbox.enabled) {
           return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
@@ -599,7 +533,7 @@ export function registerExtension(
     options: {
       guardianFailure?: AutoReviewerFailureKind;
     } = {},
-  ): Promise<ToolCallEventResult | void> => {
+  ): Promise<ToolCallEventResult | undefined> => {
     if (!ctx.hasUI) {
       return {
         block: true,
@@ -617,34 +551,25 @@ export function registerExtension(
     let transitionGrantCreated = false;
 
     try {
-      const guardianFailure = options.guardianFailure === undefined
-        ? ""
-        : `Guardian review failed (${options.guardianFailure}); manual approval is required.\n\n`;
+      const guardianFailure =
+        options.guardianFailure === undefined
+          ? ""
+          : `Guardian review failed (${options.guardianFailure}); manual approval is required.\n\n`;
       const prompt = `${guardianFailure}pi-permissions · ${decision.risk}\n\n${event.toolName}: ${decision.summary}\n\n${decision.reason}${
-          decision.networkHosts?.length
-            ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
-            : ""
-        }${
-          decision.filesystemWriteRoots?.length
-            ? `\n\nFilesystem for this command: ${decision.filesystemWriteRoots.join(", ")}`
-            : ""
-        }${
-          decision.justification
-            ? `\n\nJustification: ${decision.justification}`
-            : ""
-        }`;
-      const choice = await ctx.ui.select(
-        prompt,
-        [
-          DEFAULT_ALLOW_ONCE_CHOICE,
-          DEFAULT_ALLOW_AND_AUTO_CHOICE,
-          DEFAULT_DENY_CHOICE,
-        ],
-      );
-      if (
-        choice === DEFAULT_ALLOW_ONCE_CHOICE
-        || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE
-      ) {
+        decision.networkHosts?.length
+          ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
+          : ""
+      }${
+        decision.filesystemWriteRoots?.length
+          ? `\n\nFilesystem for this command: ${decision.filesystemWriteRoots.join(", ")}`
+          : ""
+      }${decision.justification ? `\n\nJustification: ${decision.justification}` : ""}`;
+      const choice = await ctx.ui.select(prompt, [
+        DEFAULT_ALLOW_ONCE_CHOICE,
+        DEFAULT_ALLOW_AND_AUTO_CHOICE,
+        DEFAULT_DENY_CHOICE,
+      ]);
+      if (choice === DEFAULT_ALLOW_ONCE_CHOICE || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
         if (permissionContextEpoch !== approvalEpoch) {
           return {
             block: true,
@@ -652,14 +577,7 @@ export function registerExtension(
           };
         }
         if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-          grantApprovedCall(
-            event,
-            decision,
-            config,
-            ctx.cwd,
-            "user",
-            "user-transition",
-          );
+          grantApprovedCall(event, decision, config, ctx.cwd, "user", "user-transition");
           transitionGrantCreated = true;
           runtime.activate("auto");
           setDefaultStatus(ctx);
@@ -667,14 +585,7 @@ export function registerExtension(
           return;
         }
         const approvalMode = runtime.mode === "auto" ? "auto" : "default";
-        grantApprovedCall(
-          event,
-          decision,
-          config,
-          ctx.cwd,
-          "user",
-          approvalMode,
-        );
+        grantApprovedCall(event, decision, config, ctx.cwd, "user", approvalMode);
         return;
       }
       return {
@@ -705,16 +616,10 @@ export function registerExtension(
     resetBranchPermissionContext("session changed");
     try {
       const result = await activateConfig(ctx, true);
-      modeRuntime = new PermissionModeRuntime(
-        result.config,
-        pi.appendEntry.bind(pi),
-      );
+      modeRuntime = new PermissionModeRuntime(result.config, pi.appendEntry.bind(pi));
       restoreModeState(ctx, result.config);
       setDefaultStatus(ctx);
-      if (
-        await shiftTabAvailability(agentDir) === "reserved" &&
-        !shortcutWarningShown
-      ) {
+      if ((await shiftTabAvailability(agentDir)) === "reserved" && !shortcutWarningShown) {
         shortcutWarningShown = true;
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -750,10 +655,7 @@ export function registerExtension(
   });
 
   pi.on("input", (event) => {
-    if (
-      (event.source === "interactive" || event.source === "rpc") &&
-      event.text.length > 0
-    ) {
+    if ((event.source === "interactive" || event.source === "rpc") && event.text.length > 0) {
       trustedUserMessages.push(event.text);
     }
   });
@@ -762,231 +664,211 @@ export function registerExtension(
     modeRuntime?.beginAgentTurn();
   });
 
-  pi.on("tool_call", async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | void> => {
-    if (event.toolCallId) {
-      approvedCalls.delete(event.toolCallId);
-      approvedNetworkHosts.delete(event.toolCallId);
-      approvedWriteRoots.delete(event.toolCallId);
-    }
-    let result: LoadedPermissionsConfig;
-    try {
-      result = await activateConfig(ctx);
-    } catch (error: unknown) {
-      return reportConfigError(ctx, error);
-    }
+  pi.on(
+    "tool_call",
+    async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
+      if (event.toolCallId) {
+        approvedCalls.delete(event.toolCallId);
+        approvedNetworkHosts.delete(event.toolCallId);
+        approvedWriteRoots.delete(event.toolCallId);
+      }
+      let result: LoadedPermissionsConfig;
+      try {
+        result = await activateConfig(ctx);
+      } catch (error: unknown) {
+        return reportConfigError(ctx, error);
+      }
 
-    let decision;
-    try {
-      decision = await evaluateDefaultRequest(
-        event.toolName,
-        event.input as Record<string, unknown>,
-        ctx.cwd,
-        result.config,
-        defaultProtectedWritePaths(ctx.cwd, agentDir),
-      );
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { block: true, reason: `pi-permissions failed closed: ${message}` };
-    }
+      let decision: DefaultDecision;
+      try {
+        decision = await evaluateDefaultRequest(
+          event.toolName,
+          event.input as Record<string, unknown>,
+          ctx.cwd,
+          result.config,
+          defaultProtectedWritePaths(ctx.cwd, agentDir),
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { block: true, reason: `pi-permissions failed closed: ${message}` };
+      }
 
-    if (decision.action === "allow") return;
-    if (decision.action === "block") {
-      return { block: true, reason: `pi-permissions: ${decision.reason}` };
-    }
-    const runtime = ensureModeRuntime(result.config);
-    const effectiveMode = runtime.mode === "auto" ? "auto" : "default";
-    if (effectiveMode === "auto" && runtime.autoState.paused) {
-      return {
-        block: true,
-        reason:
-          "pi-permissions: Auto review paused after repeated denials; start a new turn or run /auto to resume",
-      };
-    }
-    if (effectiveMode === "auto") {
-      const id = event.toolCallId;
-      if (!id) {
+      if (decision.action === "allow") return;
+      if (decision.action === "block") {
+        return { block: true, reason: `pi-permissions: ${decision.reason}` };
+      }
+      const runtime = ensureModeRuntime(result.config);
+      const effectiveMode = runtime.mode === "auto" ? "auto" : "default";
+      if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
           block: true,
-          reason: "pi-permissions: Auto review requires a tool-call ID",
+          reason:
+            "pi-permissions: Auto review paused after repeated denials; start a new turn or run /auto to resume",
         };
       }
-      if (!runtime.beginReview(id)) {
-        return { block: true, reason: "pi-permissions: duplicate Auto review" };
-      }
-      const reviewController = new AbortController();
-      reviewControllers.set(id, reviewController);
-      const reviewSignal = ctx.signal
-        ? AbortSignal.any([ctx.signal, reviewController.signal])
-        : reviewController.signal;
-      try {
-        const actionFingerprint = fingerprintValue({
-          tool: event.toolName.toLowerCase(),
-          input: event.input,
-        });
-        const configFingerprint = fingerprintConfig(result.config);
-        const approvalOverride = autoApprovalLedger.takeOverride({
-          actionFingerprint,
-          cwd: resolve(ctx.cwd),
-          configFingerprint,
-        });
-        const request = buildAutoReviewRequest(
-          event,
-          decision,
-          ctx.cwd,
-          result.config.sandbox.profile,
-          trustedUserMessages,
-          approvalOverride,
-        );
-        const auto = await reviewAutoPrompt(
-          autoReviewer,
-          request,
-          {
-            modelRegistry: ctx.modelRegistry,
-            activeModel: ctx.model,
-            reviewer: result.config.reviewer,
-            guardianSession: {
-              cwd: resolve(ctx.cwd),
-              configFingerprint,
-            },
-          },
-          runtime.autoState,
-          reviewSignal,
-        );
-        if (reviewSignal.aborted) {
+      if (effectiveMode === "auto") {
+        const id = event.toolCallId;
+        if (!id) {
           return {
             block: true,
-            reason: "pi-permissions: permission context changed during Auto review",
+            reason: "pi-permissions: Auto review requires a tool-call ID",
           };
         }
-        if (
-          auto.action !== "error"
-          && auto.review.guardian?.source === "active-fallback"
-          && auto.review.guardian.fallbackNotice ===
-            "configured-reviewer-unavailable"
-          && ctx.hasUI
-        ) {
-          const preferred = result.config.reviewer;
-          const guardian = auto.review.guardian;
-          const noticeKey = fingerprintValue({
-            configFingerprint,
-            preferredProvider: preferred?.provider,
-            preferredModel: preferred?.model,
-            activeProvider: guardian.provider,
-            activeModel: guardian.model,
+        if (!runtime.beginReview(id)) {
+          return { block: true, reason: "pi-permissions: duplicate Auto review" };
+        }
+        const reviewController = new AbortController();
+        reviewControllers.set(id, reviewController);
+        const reviewSignal = ctx.signal
+          ? AbortSignal.any([ctx.signal, reviewController.signal])
+          : reviewController.signal;
+        try {
+          const actionFingerprint = fingerprintValue({
+            tool: event.toolName.toLowerCase(),
+            input: event.input,
           });
-          if (!guardianFallbackNoticeKeys.has(noticeKey)) {
-            guardianFallbackNoticeKeys.add(noticeKey);
-            ctx.ui.notify(
-              "Guardian preferred model unavailable; using active model",
-              "warning",
-            );
-          }
-        }
-        if (auto.action === "approve") {
-          runtime.recordAutoReview("approve");
-          grantApprovedCall(
-            event,
-            decision,
-            result.config,
-            ctx.cwd,
-            "auto-review",
-            effectiveMode,
-          );
-          return;
-        }
-        if (auto.action === "deny") {
-          const autoState = runtime.recordAutoReview("deny");
-          autoApprovalLedger.recordDenial({
-            tool: event.toolName,
-            input: event.input as Record<string, unknown>,
+          const configFingerprint = fingerprintConfig(result.config);
+          const approvalOverride = autoApprovalLedger.takeOverride({
+            actionFingerprint,
             cwd: resolve(ctx.cwd),
             configFingerprint,
-            actionFingerprint,
-            summary: decision.summary,
-            rationale: auto.review.rationale,
           });
-          if (autoState.paused) {
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                "Auto-review interrupted this turn after repeated denials",
-                "warning",
-              );
+          const request = buildAutoReviewRequest(
+            event,
+            decision,
+            ctx.cwd,
+            result.config.sandbox.profile,
+            trustedUserMessages,
+            approvalOverride,
+          );
+          const auto = await reviewAutoPrompt(
+            autoReviewer,
+            request,
+            {
+              modelRegistry: ctx.modelRegistry,
+              activeModel: ctx.model,
+              reviewer: result.config.reviewer,
+              guardianSession: {
+                cwd: resolve(ctx.cwd),
+                configFingerprint,
+              },
+            },
+            runtime.autoState,
+            reviewSignal,
+          );
+          if (reviewSignal.aborted) {
+            return {
+              block: true,
+              reason: "pi-permissions: permission context changed during Auto review",
+            };
+          }
+          if (
+            auto.action !== "error" &&
+            auto.review.guardian?.source === "active-fallback" &&
+            auto.review.guardian.fallbackNotice === "configured-reviewer-unavailable" &&
+            ctx.hasUI
+          ) {
+            const preferred = result.config.reviewer;
+            const guardian = auto.review.guardian;
+            const noticeKey = fingerprintValue({
+              configFingerprint,
+              preferredProvider: preferred?.provider,
+              preferredModel: preferred?.model,
+              activeProvider: guardian.provider,
+              activeModel: guardian.model,
+            });
+            if (!guardianFallbackNoticeKeys.has(noticeKey)) {
+              guardianFallbackNoticeKeys.add(noticeKey);
+              ctx.ui.notify("Guardian preferred model unavailable; using active model", "warning");
             }
-            ctx.abort();
+          }
+          if (auto.action === "approve") {
+            runtime.recordAutoReview("approve");
+            grantApprovedCall(
+              event,
+              decision,
+              result.config,
+              ctx.cwd,
+              "auto-review",
+              effectiveMode,
+            );
+            return;
+          }
+          if (auto.action === "deny") {
+            const autoState = runtime.recordAutoReview("deny");
+            autoApprovalLedger.recordDenial({
+              tool: event.toolName,
+              input: event.input as Record<string, unknown>,
+              cwd: resolve(ctx.cwd),
+              configFingerprint,
+              actionFingerprint,
+              summary: decision.summary,
+              rationale: auto.review.rationale,
+            });
+            if (autoState.paused) {
+              if (ctx.hasUI) {
+                ctx.ui.notify(
+                  "Auto-review interrupted this turn after repeated denials",
+                  "warning",
+                );
+              }
+              ctx.abort();
+            }
+            return {
+              block: true,
+              reason: `pi-permissions Auto denied: ${auto.review.rationale} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`,
+            };
+          }
+          runtime.recordAutoNonDenial();
+          if (ctx.hasUI) {
+            return requestHumanApproval(event, decision, result.config, ctx, {
+              guardianFailure: auto.error.kind,
+            });
           }
           return {
             block: true,
-            reason:
-              `pi-permissions Auto denied: ${auto.review.rationale} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`,
+            reason: "pi-permissions Auto review failed closed; interactive approval is required",
           };
-        }
-        runtime.recordAutoNonDenial();
-        if (ctx.hasUI) {
-          return requestHumanApproval(
-            event,
-            decision,
-            result.config,
-            ctx,
-            { guardianFailure: auto.error.kind },
-          );
-        }
-        return {
-          block: true,
-          reason:
-            "pi-permissions Auto review failed closed; interactive approval is required",
-        };
-      } catch {
-        if (reviewSignal.aborted) {
+        } catch {
+          if (reviewSignal.aborted) {
+            return {
+              block: true,
+              reason: "pi-permissions: permission context changed during Auto review",
+            };
+          }
+          runtime.recordAutoNonDenial();
           return {
             block: true,
-            reason: "pi-permissions: permission context changed during Auto review",
+            reason: "pi-permissions Auto review failed closed; the action was not run",
           };
-        }
-        runtime.recordAutoNonDenial();
-        return {
-          block: true,
-          reason:
-            "pi-permissions Auto review failed closed; the action was not run",
-        };
-      } finally {
-        if (reviewControllers.get(id) === reviewController) {
-          reviewControllers.delete(id);
-          runtime.endReview(id);
+        } finally {
+          if (reviewControllers.get(id) === reviewController) {
+            reviewControllers.delete(id);
+            runtime.endReview(id);
+          }
         }
       }
-    }
-    return requestHumanApproval(event, decision, result.config, ctx);
-  });
+      return requestHumanApproval(event, decision, result.config, ctx);
+    },
+  );
 
-  const activateMode = async (
-    mode: "default" | "auto",
-    ctx: ExtensionContext,
-  ): Promise<void> =>
+  const activateMode = async (mode: "default" | "auto", ctx: ExtensionContext): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
         const result = await activateConfig(ctx, ctx.isIdle());
         if (generation !== modeMutationGeneration) return;
         const runtime = ensureModeRuntime(result.config);
-        if (
-          runtime.snapshot().configFingerprint !==
-          fingerprintConfig(result.config)
-        ) {
+        if (runtime.snapshot().configFingerprint !== fingerprintConfig(result.config)) {
           runtime.restore([], result.config);
         }
         runtime.activate(mode);
         invalidatePermissionContext("permission mode changed");
         setDefaultStatus(ctx);
-        ctx.ui.notify(
-          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
-          "info",
-        );
+        ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
-        ctx.ui.notify(
-          `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
-          "error",
-        );
+        ctx.ui.notify(`pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`, "error");
       }
     });
 
@@ -1012,10 +894,7 @@ export function registerExtension(
       }
       const runtime = ensureModeRuntime(result.config);
       if (runtime.mode !== "auto") {
-        ctx.ui.notify(
-          "/approve is available only while Auto mode is active",
-          "warning",
-        );
+        ctx.ui.notify("/approve is available only while Auto mode is active", "warning");
         return;
       }
       if (!ctx.hasUI) {
@@ -1029,19 +908,16 @@ export function registerExtension(
       }
       const choices = denials.map((denial, index) => {
         const summary = denial.summary.replace(/\s+/g, " ").trim().slice(0, 120);
-        const rationale = denial.rationale
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 160);
+        const rationale = denial.rationale.replace(/\s+/g, " ").trim().slice(0, 160);
         return `${index + 1}. ${denial.tool}: ${summary} — ${rationale}`;
       });
       const choice = await ctx.ui.select("Auto-review Denials", choices);
       if (choice === undefined) return;
       const selectedIndex = choices.indexOf(choice);
       if (selectedIndex < 0) return;
-      const selected = autoApprovalLedger.approveDenial(
-        denials[selectedIndex]!.id,
-      );
+      const denial = denials[selectedIndex];
+      if (!denial) return;
+      const selected = autoApprovalLedger.approveDenial(denial.id);
       if (!selected) {
         ctx.ui.notify("That Auto-review denial is no longer available", "warning");
         return;
@@ -1071,7 +947,7 @@ export function registerExtension(
   const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
-        if (await shiftTabAvailability(agentDir) !== "available") {
+        if ((await shiftTabAvailability(agentDir)) !== "available") {
           ctx.ui.notify(
             "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
             "warning",
@@ -1084,10 +960,7 @@ export function registerExtension(
         runtime.cycle();
         invalidatePermissionContext("permission mode changed");
         setDefaultStatus(ctx);
-        ctx.ui.notify(
-          `pi-permissions: ${runtime.statusLabel} mode 已启用`,
-          "info",
-        );
+        ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
@@ -1107,27 +980,27 @@ export function registerExtension(
         const result = await activateConfig(ctx, true);
         const config = result.config;
         const runtime = ensureModeRuntime(config);
-        if (
-          runtime.snapshot().configFingerprint !== fingerprintConfig(config)
-        ) {
+        if (runtime.snapshot().configFingerprint !== fingerprintConfig(config)) {
           runtime.restore(ctx.sessionManager.getBranch(), config);
         }
         setDefaultStatus(ctx);
-        const sandboxSummary = sandboxState.kind === "ready"
-          ? `${sandboxState.profile} sandbox on`
-          : sandboxState.kind === "disabled"
-            ? "sandbox off"
-            : sandboxState.kind === "failed"
-              ? `sandbox error: ${sandboxState.error}`
-              : "sandbox pending";
+        const sandboxSummary =
+          sandboxState.kind === "ready"
+            ? `${sandboxState.profile} sandbox on`
+            : sandboxState.kind === "disabled"
+              ? "sandbox off"
+              : sandboxState.kind === "failed"
+                ? `sandbox error: ${sandboxState.error}`
+                : "sandbox pending";
         const reviewerSummary = config.reviewer
           ? `${config.reviewer.provider}/${config.reviewer.model}`
           : "current session model";
-        const autoSummary = runtime.mode === "auto"
-          ? runtime.autoState.paused
-            ? "Auto paused"
-            : "Auto active"
-          : "manual approval";
+        const autoSummary =
+          runtime.mode === "auto"
+            ? runtime.autoState.paused
+              ? "Auto paused"
+              : "Auto active"
+            : "manual approval";
         ctx.ui.notify(
           `${runtime.statusLabel} · reviewer ${reviewerSummary} · ${sandboxSummary} · ${autoSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
           "info",
@@ -1135,10 +1008,7 @@ export function registerExtension(
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
-        ctx.ui.notify(
-          `pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`,
-          "error",
-        );
+        ctx.ui.notify(`pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`, "error");
       }
     },
   });

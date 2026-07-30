@@ -125,16 +125,18 @@ describe("PermissionModeRuntime", () => {
       pendingMode: "auto" as const,
       auto: { consecutiveDenials: 0, paused: false },
       sandboxProfile: "workspace-write" as const,
-      configFingerprint: new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn())
-        .snapshot().configFingerprint,
+      configFingerprint: new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn()).snapshot()
+        .configFingerprint,
     };
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.restore(
-      [{
-        type: "custom",
-        customType: "pi-permissions-state",
-        data: pendingState,
-      }],
+      [
+        {
+          type: "custom",
+          customType: "pi-permissions-state",
+          data: pendingState,
+        },
+      ],
       DEFAULT_CONFIG,
     );
 
@@ -149,8 +151,6 @@ describe("PermissionModeRuntime", () => {
 
     expect(runtime.mode).toBe("default");
     expect(runtime.statusLabel).toBe("Default");
-    expect(() => runtime.activate("plan")).toThrow(
-      "Plan mode is not implemented",
-    );
+    expect(() => runtime.activate("plan")).toThrow("Plan mode is not implemented");
   });
 });
