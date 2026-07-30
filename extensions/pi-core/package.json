@@ -12,7 +12,7 @@
     ]
   },
   "exports": {
-    ".": "./src/tui/tool-renderer.ts"
+    ".": "./index.ts"
   },
   "scripts": {
     "check": "tsc --noEmit",

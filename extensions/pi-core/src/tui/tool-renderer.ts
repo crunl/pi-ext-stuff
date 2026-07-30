@@ -11,19 +11,19 @@ import {
 } from "./output-padding.ts";
 import { buildExpandedOutput, buildOutputPreview } from "./tool-output.ts";
 
-export type CollapsedResult =
+type CollapsedResult =
   | "hidden"
   | "preview"
   | ((result: AgentToolResult<unknown>, args: Record<string, unknown>) => string | undefined);
 
-export type ExpandedResultRenderer = (
+type ExpandedResultRenderer = (
   result: AgentToolResult<unknown>,
   args: Record<string, unknown>,
   theme: Theme,
   outputPad: OutputPad,
 ) => Component;
 
-export interface CodexToolRendererSpec {
+interface CodexToolRendererSpec {
   icon?: string;
   runningVerb: string;
   completedVerb: string;
@@ -51,7 +51,7 @@ interface RenderContext {
   isError: boolean;
 }
 
-export interface CodexToolRendering {
+interface CodexToolRendering {
   renderShell: "self";
   renderCall: (args: Record<string, unknown>, theme: Theme, context: RenderContext) => Component;
   renderResult: (

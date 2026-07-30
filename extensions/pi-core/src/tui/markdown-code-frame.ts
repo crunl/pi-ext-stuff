@@ -23,6 +23,7 @@
  * still colors the code, we only replace the fence dressing.
  */
 import { Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { FRAME_OVERHEAD } from "./frame.ts";
 
 interface CodeToken {
   type: string;
@@ -45,9 +46,6 @@ interface MarkdownInternals {
     styleContext?: unknown,
   ): string[];
 }
-
-/** Columns consumed by the frame: `│ ` left + ` │` right. */
-const FRAME_OVERHEAD = 4;
 
 type RenderToken = MarkdownInternals["renderToken"];
 

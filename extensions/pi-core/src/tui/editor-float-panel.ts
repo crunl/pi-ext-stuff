@@ -156,7 +156,7 @@ class PanelComponent implements FloatingComponent {
   invalidate(): void {}
 }
 
-export interface EditorFloatPanelShowOptions {
+interface EditorFloatPanelShowOptions {
   /** Rendered height of the editor this frame (for row placement). */
   editorHeight: number;
   /** Column where the panel starts (usually the editor's paddingX). */

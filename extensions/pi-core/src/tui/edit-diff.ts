@@ -9,9 +9,9 @@ import {
 } from "@earendil-works/pi-tui";
 import type { OutputPad } from "./output-padding.ts";
 
-export type EditDiffKind = "context" | "added" | "removed";
+type EditDiffKind = "context" | "added" | "removed";
 
-export interface EditDiffRow {
+interface EditDiffRow {
   kind: EditDiffKind;
   lineNumber?: number;
   content: string;
@@ -40,7 +40,7 @@ export function parseEditDiff(diff: string): EditDiffRow[] {
   });
 }
 
-export interface EditDiffBoxOptions {
+interface EditDiffBoxOptions {
   outputPad: OutputPad;
   /** Language for syntax highlighting diff content (e.g. from getLanguageFromPath). */
   lang?: string;

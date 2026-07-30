@@ -5,9 +5,6 @@ import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
 import { installSelectorFloat } from "./selector-float.ts";
 import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
 
-// Re-exported for backwards compatibility (previously defined here).
-export { frameLines } from "./frame.ts";
-
 interface EditorInternals {
   autocompleteList?: { render(width: number): string[]; handleInput?(data: string): void };
   autocompleteState?: unknown;
