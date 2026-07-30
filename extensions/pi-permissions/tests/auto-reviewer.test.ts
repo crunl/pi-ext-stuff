@@ -31,9 +31,13 @@ const response = {
   stopReason: "stop",
 } as any;
 
-const context = {
+const guardianSession = {
   cwd: "/workspace",
   configFingerprint: "config-a",
+};
+
+const context = {
+  guardianSession,
   modelRegistry: {
     getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
   } as any,
@@ -62,6 +66,7 @@ describe("PiAutoReviewer", () => {
 
     await expect(
       reviewer.review(request, {
+        guardianSession,
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
@@ -117,7 +122,11 @@ describe("PiAutoReviewer", () => {
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
     } as any;
 
-    await reviewer.review(request, { modelRegistry, activeModel });
+    await reviewer.review(request, {
+      guardianSession,
+      modelRegistry,
+      activeModel,
+    });
     expect(complete).toHaveBeenCalledWith(
       activeModel,
       expect.any(Object),
@@ -129,6 +138,7 @@ describe("PiAutoReviewer", () => {
     const reviewer = new PiAutoReviewer(vi.fn() as any);
     await expect(
       reviewer.review(request, {
+        guardianSession,
         modelRegistry: { find: () => undefined } as any,
         activeModel: undefined,
         reviewer: {
@@ -147,6 +157,7 @@ describe("PiAutoReviewer", () => {
     );
     await expect(
       malformed.review(request, {
+        guardianSession,
         modelRegistry: {
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
         } as any,
@@ -170,6 +181,7 @@ describe("PiAutoReviewer", () => {
     const pending = reviewer.review(
       request,
       {
+        guardianSession,
         modelRegistry: {
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
         } as any,
@@ -198,6 +210,7 @@ describe("PiAutoReviewer", () => {
     const pending = reviewer.review(
       request,
       {
+        guardianSession,
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
@@ -231,6 +244,7 @@ describe("PiAutoReviewer", () => {
 
     await expect(
       reviewer.review(request, {
+        guardianSession,
         modelRegistry,
         activeModel,
         reviewer: {
@@ -262,6 +276,7 @@ describe("PiAutoReviewer", () => {
     );
 
     const pending = reviewer.review(request, {
+      guardianSession,
       modelRegistry: {
         find: () => ({ provider: "openai", id: "main" }),
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
@@ -307,8 +322,12 @@ describe("PiAutoReviewer", () => {
     ).resolves.toMatchObject({ decision: "approve" });
 
     expect(complete).toHaveBeenCalledTimes(3);
-    expect(complete.mock.calls[0]?.[0]).toBe(complete.mock.calls[2]?.[0]);
-    expect(complete.mock.calls[0]?.[1]).toBe(complete.mock.calls[2]?.[1]);
+    const firstCall = complete.mock.calls[0];
+    expect(complete.mock.calls.every((call) => call[0] === firstCall?.[0])).toBe(true);
+    expect(complete.mock.calls.every((call) => call[1] === firstCall?.[1])).toBe(true);
+    expect(
+      complete.mock.calls.every((call) => call[2]?.sessionId === firstCall?.[2]?.sessionId),
+    ).toBe(true);
     expect(complete.mock.calls.every((call) => call[2]?.maxRetries === 0)).toBe(true);
     expect(modelRegistry.find).toHaveBeenCalledTimes(1);
     expect(sleep).toHaveBeenCalledTimes(2);
@@ -333,8 +352,8 @@ describe("PiAutoReviewer", () => {
 
     const next = sessions.open(
       {
-        cwd: context.cwd,
-        configFingerprint: context.configFingerprint,
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
         provider: context.activeModel.provider,
         model: context.activeModel.id,
       },
@@ -363,8 +382,8 @@ describe("PiAutoReviewer", () => {
     });
     const next = sessions.open(
       {
-        cwd: context.cwd,
-        configFingerprint: context.configFingerprint,
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
         provider: context.activeModel.provider,
         model: context.activeModel.id,
       },
@@ -426,6 +445,110 @@ describe("PiAutoReviewer", () => {
       });
       expect(complete).toHaveBeenCalledTimes(1);
       expect(sleep).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries the pinned provider WebSocket completion disconnect", async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("WebSocket stream closed before response.completed"))
+      .mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["statusCode", { statusCode: 503 }],
+    ["$metadata.httpStatusCode", { $metadata: { httpStatusCode: 503 } }],
+    ["$response.status", { $response: { status: 503 } }],
+    ["$response.statusCode", { $response: { statusCode: 503 } }],
+  ])("retries transient SDK status shape %s", async (_label, statusShape) => {
+    const complete = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("provider failed"), statusShape))
+      .mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a deeply nested non-retry status override transient wrapper text", async () => {
+    let nested: Error = Object.assign(new Error("unauthorized"), { statusCode: 401 });
+    for (let depth = 0; depth < 5; depth += 1) {
+      nested = new Error("provider wrapper", { cause: nested });
+    }
+    const complete = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("fetch failed", { cause: nested }))
+      .mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+      message: "Auto reviewer request failed",
+    });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("traverses cyclic causes safely when classifying SDK statuses", async () => {
+    const outer = new Error("connection reset") as Error & { cause?: unknown };
+    const inner = Object.assign(new Error("nested provider failure"), {
+      statusCode: 503,
+      cause: outer,
+    });
+    outer.cause = inner;
+    const complete = vi.fn().mockRejectedValueOnce(outer).mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not start another provider call when retry sleep reaches the deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-30T00:00:00.000Z"));
+    const complete = vi.fn(async () => {
+      throw Object.assign(new Error("service unavailable"), { status: 503 });
+    });
+    const sleep = vi.fn(async () => {
+      vi.setSystemTime(new Date("2026-07-30T00:01:30.000Z"));
+    });
+    const reviewer = new PiAutoReviewer(complete as any, new GuardianReviewSessionManager(), sleep);
+
+    try {
+      await expect(reviewer.review(request, context)).rejects.toMatchObject({
+        kind: "timeout",
+        message: "Auto review timed out",
+      });
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(sleep).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

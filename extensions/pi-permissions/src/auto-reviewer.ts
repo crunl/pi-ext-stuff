@@ -27,12 +27,11 @@ export interface AutoReviewerContext {
   modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
   activeModel?: Model<Api>;
   reviewer?: PermissionsConfig["reviewer"];
-  cwd: string;
-  configFingerprint: string;
+  guardianSession: {
+    cwd: string;
+    configFingerprint: string;
+  };
 }
-
-type PiAutoReviewerContext = Omit<AutoReviewerContext, "cwd" | "configFingerprint"> &
-  Partial<Pick<AutoReviewerContext, "cwd" | "configFingerprint">>;
 
 export interface AutoReviewer {
   review(
@@ -93,7 +92,7 @@ const RETRYABLE_PROVIDER_CODES = new Set([
   "WEBSOCKET_ERROR",
 ]);
 const RETRYABLE_PROVIDER_MESSAGE =
-  /\b(?:500|502|503|504|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETDOWN|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT)\b|overload|service.?unavailable|upstream.?connect|connection.?(?:error|failed|lost|refused|reset)|fetch failed|other side closed|socket hang up|socket connection was closed|websocket.?(?:closed|error)|stream ended (?:before|without)|http2 request did not get a response|reset before headers/i;
+  /\b(?:500|502|503|504|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETDOWN|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT)\b|overload|service.?unavailable|upstream.?connect|connection.?(?:error|failed|lost|refused|reset)|fetch failed|other side closed|socket hang up|socket connection was closed|websocket.?(?:closed|error)|WebSocket stream closed before response\.completed|stream ended (?:before|without)|http2 request did not get a response|reset before headers/i;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -106,13 +105,24 @@ function errorRecord(error: unknown): Record<string, unknown> | undefined {
 }
 
 function isTransientProviderFailure(error: unknown): boolean {
+  const visited = new Set<object>();
+  const statuses: number[] = [];
   let current: unknown = error;
   let transientCodeOrMessage = false;
-  for (let depth = 0; depth < 3; depth += 1) {
+  for (;;) {
     const record = errorRecord(current);
-    if (!record) break;
-    if (typeof record.status === "number") {
-      return RETRYABLE_PROVIDER_STATUSES.has(record.status);
+    if (!record || visited.has(record)) break;
+    visited.add(record);
+    const metadata = errorRecord(record.$metadata);
+    const response = errorRecord(record.$response);
+    for (const status of [
+      record.status,
+      record.statusCode,
+      metadata?.httpStatusCode,
+      response?.status,
+      response?.statusCode,
+    ]) {
+      if (typeof status === "number") statuses.push(status);
     }
     if (
       typeof record.code === "string" &&
@@ -124,6 +134,9 @@ function isTransientProviderFailure(error: unknown): boolean {
       transientCodeOrMessage = true;
     }
     current = record.cause;
+  }
+  if (statuses.length > 0) {
+    return statuses.every((status) => RETRYABLE_PROVIDER_STATUSES.has(status));
   }
   return transientCodeOrMessage;
 }
@@ -211,7 +224,7 @@ export class PiAutoReviewer implements AutoReviewer {
 
   async review(
     request: AutoReviewRequest,
-    context: PiAutoReviewerContext,
+    context: AutoReviewerContext,
     callerSignal?: AbortSignal,
   ): Promise<AutoReviewResult> {
     if (callerSignal?.aborted) {
@@ -245,8 +258,8 @@ export class PiAutoReviewer implements AutoReviewer {
 
     const lease = this.sessions.open(
       {
-        cwd: context.cwd ?? request.cwd,
-        configFingerprint: context.configFingerprint ?? "legacy",
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
         provider: model.provider,
         model: model.id,
       },

@@ -9,6 +9,7 @@ import {
   type AutoReviewer,
 } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
+import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -34,6 +35,7 @@ function harness(
     runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   },
   reviewer?: AutoReviewer,
+  guardianSessionManager?: GuardianReviewSessionManager,
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -90,6 +92,7 @@ function harness(
     filteringProxyFactory,
     sandboxCoordinator,
     autoReviewer,
+    guardianSessionManager,
   });
   const context = {
     cwd: agentDir,
@@ -127,6 +130,53 @@ function harness(
 }
 
 describe("Default mode registration", () => {
+  it("invalidates Guardian history across permission-context lifecycle boundaries", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const sessions = new GuardianReviewSessionManager();
+    const key = {
+      cwd: agentDir,
+      configFingerprint: "config-a",
+      provider: "openai",
+      model: "guardian",
+    };
+    const previous = sessions.open(key, "old review");
+    previous.commit('{"outcome":"allow"}');
+    previous.release();
+    const invalidate = vi.spyOn(sessions, "invalidate");
+    const app = harness(agentDir, false, true, {}, undefined, undefined, sessions);
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const afterSessionStart = invalidate.mock.calls.length;
+    const afterReset = sessions.open(key, "after reset");
+    expect(afterSessionStart).toBeGreaterThan(0);
+    expect(afterReset.sessionId).not.toBe(previous.sessionId);
+    expect(afterReset.context.messages).toHaveLength(1);
+    afterReset.commit('{"outcome":"allow"}');
+    afterReset.release();
+
+    await app.commands.get("auto")?.handler("", app.context);
+    expect(invalidate.mock.calls.length).toBeGreaterThan(afterSessionStart);
+    const afterModeChange = invalidate.mock.calls.length;
+    const afterModeReset = sessions.open(key, "after mode change");
+    expect(afterModeReset.sessionId).not.toBe(afterReset.sessionId);
+    expect(afterModeReset.context.messages).toHaveLength(1);
+    afterModeReset.release();
+    const beforeConfigReload = invalidate.mock.calls.length;
+    await app.commands.get("permissions")?.handler("", app.context);
+    expect(invalidate.mock.calls.length).toBeGreaterThan(beforeConfigReload);
+
+    await app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
+    await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
+    expect(invalidate.mock.calls.length).toBeGreaterThan(afterModeChange);
+    const afterTreeChange = invalidate.mock.calls.length;
+
+    await app.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, app.context);
+    expect(invalidate.mock.calls.length).toBeGreaterThan(afterTreeChange);
+  });
+
   it("loads Default mode and exposes status commands", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);

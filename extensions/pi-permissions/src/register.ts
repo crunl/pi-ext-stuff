@@ -37,6 +37,7 @@ import {
 } from "./auto-reviewer.ts";
 import { reviewAutoPrompt } from "./auto-policy.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
+import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
@@ -76,6 +77,7 @@ export interface RegisterExtensionOptions {
     "runShared" | "runExclusive"
   >;
   autoReviewer?: AutoReviewer;
+  guardianSessionManager?: GuardianReviewSessionManager;
 }
 
 interface ApprovedCall {
@@ -109,7 +111,10 @@ export function registerExtension(
   const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
-  const autoReviewer = options.autoReviewer ?? new PiAutoReviewer();
+  const guardianSessionManager =
+    options.guardianSessionManager ?? new GuardianReviewSessionManager();
+  const autoReviewer =
+    options.autoReviewer ?? new PiAutoReviewer(undefined, guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
@@ -170,6 +175,7 @@ export function registerExtension(
     approvedNetworkHosts.clear();
     approvedWriteRoots.clear();
     autoApprovalLedger.clear();
+    guardianSessionManager.invalidate();
   };
 
   const resetBranchPermissionContext = (reason: string): void => {
@@ -784,8 +790,10 @@ export function registerExtension(
             modelRegistry: ctx.modelRegistry,
             activeModel: ctx.model,
             reviewer: result.config.reviewer,
-            cwd: resolve(ctx.cwd),
-            configFingerprint,
+            guardianSession: {
+              cwd: resolve(ctx.cwd),
+              configFingerprint,
+            },
           },
           runtime.autoState,
           reviewSignal,
