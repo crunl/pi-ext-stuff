@@ -128,6 +128,220 @@ function harness(
 }
 
 describe("Default mode registration", () => {
+  it("bypasses hard blocks and every reviewer in YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "WebFetch",
+          toolCallId: "yolo-private-network",
+          input: { url: "http://127.0.0.1/admin" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "read",
+          toolCallId: "yolo-secret-read",
+          input: { path: ".env" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.autoReviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("uses native Bash without sandbox or network proxy in YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir, false, true, { http: 7890 });
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.tools.get("bash").execute(
+      "yolo-bash",
+      { command: "curl http://127.0.0.1/" },
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+    expect(app.filteringProxyFactory).not.toHaveBeenCalled();
+  });
+
+  it("uses native Write and Edit backends in YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.tools.get("write").execute(
+      "yolo-write",
+      { path: "note.txt", content: "before" },
+      undefined,
+      undefined,
+      app.context,
+    );
+    await app.tools.get("edit").execute(
+      "yolo-edit",
+      {
+        path: "note.txt",
+        edits: [{ oldText: "before", newText: "after" }],
+      },
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(await readFile(join(project, "note.txt"), "utf8")).toBe("after");
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh authorization when YOLO ends before execution", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "yolo-then-default",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(
+      app.handlers.get("tool_call")!(event, app.context),
+    ).resolves.toBeUndefined();
+    await app.commands.get("default")!.handler("", app.context);
+
+    await expect(
+      app.tools.get("bash").execute(
+        event.toolCallId,
+        event.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it("invalidates a pending Guardian review when entering YOLO", async () => {
+    const review = deferred<{
+      decision: "approve";
+      risk: "low";
+      userAuthorization: "high";
+      rationale: string;
+    }>();
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => review.promise),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "auto" }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const pending = app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "auto-to-yolo",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
+
+    await app.commands.get("yolo")!.handler("", app.context);
+    review.resolve({
+      decision: "approve",
+      risk: "low",
+      userAuthorization: "high",
+      rationale: "Stale approval.",
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("permission context changed"),
+    });
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+  });
+
+  it("invalidates a pending human approval when entering YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const choice = deferred<string>();
+    app.select.mockImplementationOnce(async () => choice.promise);
+    const event = {
+      toolName: "bash",
+      toolCallId: "default-to-yolo",
+      input: { command: "rm -rf build" },
+    };
+    const pending = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
+
+    await app.commands.get("yolo")!.handler("", app.context);
+    choice.resolve("Allow Once");
+
+    await expect(pending).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context changed"),
+    });
+    await app.commands.get("default")!.handler("", app.context);
+    await expect(
+      app.tools.get("bash").execute(
+        event.toolCallId,
+        event.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+  });
+
   it("invalidates the configured reviewer's Guardian history across lifecycle boundaries", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const sessions = new GuardianReviewSessionManager();
@@ -1797,7 +2011,7 @@ describe("Default mode registration", () => {
       app.tools
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
+    ).resolves.toBeDefined();
 
     const nextApproval = await app.handlers.get("tool_call")!(
       {
@@ -1807,8 +2021,8 @@ describe("Default mode registration", () => {
       },
       app.context,
     );
-    expect(nextApproval).toMatchObject({ block: true });
-    expect(app.select).toHaveBeenCalledOnce();
+    expect(nextApproval).toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
     expect(reviewer.review).toHaveBeenCalledOnce();
 
     idle = true;

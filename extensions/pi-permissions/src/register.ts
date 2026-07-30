@@ -384,6 +384,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
+      if (modeRuntime?.mode === "yolo") {
+        revokeApprovedCall(id);
+        return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
+      }
       const needsExclusiveLease = (approvedNetworkHosts.get(id)?.length ?? 0) > 0;
 
       const executeWithSnapshot = async (allowNetworkEscalation: boolean) => {
@@ -476,6 +480,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
+      if (modeRuntime?.mode === "yolo") {
+        revokeApprovedCall(id);
+        return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      }
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
@@ -511,6 +519,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
+      if (modeRuntime?.mode === "yolo") {
+        revokeApprovedCall(id);
+        return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      }
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
@@ -687,6 +699,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return reportConfigError(ctx, error);
       }
 
+      const runtime = ensureModeRuntime(result.config);
+      if (runtime.mode === "yolo") return;
+
       let decision: DefaultDecision;
       try {
         decision = await evaluateDefaultRequest(
@@ -705,7 +720,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const runtime = ensureModeRuntime(result.config);
       const effectiveMode = runtime.mode === "auto" ? "auto" : "default";
       if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
