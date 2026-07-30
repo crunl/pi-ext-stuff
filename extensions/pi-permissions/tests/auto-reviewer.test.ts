@@ -31,18 +31,13 @@ const response = {
 } as any;
 
 describe("PiAutoReviewer", () => {
-  it("uses the configured model, Pi credentials, and bounded options", async () => {
+  it("uses configured Guardian metadata and bounded options", async () => {
     const configuredModel = { provider: "openai-codex", id: "reviewer" } as any;
     const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
     const reviewer = new PiAutoReviewer(complete as any);
     const modelRegistry = {
       find: vi.fn(() => configuredModel),
-      getApiKeyAndHeaders: vi.fn(async () => ({
-        ok: true,
-        apiKey: "token",
-        headers: { "x-test": "yes" },
-        env: { TEST_ENV: "yes" },
-      })),
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true })),
     } as any;
 
     await expect(
@@ -55,7 +50,14 @@ describe("PiAutoReviewer", () => {
           reasoningEffort: "medium",
         },
       }),
-    ).resolves.toMatchObject({ decision: "approve" });
+    ).resolves.toMatchObject({
+      decision: "approve",
+      guardian: {
+        provider: "openai-codex",
+        model: "reviewer",
+        source: "configured",
+      },
+    });
 
     expect(modelRegistry.find).toHaveBeenCalledWith("openai-codex", "reviewer");
     expect(complete).toHaveBeenCalledWith(
@@ -67,9 +69,6 @@ describe("PiAutoReviewer", () => {
         messages: expect.any(Array),
       }),
       expect.objectContaining({
-        apiKey: "token",
-        headers: { "x-test": "yes" },
-        env: { TEST_ENV: "yes" },
         reasoningEffort: "medium",
         maxRetries: 0,
         cacheRetention: "none",

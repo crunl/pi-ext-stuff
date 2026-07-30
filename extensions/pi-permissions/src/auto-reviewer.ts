@@ -10,6 +10,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import type { PermissionsConfig } from "./config.ts";
+import { resolveGuardianModel } from "./guardian-model.ts";
 import { GUARDIAN_REVIEW_TIMEOUT_MS } from "./guardian-policy.ts";
 import {
   AUTO_REVIEW_SYSTEM_PROMPT,
@@ -75,25 +76,23 @@ export class PiAutoReviewer implements AutoReviewer {
       throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
     }
 
-    const model = context.reviewer
-      ? context.modelRegistry.find(context.reviewer.provider, context.reviewer.model)
-      : context.activeModel;
-    if (!model) {
-      throw new AutoReviewerFailure("unavailable", "Auto reviewer model is unavailable");
-    }
+    const guardian = await resolveGuardianModel(context);
+    const model = guardian.model;
 
     let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
     try {
       auth = await context.modelRegistry.getApiKeyAndHeaders(model);
-    } catch (error) {
+    } catch {
       throw new AutoReviewerFailure(
-        "provider",
-        `Failed to resolve Auto reviewer credentials: ${errorMessage(error)}`,
-        { cause: error },
+        "unavailable",
+        "No usable Guardian or active Pi model is available",
       );
     }
     if (!auth.ok) {
-      throw new AutoReviewerFailure("unavailable", auth.error);
+      throw new AutoReviewerFailure(
+        "unavailable",
+        "No usable Guardian or active Pi model is available",
+      );
     }
     if (callerSignal?.aborted) {
       throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
@@ -137,22 +136,14 @@ export class PiAutoReviewer implements AutoReviewer {
         }),
         abortResponse,
       ]);
-    } catch (error) {
+    } catch {
       if (callerSignal?.aborted) {
-        throw new AutoReviewerFailure("cancelled", "Auto review was cancelled", {
-          cause: error,
-        });
+        throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
       }
       if (timeoutSignal.aborted) {
-        throw new AutoReviewerFailure("timeout", "Auto review timed out", {
-          cause: error,
-        });
+        throw new AutoReviewerFailure("timeout", "Auto review timed out");
       }
-      throw new AutoReviewerFailure(
-        "provider",
-        `Auto reviewer request failed: ${errorMessage(error)}`,
-        { cause: error },
-      );
+      throw new AutoReviewerFailure("provider", "Auto reviewer request failed");
     }
     if (callerSignal?.aborted) {
       throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
@@ -172,7 +163,17 @@ export class PiAutoReviewer implements AutoReviewer {
       .map((part) => part.text)
       .join("");
     try {
-      return parseAutoReviewResult(text);
+      return {
+        ...parseAutoReviewResult(text),
+        guardian: {
+          provider: model.provider,
+          model: model.id,
+          source: guardian.source,
+          ...(guardian.fallbackNotice === undefined
+            ? {}
+            : { fallbackNotice: guardian.fallbackNotice }),
+        },
+      };
     } catch (error) {
       throw new AutoReviewerFailure(
         "parse",

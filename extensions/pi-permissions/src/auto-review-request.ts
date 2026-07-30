@@ -9,6 +9,12 @@ export interface AutoReviewResult {
   risk: AutoReviewRisk;
   userAuthorization: AutoReviewUserAuthorization;
   rationale: string;
+  guardian?: {
+    provider: string;
+    model: string;
+    source: "configured" | "active" | "active-fallback";
+    fallbackNotice?: "configured-reviewer-unavailable";
+  };
 }
 
 export interface AutoReviewApprovalOverride {
