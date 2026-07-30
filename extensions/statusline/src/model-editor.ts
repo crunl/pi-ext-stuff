@@ -5,8 +5,8 @@
  *    > user input here…
  *   ── (provider) model•effort ───────────────  <- bottom border, left side
  *
- * The mode badge uses the theme's warning color as background (yellow —
- * "attention, not alarm": Auto hands tool approval to the auto-reviewer).
+ * The mode badge uses a mode-dependent theme color as background: warning
+ * (yellow — "attention, not alarm") for Auto, error (red — alarm) for YOLO.
  * Falls back to inverse video without truecolor theme data.
  *
  * Pattern follows examples/extensions/modal-editor.ts: subclass CustomEditor,
@@ -17,7 +17,7 @@
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { makeModeBadgeDecorator } from "./badge.ts";
+import { badgeColorFor, makeModeBadgeDecorator } from "./badge.ts";
 import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
 
 export interface ModelInfoProvider {
@@ -39,8 +39,8 @@ export class ModelLineEditor extends CustomEditor {
 	getStats: StatsProvider = () => undefined;
 	/** Injected callback returning the mode published by pi-permissions. */
 	getPermissionsMode: PermissionsModeProvider = () => undefined;
-	/** Warning-color ANSI provider (captured lazily from the footer theme). */
-	getWarningFgAnsi: () => string | undefined = () => undefined;
+	/** Badge-color ANSI provider (captured lazily from the footer theme). */
+	getBadgeFgAnsi: (color: "warning" | "error") => string | undefined = () => undefined;
 
 	render(width: number): string[] {
 		const lines = super.render(width);
@@ -63,11 +63,14 @@ export class ModelLineEditor extends CustomEditor {
 		// Border runs and the badge are colored separately: the badge's own
 		// fg/bg codes must not leak into (or cut) the border color.
 		if (topIdx !== -1) {
-			const top = buildTopBorder(width, this.getPermissionsMode(), this.getStats());
+			const mode = this.getPermissionsMode();
+			const top = buildTopBorder(width, mode, this.getStats());
 			if (top !== undefined) {
 				// Builders guarantee pre+mode+post is exactly `width` (tested),
 				// so no re-truncation is needed here.
-				const decorate = makeModeBadgeDecorator(this.getWarningFgAnsi());
+				const decorate = makeModeBadgeDecorator(
+					mode ? this.getBadgeFgAnsi(badgeColorFor(mode)) : undefined,
+				);
 				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
 				lines[topIdx] =
 					this.borderColor(top.pre) + badge + this.borderColor(top.post);

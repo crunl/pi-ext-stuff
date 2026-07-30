@@ -48,16 +48,17 @@ export default function statusline(pi: ExtensionAPI) {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		currentCtx = ctx;
 		// Captured from the footer factory's theme (full Theme, not EditorTheme).
-		let warningFgAnsi: string | undefined;
+		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
 		installFooter(ctx, permissionsMode, (theme) => {
-			warningFgAnsi = theme.getFgAnsi("warning");
+			badgeFgAnsi.warning = theme.getFgAnsi("warning");
+			badgeFgAnsi.error = theme.getFgAnsi("error");
 		});
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			const editor = new ModelLineEditor(tui, theme, keybindings);
 			editor.getModelInfo = modelInfo;
 			editor.getStats = stats;
 			editor.getPermissionsMode = () => permissionsMode.get();
-			editor.getWarningFgAnsi = () => warningFgAnsi;
+			editor.getBadgeFgAnsi = (color) => badgeFgAnsi[color];
 			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
 	};

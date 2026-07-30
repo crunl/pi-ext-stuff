@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { makeModeBadgeDecorator, parseTruecolor } from "../src/badge.ts";
+import { badgeColorFor, makeModeBadgeDecorator, parseTruecolor } from "../src/badge.ts";
 
 test("parses truecolor foreground sequences", () => {
 	assert.deepEqual(parseTruecolor("\x1b[38;2;229;200;144m"), [229, 200, 144]);
@@ -26,4 +26,10 @@ test("falls back to inverse video without truecolor data", () => {
 		const decorate = makeModeBadgeDecorator(ansi);
 		assert.equal(decorate(" Auto "), "\x1b[7m Auto \x1b[27m");
 	}
+});
+
+test("YOLO badge escalates to error color; other modes stay warning", () => {
+	assert.equal(badgeColorFor("YOLO"), "error");
+	assert.equal(badgeColorFor("Auto"), "warning");
+	assert.equal(badgeColorFor("Plan"), "warning");
 });
