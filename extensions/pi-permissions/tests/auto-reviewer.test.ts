@@ -71,7 +71,6 @@ describe("PiAutoReviewer", () => {
         headers: { "x-test": "yes" },
         env: { TEST_ENV: "yes" },
         reasoningEffort: "medium",
-        timeoutMs: 90_000,
         maxRetries: 0,
         cacheRetention: "none",
         signal: expect.any(AbortSignal),

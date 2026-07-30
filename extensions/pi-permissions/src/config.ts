@@ -102,13 +102,6 @@ function expectBoolean(value: unknown, path: string): boolean {
   return value;
 }
 
-function expectNumber(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new ConfigError(`${path} must be a finite number`);
-  }
-  return value;
-}
-
 function expectStrings(value: unknown, path: string): string[] {
   if (!Array.isArray(value)) throw new ConfigError(`${path} must be an array of strings`);
   return value.map((entry, index) => expectString(entry, `${path}[${index}]`));

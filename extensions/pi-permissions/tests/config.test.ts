@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  ConfigError,
   DEFAULT_CONFIG,
   fingerprintConfig,
   loadPermissionsConfig,
   mergePermissionsConfig,
   validatePermissionsConfig,
 } from "../src/config.ts";
+import type { ConfigError } from "../src/config.ts";
 
 async function withConfigRoots(
   run: (paths: { root: string; cwd: string; agentDir: string }) => Promise<void>,
