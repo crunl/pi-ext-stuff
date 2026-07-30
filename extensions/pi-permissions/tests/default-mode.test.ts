@@ -20,6 +20,14 @@ describe("Default mode gate", () => {
       .resolves.toMatchObject({ action: "allow", risk: "LOW" });
     await expect(evaluateDefaultRequest("write", { path: "notes.txt", content: "hello" }, cwd, config()))
       .resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    await expect(
+      evaluateDefaultRequest(
+        "write",
+        { path: ".pi/permissions.json", content: "{}" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
   it("blocks protected secrets without a one-off prompt", async () => {
@@ -40,7 +48,6 @@ describe("Default mode gate", () => {
       ".git/config",
       ".agents/AGENTS.md",
       ".codex/config.toml",
-      ".pi/permissions.json",
     ]) {
       await expect(evaluateDefaultRequest("write", { path, content: "x" }, cwd, config()))
         .resolves.toMatchObject({

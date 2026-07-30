@@ -33,7 +33,6 @@ export function defaultProtectedWritePaths(
     resolve(cwd, ".git"),
     resolve(cwd, ".agents"),
     resolve(cwd, ".codex"),
-    resolve(cwd, ".pi", "permissions.json"),
     resolve(agentDir, "extensions", "pi-permissions", "config.json"),
     packageRoot,
   ];

@@ -42,14 +42,20 @@ describe("path policy", () => {
     await expect(isPathAllowed("workspace/escape/target.txt", { cwd, allowWrite: ["workspace"], denyRead: [], denyWrite: [], operation: "write" })).resolves.toMatchObject({ allowed: false });
   });
 
-  it("protects project permission configuration through a symlink", async () => {
+  it("treats a project permissions file as an ordinary workspace file", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-"));
     temporaryDirectories.push(cwd);
     await mkdir(join(cwd, ".pi"));
-    await writeFile(join(cwd, "control.json"), "{}");
-    await symlink("../control.json", join(cwd, ".pi", "permissions.json"));
 
-    await expect(isPathAllowed(".pi/permissions.json", { cwd, allowWrite: ["."], denyRead: [], denyWrite: [], operation: "write" })).resolves.toMatchObject({ allowed: false });
+    await expect(
+      isPathAllowed(".pi/permissions.json", {
+        cwd,
+        allowWrite: ["."],
+        denyRead: [],
+        denyWrite: [],
+        operation: "write",
+      }),
+    ).resolves.toMatchObject({ allowed: true });
   });
 });
 
@@ -103,7 +109,7 @@ describe("narrow static risk contract", () => {
 
   it("keeps ordinary workspace writes low", () => {
     expect(classifyRisk(normalizeToolCall("write", { path: "notes.txt" }, "/work/repo"))).toBe("LOW");
-    expect(classifyRisk(normalizeToolCall("edit", { path: ".pi/permissions.json" }, "/work/repo"))).toBe("HARD");
+    expect(classifyRisk(normalizeToolCall("edit", { path: ".pi/permissions.json" }, "/work/repo"))).toBe("LOW");
     expect(classifyRisk(normalizeToolCall(
       "edit",
       {

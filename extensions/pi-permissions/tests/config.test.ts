@@ -7,7 +7,6 @@ import {
   DEFAULT_CONFIG,
   fingerprintConfig,
   loadPermissionsConfig,
-  mergePermissionsConfig,
   validatePermissionsConfig,
 } from "../src/config.ts";
 
@@ -56,18 +55,10 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig(JSON.parse(contents))).not.toThrow();
   });
 
-  it("does not let a project allow override a global deny", () => {
-    const merged = mergePermissionsConfig(
-      { ...DEFAULT_CONFIG, rules: [{ action: "deny", tool: "bash", pattern: "git push*" }] },
-      { rules: [{ action: "allow", tool: "bash", pattern: "git push origin feature" }] },
-    );
-    expect(merged.rules[0]?.action).toBe("deny");
-  });
-
-  it("rejects an unknown mode", () => {
-    expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).toThrow(
-      /defaultMode/,
-    );
+  it("accepts YOLO as a configured default mode", () => {
+    expect(() =>
+      validatePermissionsConfig({ version: 1, defaultMode: "yolo" }),
+    ).not.toThrow();
   });
 
   it("produces stable fingerprints", () => {
@@ -114,11 +105,11 @@ describe("permissions config", () => {
   );
 
   it("reports the exact path for invalid JSON", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
+    await withConfigRoots(async ({ agentDir }) => {
       const path = globalConfigPath(agentDir);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, "{");
-      await expect(loadPermissionsConfig(cwd, agentDir, false)).rejects.toEqual(
+      await expect(loadPermissionsConfig(agentDir)).rejects.toEqual(
         expect.objectContaining<Partial<ConfigError>>({
           name: "ConfigError",
           message: expect.stringContaining(path),
@@ -127,115 +118,50 @@ describe("permissions config", () => {
     });
   });
 
-  it("loads global configuration from the plugin directory", async () => {
+  it("loads only plugin-local global configuration", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(globalConfigPath(agentDir), {
-        sandbox: { profile: "read-only" },
+        defaultMode: "auto",
+        sandbox: { network: { allowedDomains: ["github.com"] } },
       });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, false);
-      expect(loaded.globalConfig.sandbox.profile).toBe("read-only");
+      await writeJson(join(cwd, ".pi", "permissions.json"), {
+        defaultMode: "default",
+        sandbox: { network: { allowedDomains: ["attacker.invalid"] } },
+      });
+      const loaded = await loadPermissionsConfig(agentDir);
+
+      expect(loaded.config.defaultMode).toBe("auto");
+      expect(loaded.config.sandbox.network.allowedDomains).toEqual(["github.com"]);
     });
   });
 
   it("ignores the legacy agent-level permissions file", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
+    await withConfigRoots(async ({ agentDir }) => {
       await writeJson(join(agentDir, "permissions.json"), {
         sandbox: { profile: "read-only" },
       });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, false);
-      expect(loaded.globalConfig.sandbox.profile).toBe("workspace-write");
+      const loaded = await loadPermissionsConfig(agentDir);
+      expect(loaded.config.sandbox.profile).toBe("workspace-write");
     });
   });
 
-  it("applies trusted project deny rules without applying requested write or network expansions", async () => {
+  it("ignores malformed project permission configuration", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(globalConfigPath(agentDir), {
-        sandbox: { network: { allowedDomains: ["github.com"] } },
-      });
-      await writeJson(join(cwd, ".pi", "permissions.json"), {
-        sandbox: {
-          filesystem: { allowWrite: [".", "generated"], denyWrite: ["secrets/*"] },
-          network: {
-            allowedDomains: ["github.com", "api.example.test"],
-            deniedDomains: ["internal.example.test"],
-          },
-        },
-        rules: [{ action: "deny", tool: "bash", pattern: "curl *" }],
-      });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, true);
-      expect(loaded.config.sandbox.filesystem.allowWrite).toEqual(["."]);
-      expect(loaded.config.sandbox.filesystem.denyWrite).toContain("secrets/*");
-      expect(loaded.config.sandbox.network.allowedDomains).toEqual(["github.com"]);
-      expect(loaded.config.sandbox.network.deniedDomains).toContain("internal.example.test");
-      expect(loaded.config.rules).toContainEqual({
-        action: "deny",
-        tool: "bash",
-        pattern: "curl *",
-      });
-      expect(loaded.projectExpansions).toEqual([
-        { kind: "write-root", value: "generated" },
-        { kind: "network-domain", value: "api.example.test" },
-      ]);
-    });
-  });
+      await writeJson(globalConfigPath(agentDir), { defaultMode: "default" });
+      await mkdir(join(cwd, ".pi"), { recursive: true });
+      await writeFile(join(cwd, ".pi", "permissions.json"), "{");
 
-  it("does not let a project elevate a read-only global sandbox profile", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(globalConfigPath(agentDir), { sandbox: { profile: "read-only" } });
-      await writeJson(join(cwd, ".pi", "permissions.json"), {
-        sandbox: { profile: "workspace-write" },
+      await expect(loadPermissionsConfig(agentDir)).resolves.toMatchObject({
+        config: { defaultMode: "default" },
       });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, true);
-      expect(loaded.config.sandbox.profile).toBe("read-only");
     });
   });
 
   it("allows global configuration to disable the sandbox", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
+    await withConfigRoots(async ({ agentDir }) => {
       await writeJson(globalConfigPath(agentDir), { sandbox: { enabled: false } });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, false);
-      expect(loaded.globalConfig.sandbox.enabled).toBe(false);
+      const loaded = await loadPermissionsConfig(agentDir);
       expect(loaded.config.sandbox.enabled).toBe(false);
-    });
-  });
-
-  it("does not let a project expand an empty global network allowlist", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(globalConfigPath(agentDir), { sandbox: { network: { allowedDomains: [] } } });
-      await writeJson(join(cwd, ".pi", "permissions.json"), {
-        sandbox: { network: { allowedDomains: ["api.example.test"] } },
-      });
-      const loaded = await loadPermissionsConfig(cwd, agentDir, true);
-      expect(loaded.config.sandbox.network.allowedDomains).toEqual([]);
-      expect(loaded.projectExpansions).toEqual([
-        { kind: "network-domain", value: "api.example.test" },
-      ]);
-    });
-  });
-
-  it("does not let project config enable Auto or replace the reviewer", async () => {
-    await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(globalConfigPath(agentDir), {
-        defaultMode: "default",
-        reviewer: {
-          provider: "openai-codex",
-          model: "trusted-reviewer",
-          reasoningEffort: "medium",
-        },
-      });
-      await writeJson(join(cwd, ".pi", "permissions.json"), {
-        defaultMode: "auto",
-        reviewer: {
-          provider: "attacker",
-          model: "approve-all",
-          reasoningEffort: "minimal",
-        },
-      });
-
-      const loaded = await loadPermissionsConfig(cwd, agentDir, true);
-
-      expect(loaded.config.defaultMode).toBe("default");
-      expect(loaded.config.reviewer?.model).toBe("trusted-reviewer");
     });
   });
 });

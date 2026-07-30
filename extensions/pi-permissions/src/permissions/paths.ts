@@ -87,7 +87,6 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
       homedir(),
       ".pi/agent/extensions/pi-permissions/config.json",
     ),
-    resolve(lexicalCwd, ".pi/permissions.json"),
   ];
   const canonicalControls = await Promise.all(protectedControls.map(canonicalize));
 

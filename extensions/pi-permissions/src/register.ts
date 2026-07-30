@@ -232,20 +232,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  const configKey = (ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">): string => {
-    const projectTrusted = ctx.isProjectTrusted();
-    return `${ctx.cwd}\0${projectTrusted}`;
-  };
+  const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
 
   const activateConfigUnlocked = async (
-    ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted" | "ui" | "hasUI">,
+    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
   ): Promise<LoadedPermissionsConfig> => {
     const key = configKey(ctx);
     if (!force && loaded && loadedKey === key) return loaded;
     if (!force && activationFailure?.key === key) throw activationFailure.error;
 
-    const candidate = await loadPermissionsConfig(ctx.cwd, agentDir, ctx.isProjectTrusted());
+    const candidate = await loadPermissionsConfig(agentDir);
     const previous = {
       loaded,
       loadedKey,
@@ -308,7 +305,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const activateConfig = (
-    ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted" | "ui" | "hasUI">,
+    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
   ): Promise<LoadedPermissionsConfig> =>
     sandboxCoordinator.runExclusive(() => activateConfigUnlocked(ctx, force));

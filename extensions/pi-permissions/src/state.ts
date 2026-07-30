@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type PermissionsConfig, fingerprintConfig } from "./config.ts";
 
-export type PermissionMode = "default" | "plan" | "auto";
+export type PermissionMode = "default" | "plan" | "auto" | "yolo";
 
 export interface PermissionSessionState {
   mode: PermissionMode;
@@ -18,7 +18,7 @@ type StateEntry = {
   data?: unknown;
 };
 
-const modes = new Set<PermissionMode>(["default", "plan", "auto"]);
+const modes = new Set<PermissionMode>(["default", "plan", "auto", "yolo"]);
 const planStatuses = new Set<NonNullable<PermissionSessionState["plan"]>["status"]>([
   "draft",
   "approved",

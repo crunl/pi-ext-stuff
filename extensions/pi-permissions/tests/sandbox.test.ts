@@ -24,7 +24,8 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
-    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.pi/permissions.json");
+    expect(runtime.filesystem.denyWrite)
+      .not.toContain("/workspace/project/.pi/permissions.json");
     expect(runtime.network.allowedDomains).toEqual([]);
   });
 

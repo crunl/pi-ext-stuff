@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export interface PermissionsConfig {
   version: 1;
-  defaultMode: "default" | "plan" | "auto";
+  defaultMode: "default" | "plan" | "auto" | "yolo";
   reviewer?: {
     provider: string;
     model: string;
@@ -25,10 +25,6 @@ export interface PermissionsConfig {
 
 export interface LoadedPermissionsConfig {
   config: PermissionsConfig;
-  globalConfig: PermissionsConfig;
-  projectExpansions: Array<
-    { kind: "write-root"; value: string } | { kind: "network-domain"; value: string }
-  >;
 }
 
 export type PermissionsConfigOverlay = {
@@ -77,7 +73,7 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
   rules: [],
 };
 
-const modes = new Set<PermissionsConfig["defaultMode"]>(["default", "plan", "auto"]);
+const modes = new Set<PermissionsConfig["defaultMode"]>(["default", "plan", "auto", "yolo"]);
 const profiles = new Set<PermissionsConfig["sandbox"]["profile"]>(["workspace-write", "read-only"]);
 const efforts = new Set<NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"]>([
   "minimal",
@@ -136,7 +132,7 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
       typeof input.defaultMode !== "string" ||
       !modes.has(input.defaultMode as PermissionsConfig["defaultMode"])
     ) {
-      throw new ConfigError("defaultMode must be one of default, plan, or auto");
+      throw new ConfigError("defaultMode must be one of default, plan, auto, or yolo");
     }
     overlay.defaultMode = input.defaultMode as PermissionsConfig["defaultMode"];
   }
@@ -298,20 +294,6 @@ export function validatePermissionsConfig(input: unknown): PermissionsConfig {
   return applyOverlay(DEFAULT_CONFIG, parseOverlay(input));
 }
 
-export function mergePermissionsConfig(
-  base: PermissionsConfig,
-  overlay: PermissionsConfigOverlay,
-): PermissionsConfig {
-  const parsedOverlay = parseOverlay(overlay);
-  const merged = applyOverlay(base, { ...parsedOverlay, rules: undefined });
-  if (base.sandbox.enabled && parsedOverlay.sandbox?.enabled === false)
-    merged.sandbox.enabled = true;
-  const globalDenies = base.rules.filter((rule) => rule.action === "deny");
-  const remainingRules = base.rules.filter((rule) => rule.action !== "deny");
-  merged.rules = [...globalDenies, ...remainingRules, ...(parsedOverlay.rules ?? [])];
-  return merged;
-}
-
 function mergeGlobalPermissionsConfig(
   base: PermissionsConfig,
   overlay: PermissionsConfigOverlay,
@@ -322,86 +304,6 @@ function mergeGlobalPermissionsConfig(
   const baseOtherRules = base.rules.filter((rule) => rule.action !== "deny");
   merged.rules = [...baseDenies, ...baseOtherRules, ...(parsedOverlay.rules ?? [])];
   return merged;
-}
-
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
-}
-
-function intersect(values: string[], permitted: string[]): string[] {
-  return values.filter((value) => permitted.includes(value));
-}
-
-function projectRestrictions(
-  globalConfig: PermissionsConfig,
-  project: PermissionsConfigOverlay,
-): PermissionsConfig {
-  const projectDefaultMode =
-    project.defaultMode === "auto" && globalConfig.defaultMode !== "auto"
-      ? globalConfig.defaultMode
-      : project.defaultMode;
-  const baseRestricted: PermissionsConfigOverlay = {
-    ...project,
-    defaultMode: projectDefaultMode,
-    reviewer: undefined,
-  };
-  const restrictedOverlay: PermissionsConfigOverlay = project.sandbox
-    ? {
-        ...baseRestricted,
-        sandbox: {
-          ...project.sandbox,
-          enabled:
-            project.sandbox.enabled === false && globalConfig.sandbox.enabled
-              ? true
-              : project.sandbox.enabled,
-          profile:
-            globalConfig.sandbox.profile === "read-only" ? "read-only" : project.sandbox.profile,
-          filesystem: project.sandbox.filesystem
-            ? {
-                ...project.sandbox.filesystem,
-                allowWrite: project.sandbox.filesystem.allowWrite
-                  ? intersect(
-                      project.sandbox.filesystem.allowWrite,
-                      globalConfig.sandbox.filesystem.allowWrite,
-                    )
-                  : undefined,
-              }
-            : undefined,
-          network: project.sandbox.network
-            ? {
-                ...project.sandbox.network,
-                allowedDomains: project.sandbox.network.allowedDomains
-                  ? intersect(
-                      project.sandbox.network.allowedDomains,
-                      globalConfig.sandbox.network.allowedDomains,
-                    )
-                  : undefined,
-              }
-            : undefined,
-        },
-      }
-    : baseRestricted;
-  const effective = mergePermissionsConfig(globalConfig, restrictedOverlay);
-
-  if (project.sandbox?.filesystem?.denyRead) {
-    effective.sandbox.filesystem.denyRead = unique([
-      ...globalConfig.sandbox.filesystem.denyRead,
-      ...project.sandbox.filesystem.denyRead,
-    ]);
-  }
-  if (project.sandbox?.filesystem?.denyWrite) {
-    effective.sandbox.filesystem.denyWrite = unique([
-      ...globalConfig.sandbox.filesystem.denyWrite,
-      ...project.sandbox.filesystem.denyWrite,
-    ]);
-  }
-  if (project.sandbox?.network?.deniedDomains) {
-    effective.sandbox.network.deniedDomains = unique([
-      ...globalConfig.sandbox.network.deniedDomains,
-      ...project.sandbox.network.deniedDomains,
-    ]);
-  }
-  return effective;
 }
 
 async function readConfigFile(path: string): Promise<PermissionsConfigOverlay | undefined> {
@@ -421,35 +323,13 @@ async function readConfigFile(path: string): Promise<PermissionsConfigOverlay | 
   }
 }
 
-export async function loadPermissionsConfig(
-  cwd: string,
-  agentDir: string,
-  projectTrusted: boolean,
-): Promise<LoadedPermissionsConfig> {
+export async function loadPermissionsConfig(agentDir: string): Promise<LoadedPermissionsConfig> {
   const globalPath = join(agentDir, "extensions", "pi-permissions", "config.json");
-  const globalOverlay = await readConfigFile(globalPath);
-  const globalConfig = globalOverlay
-    ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, globalOverlay)
-    : cloneConfig(DEFAULT_CONFIG);
-  if (!projectTrusted)
-    return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
-
-  const projectOverlay = await readConfigFile(join(cwd, ".pi", "permissions.json"));
-  if (!projectOverlay)
-    return { config: cloneConfig(globalConfig), globalConfig, projectExpansions: [] };
-
-  const projectExpansions: LoadedPermissionsConfig["projectExpansions"] = [
-    ...(projectOverlay.sandbox?.filesystem?.allowWrite ?? [])
-      .filter((value) => !globalConfig.sandbox.filesystem.allowWrite.includes(value))
-      .map((value) => ({ kind: "write-root" as const, value })),
-    ...(projectOverlay.sandbox?.network?.allowedDomains ?? [])
-      .filter((value) => !globalConfig.sandbox.network.allowedDomains.includes(value))
-      .map((value) => ({ kind: "network-domain" as const, value })),
-  ];
+  const overlay = await readConfigFile(globalPath);
   return {
-    config: projectRestrictions(globalConfig, projectOverlay),
-    globalConfig,
-    projectExpansions,
+    config: overlay
+      ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, overlay)
+      : cloneConfig(DEFAULT_CONFIG),
   };
 }
 
