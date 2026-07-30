@@ -6,7 +6,15 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!node_modules", "!graphify-out", "!docs"]
+    "includes": [
+      "**",
+      "!node_modules",
+      "!graphify-out",
+      "!docs",
+      "!work",
+      "!assets/**/*.png",
+      "!assets/**/*.svg"
+    ]
   },
   "formatter": {
     "enabled": true,
