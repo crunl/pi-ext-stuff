@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 
-**Status:** Proposed
+**Status:** Approved
 
 **Scope:** Resolve and commit the eight pre-existing Guardian/Default/risk
 working-tree changes without changing YOLO semantics.
