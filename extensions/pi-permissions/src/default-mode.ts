@@ -10,6 +10,7 @@ import {
   classifyRisk,
   isPublicNetworkHost,
   normalizeToolCall,
+  shellCommandCanGrantGitMetadata,
   shellCommandUsesGitMutation,
   shellCommandUsesImplicitGitNetwork,
   type Risk,
@@ -175,6 +176,17 @@ export async function evaluateDefaultRequest(
   const usesGitMutation = request.operation === "execute"
     && command
     && shellCommandUsesGitMutation(command);
+  if (
+    usesGitMutation
+    && command
+    && !shellCommandCanGrantGitMetadata(command)
+  ) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: "Git metadata access requires a single Git mutation command",
+    };
+  }
   const gitMetadata = usesImplicitGitNetwork || usesGitMutation
     ? await repositoryGitMetadata(cwd)
     : undefined;

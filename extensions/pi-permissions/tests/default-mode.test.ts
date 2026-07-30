@@ -173,6 +173,37 @@ describe("Default mode gate", () => {
         networkHosts: ["api.github.com", "github.com", "uploads.github.com"],
         filesystemWriteRoots: [gitRoot],
       });
+    for (const command of [
+      "git commit -m 'document input > output'",
+      'git commit -m "document bash support"',
+      "git add docs/fish.md",
+    ]) {
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "prompt",
+        filesystemWriteRoots: [gitRoot],
+      });
+    }
+  });
+
+  it.each([
+    "git add README.md; printf '#!/bin/sh\\n' > .git/hooks/pre-commit",
+    "git add README.md > .git/hooks/pre-commit",
+    'bash -c "git add README.md"',
+    'fish -c "git add README.md"',
+    'git add "$(printf README.md)"',
+    "git add README.md | tee result.txt",
+  ])("blocks Git metadata grants for compound shell effects in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await mkdir(join(cwd, ".git"));
+    await writeFile(join(cwd, ".git", "config"), "");
+
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config()))
+      .resolves.toMatchObject({
+        action: "block",
+        reason: expect.stringContaining("single Git mutation"),
+      });
   });
 
   it("blocks a repository pointer that would grant the filesystem root", async () => {

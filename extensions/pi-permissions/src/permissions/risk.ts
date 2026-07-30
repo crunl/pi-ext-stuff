@@ -1,6 +1,6 @@
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
-import { homedir } from "node:os";
 import { isIP } from "node:net";
+import { homedir } from "node:os";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 
 export type Risk = "LOW" | "REVIEW" | "HARD";
@@ -69,7 +69,7 @@ const packageNetworkSubcommands = new Set([
 function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
   let current = "";
-  let quote: "'" | "\"" | undefined;
+  let quote: "'" | '"' | undefined;
   let escaped = false;
   for (const character of command) {
     if (escaped) {
@@ -87,7 +87,7 @@ function splitShellSegments(command: string): string[] {
       if (character === quote) quote = undefined;
       continue;
     }
-    if (character === "'" || character === "\"") {
+    if (character === "'" || character === '"') {
       current += character;
       quote = character;
       continue;
@@ -106,7 +106,7 @@ function splitShellSegments(command: string): string[] {
 function shellWords(source: string): string[] {
   const words: string[] = [];
   let current = "";
-  let quote: "'" | "\"" | undefined;
+  let quote: "'" | '"' | undefined;
   let escaped = false;
   const flush = (): void => {
     if (current) words.push(current);
@@ -127,7 +127,7 @@ function shellWords(source: string): string[] {
       else current += character;
       continue;
     }
-    if (character === "'" || character === "\"") {
+    if (character === "'" || character === '"') {
       quote = character;
       continue;
     }
@@ -143,18 +143,18 @@ function shellWords(source: string): string[] {
 
 function executableIndex(words: readonly string[]): number {
   let index = 0;
-  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]!)) index += 1;
+  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] ?? "")) index += 1;
   while (index < words.length) {
-    const wrapper = basename(words[index]!).toLowerCase();
+    const wrapper = basename(words[index] ?? "").toLowerCase();
     if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup") {
       index += 1;
-      while (index < words.length && words[index]!.startsWith("-")) index += 1;
+      while (index < words.length && words[index]?.startsWith("-")) index += 1;
       continue;
     }
     if (wrapper === "env") {
       index += 1;
       while (index < words.length) {
-        const token = words[index]!;
+        const token = words[index] ?? "";
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) || token === "--") {
           index += 1;
           continue;
@@ -174,7 +174,7 @@ function executableIndex(words: readonly string[]): number {
     if (wrapper !== "sudo") break;
     index += 1;
     while (index < words.length) {
-      const token = words[index]!;
+      const token = words[index] ?? "";
       if (token === "-u" || token === "-g" || token === "-h" || token === "-p" || token === "-C") {
         index += 2;
         continue;
@@ -189,18 +189,66 @@ function executableIndex(words: readonly string[]): number {
   return index;
 }
 
+interface ShellSyntax {
+  hasExecutableSubstitution: boolean;
+  hasActiveRedirect: boolean;
+}
+
+function scanShellSyntax(source: string): ShellSyntax {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let hasExecutableSubstitution = false;
+  let hasActiveRedirect = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (character === "'") {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      quote = quote === '"' ? undefined : '"';
+      continue;
+    }
+    if (character === "`" || (character === "$" && source[index + 1] === "(")) {
+      hasExecutableSubstitution = true;
+    }
+    if (quote === undefined && (character === "<" || character === ">")) {
+      hasActiveRedirect = true;
+    }
+  }
+  return { hasExecutableSubstitution, hasActiveRedirect };
+}
+
 function parseCommandSegment(source: string): CommandSegment {
   const words = shellWords(source);
   const index = executableIndex(words);
   const executableToken = words[index] ?? "";
+  const executable = basename(executableToken).toLowerCase();
+  const args = words.slice(index + 1);
+  const syntax = scanShellSyntax(source);
+  const commandIndex = args.findIndex(
+    (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
+  );
   return {
     source,
     executableToken,
-    executable: basename(executableToken).toLowerCase(),
-    args: words.slice(index + 1),
-    hasRedirect: /[<>]/.test(source),
-    hasSubstitution: /[$`]/.test(source),
-    nestedShell: /\b(?:bash|sh|zsh|fish|dash)\b/.test(source),
+    executable,
+    args,
+    hasRedirect: syntax.hasActiveRedirect,
+    hasSubstitution: syntax.hasExecutableSubstitution,
+    nestedShell: shellExecutables.has(executable) && commandIndex >= 0,
   };
 }
 
@@ -208,36 +256,52 @@ function parseCommandSegments(command: string): CommandSegment[] {
   const segments = splitShellSegments(command).map(parseCommandSegment);
   const nested = segments.flatMap((segment) => {
     if (!shellExecutables.has(segment.executable)) return [];
-    const commandIndex = segment.args.findIndex((arg) =>
-      arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg));
+    const commandIndex = segment.args.findIndex(
+      (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
+    );
     const nestedCommand = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
     return nestedCommand ? parseCommandSegments(nestedCommand) : [];
   });
   return [...segments, ...nested];
 }
 
-export function shellCommandUsesGitMutation(command: string): boolean {
-  return parseCommandSegments(command).some((segment) => {
-    const args = segment.args.map((arg) => arg.toLowerCase());
-    if (segment.executable === "git") {
-      const subcommand = args.find((arg) => !arg.startsWith("-"));
-      if (!subcommand) return false;
-      if (subcommand === "config") {
-        return !args.some((arg) =>
-          arg === "--global" || arg === "--system" || arg === "--file");
-      }
-      return gitMutationSubcommands.has(subcommand);
+function segmentUsesGitMutation(segment: CommandSegment): boolean {
+  const args = segment.args.map((arg) => arg.toLowerCase());
+  if (segment.executable === "git") {
+    const subcommand = args.find((arg) => !arg.startsWith("-"));
+    if (!subcommand) return false;
+    if (subcommand === "config") {
+      return !args.some((arg) => arg === "--global" || arg === "--system" || arg === "--file");
     }
-    if (segment.executable !== "gh") return false;
-    const positional = args.filter((arg) => !arg.startsWith("-"));
-    return positional[0] === "pr" && positional[1] === "checkout";
-  });
+    return gitMutationSubcommands.has(subcommand);
+  }
+  if (segment.executable !== "gh") return false;
+  const positional = args.filter((arg) => !arg.startsWith("-"));
+  return positional[0] === "pr" && positional[1] === "checkout";
+}
+
+export function shellCommandUsesGitMutation(command: string): boolean {
+  return parseCommandSegments(command).some(segmentUsesGitMutation);
+}
+
+export function shellCommandCanGrantGitMetadata(command: string): boolean {
+  const segments = parseCommandSegments(command);
+  const segment = segments.length === 1 ? segments[0] : undefined;
+  return Boolean(
+    segment &&
+      segmentUsesGitMutation(segment) &&
+      !segment.hasRedirect &&
+      !segment.hasSubstitution &&
+      !segment.nestedShell,
+  );
 }
 
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
   return ["path", "filePath", "targetPath", "sourcePath"].flatMap((key) => {
     const value = input[key];
-    return typeof value === "string" ? [isAbsolute(value) ? resolve(value) : resolve(cwd, value)] : [];
+    return typeof value === "string"
+      ? [isAbsolute(value) ? resolve(value) : resolve(cwd, value)]
+      : [];
   });
 }
 
@@ -257,13 +321,23 @@ function extractNetworkTargets(input: Record<string, unknown>): string[] {
   });
 }
 
-export function normalizeToolCall(tool: string, input: Record<string, unknown>, cwd: string): PermissionRequest {
+export function normalizeToolCall(
+  tool: string,
+  input: Record<string, unknown>,
+  cwd: string,
+): PermissionRequest {
   const command = typeof input.command === "string" ? input.command : undefined;
   const lowerTool = tool.toLowerCase();
-  const operation = lowerTool === "webfetch" ? "network"
-    : new Set(["websearch", "read", "search", "grep", "find", "ls"]).has(lowerTool) ? "read"
-    : ["write", "edit", "apply_patch"].includes(lowerTool) ? "write"
-    : command ? "execute" : "external";
+  const operation =
+    lowerTool === "webfetch"
+      ? "network"
+      : new Set(["websearch", "read", "search", "grep", "find", "ls"]).has(lowerTool)
+        ? "read"
+        : ["write", "edit", "apply_patch"].includes(lowerTool)
+          ? "write"
+          : command
+            ? "execute"
+            : "external";
   return {
     tool,
     operation,
@@ -277,16 +351,18 @@ export function normalizeToolCall(tool: string, input: Record<string, unknown>, 
 
 function isSpecialIpv4(host: string): boolean {
   const [first, second, third] = host.split(".").map(Number);
-  return first === 0
-    || first === 10
-    || first === 127
-    || first === 100 && second >= 64 && second <= 127
-    || first === 169 && second === 254
-    || first === 172 && second >= 16 && second <= 31
-    || first === 192 && (second === 0 || second === 88 || second === 168)
-    || first === 198 && (second === 18 || second === 19 || second === 51 && third === 100)
-    || first === 203 && second === 0 && third === 113
-    || first >= 224;
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && (second === 0 || second === 88 || second === 168)) ||
+    (first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) ||
+    (first === 203 && second === 0 && third === 113) ||
+    first >= 224
+  );
 }
 
 function ipv6Groups(host: string): number[] | undefined {
@@ -296,7 +372,7 @@ function ipv6Groups(host: string): number[] | undefined {
     const ipv4 = host.slice(separator + 1);
     if (separator < 0 || isIP(ipv4) !== 4) return undefined;
     const octets = ipv4.split(".").map(Number);
-    normalized = `${host.slice(0, separator)}:${((octets[0]! << 8) | octets[1]!).toString(16)}:${((octets[2]! << 8) | octets[3]!).toString(16)}`;
+    normalized = `${host.slice(0, separator)}:${(((octets[0] ?? 0) << 8) | (octets[1] ?? 0)).toString(16)}:${(((octets[2] ?? 0) << 8) | (octets[3] ?? 0)).toString(16)}`;
   }
   const pieces = normalized.split("::");
   if (pieces.length > 2) return undefined;
@@ -304,8 +380,9 @@ function ipv6Groups(host: string): number[] | undefined {
   const right = pieces[1] ? pieces[1].split(":") : [];
   const missing = 8 - left.length - right.length;
   if (pieces.length === 1 ? missing !== 0 : missing < 1) return undefined;
-  const groups = [...left, ...Array(missing).fill("0"), ...right]
-    .map((group) => Number.parseInt(group, 16));
+  const groups = [...left, ...Array(missing).fill("0"), ...right].map((group) =>
+    Number.parseInt(group, 16),
+  );
   return groups.length === 8 && groups.every((group) => Number.isInteger(group))
     ? groups
     : undefined;
@@ -313,10 +390,10 @@ function ipv6Groups(host: string): number[] | undefined {
 
 function ipv4FromGroups(groups: readonly number[], offset: number): string {
   return [
-    groups[offset]! >> 8,
-    groups[offset]! & 255,
-    groups[offset + 1]! >> 8,
-    groups[offset + 1]! & 255,
+    (groups[offset] ?? 0) >> 8,
+    (groups[offset] ?? 0) & 255,
+    (groups[offset + 1] ?? 0) >> 8,
+    (groups[offset + 1] ?? 0) & 255,
   ].join(".");
 }
 
@@ -325,24 +402,30 @@ function isSpecialIp(host: string): boolean {
   if (isIP(host) !== 6) return false;
   const groups = ipv6Groups(host);
   if (!groups) return true;
-  const first = groups[0]!;
-  const embeddedIpv4 = (
-    groups.slice(0, 6).every((group) => group === 0)
-    || groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff
-    || groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((group) => group === 0)
-    || groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 1
-      && groups.slice(3, 6).every((group) => group === 0)
-  ) ? ipv4FromGroups(groups, 6)
-    : groups[0] === 0x2002 ? ipv4FromGroups(groups, 1)
-      : undefined;
-  return embeddedIpv4 ? isSpecialIpv4(embeddedIpv4)
-    : groups.every((group) => group === 0)
-      || groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1
-      || (first & 0xfe00) === 0xfc00
-      || (first & 0xffc0) === 0xfe80
-      || (first & 0xff00) === 0xff00
-      || groups[0] === 0x2001 && groups[1] === 0x0db8
-      || groups[0] === 0x2001 && groups[1] === 0x0002;
+  const first = groups[0] ?? 0;
+  const embeddedIpv4 =
+    groups.slice(0, 6).every((group) => group === 0) ||
+    (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) ||
+    (groups[0] === 0x64 &&
+      groups[1] === 0xff9b &&
+      groups.slice(2, 6).every((group) => group === 0)) ||
+    (groups[0] === 0x64 &&
+      groups[1] === 0xff9b &&
+      groups[2] === 1 &&
+      groups.slice(3, 6).every((group) => group === 0))
+      ? ipv4FromGroups(groups, 6)
+      : groups[0] === 0x2002
+        ? ipv4FromGroups(groups, 1)
+        : undefined;
+  return embeddedIpv4
+    ? isSpecialIpv4(embeddedIpv4)
+    : groups.every((group) => group === 0) ||
+        (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
+        (first & 0xfe00) === 0xfc00 ||
+        (first & 0xffc0) === 0xfe80 ||
+        (first & 0xff00) === 0xff00 ||
+        (groups[0] === 0x2001 && groups[1] === 0x0db8) ||
+        (groups[0] === 0x2001 && groups[1] === 0x0002);
 }
 
 export function isPublicNetworkHost(value: string): boolean {
@@ -352,11 +435,12 @@ export function isPublicNetworkHost(value: string): boolean {
     .replace(/\.+$/, "")
     .toLowerCase();
   if (
-    !host
-    || host === "localhost"
-    || host.endsWith(".localhost")
-    || host === "metadata.google.internal"
-  ) return false;
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "metadata.google.internal"
+  )
+    return false;
   return !isSpecialIp(host);
 }
 
@@ -371,9 +455,7 @@ function normalizeHostToken(value: string): string | undefined {
   token = token.replace(/^[^@]+@/, "");
   if (token.startsWith("[")) return /^\[([^\]]+)\]/.exec(token)?.[1];
   token = token.replace(/:.*$/, "");
-  return /^(?:[a-z0-9-]+\.)*[a-z0-9-]+$/i.test(token) || isIP(token) !== 0
-    ? token
-    : undefined;
+  return /^(?:[a-z0-9-]+\.)*[a-z0-9-]+$/i.test(token) || isIP(token) !== 0 ? token : undefined;
 }
 
 function invocationUsesNetwork(segment: CommandSegment): boolean {
@@ -383,18 +465,23 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
   }
   if (segment.executable === "gh") {
     const subcommand = args.find((arg) => !arg.startsWith("-"));
-    return subcommand !== undefined
-      && !new Set(["alias", "completion", "config", "help", "version"]).has(subcommand);
+    return (
+      subcommand !== undefined &&
+      !new Set(["alias", "completion", "config", "help", "version"]).has(subcommand)
+    );
   }
   if (
     new Set(["node", "nodejs", "python", "python3", "ruby", "php", "deno"]).has(segment.executable)
   ) {
-    return /\b(?:fetch|axios|https?\.request|requests\.|urllib|httpx|aiohttp|socket)\b/i
-      .test(segment.source);
+    return /\b(?:fetch|axios|https?\.request|requests\.|urllib|httpx|aiohttp|socket)\b/i.test(
+      segment.source,
+    );
   }
   if (segment.executable === "git") {
-    return args.some((arg) => gitNetworkSubcommands.has(arg))
-      || args.includes("submodule") && args.some((arg) => arg === "add" || arg === "update");
+    return (
+      args.some((arg) => gitNetworkSubcommands.has(arg)) ||
+      (args.includes("submodule") && args.some((arg) => arg === "add" || arg === "update"))
+    );
   }
   if (new Set(["npm", "pnpm", "yarn", "bun"]).has(segment.executable)) {
     const subcommand = args.find((arg) => !arg.startsWith("-"));
@@ -413,11 +500,14 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
 }
 
 export function shellCommandUsesImplicitGitNetwork(command: string): boolean {
-  return parseCommandSegments(command).some((segment) =>
-    segment.executable === "git"
-    && invocationUsesNetwork(segment)
-    && !segment.args.some((arg) =>
-      /^https?:\/\//i.test(arg) || arg.includes("@") || /^[^\s/:]+:[^\s]+$/.test(arg)));
+  return parseCommandSegments(command).some(
+    (segment) =>
+      segment.executable === "git" &&
+      invocationUsesNetwork(segment) &&
+      !segment.args.some(
+        (arg) => /^https?:\/\//i.test(arg) || arg.includes("@") || /^[^\s/:]+:[^\s]+$/.test(arg),
+      ),
+  );
 }
 
 export function extractShellNetworkHosts(command: string): string[] {
@@ -439,33 +529,36 @@ export function extractShellNetworkHosts(command: string): string[] {
       hosts.add("uploads.github.com");
       continue;
     }
-    if (
-      new Set(["npm", "pnpm", "yarn", "bun", "npx", "pnpx", "bunx"]).has(segment.executable)
-    ) {
+    if (new Set(["npm", "pnpm", "yarn", "bun", "npx", "pnpx", "bunx"]).has(segment.executable)) {
       hosts.add("registry.npmjs.org");
     }
     if (
-      !directNetworkExecutables.has(segment.executable)
-      && segment.executable !== "git"
-      && segment.executable !== "gh"
-    ) continue;
+      !directNetworkExecutables.has(segment.executable) &&
+      segment.executable !== "git" &&
+      segment.executable !== "gh"
+    )
+      continue;
     for (const token of segment.args) {
       if (token.startsWith("-")) continue;
-      const remoteLike = /^https?:\/\//i.test(token)
-        || token.includes("@")
-        || (segment.executable === "scp" && token.includes(":"))
-        || token.includes(".")
-        || isIP(token.replace(/:.*$/, "")) !== 0;
+      const remoteLike =
+        /^https?:\/\//i.test(token) ||
+        token.includes("@") ||
+        (segment.executable === "scp" && token.includes(":")) ||
+        token.includes(".") ||
+        isIP(token.replace(/:.*$/, "")) !== 0;
       if (!remoteLike) continue;
       const host = normalizeHostToken(token);
       if (host) hosts.add(host.toLowerCase());
     }
     const positional = segment.args.filter((token) => !token.startsWith("-"));
-    const implicitHost = segment.executable === "ssh" || segment.executable === "sftp"
-      ? positional.at(-1)
-      : segment.executable === "ftp" || segment.executable === "nc" || segment.executable === "ncat"
-        ? positional[0]
-        : undefined;
+    const implicitHost =
+      segment.executable === "ssh" || segment.executable === "sftp"
+        ? positional.at(-1)
+        : segment.executable === "ftp" ||
+            segment.executable === "nc" ||
+            segment.executable === "ncat"
+          ? positional[0]
+          : undefined;
     const normalizedImplicitHost = implicitHost ? normalizeHostToken(implicitHost) : undefined;
     if (normalizedImplicitHost) hosts.add(normalizedImplicitHost.toLowerCase());
   }
@@ -474,10 +567,16 @@ export function extractShellNetworkHosts(command: string): string[] {
 
 function webFetchRisk(request: PermissionRequest): Risk {
   const value = request.input.url;
-  if (typeof value !== "string" || value.trim() === "" || request.networkTargets?.length !== 1) return "HARD";
+  if (typeof value !== "string" || value.trim() === "" || request.networkTargets?.length !== 1)
+    return "HARD";
   let parsed: URL;
-  try { parsed = new URL(value); } catch { return "HARD"; }
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) return "HARD";
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "HARD";
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname)
+    return "HARD";
   return isPublicNetworkHost(parsed.hostname) ? "LOW" : "HARD";
 }
 
@@ -487,23 +586,25 @@ function isWithin(path: string, root: string): boolean {
 }
 
 function writeRisk(request: PermissionRequest): Risk {
-  const globalConfig = resolve(
-    homedir(),
-    ".pi/agent/extensions/pi-permissions/config.json",
-  );
+  const globalConfig = resolve(homedir(), ".pi/agent/extensions/pi-permissions/config.json");
   if (request.resolvedPaths.some((path) => path === globalConfig)) return "HARD";
-  return request.resolvedPaths.length > 0 && request.resolvedPaths.every((path) => isWithin(path, request.cwd)) ? "LOW" : "REVIEW";
+  return request.resolvedPaths.length > 0 &&
+    request.resolvedPaths.every((path) => isWithin(path, request.cwd))
+    ? "LOW"
+    : "REVIEW";
 }
 
 function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (segment.executable === "kubectl") {
     return args.some((arg) =>
-      new Set(["apply", "create", "delete", "edit", "patch", "replace", "scale", "set"]).has(arg));
+      new Set(["apply", "create", "delete", "edit", "patch", "replace", "scale", "set"]).has(arg),
+    );
   }
   if (segment.executable === "terraform" || segment.executable === "tofu") {
     return args.some((arg) =>
-      new Set(["apply", "destroy", "import", "refresh", "taint", "untaint"]).has(arg));
+      new Set(["apply", "destroy", "import", "refresh", "taint", "untaint"]).has(arg),
+    );
   }
   return new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]).has(segment.executable);
 }
@@ -518,10 +619,19 @@ export function classifyRisk(request: PermissionRequest): Risk {
   if (!command) return "REVIEW";
   const segments = request.commandSegments ?? parseCommandSegments(command);
   if (request.networkTargets?.length) return "HARD";
-  if (segments.some((segment) =>
-    deleteExecutables.has(segment.executable)
-    || invocationUsesNetwork(segment)
-    || invocationHasExternalSideEffect(segment)
-  )) return "HARD";
+  if (
+    segments.some(
+      (segment) =>
+        deleteExecutables.has(segment.executable) ||
+        invocationUsesNetwork(segment) ||
+        invocationHasExternalSideEffect(segment),
+    )
+  )
+    return "HARD";
+  if (
+    scanShellSyntax(command).hasExecutableSubstitution ||
+    segments.some((segment) => segment.hasSubstitution)
+  )
+    return "REVIEW";
   return "LOW";
 }

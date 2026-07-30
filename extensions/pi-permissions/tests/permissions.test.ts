@@ -1,20 +1,25 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { isPathAllowed } from "../src/permissions/paths.ts";
-import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
 import {
   classifyRisk,
   extractShellNetworkHosts,
   isPublicNetworkHost,
   normalizeToolCall,
+  shellCommandCanGrantGitMetadata,
 } from "../src/permissions/risk.ts";
+import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
 });
 
 function request(tool: string, command: string): PermissionRequest {
@@ -26,9 +31,33 @@ describe("path policy", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-"));
     temporaryDirectories.push(cwd);
 
-    await expect(isPathAllowed("notes.txt", { cwd, allowWrite: ["."], denyRead: [".env", ".env.*", "*.pem", "*.key"], denyWrite: [".env", ".env.*", "*.pem", "*.key"], operation: "write" })).resolves.toMatchObject({ allowed: true });
-    await expect(isPathAllowed(".env.local", { cwd, allowWrite: ["."], denyRead: [".env", ".env.*", "*.pem", "*.key"], denyWrite: [".env", ".env.*", "*.pem", "*.key"], operation: "write" })).resolves.toMatchObject({ allowed: false });
-    await expect(isPathAllowed("deploy.key", { cwd, allowWrite: ["."], denyRead: [".env", ".env.*", "*.pem", "*.key"], denyWrite: [".env", ".env.*", "*.pem", "*.key"], operation: "read" })).resolves.toMatchObject({ allowed: false });
+    await expect(
+      isPathAllowed("notes.txt", {
+        cwd,
+        allowWrite: ["."],
+        denyRead: [".env", ".env.*", "*.pem", "*.key"],
+        denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+        operation: "write",
+      }),
+    ).resolves.toMatchObject({ allowed: true });
+    await expect(
+      isPathAllowed(".env.local", {
+        cwd,
+        allowWrite: ["."],
+        denyRead: [".env", ".env.*", "*.pem", "*.key"],
+        denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+        operation: "write",
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+    await expect(
+      isPathAllowed("deploy.key", {
+        cwd,
+        allowWrite: ["."],
+        denyRead: [".env", ".env.*", "*.pem", "*.key"],
+        denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+        operation: "read",
+      }),
+    ).resolves.toMatchObject({ allowed: false });
   });
 
   it("rejects a symlink escape from an allowed write root", async () => {
@@ -39,7 +68,15 @@ describe("path policy", () => {
     await writeFile(join(outside, "target.txt"), "outside");
     await symlink(outside, join(cwd, "workspace", "escape"));
 
-    await expect(isPathAllowed("workspace/escape/target.txt", { cwd, allowWrite: ["workspace"], denyRead: [], denyWrite: [], operation: "write" })).resolves.toMatchObject({ allowed: false });
+    await expect(
+      isPathAllowed("workspace/escape/target.txt", {
+        cwd,
+        allowWrite: ["workspace"],
+        denyRead: [],
+        denyWrite: [],
+        operation: "write",
+      }),
+    ).resolves.toMatchObject({ allowed: false });
   });
 
   it("treats a project permissions file as an ordinary workspace file", async () => {
@@ -70,14 +107,39 @@ describe("permission rules", () => {
   });
 });
 
+describe("Git metadata eligibility", () => {
+  it.each([
+    ['git commit -m "document bash support"', true],
+    ["git add docs/fish.md", true],
+    ['bash -c "git add README.md"', false],
+    ['git add "$(printf README.md)"', false],
+    ["git add README.md > result.txt", false],
+  ] as const)("decides Git metadata eligibility for %s", (command, expected) => {
+    expect(shellCommandCanGrantGitMetadata(command)).toBe(expected);
+  });
+});
+
 describe("narrow static risk contract", () => {
   it.each(["Read", "Search", "WebSearch"])("keeps native %s low risk", (tool) => {
-    expect(classifyRisk(normalizeToolCall(tool, { path: "README.md", query: "permissions" }, "/work/repo"))).toBe("LOW");
+    expect(
+      classifyRisk(
+        normalizeToolCall(tool, { path: "README.md", query: "permissions" }, "/work/repo"),
+      ),
+    ).toBe("LOW");
   });
 
   it("keeps public WebFetch low and fails closed for invalid targets", () => {
-    expect(classifyRisk(normalizeToolCall("WebFetch", { url: "https://example.com/docs" }, "/work/repo"))).toBe("LOW");
-    for (const input of [{}, { url: "" }, { url: "file:///etc/passwd" }, { url: "ftp://example.com" }]) {
+    expect(
+      classifyRisk(
+        normalizeToolCall("WebFetch", { url: "https://example.com/docs" }, "/work/repo"),
+      ),
+    ).toBe("LOW");
+    for (const input of [
+      {},
+      { url: "" },
+      { url: "file:///etc/passwd" },
+      { url: "ftp://example.com" },
+    ]) {
       expect(classifyRisk(normalizeToolCall("WebFetch", input, "/work/repo"))).toBe("HARD");
     }
   });
@@ -108,22 +170,23 @@ describe("narrow static risk contract", () => {
   });
 
   it("keeps ordinary workspace writes low", () => {
-    expect(classifyRisk(normalizeToolCall("write", { path: "notes.txt" }, "/work/repo"))).toBe("LOW");
-    expect(classifyRisk(normalizeToolCall("edit", { path: ".pi/permissions.json" }, "/work/repo"))).toBe("LOW");
-    expect(classifyRisk(normalizeToolCall(
-      "edit",
-      {
-        path: join(
-          homedir(),
-          ".pi",
-          "agent",
-          "extensions",
-          "pi-permissions",
-          "config.json",
+    expect(classifyRisk(normalizeToolCall("write", { path: "notes.txt" }, "/work/repo"))).toBe(
+      "LOW",
+    );
+    expect(
+      classifyRisk(normalizeToolCall("edit", { path: ".pi/permissions.json" }, "/work/repo")),
+    ).toBe("LOW");
+    expect(
+      classifyRisk(
+        normalizeToolCall(
+          "edit",
+          {
+            path: join(homedir(), ".pi", "agent", "extensions", "pi-permissions", "config.json"),
+          },
+          "/work/repo",
         ),
-      },
-      "/work/repo",
-    ))).toBe("HARD");
+      ),
+    ).toBe("HARD");
   });
 
   it.each([
@@ -153,7 +216,7 @@ describe("narrow static risk contract", () => {
     ["cat README.md &", "LOW"],
     ["cat README.md\npwd", "LOW"],
     ["cat README.md > copy.txt", "LOW"],
-    ["cat $(pwd)", "LOW"],
+    ["cat $(pwd)", "REVIEW"],
     ["bash -c 'pwd'", "LOW"],
     ["rm -rf build", "HARD"],
     ["git push origin feature", "HARD"],
@@ -173,13 +236,28 @@ describe("narrow static risk contract", () => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
 
+  it.each(['echo "$(rm -rf build)"', "echo `rm -rf build`"])(
+    "requires review for executable shell substitution in %s",
+    (command) => {
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("REVIEW");
+    },
+  );
+
+  it.each([
+    "printf '%s\\n' '$(rm -rf build)'",
+    "printf '%s\\n' '`rm -rf build`'",
+    "printf '%s\\n' \\$HOME",
+  ])("keeps inert shell substitution syntax low risk in %s", (command) => {
+    expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("LOW");
+  });
+
   it("extracts one-time public network hosts from shell commands", () => {
-    expect(extractShellNetworkHosts(
-      "curl https://example.com/a && ssh user@build.example.org",
-    )).toEqual(["example.com", "build.example.org"]);
-    expect(extractShellNetworkHosts(
-      "scp ./artifact.tgz deploy@uploads.example.net:/srv/releases/",
-    )).toEqual(["uploads.example.net"]);
+    expect(
+      extractShellNetworkHosts("curl https://example.com/a && ssh user@build.example.org"),
+    ).toEqual(["example.com", "build.example.org"]);
+    expect(
+      extractShellNetworkHosts("scp ./artifact.tgz deploy@uploads.example.net:/srv/releases/"),
+    ).toEqual(["uploads.example.net"]);
     expect(isPublicNetworkHost("example.com")).toBe(true);
     expect(isPublicNetworkHost("127.0.0.1")).toBe(false);
     expect(isPublicNetworkHost("service.localhost")).toBe(false);
