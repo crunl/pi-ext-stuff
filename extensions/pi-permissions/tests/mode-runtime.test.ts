@@ -30,12 +30,21 @@ describe("PermissionModeRuntime", () => {
     runtime.endReview("call-2");
   });
 
-  it("serializes human dialogs", () => {
+  it("serializes human dialogs with cancellation-safe tokens", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
-    expect(runtime.beginHumanApproval()).toBe(true);
-    expect(runtime.beginHumanApproval()).toBe(false);
-    runtime.endHumanApproval();
-    expect(runtime.beginHumanApproval()).toBe(true);
+    const first = runtime.beginHumanApproval();
+    expect(first).toEqual(expect.any(Number));
+    expect(runtime.beginHumanApproval()).toBeUndefined();
+
+    runtime.cancelReviews();
+    const second = runtime.beginHumanApproval();
+    expect(second).toEqual(expect.any(Number));
+    expect(second).not.toBe(first);
+
+    runtime.endHumanApproval(first!);
+    expect(runtime.beginHumanApproval()).toBeUndefined();
+    runtime.endHumanApproval(second!);
+    expect(runtime.beginHumanApproval()).toEqual(expect.any(Number));
   });
 
   it("cycles immediately while working", () => {

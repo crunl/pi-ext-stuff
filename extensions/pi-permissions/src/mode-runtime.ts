@@ -27,7 +27,8 @@ export class PermissionModeRuntime {
   private state: PermissionSessionState;
   private readonly activeReviewIds = new Set<string>();
   private readonly autoReviewWindow: boolean[] = [];
-  private humanApprovalActive = false;
+  private humanApprovalGeneration = 0;
+  private activeHumanApproval: number | undefined;
 
   constructor(
     config: PermissionsConfig,
@@ -46,7 +47,7 @@ export class PermissionModeRuntime {
   }
 
   get approvalActive(): boolean {
-    return this.humanApprovalActive || this.activeReviewIds.size > 0;
+    return this.activeHumanApproval !== undefined || this.activeReviewIds.size > 0;
   }
 
   get statusLabel(): "Default" | "Auto" | "YOLO" {
@@ -68,16 +69,19 @@ export class PermissionModeRuntime {
 
   cancelReviews(): void {
     this.activeReviewIds.clear();
+    this.humanApprovalGeneration += 1;
+    this.activeHumanApproval = undefined;
   }
 
-  beginHumanApproval(): boolean {
-    if (this.humanApprovalActive) return false;
-    this.humanApprovalActive = true;
-    return true;
+  beginHumanApproval(): number | undefined {
+    if (this.activeHumanApproval !== undefined) return undefined;
+    this.humanApprovalGeneration += 1;
+    this.activeHumanApproval = this.humanApprovalGeneration;
+    return this.activeHumanApproval;
   }
 
-  endHumanApproval(): void {
-    this.humanApprovalActive = false;
+  endHumanApproval(token: number): void {
+    if (this.activeHumanApproval === token) this.activeHumanApproval = undefined;
   }
 
   activate(mode: PermissionMode): PermissionMode {
@@ -142,7 +146,8 @@ export class PermissionModeRuntime {
     this.controller = new ModeController(this.state.mode);
     this.activeReviewIds.clear();
     this.autoReviewWindow.length = 0;
-    this.humanApprovalActive = false;
+    this.humanApprovalGeneration += 1;
+    this.activeHumanApproval = undefined;
   }
 
   snapshot(): PermissionSessionState {

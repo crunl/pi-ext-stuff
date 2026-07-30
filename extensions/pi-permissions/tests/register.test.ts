@@ -2058,6 +2058,12 @@ describe("Default mode registration", () => {
       expect.stringContaining("candidate rejected"),
       "error",
     );
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "yolo-after-sandbox-failure", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("cycles Default, Auto, and YOLO with Shift+Tab after thinking is migrated", async () => {
@@ -2100,6 +2106,136 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
+  it("aborts the active turn after downgrading YOLO to Default", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    await app.commands.get("default")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.abort).toHaveBeenCalledOnce();
+  });
+
+  it("validates the latest global config before entering YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await writeFile(globalConfigPath(agentDir), "{");
+
+    await app.commands.get("yolo")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.notify).toHaveBeenLastCalledWith(expect.stringContaining("配置重载失败"), "error");
+  });
+
+  it("fails closed in cached YOLO after a malformed permissions reload", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await writeFile(globalConfigPath(agentDir), "{");
+
+    await app.commands.get("permissions")!.handler("", app.context);
+    const result = await app.handlers.get("tool_call")!(
+      { toolName: "read", toolCallId: "invalid-yolo", input: { path: ".env" } },
+      app.context,
+    );
+
+    expect(result).toMatchObject({
+      block: true,
+      reason: expect.stringContaining("configuration"),
+    });
+  });
+
+  it("invalidates cached YOLO when a resumed session has malformed config", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await writeFile(globalConfigPath(agentDir), "{");
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "invalid-resume", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("configuration"),
+    });
+  });
+
+  it("aborts working YOLO when permissions reload restores a restrictive mode", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "default" }));
+
+    await app.commands.get("permissions")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.abort).toHaveBeenCalledOnce();
+  });
+
+  it("serializes permissions reload behind an in-flight mode mutation", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const gate = deferred<undefined>();
+    app.sandboxManager.initialize.mockImplementationOnce(() => gate.promise);
+
+    const transition = app.commands.get("default")!.handler("", app.context);
+    await vi.waitFor(() => expect(app.sandboxManager.initialize).toHaveBeenCalledOnce());
+    const reload = app.commands.get("permissions")!.handler("", app.context);
+    await Promise.resolve();
+    expect(app.notify).not.toHaveBeenCalledWith(expect.stringContaining("Default ·"), "info");
+
+    gate.resolve(undefined);
+    await Promise.all([transition, reload]);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
+  it("keeps YOLO active when session-tree restrictive restoration cannot initialize", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    app.context.sessionManager.getBranch = (() => [
+      {
+        type: "custom",
+        customType: "pi-permissions-state",
+        data: {
+          mode: "default",
+          auto: { consecutiveDenials: 0, paused: false },
+          sandboxProfile: "workspace-write",
+          configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
+        },
+      },
+    ]) as any;
+    app.sandboxManager.initialize.mockRejectedValueOnce(new Error("sandbox unavailable"));
+
+    await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "still-yolo", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("shows a working Shift+Tab transition immediately", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
@@ -2120,6 +2256,7 @@ describe("Default mode registration", () => {
       "info",
     );
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.abort).not.toHaveBeenCalled();
   });
 
   it("uses Auto for the next approval after working Shift+Tab switches the mode", async () => {

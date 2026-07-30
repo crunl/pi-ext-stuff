@@ -126,6 +126,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
+  let configFailure: Error | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
@@ -177,14 +178,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       () => undefined,
     );
     return result;
-  };
-
-  const restoreModeState = (
-    ctx: Pick<ExtensionContext, "sessionManager">,
-    config: PermissionsConfig,
-  ): void => {
-    if (!modeRuntime) return;
-    modeRuntime.restore(ctx.sessionManager.getBranch(), config);
   };
 
   const invalidatePermissionContext = (reason: string): void => {
@@ -260,6 +253,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     candidateOverride?: LoadedPermissionsConfig,
   ): Promise<LoadedPermissionsConfig> => {
     const key = configKey(ctx);
+    if (!force && configFailure) throw configFailure;
     const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
     if (!force && loaded && loadedKey === key) {
       const effectiveCachedMode = cachedMode ?? executableMode(loaded.config.defaultMode);
@@ -271,7 +265,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw activationFailure.error;
     }
 
-    const candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
+    let candidate: LoadedPermissionsConfig;
+    try {
+      candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
+    } catch (error: unknown) {
+      configFailure = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    }
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
     const previous = {
       loaded,
@@ -288,6 +288,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       : undefined;
 
     if (!requiresSandbox(effectiveMode, candidate.config)) {
+      configFailure = undefined;
       activationFailure = undefined;
       if (force) invalidatePermissionContext("permission context changed");
       loaded = candidate;
@@ -332,6 +333,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
 
     activationFailure = undefined;
+    configFailure = undefined;
     if (force) {
       invalidatePermissionContext("permission context changed");
     }
@@ -351,8 +353,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
   ): Promise<LoadedPermissionsConfig> =>
-    targetMode === "yolo" && !force && loaded && loadedKey === configKey(ctx)
-      ? Promise.resolve(loaded)
+    targetMode === "yolo"
+      ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride)
       : sandboxCoordinator.runExclusive(() =>
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride),
         );
@@ -605,7 +607,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       };
     }
     const runtime = ensureModeRuntime(config);
-    if (!runtime.beginHumanApproval()) {
+    const humanApprovalToken = runtime.beginHumanApproval();
+    if (humanApprovalToken === undefined) {
       return {
         block: true,
         reason: "pi-permissions: another approval is already active",
@@ -670,7 +673,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         reason: `pi-permissions approval failed: ${message}`,
       };
     } finally {
-      runtime.endHumanApproval();
+      runtime.endHumanApproval(humanApprovalToken);
       if (!transitionGrantCreated) setDefaultStatus(ctx);
     }
   };
@@ -678,8 +681,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
+    let candidate: LoadedPermissionsConfig;
     try {
-      const candidate = await loadPermissionsConfig(agentDir);
+      candidate = await loadPermissionsConfig(agentDir);
+    } catch (error: unknown) {
+      configFailure = error instanceof Error ? error : new Error(String(error));
+      reportConfigError(ctx, error);
+      return;
+    }
+    try {
       const restoredRuntime = new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi));
       restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
       const restoredMode = executableMode(restoredRuntime.mode);
@@ -706,10 +716,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("session_tree", (_event, ctx) => {
     resetBranchPermissionContext("session tree changed");
-    if (loaded && modeRuntime) {
-      restoreModeState(ctx, loaded.config);
-      setDefaultStatus(ctx);
-    }
+    return runModeMutation(async (generation) => {
+      if (loaded && modeRuntime && generation === modeMutationGeneration) {
+        const previousMode = executableMode(modeRuntime.mode);
+        const restoredRuntime = new PermissionModeRuntime(loaded.config, pi.appendEntry.bind(pi));
+        restoredRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
+        const restoredMode = executableMode(restoredRuntime.mode);
+        try {
+          await activateConfig(ctx, false, restoredMode, loaded);
+        } catch (error: unknown) {
+          reportConfigError(ctx, error);
+          return;
+        }
+        if (generation !== modeMutationGeneration) return;
+        modeRuntime = restoredRuntime;
+        setDefaultStatus(ctx);
+        if (previousMode === "yolo" && restoredMode !== "yolo" && !ctx.isIdle()) ctx.abort();
+      }
+    });
   });
 
   pi.on("session_shutdown", async () => {
@@ -948,7 +972,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
-        const result = await activateConfig(ctx, mode === "yolo" ? false : ctx.isIdle(), mode);
+        const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : undefined;
+        const result = await activateConfig(ctx, ctx.isIdle(), mode);
         if (generation !== modeMutationGeneration) return;
         const runtime = ensureModeRuntime(result.config);
         if (runtime.snapshot().configFingerprint !== fingerprintConfig(result.config)) {
@@ -958,6 +983,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         invalidatePermissionContext("permission mode changed");
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
+        if (previousMode === "yolo" && mode !== "yolo" && !ctx.isIdle()) ctx.abort();
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
@@ -1057,18 +1083,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const initial = await activateConfig(ctx);
           runtime = ensureModeRuntime(initial.config);
         }
-        const targetMode = nextExecutableMode(executableMode(runtime.mode));
-        const result = await activateConfig(
-          ctx,
-          targetMode === "yolo" ? false : ctx.isIdle(),
-          targetMode,
-        );
+        const previousMode = executableMode(runtime.mode);
+        const targetMode = nextExecutableMode(previousMode);
+        const result = await activateConfig(ctx, ctx.isIdle(), targetMode);
         if (generation !== modeMutationGeneration) return;
         runtime = ensureModeRuntime(result.config);
         runtime.activate(targetMode);
         invalidatePermissionContext("permission mode changed");
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
+        if (previousMode === "yolo" && targetMode !== "yolo" && !ctx.isIdle()) ctx.abort();
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
@@ -1083,64 +1107,74 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerCommand("permissions", {
     description: "Show the active pi-permissions policy",
-    handler: async (_args, ctx) => {
-      try {
-        const candidate = await loadPermissionsConfig(agentDir);
-        const candidateFingerprint = fingerprintConfig(candidate.config);
-        const restoredRuntime =
-          !modeRuntime || modeRuntime.snapshot().configFingerprint !== candidateFingerprint
-            ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
-            : undefined;
-        restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
-        const targetMode = executableMode(
-          (restoredRuntime ?? modeRuntime)?.mode ?? candidate.config.defaultMode,
-        );
-        const result = await activateConfig(ctx, true, targetMode, candidate);
-        if (restoredRuntime) modeRuntime = restoredRuntime;
-        const config = result.config;
-        const runtime = ensureModeRuntime(config);
-        setDefaultStatus(ctx);
-        if (runtime.mode === "yolo") {
-          ctx.ui.notify("YOLO · Full Access · sandbox off · approvals never", "info");
-          return;
+    handler: async (_args, ctx) =>
+      runModeMutation(async (generation) => {
+        let candidateLoaded = false;
+        try {
+          const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : undefined;
+          const candidate = await loadPermissionsConfig(agentDir);
+          candidateLoaded = true;
+          const candidateFingerprint = fingerprintConfig(candidate.config);
+          const restoredRuntime =
+            !modeRuntime || modeRuntime.snapshot().configFingerprint !== candidateFingerprint
+              ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
+              : undefined;
+          restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
+          const targetMode = executableMode(
+            (restoredRuntime ?? modeRuntime)?.mode ?? candidate.config.defaultMode,
+          );
+          const result = await activateConfig(ctx, true, targetMode, candidate);
+          if (generation !== modeMutationGeneration) return;
+          if (restoredRuntime) modeRuntime = restoredRuntime;
+          const config = result.config;
+          const runtime = ensureModeRuntime(config);
+          setDefaultStatus(ctx);
+          if (previousMode === "yolo" && runtime.mode !== "yolo" && !ctx.isIdle()) ctx.abort();
+          if (runtime.mode === "yolo") {
+            ctx.ui.notify("YOLO · Full Access · sandbox off · approvals never", "info");
+            return;
+          }
+          const sandboxSummary =
+            sandboxState.kind === "ready"
+              ? `${sandboxState.profile} sandbox on`
+              : sandboxState.kind === "disabled"
+                ? "sandbox off"
+                : sandboxState.kind === "failed"
+                  ? `sandbox error: ${sandboxState.error}`
+                  : "sandbox pending";
+          const configFingerprint = fingerprintConfig(config);
+          const lastFallback =
+            lastGuardianSelection?.guardian.source === "active-fallback" &&
+            lastGuardianSelection.cwd === resolve(ctx.cwd) &&
+            lastGuardianSelection.configFingerprint === configFingerprint &&
+            lastGuardianSelection.guardian.provider === ctx.model?.provider &&
+            lastGuardianSelection.guardian.model === ctx.model.id
+              ? lastGuardianSelection.guardian
+              : undefined;
+          const reviewerSummary = lastFallback
+            ? `${lastFallback.provider}/${lastFallback.model} (active fallback)`
+            : config.reviewer
+              ? `${config.reviewer.provider}/${config.reviewer.model}`
+              : "current session model";
+          const autoSummary =
+            runtime.mode === "auto"
+              ? runtime.autoState.paused
+                ? "Auto paused"
+                : "Auto active"
+              : "manual approval";
+          ctx.ui.notify(
+            `${runtime.statusLabel} · reviewer ${reviewerSummary} · ${sandboxSummary} · ${autoSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
+            "info",
+          );
+        } catch (error: unknown) {
+          if (!candidateLoaded) {
+            configFailure = error instanceof Error ? error : new Error(String(error));
+          }
+          if (modeRuntime?.mode === "yolo" && !ctx.isIdle()) ctx.abort();
+          const message = error instanceof Error ? error.message : String(error);
+          setDefaultStatus(ctx);
+          ctx.ui.notify(`pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`, "error");
         }
-        const sandboxSummary =
-          sandboxState.kind === "ready"
-            ? `${sandboxState.profile} sandbox on`
-            : sandboxState.kind === "disabled"
-              ? "sandbox off"
-              : sandboxState.kind === "failed"
-                ? `sandbox error: ${sandboxState.error}`
-                : "sandbox pending";
-        const configFingerprint = fingerprintConfig(config);
-        const lastFallback =
-          lastGuardianSelection?.guardian.source === "active-fallback" &&
-          lastGuardianSelection.cwd === resolve(ctx.cwd) &&
-          lastGuardianSelection.configFingerprint === configFingerprint &&
-          lastGuardianSelection.guardian.provider === ctx.model?.provider &&
-          lastGuardianSelection.guardian.model === ctx.model.id
-            ? lastGuardianSelection.guardian
-            : undefined;
-        const reviewerSummary = lastFallback
-          ? `${lastFallback.provider}/${lastFallback.model} (active fallback)`
-          : config.reviewer
-            ? `${config.reviewer.provider}/${config.reviewer.model}`
-            : "current session model";
-        const autoSummary =
-          runtime.mode === "auto"
-            ? runtime.autoState.paused
-              ? "Auto paused"
-              : "Auto active"
-            : "manual approval";
-        ctx.ui.notify(
-          `${runtime.statusLabel} · reviewer ${reviewerSummary} · ${sandboxSummary} · ${autoSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
-          "info",
-        );
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        setDefaultStatus(ctx);
-        ctx.ui.notify(`pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`, "error");
-      }
-    },
+      }),
   });
 }
