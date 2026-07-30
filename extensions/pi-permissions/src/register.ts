@@ -72,6 +72,7 @@ export interface RegisterExtensionOptions {
   sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
+  riskEvaluator?: typeof evaluateDefaultRequest;
 }
 
 interface ApprovedCall {
@@ -106,6 +107,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
+  const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
@@ -702,9 +704,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       const runtime = ensureModeRuntime(result.config);
       if (runtime.mode === "yolo") return;
 
+      const evaluationEpoch = permissionContextEpoch;
       let decision: DefaultDecision;
       try {
-        decision = await evaluateDefaultRequest(
+        decision = await riskEvaluator(
           event.toolName,
           event.input as Record<string, unknown>,
           ctx.cwd,
@@ -712,10 +715,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           defaultProtectedWritePaths(ctx.cwd, agentDir),
         );
       } catch (error: unknown) {
+        if (modeRuntime?.mode === "yolo") return;
+        if (permissionContextEpoch !== evaluationEpoch) {
+          return {
+            block: true,
+            reason: "pi-permissions: permission context changed during risk evaluation",
+          };
+        }
         const message = error instanceof Error ? error.message : String(error);
         return { block: true, reason: `pi-permissions failed closed: ${message}` };
       }
 
+      if (modeRuntime?.mode === "yolo") return;
+      if (permissionContextEpoch !== evaluationEpoch) {
+        return {
+          block: true,
+          reason: "pi-permissions: permission context changed during risk evaluation",
+        };
+      }
       if (decision.action === "allow") return;
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };

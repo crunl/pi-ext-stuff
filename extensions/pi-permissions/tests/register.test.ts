@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type AutoReviewer, AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
+import type { DefaultDecision } from "../src/default-mode.ts";
 import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 import { registerExtension } from "../src/register.ts";
 
@@ -32,6 +33,7 @@ function harness(
     runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   },
   reviewer?: AutoReviewer,
+  riskEvaluator?: (...args: any[]) => Promise<DefaultDecision>,
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -91,6 +93,7 @@ function harness(
     filteringProxyFactory,
     sandboxCoordinator,
     autoReviewer,
+    riskEvaluator,
   });
   const context = {
     cwd: agentDir,
@@ -227,6 +230,67 @@ describe("Default mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
+  it("ignores a stale hard block when risk evaluation resolves after entering YOLO", async () => {
+    const evaluation = deferred<DefaultDecision>();
+    const riskEvaluator = vi.fn(async () => evaluation.promise);
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const pending = app.handlers.get("tool_call")!(
+      {
+        toolName: "WebFetch",
+        toolCallId: "pending-risk-to-yolo",
+        input: { url: "http://127.0.0.1/admin" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
+
+    await app.commands.get("yolo")!.handler("", app.context);
+    evaluation.resolve({
+      action: "block",
+      risk: "HARD",
+      reason: "Stale private-network block.",
+    });
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.autoReviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale risk-evaluator rejection after entering YOLO", async () => {
+    const evaluationStarted = deferred();
+    const riskEvaluator = vi.fn(async (): Promise<DefaultDecision> => {
+      await evaluationStarted.promise;
+      throw new Error("stale evaluator failure");
+    });
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const pending = app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "pending-risk-error-to-yolo",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
+
+    await app.commands.get("yolo")!.handler("", app.context);
+    evaluationStarted.resolve();
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.autoReviewer.review).not.toHaveBeenCalled();
+  });
+
   it("requires fresh authorization when YOLO ends before execution", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
@@ -292,6 +356,8 @@ describe("Default mode registration", () => {
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
     await app.commands.get("yolo")!.handler("", app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await app.commands.get("auto")!.handler("", app.context);
     review.resolve({
       decision: "approve",
       risk: "low",
@@ -303,7 +369,15 @@ describe("Default mode registration", () => {
       block: true,
       reason: expect.stringContaining("permission context changed"),
     });
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await expect(
+      app.tools.get("bash").execute(
+        "auto-to-yolo",
+        { command: "rm -rf build" },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
   });
 
   it("invalidates a pending human approval when entering YOLO", async () => {
