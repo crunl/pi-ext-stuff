@@ -151,6 +151,8 @@ classification:
 - executable command substitution: `$()` or backticks outside single quotes
   and without escaping;
 - active redirects: `<` or `>` outside quotes and without escaping;
+- active top-level controls: `&`, `;`, `|`, newline, `(`, and `)` across the
+  complete command;
 - actual nested shell execution.
 
 An ordinary argument containing the words `bash`, `sh`, `zsh`, `fish`, or
@@ -177,12 +179,35 @@ command is:
 
 - a single parsed command segment;
 - a recognized Git mutation or supported `gh pr checkout`;
+- invoked as trusted plain `git`/`gh`, an explicitly trusted system executable,
+  or through a safe supported wrapper context;
+- free of repository-target/config-changing Git global options and malformed
+  or unknown global options;
 - free of active redirects;
 - free of executable substitution;
+- free of active top-level shell control/grouping syntax;
 - not executed through a nested shell.
 
 Compound commands, pipelines, substitutions, redirects, and nested shells
 must not inherit Git metadata write access.
+
+Relative or unknown executable paths, command-scoped `PATH` or `GIT_*`
+overrides, and wrapper cwd changes remain mutation candidates but fail closed
+instead of receiving metadata access. Git global options are parsed with their
+real value arity, so a later mutation is not hidden by `-C`, `--git-dir`,
+`--work-tree`, `-c`, or `--config-env`.
+
+### Git remote operands
+
+Git network policy parses the remote operand according to the recognized
+subcommand's option grammar. It does not scan later refspecs for remote-like
+text. Explicit `http`, `https`, `ssh`, `git`, and SCP-like operands share one
+host normalizer; deterministic local paths are suppressed from network policy.
+Named or omitted remotes use repository config, with fetch selecting `url` and
+push selecting `pushurl` when present or otherwise `url` for each remote.
+
+Unknown or malformed remote options and non-local remote values that cannot be
+parsed produce a typed unsafe result and a deterministic HARD block.
 
 ## Git Metadata Ownership
 
