@@ -1280,6 +1280,65 @@ describe("Default mode registration", () => {
     ).toHaveLength(1);
   });
 
+  it("reports the active fallback when the selected reviewer later fails", async () => {
+    const reviewer = new PiAutoReviewer(
+      vi.fn(async () => {
+        throw new Error("non-retryable provider failure");
+      }) as any,
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "auto",
+        reviewer: {
+          provider: "configured-provider",
+          model: "configured-guardian",
+          reasoningEffort: "medium",
+        },
+      }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.model = {
+      provider: "active-provider",
+      id: "active-failed-review-model",
+    } as any;
+    app.context.modelRegistry = {
+      find: vi.fn(() => undefined),
+      getApiKeyAndHeaders: vi.fn(async () => ({
+        ok: true,
+        apiKey: "token",
+      })),
+    } as any;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "failed-fallback-notice",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+
+    expect(
+      app.notify.mock.calls.filter(
+        ([message]) => message === "Guardian preferred model unavailable; using active model",
+      ),
+    ).toHaveLength(1);
+
+    await app.commands.get("permissions")?.handler("", app.context);
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "reviewer active-provider/active-failed-review-model (active fallback)",
+      ),
+      "info",
+    );
+  });
+
   it("deduplicates fallback notices by the Guardian result model during an active-model race", async () => {
     const firstReview = deferred<{
       decision: "approve";

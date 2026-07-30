@@ -50,7 +50,12 @@ export async function resolveGuardianModel(
 ): Promise<GuardianModelSelection> {
   if (!context.reviewer) return verifyActiveModel(context, "active");
 
-  const preferred = context.modelRegistry.find(context.reviewer.provider, context.reviewer.model);
+  let preferred: Model<Api> | undefined;
+  try {
+    preferred = context.modelRegistry.find(context.reviewer.provider, context.reviewer.model);
+  } catch {
+    return verifyActiveModel(context, "active-fallback");
+  }
   if (preferred && (await hasUsablePiAuth(preferred, context.modelRegistry))) {
     return { model: preferred, source: "configured" };
   }

@@ -28,6 +28,7 @@ import { buildAutoReviewRequest } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
   type AutoReviewerFailureKind,
+  type GuardianReviewIdentity,
   PiAutoReviewer,
 } from "./auto-reviewer.ts";
 import {
@@ -114,6 +115,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const reviewControllers = new Map<string, AbortController>();
   let modeMutationTail: Promise<void> = Promise.resolve();
   let modeMutationGeneration = 0;
+  let lastGuardianSelection:
+    | {
+        guardian: GuardianReviewIdentity;
+        cwd: string;
+        configFingerprint: string;
+      }
+    | undefined;
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
@@ -762,14 +770,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               reason: "pi-permissions: permission context changed during Auto review",
             };
           }
+          const guardian = auto.action === "error" ? auto.error.guardian : auto.review.guardian;
+          if (guardian) {
+            lastGuardianSelection = {
+              guardian,
+              cwd: resolve(ctx.cwd),
+              configFingerprint,
+            };
+          }
           if (
-            auto.action !== "error" &&
-            auto.review.guardian?.source === "active-fallback" &&
-            auto.review.guardian.fallbackNotice === "configured-reviewer-unavailable" &&
+            guardian?.source === "active-fallback" &&
+            guardian.fallbackNotice === "configured-reviewer-unavailable" &&
             ctx.hasUI
           ) {
             const preferred = result.config.reviewer;
-            const guardian = auto.review.guardian;
             const noticeKey = fingerprintValue({
               configFingerprint,
               preferredProvider: preferred?.provider,
@@ -992,9 +1006,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               : sandboxState.kind === "failed"
                 ? `sandbox error: ${sandboxState.error}`
                 : "sandbox pending";
-        const reviewerSummary = config.reviewer
-          ? `${config.reviewer.provider}/${config.reviewer.model}`
-          : "current session model";
+        const configFingerprint = fingerprintConfig(config);
+        const lastFallback =
+          lastGuardianSelection?.guardian.source === "active-fallback" &&
+          lastGuardianSelection.cwd === resolve(ctx.cwd) &&
+          lastGuardianSelection.configFingerprint === configFingerprint &&
+          lastGuardianSelection.guardian.provider === ctx.model?.provider &&
+          lastGuardianSelection.guardian.model === ctx.model.id
+            ? lastGuardianSelection.guardian
+            : undefined;
+        const reviewerSummary = lastFallback
+          ? `${lastFallback.provider}/${lastFallback.model} (active fallback)`
+          : config.reviewer
+            ? `${config.reviewer.provider}/${config.reviewer.model}`
+            : "current session model";
         const autoSummary =
           runtime.mode === "auto"
             ? runtime.autoState.paused

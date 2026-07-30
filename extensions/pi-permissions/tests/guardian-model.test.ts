@@ -85,6 +85,25 @@ describe("resolveGuardianModel", () => {
     });
   });
 
+  it("falls back when configured Guardian registry lookup throws", async () => {
+    const selected = await resolveGuardianModel({
+      modelRegistry: {
+        find: () => {
+          throw new Error("registry backend failed");
+        },
+        getApiKeyAndHeaders: async () => ({ ok: true }),
+      },
+      activeModel,
+      reviewer: configuredReviewer,
+    });
+
+    expect(selected).toMatchObject({
+      model: activeModel,
+      source: "active-fallback",
+      fallbackNotice: "configured-reviewer-unavailable",
+    });
+  });
+
   it("rechecks auth when configured and active models are the same object", async () => {
     const modelRegistry = {
       find: () => preferredModel,

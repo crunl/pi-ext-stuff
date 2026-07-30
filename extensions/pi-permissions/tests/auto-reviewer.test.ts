@@ -134,6 +134,39 @@ describe("PiAutoReviewer", () => {
     );
   });
 
+  it("carries active-fallback identity on a selected reviewer failure", async () => {
+    const activeModel = { provider: "openai", id: "main" } as any;
+    const reviewer = new PiAutoReviewer(
+      vi.fn(async () => {
+        throw new Error("non-retryable provider failure");
+      }) as any,
+    );
+
+    await expect(
+      reviewer.review(request, {
+        guardianSession,
+        modelRegistry: {
+          find: () => undefined,
+          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
+        } as any,
+        activeModel,
+        reviewer: {
+          provider: "missing",
+          model: "guardian",
+          reasoningEffort: "medium",
+        },
+      }),
+    ).rejects.toMatchObject({
+      kind: "provider",
+      guardian: {
+        provider: "openai",
+        model: "main",
+        source: "active-fallback",
+        fallbackNotice: "configured-reviewer-unavailable",
+      },
+    });
+  });
+
   it("classifies missing models and malformed output as typed failures", async () => {
     const reviewer = new PiAutoReviewer(vi.fn() as any);
     await expect(

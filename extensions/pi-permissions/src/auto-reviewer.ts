@@ -49,11 +49,14 @@ export type AutoReviewerFailureKind =
   | "provider"
   | "parse";
 
+export type GuardianReviewIdentity = NonNullable<AutoReviewResult["guardian"]>;
+
 export class AutoReviewerFailure extends Error {
   constructor(
     readonly kind: AutoReviewerFailureKind,
     message: string,
     options?: ErrorOptions,
+    readonly guardian?: GuardianReviewIdentity,
   ) {
     super(message, options);
     this.name = "AutoReviewerFailure";
@@ -146,8 +149,8 @@ function cancelledFailure(): AutoReviewerFailure {
   return new AutoReviewerFailure("cancelled", "Auto review was cancelled");
 }
 
-function timeoutFailure(): AutoReviewerFailure {
-  return new AutoReviewerFailure("timeout", "Auto review timed out");
+function timeoutFailure(guardian: GuardianReviewIdentity): AutoReviewerFailure {
+  return new AutoReviewerFailure("timeout", "Auto review timed out", undefined, guardian);
 }
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -198,22 +201,23 @@ async function waitBeforeRetry(
   sleep: Sleep,
   attempt: number,
   deadline: number,
+  guardian: GuardianReviewIdentity,
   callerSignal?: AbortSignal,
 ): Promise<void> {
   const delayMs = guardianRetryDelayMs(attempt);
   const remainingMs = deadline - Date.now();
-  if (remainingMs <= delayMs) throw timeoutFailure();
+  if (remainingMs <= delayMs) throw timeoutFailure(guardian);
   const deadlineSignal = AbortSignal.timeout(remainingMs);
   const signal = callerSignal ? AbortSignal.any([callerSignal, deadlineSignal]) : deadlineSignal;
   try {
     await sleep(delayMs, signal);
   } catch (error) {
     if (callerSignal?.aborted) throw cancelledFailure();
-    if (deadlineSignal.aborted || Date.now() >= deadline) throw timeoutFailure();
+    if (deadlineSignal.aborted || Date.now() >= deadline) throw timeoutFailure(guardian);
     throw error;
   }
   if (callerSignal?.aborted) throw cancelledFailure();
-  if (Date.now() >= deadline) throw timeoutFailure();
+  if (Date.now() >= deadline) throw timeoutFailure(guardian);
 }
 
 export class PiAutoReviewer implements AutoReviewer {
@@ -241,6 +245,12 @@ export class PiAutoReviewer implements AutoReviewer {
       throw cancelledFailure();
     }
     const model = guardian.model;
+    const guardianIdentity: GuardianReviewIdentity = {
+      provider: model.provider,
+      model: model.id,
+      source: guardian.source,
+      ...(guardian.fallbackNotice === undefined ? {} : { fallbackNotice: guardian.fallbackNotice }),
+    };
 
     let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
     try {
@@ -249,12 +259,16 @@ export class PiAutoReviewer implements AutoReviewer {
       throw new AutoReviewerFailure(
         "unavailable",
         "No usable Guardian or active Pi model is available",
+        undefined,
+        guardianIdentity,
       );
     }
     if (!auth.ok) {
       throw new AutoReviewerFailure(
         "unavailable",
         "No usable Guardian or active Pi model is available",
+        undefined,
+        guardianIdentity,
       );
     }
     if (callerSignal?.aborted) {
@@ -275,7 +289,7 @@ export class PiAutoReviewer implements AutoReviewer {
       for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
         if (callerSignal?.aborted) throw cancelledFailure();
         const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) throw timeoutFailure();
+        if (remainingMs <= 0) throw timeoutFailure(guardianIdentity);
         const deadlineSignal = AbortSignal.timeout(remainingMs);
         const signal = callerSignal
           ? AbortSignal.any([callerSignal, deadlineSignal])
@@ -300,25 +314,32 @@ export class PiAutoReviewer implements AutoReviewer {
         } catch (error) {
           if (callerSignal?.aborted) throw cancelledFailure();
           if (deadlineSignal.aborted || Date.now() >= deadline) {
-            throw timeoutFailure();
+            throw timeoutFailure(guardianIdentity);
           }
           if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS || !isTransientProviderFailure(error)) {
-            throw new AutoReviewerFailure("provider", "Auto reviewer request failed", {
-              cause: error,
-            });
+            throw new AutoReviewerFailure(
+              "provider",
+              "Auto reviewer request failed",
+              {
+                cause: error,
+              },
+              guardianIdentity,
+            );
           }
-          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
           continue;
         }
 
         if (callerSignal?.aborted) throw cancelledFailure();
         if (deadlineSignal.aborted || Date.now() >= deadline) {
-          throw timeoutFailure();
+          throw timeoutFailure(guardianIdentity);
         }
         if (response.stopReason !== "stop") {
           const failure = new AutoReviewerFailure(
             "provider",
             `Auto reviewer stopped with ${response.stopReason}`,
+            undefined,
+            guardianIdentity,
           );
           if (
             attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
@@ -327,7 +348,7 @@ export class PiAutoReviewer implements AutoReviewer {
           ) {
             throw failure;
           }
-          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
           continue;
         }
 
@@ -340,26 +361,25 @@ export class PiAutoReviewer implements AutoReviewer {
           lease.commit(text);
           return {
             ...result,
-            guardian: {
-              provider: model.provider,
-              model: model.id,
-              source: guardian.source,
-              ...(guardian.fallbackNotice === undefined
-                ? {}
-                : { fallbackNotice: guardian.fallbackNotice }),
-            },
+            guardian: guardianIdentity,
           };
         } catch (error) {
           const failure = new AutoReviewerFailure(
             "parse",
             `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
             { cause: error },
+            guardianIdentity,
           );
           if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS) throw failure;
-          await waitBeforeRetry(this.sleep, attempt, deadline, callerSignal);
+          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
         }
       }
-      throw new AutoReviewerFailure("provider", "Auto reviewer request failed");
+      throw new AutoReviewerFailure(
+        "provider",
+        "Auto reviewer request failed",
+        undefined,
+        guardianIdentity,
+      );
     } finally {
       lease.release();
     }
