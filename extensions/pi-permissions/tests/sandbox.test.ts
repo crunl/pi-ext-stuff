@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-import { join } from "node:path";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { defaultProtectedWritePaths } from "../src/filesystem-policy.ts";
 import {
@@ -24,18 +24,17 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
-    expect(runtime.filesystem.denyWrite)
-      .not.toContain("/workspace/project/.pi/permissions.json");
+    expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/.pi/permissions.json");
     expect(runtime.network.allowedDomains).toEqual([]);
   });
 
   it("protects the plugin-local global configuration path", () => {
-    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent"))
-      .toContain(
-        "/workspace/agent/extensions/pi-permissions/config.json",
-      );
-    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent"))
-      .not.toContain("/workspace/agent/permissions.json");
+    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).toContain(
+      "/workspace/agent/extensions/pi-permissions/config.json",
+    );
+    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).not.toContain(
+      "/workspace/agent/permissions.json",
+    );
   });
 
   it("removes project write roots in read-only profile", () => {
@@ -107,9 +106,11 @@ describe("sandbox integration", () => {
       ALL_PROXY: "socks5://localhost:7891",
     });
     expect(ports).toEqual({ http: 7890, socks: 7891 });
-    expect(detectLocalProxyPorts({
-      HTTPS_PROXY: "http://proxy.example.com:8080",
-    })).toEqual({ http: undefined, socks: undefined });
+    expect(
+      detectLocalProxyPorts({
+        HTTPS_PROXY: "http://proxy.example.com:8080",
+      }),
+    ).toEqual({ http: undefined, socks: undefined });
 
     const runtime = withLocalProxy(
       createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project"),

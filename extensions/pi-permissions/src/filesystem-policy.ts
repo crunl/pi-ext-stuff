@@ -44,14 +44,12 @@ export function createFilesystemPolicy(
   protectedWritePaths = defaultProtectedWritePaths(cwd),
 ): ResolvedFilesystemPolicy {
   return {
-    allowWrite: config.profile === "read-only"
-      ? []
-      : config.filesystem.allowWrite.map((path) => resolvePolicyPath(path, cwd)),
+    allowWrite:
+      config.profile === "read-only"
+        ? []
+        : config.filesystem.allowWrite.map((path) => resolvePolicyPath(path, cwd)),
     denyRead: [...config.filesystem.denyRead],
-    denyWrite: [
-      ...config.filesystem.denyWrite,
-      ...protectedWritePaths,
-    ],
+    denyWrite: [...config.filesystem.denyWrite, ...protectedWritePaths],
     protectedWritePaths: [...protectedWritePaths],
   };
 }

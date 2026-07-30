@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type PermissionsConfig, fingerprintConfig } from "./config.ts";
+import { fingerprintConfig, type PermissionsConfig } from "./config.ts";
 
 export type PermissionMode = "default" | "plan" | "auto" | "yolo";
 
@@ -55,7 +55,11 @@ function isSessionState(value: unknown): value is PermissionSessionState {
     return false;
   }
   if (value.plan !== undefined) {
-    if (!isRecord(value.plan) || typeof value.plan.markdown !== "string" || !planStatuses.has(value.plan.status as NonNullable<PermissionSessionState["plan"]>["status"])) {
+    if (
+      !isRecord(value.plan) ||
+      typeof value.plan.markdown !== "string" ||
+      !planStatuses.has(value.plan.status as NonNullable<PermissionSessionState["plan"]>["status"])
+    ) {
       return false;
     }
   }

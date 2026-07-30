@@ -42,9 +42,7 @@ async function canonicalize(path: string): Promise<string> {
 }
 
 function globMatches(value: string, pattern: string): boolean {
-  const expression = pattern
-    .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
-    .replace(/\*/g, ".*");
+  const expression = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${expression}$`).test(value);
 }
 
@@ -55,23 +53,27 @@ async function matchesProtectedPattern(
   canonicalCwd: string,
   patterns: string[],
 ): Promise<boolean> {
-  return (await Promise.all(patterns.map(async (rawPattern) => {
-    const pattern = expandHome(rawPattern);
-    if (isAbsolute(pattern)) {
-      if (pattern.includes("*")) {
-        return globMatches(lexicalPath, pattern) || globMatches(canonicalPath, pattern);
-      }
-      const canonicalPattern = await canonicalize(pattern);
-      return isWithin(lexicalPath, pattern) || isWithin(canonicalPath, canonicalPattern);
-    }
-    const candidates = [
-      basename(lexicalPath),
-      relative(lexicalCwd, lexicalPath),
-      basename(canonicalPath),
-      relative(canonicalCwd, canonicalPath),
-    ];
-    return candidates.some((candidate) => globMatches(candidate, pattern));
-  }))).some(Boolean);
+  return (
+    await Promise.all(
+      patterns.map(async (rawPattern) => {
+        const pattern = expandHome(rawPattern);
+        if (isAbsolute(pattern)) {
+          if (pattern.includes("*")) {
+            return globMatches(lexicalPath, pattern) || globMatches(canonicalPath, pattern);
+          }
+          const canonicalPattern = await canonicalize(pattern);
+          return isWithin(lexicalPath, pattern) || isWithin(canonicalPath, canonicalPattern);
+        }
+        const candidates = [
+          basename(lexicalPath),
+          relative(lexicalCwd, lexicalPath),
+          basename(canonicalPath),
+          relative(canonicalCwd, canonicalPath),
+        ];
+        return candidates.some((candidate) => globMatches(candidate, pattern));
+      }),
+    )
+  ).some(Boolean);
 }
 
 /** Resolves symlinks in every existing ancestor before comparing path components. */
@@ -83,17 +85,15 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
     : resolve(lexicalCwd, expandHome(path));
   const canonicalPath = await canonicalize(requested);
   const protectedControls = policy.protectedWritePaths ?? [
-    resolve(
-      homedir(),
-      ".pi/agent/extensions/pi-permissions/config.json",
-    ),
+    resolve(homedir(), ".pi/agent/extensions/pi-permissions/config.json"),
   ];
   const canonicalControls = await Promise.all(protectedControls.map(canonicalize));
 
-  if (policy.operation === "write" && (
-    protectedControls.some((control) => isWithin(requested, control))
-    || canonicalControls.some((control) => isWithin(canonicalPath, control))
-  )) {
+  if (
+    policy.operation === "write" &&
+    (protectedControls.some((control) => isWithin(requested, control)) ||
+      canonicalControls.some((control) => isWithin(canonicalPath, control)))
+  ) {
     return { allowed: false, canonicalPath, reason: "permission control path is protected" };
   }
 
@@ -104,12 +104,21 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
 
   if (policy.operation === "read") return { allowed: true, canonicalPath };
 
-  const writeRoots = await Promise.all(policy.allowWrite.map(async (root) => {
-    const expanded = expandHome(root);
-    const absolute = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-    return { lexical: isAbsolute(expanded) ? expanded : resolve(lexicalCwd, expanded), canonical: await canonicalize(absolute) };
-  }));
-  if (!writeRoots.some((root) => isWithin(requested, root.lexical) && isWithin(canonicalPath, root.canonical))) {
+  const writeRoots = await Promise.all(
+    policy.allowWrite.map(async (root) => {
+      const expanded = expandHome(root);
+      const absolute = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+      return {
+        lexical: isAbsolute(expanded) ? expanded : resolve(lexicalCwd, expanded),
+        canonical: await canonicalize(absolute),
+      };
+    }),
+  );
+  if (
+    !writeRoots.some(
+      (root) => isWithin(requested, root.lexical) && isWithin(canonicalPath, root.canonical),
+    )
+  ) {
     return { allowed: false, canonicalPath, reason: "write path is outside allowed roots" };
   }
 

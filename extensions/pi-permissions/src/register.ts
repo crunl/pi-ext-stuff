@@ -43,7 +43,6 @@ import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
-import type { PermissionMode } from "./state.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -58,6 +57,7 @@ import {
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
+import type { PermissionMode } from "./state.ts";
 
 export interface RegisterExtensionOptions {
   agentDir?: string;
@@ -94,10 +94,7 @@ function executableMode(mode: PermissionMode): ExecutablePermissionMode {
   return mode === "plan" ? "default" : mode;
 }
 
-function requiresSandbox(
-  mode: ExecutablePermissionMode,
-  config: PermissionsConfig,
-): boolean {
+function requiresSandbox(mode: ExecutablePermissionMode, config: PermissionsConfig): boolean {
   return mode !== "yolo" && config.sandbox.enabled;
 }
 
@@ -263,15 +260,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     candidateOverride?: LoadedPermissionsConfig,
   ): Promise<LoadedPermissionsConfig> => {
     const key = configKey(ctx);
-    const cachedMode =
-      targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
+    const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
     if (!force && loaded && loadedKey === key) {
-      const effectiveCachedMode =
-        cachedMode ?? executableMode(loaded.config.defaultMode);
-      if (
-        !requiresSandbox(effectiveCachedMode, loaded.config) ||
-        sandboxState.kind === "ready"
-      ) {
+      const effectiveCachedMode = cachedMode ?? executableMode(loaded.config.defaultMode);
+      if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
         return loaded;
       }
     }
@@ -279,9 +271,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw activationFailure.error;
     }
 
-    const candidate = candidateOverride ?? await loadPermissionsConfig(agentDir);
-    const effectiveMode =
-      cachedMode ?? executableMode(candidate.config.defaultMode);
+    const candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
+    const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
     const previous = {
       loaded,
       loadedKey,
@@ -689,10 +680,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     resetBranchPermissionContext("session changed");
     try {
       const candidate = await loadPermissionsConfig(agentDir);
-      const restoredRuntime = new PermissionModeRuntime(
-        candidate.config,
-        pi.appendEntry.bind(pi),
-      );
+      const restoredRuntime = new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi));
       restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
       const restoredMode = executableMode(restoredRuntime.mode);
       await activateConfig(ctx, true, restoredMode, candidate);
@@ -954,14 +942,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     },
   );
 
-  const activateMode = async (mode: ExecutablePermissionMode, ctx: ExtensionContext): Promise<void> =>
+  const activateMode = async (
+    mode: ExecutablePermissionMode,
+    ctx: ExtensionContext,
+  ): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
-        const result = await activateConfig(
-          ctx,
-          mode === "yolo" ? false : ctx.isIdle(),
-          mode,
-        );
+        const result = await activateConfig(ctx, mode === "yolo" ? false : ctx.isIdle(), mode);
         if (generation !== modeMutationGeneration) return;
         const runtime = ensureModeRuntime(result.config);
         if (runtime.snapshot().configFingerprint !== fingerprintConfig(result.config)) {
@@ -1101,8 +1088,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         const candidate = await loadPermissionsConfig(agentDir);
         const candidateFingerprint = fingerprintConfig(candidate.config);
         const restoredRuntime =
-          !modeRuntime ||
-          modeRuntime.snapshot().configFingerprint !== candidateFingerprint
+          !modeRuntime || modeRuntime.snapshot().configFingerprint !== candidateFingerprint
             ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
             : undefined;
         restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);

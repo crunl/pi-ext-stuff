@@ -56,9 +56,7 @@ describe("permissions config", () => {
   });
 
   it("accepts YOLO as a configured default mode", () => {
-    expect(() =>
-      validatePermissionsConfig({ version: 1, defaultMode: "yolo" }),
-    ).not.toThrow();
+    expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).not.toThrow();
   });
 
   it("produces stable fingerprints", () => {
