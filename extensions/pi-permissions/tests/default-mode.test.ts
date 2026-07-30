@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
 import { evaluateDefaultRequest } from "../src/default-mode.ts";
 
@@ -12,14 +12,24 @@ function config(overrides: Partial<PermissionsConfig> = {}): PermissionsConfig {
   };
 }
 
+async function createGitDirectory(path: string, contents = ""): Promise<void> {
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(path, "config"), contents);
+  await mkdir(join(path, "objects"));
+  await mkdir(join(path, "refs"));
+}
+
 describe("Default mode gate", () => {
   it("allows ordinary workspace reads and writes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
-    await expect(evaluateDefaultRequest("read", { path: "README.md" }, cwd, config()))
-      .resolves.toMatchObject({ action: "allow", risk: "LOW" });
-    await expect(evaluateDefaultRequest("write", { path: "notes.txt", content: "hello" }, cwd, config()))
-      .resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    await expect(
+      evaluateDefaultRequest("read", { path: "README.md" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    await expect(
+      evaluateDefaultRequest("write", { path: "notes.txt", content: "hello" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     await expect(
       evaluateDefaultRequest(
         "write",
@@ -34,36 +44,37 @@ describe("Default mode gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
     for (const path of [".env", "nested/.env", "nested/.env.local", "nested/deploy.key"]) {
-      await expect(evaluateDefaultRequest("read", { path }, cwd, config()))
-        .resolves.toMatchObject({ action: "block" });
-      await expect(evaluateDefaultRequest("write", { path, content: "secret" }, cwd, config()))
-        .resolves.toMatchObject({ action: "block" });
+      await expect(evaluateDefaultRequest("read", { path }, cwd, config())).resolves.toMatchObject({
+        action: "block",
+      });
+      await expect(
+        evaluateDefaultRequest("write", { path, content: "secret" }, cwd, config()),
+      ).resolves.toMatchObject({ action: "block" });
     }
   });
 
   it("keeps repository control directories read-only", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
-    for (const path of [
-      ".git/config",
-      ".agents/AGENTS.md",
-      ".codex/config.toml",
-    ]) {
-      await expect(evaluateDefaultRequest("write", { path, content: "x" }, cwd, config()))
-        .resolves.toMatchObject({
-          action: "block",
-          reason: "permission control path is protected",
-        });
+    for (const path of [".git/config", ".agents/AGENTS.md", ".codex/config.toml"]) {
+      await expect(
+        evaluateDefaultRequest("write", { path, content: "x" }, cwd, config()),
+      ).resolves.toMatchObject({
+        action: "block",
+        reason: "permission control path is protected",
+      });
     }
   });
 
   it("prompts for external writes and dangerous Bash", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
-    await expect(evaluateDefaultRequest("write", { path: "/var/tmp/out.txt", content: "x" }, cwd, config()))
-      .resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
-    await expect(evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, config()))
-      .resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    await expect(
+      evaluateDefaultRequest("write", { path: "/var/tmp/out.txt", content: "x" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 
   it("auto-runs ordinary shell syntax inside the sandbox", async () => {
@@ -82,15 +93,19 @@ describe("Default mode gate", () => {
       "gh --version",
       "curl --version",
     ]) {
-      await expect(evaluateDefaultRequest("bash", { command }, cwd, config()))
-        .resolves.toMatchObject({ action: "allow", risk: "LOW" });
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     }
   });
 
   it("prompts for token-aware network commands and external mutations", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const cases = [
-      ["gh issue comment 1 --body https://example.com", ["api.github.com", "github.com", "uploads.github.com"]],
+      [
+        "gh issue comment 1 --body https://example.com",
+        ["api.github.com", "github.com", "uploads.github.com"],
+      ],
       ["gh pr edit 1 --title x", ["api.github.com", "github.com", "uploads.github.com"]],
       ["node -e \"fetch('https://api.github.com/repos')\"", ["api.github.com"]],
       ["python -c \"requests.get('https://example.com')\"", ["example.com"]],
@@ -98,15 +113,16 @@ describe("Default mode gate", () => {
       ["env curl https://example.com", ["example.com"]],
       ["env -u HTTPS_PROXY curl https://example.com", ["example.com"]],
       ["sudo -u root curl https://example.com", ["example.com"]],
-      ["bash -c \"curl https://example.com\"", ["example.com"]],
-      ["bash -lc \"curl https://example.com\"", ["example.com"]],
+      ['bash -c "curl https://example.com"', ["example.com"]],
+      ['bash -lc "curl https://example.com"', ["example.com"]],
       ["git clone https://github.com/openai/codex.git", ["github.com"]],
       ["npm install lodash", ["registry.npmjs.org"]],
     ] as const;
 
     for (const [command, networkHosts] of cases) {
-      await expect(evaluateDefaultRequest("bash", { command }, cwd, config()))
-        .resolves.toMatchObject({ action: "prompt", risk: "HARD", networkHosts });
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({ action: "prompt", risk: "HARD", networkHosts });
     }
   });
 
@@ -129,18 +145,18 @@ describe("Default mode gate", () => {
 
   it("infers the approved host for git operations from the repository remote", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
-    await mkdir(join(cwd, ".git"));
-    await writeFile(
-      join(cwd, ".git", "config"),
+    await createGitDirectory(
+      join(cwd, ".git"),
       '[remote "origin"]\n\turl = git@github.com:openai/codex.git\n',
     );
 
-    await expect(evaluateDefaultRequest("bash", { command: "git push origin main" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "prompt",
-        risk: "HARD",
-        networkHosts: ["github.com"],
-      });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git push origin main" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts: ["github.com"],
+    });
   });
 
   it("includes the requested public host in network approval", async () => {
@@ -157,22 +173,23 @@ describe("Default mode gate", () => {
 
   it("requests one-call Git metadata access for agent Git mutations", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
-    await mkdir(join(cwd, ".git"));
-    await writeFile(join(cwd, ".git", "config"), "");
+    await createGitDirectory(join(cwd, ".git"));
     const gitRoot = await realpath(join(cwd, ".git"));
 
-    await expect(evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
-        filesystemWriteRoots: [gitRoot],
-      });
-    await expect(evaluateDefaultRequest("bash", { command: "gh pr checkout 123" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "prompt",
-        networkHosts: ["api.github.com", "github.com", "uploads.github.com"],
-        filesystemWriteRoots: [gitRoot],
-      });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "REVIEW",
+      filesystemWriteRoots: [gitRoot],
+    });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "gh pr checkout 123" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      networkHosts: ["api.github.com", "github.com", "uploads.github.com"],
+      filesystemWriteRoots: [gitRoot],
+    });
     for (const command of [
       "git commit -m 'document input > output'",
       'git commit -m "document bash support"',
@@ -205,33 +222,84 @@ describe("Default mode gate", () => {
     await mkdir(join(cwd, ".git"));
     await writeFile(join(cwd, ".git", "config"), "");
 
-    await expect(evaluateDefaultRequest("bash", { command }, cwd, config()))
-      .resolves.toMatchObject({
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
         action: "block",
         reason: expect.stringContaining("single Git mutation"),
-      });
+      },
+    );
   });
 
   it("blocks a repository pointer that would grant the filesystem root", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await writeFile(join(cwd, ".git"), "gitdir: /\n");
 
-    await expect(evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "block",
-        reason: expect.stringContaining("unsafe Git metadata"),
-      });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("unsafe Git"),
+    });
   });
 
   it("blocks a repository symlink that would grant the filesystem root", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await symlink("/", join(cwd, ".git"));
 
-    await expect(evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "block",
-        reason: expect.stringContaining("unsafe Git metadata"),
-      });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("unsafe Git metadata"),
+    });
+  });
+
+  it("blocks a repository symlink that redirects Git access outside the workspace", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
+    await writeFile(join(unrelated, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(unrelated, "config"), "");
+    await mkdir(join(unrelated, "objects"));
+    await mkdir(join(unrelated, "refs"));
+    await symlink(unrelated, join(cwd, ".git"));
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("unsafe Git metadata"),
+    });
+  });
+
+  it("blocks a gitdir pointer that does not belong to the current worktree", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
+    await writeFile(join(unrelated, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(unrelated, "config"), "");
+    await mkdir(join(unrelated, "objects"));
+    await mkdir(join(unrelated, "refs"));
+    await writeFile(join(cwd, ".git"), `gitdir: ${unrelated}\n`);
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("unsafe Git metadata"),
+    });
+  });
+
+  it("blocks a back-pointer without valid worktree or submodule metadata", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
+    await writeFile(join(cwd, ".git"), `gitdir: ${unrelated}\n`);
+    await writeFile(join(unrelated, "gitdir"), `${join(cwd, ".git")}\n`);
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("unsafe Git"),
+    });
   });
 
   it("grants both per-worktree and common Git metadata roots", async () => {
@@ -242,17 +310,40 @@ describe("Default mode gate", () => {
     await mkdir(cwd);
     await mkdir(worktreeGit, { recursive: true });
     await writeFile(join(commonGit, "config"), "");
+    await writeFile(join(commonGit, "HEAD"), "ref: refs/heads/main\n");
+    await mkdir(join(commonGit, "objects"));
+    await mkdir(join(commonGit, "refs"));
     await writeFile(join(worktreeGit, "HEAD"), "ref: refs/heads/main\n");
     await writeFile(join(worktreeGit, "commondir"), "../..\n");
     await writeFile(join(cwd, ".git"), `gitdir: ${worktreeGit}\n`);
+    await writeFile(join(worktreeGit, "gitdir"), `${join(cwd, ".git")}\n`);
     const canonicalWorktreeGit = await realpath(worktreeGit);
     const canonicalCommonGit = await realpath(commonGit);
 
-    await expect(evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()))
-      .resolves.toMatchObject({
-        action: "prompt",
-        filesystemWriteRoots: [canonicalWorktreeGit, canonicalCommonGit],
-      });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      filesystemWriteRoots: [canonicalWorktreeGit, canonicalCommonGit],
+    });
+  });
+
+  it("preserves a structurally valid submodule gitdir pointer", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-submodule-"));
+    const gitDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-module-git-"));
+    await writeFile(join(gitDirectory, "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(gitDirectory, "config"), `[core]\n\tworktree = ${cwd}\n`);
+    await mkdir(join(gitDirectory, "objects"));
+    await mkdir(join(gitDirectory, "refs"));
+    await writeFile(join(cwd, ".git"), `gitdir: ${gitDirectory}\n`);
+    const canonicalGitDirectory = await realpath(gitDirectory);
+
+    await expect(
+      evaluateDefaultRequest("bash", { command: "git add README.md" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      filesystemWriteRoots: [canonicalGitDirectory],
+    });
   });
 
   it("blocks private shell network targets without offering approval", async () => {
@@ -291,14 +382,21 @@ describe("Default mode gate", () => {
     const outputRoot = join("/var/tmp", outputName);
     const canonicalOutputRoot = join(await realpath("/var/tmp"), outputName);
 
-    await expect(evaluateDefaultRequest("bash", {
-      command: `mkdir -p ${outputRoot}`,
-      sandbox_permissions: "with_additional_permissions",
-      additional_permissions: {
-        file_system: { write: [outputRoot, outputRoot] },
-      },
-      justification: "Write the requested build artifact",
-    }, cwd, config())).resolves.toMatchObject({
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        {
+          command: `mkdir -p ${outputRoot}`,
+          sandbox_permissions: "with_additional_permissions",
+          additional_permissions: {
+            file_system: { write: [outputRoot, outputRoot] },
+          },
+          justification: "Write the requested build artifact",
+        },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
       action: "prompt",
       risk: "REVIEW",
       filesystemWriteRoots: [canonicalOutputRoot],
@@ -308,37 +406,58 @@ describe("Default mode gate", () => {
   it("rejects malformed or protected agent bash permission requests", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
-    await expect(evaluateDefaultRequest("bash", {
-      command: "mkdir -p /var/tmp/output",
-      additional_permissions: {
-        file_system: { write: ["/var/tmp/output"] },
-      },
-      justification: "missing sandbox permission mode",
-    }, cwd, config())).resolves.toMatchObject({
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        {
+          command: "mkdir -p /var/tmp/output",
+          additional_permissions: {
+            file_system: { write: ["/var/tmp/output"] },
+          },
+          justification: "missing sandbox permission mode",
+        },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
       action: "block",
       reason: expect.stringContaining("sandbox_permissions"),
     });
 
-    await expect(evaluateDefaultRequest("bash", {
-      command: "touch /pi-permissions-unsafe",
-      sandbox_permissions: "with_additional_permissions",
-      additional_permissions: {
-        file_system: { write: ["/"] },
-      },
-      justification: "Request an unsafe broad root",
-    }, cwd, config())).resolves.toMatchObject({
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        {
+          command: "touch /pi-permissions-unsafe",
+          sandbox_permissions: "with_additional_permissions",
+          additional_permissions: {
+            file_system: { write: ["/"] },
+          },
+          justification: "Request an unsafe broad root",
+        },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
       action: "block",
       reason: expect.stringContaining("filesystem root"),
     });
 
-    await expect(evaluateDefaultRequest("bash", {
-      command: "printf x > .agents/AGENTS.md",
-      sandbox_permissions: "with_additional_permissions",
-      additional_permissions: {
-        file_system: { write: [join(cwd, ".agents")] },
-      },
-      justification: "modify protected instructions",
-    }, cwd, config())).resolves.toMatchObject({
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        {
+          command: "printf x > .agents/AGENTS.md",
+          sandbox_permissions: "with_additional_permissions",
+          additional_permissions: {
+            file_system: { write: [join(cwd, ".agents")] },
+          },
+          justification: "modify protected instructions",
+        },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
       action: "block",
       reason: expect.stringContaining("protected"),
     });
@@ -354,14 +473,18 @@ describe("Default mode gate", () => {
     ];
     const configured = config({ rules });
 
-    await expect(evaluateDefaultRequest("bash", { command: "npm publish" }, cwd, configured))
-      .resolves.toMatchObject({ action: "block" });
-    await expect(evaluateDefaultRequest("bash", { command: "npm test" }, cwd, configured))
-      .resolves.toMatchObject({ action: "prompt" });
-    await expect(evaluateDefaultRequest("bash", { command: "npm run lint" }, cwd, configured))
-      .resolves.toMatchObject({ action: "allow" });
-    await expect(evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, configured))
-      .resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "npm publish" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "block" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "prompt" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "npm run lint" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 
   it("summarizes requests without including write content", async () => {
