@@ -111,10 +111,8 @@ export function registerExtension(
   const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
-  const guardianSessionManager =
-    options.guardianSessionManager ?? new GuardianReviewSessionManager();
   const autoReviewer =
-    options.autoReviewer ?? new PiAutoReviewer(undefined, guardianSessionManager);
+    options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
@@ -175,7 +173,7 @@ export function registerExtension(
     approvedNetworkHosts.clear();
     approvedWriteRoots.clear();
     autoApprovalLedger.clear();
-    guardianSessionManager.invalidate();
+    autoReviewer.invalidateSession();
   };
 
   const resetBranchPermissionContext = (reason: string): void => {

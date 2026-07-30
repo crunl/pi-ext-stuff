@@ -34,6 +34,7 @@ export interface AutoReviewerContext {
 }
 
 export interface AutoReviewer {
+  invalidateSession(): void;
   review(
     request: AutoReviewRequest,
     context: AutoReviewerContext,
@@ -221,6 +222,10 @@ export class PiAutoReviewer implements AutoReviewer {
     private readonly sessions = new GuardianReviewSessionManager(),
     private readonly sleep: Sleep = sleepWithAbort,
   ) {}
+
+  invalidateSession(): void {
+    this.sessions.invalidate();
+  }
 
   async review(
     request: AutoReviewRequest,

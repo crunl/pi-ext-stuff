@@ -4,10 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerExtension } from "../src/register.ts";
-import {
-  AutoReviewerFailure,
-  type AutoReviewer,
-} from "../src/auto-reviewer.ts";
+import { AutoReviewerFailure, PiAutoReviewer, type AutoReviewer } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 
@@ -35,7 +32,6 @@ function harness(
     runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   },
   reviewer?: AutoReviewer,
-  guardianSessionManager?: GuardianReviewSessionManager,
 ) {
   const handlers = new Map<string, (...args: any[]) => any>();
   const commands = new Map<string, { handler: (...args: any[]) => any }>();
@@ -68,6 +64,7 @@ function harness(
   const sendMessage = vi.fn();
   const abort = vi.fn();
   const autoReviewer = reviewer ?? {
+    invalidateSession: vi.fn(),
     review: vi.fn(async () => ({
       decision: "approve" as const,
       risk: "low" as const,
@@ -92,7 +89,6 @@ function harness(
     filteringProxyFactory,
     sandboxCoordinator,
     autoReviewer,
-    guardianSessionManager,
   });
   const context = {
     cwd: agentDir,
@@ -130,7 +126,7 @@ function harness(
 }
 
 describe("Default mode registration", () => {
-  it("invalidates Guardian history across permission-context lifecycle boundaries", async () => {
+  it("invalidates the configured reviewer's Guardian history across lifecycle boundaries", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const sessions = new GuardianReviewSessionManager();
     const key = {
@@ -139,42 +135,77 @@ describe("Default mode registration", () => {
       provider: "openai",
       model: "guardian",
     };
-    const previous = sessions.open(key, "old review");
-    previous.commit('{"outcome":"allow"}');
-    previous.release();
-    const invalidate = vi.spyOn(sessions, "invalidate");
-    const app = harness(agentDir, false, true, {}, undefined, undefined, sessions);
+    const response = {
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            risk_level: "low",
+            user_authorization: "high",
+            outcome: "allow",
+            rationale: "Authorized.",
+          }),
+        },
+      ],
+      stopReason: "stop",
+    };
+    const reviewer = new PiAutoReviewer(vi.fn(async () => response) as any, sessions);
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    const reviewContext = {
+      guardianSession: { cwd: agentDir, configFingerprint: "config-a" },
+      modelRegistry: {
+        getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
+      } as any,
+      activeModel: { provider: "openai", id: "guardian" } as any,
+    };
+    let reviewNumber = 0;
+    const expectActualHistoryCleared = async (trigger: () => Promise<unknown>) => {
+      reviewNumber += 1;
+      await reviewer.review(
+        {
+          toolCallId: `review-${reviewNumber}`,
+          tool: "bash",
+          input: { command: "npm test" },
+          cwd: agentDir,
+          sandboxProfile: "workspace-write",
+          defaultRisk: "REVIEW",
+          defaultReason: "review",
+          networkHosts: [],
+          filesystemWriteRoots: [],
+          userMessages: ["run tests"],
+        },
+        reviewContext,
+      );
+      const before = sessions.open(key, "before lifecycle boundary");
+      expect(before.context.messages).toHaveLength(3);
+      before.release();
 
-    await app.handlers.get("session_start")?.(
-      { type: "session_start", reason: "startup" },
-      app.context,
+      await trigger();
+
+      const after = sessions.open(key, "after lifecycle boundary");
+      expect(after.sessionId).not.toBe(before.sessionId);
+      expect(after.context.messages).toHaveLength(1);
+      after.release();
+    };
+
+    await expectActualHistoryCleared(() =>
+      app.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
+        app.context,
+      ),
     );
-    const afterSessionStart = invalidate.mock.calls.length;
-    const afterReset = sessions.open(key, "after reset");
-    expect(afterSessionStart).toBeGreaterThan(0);
-    expect(afterReset.sessionId).not.toBe(previous.sessionId);
-    expect(afterReset.context.messages).toHaveLength(1);
-    afterReset.commit('{"outcome":"allow"}');
-    afterReset.release();
-
-    await app.commands.get("auto")?.handler("", app.context);
-    expect(invalidate.mock.calls.length).toBeGreaterThan(afterSessionStart);
-    const afterModeChange = invalidate.mock.calls.length;
-    const afterModeReset = sessions.open(key, "after mode change");
-    expect(afterModeReset.sessionId).not.toBe(afterReset.sessionId);
-    expect(afterModeReset.context.messages).toHaveLength(1);
-    afterModeReset.release();
-    const beforeConfigReload = invalidate.mock.calls.length;
-    await app.commands.get("permissions")?.handler("", app.context);
-    expect(invalidate.mock.calls.length).toBeGreaterThan(beforeConfigReload);
-
-    await app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
-    await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
-    expect(invalidate.mock.calls.length).toBeGreaterThan(afterModeChange);
-    const afterTreeChange = invalidate.mock.calls.length;
-
-    await app.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, app.context);
-    expect(invalidate.mock.calls.length).toBeGreaterThan(afterTreeChange);
+    await expectActualHistoryCleared(() => app.commands.get("auto")?.handler("", app.context));
+    await expectActualHistoryCleared(() =>
+      app.commands.get("permissions")?.handler("", app.context),
+    );
+    await expectActualHistoryCleared(async () => {
+      await app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
+      await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
+    });
+    await expectActualHistoryCleared(() =>
+      app.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, app.context),
+    );
   });
 
   it("loads Default mode and exposes status commands", async () => {
@@ -492,6 +523,7 @@ describe("Default mode registration", () => {
       JSON.stringify({ defaultMode: "auto" }),
     );
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
@@ -522,6 +554,7 @@ describe("Default mode registration", () => {
 
   it("trusts only interactive or RPC input as reviewer authorization", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
@@ -570,6 +603,7 @@ describe("Default mode registration", () => {
 
   it("does not carry trusted authorization or approvals across session tree branches", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
@@ -684,7 +718,7 @@ describe("Default mode registration", () => {
       globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
-    const reviewer = { review: vi.fn() };
+    const reviewer = { invalidateSession: vi.fn(), review: vi.fn() };
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
@@ -711,7 +745,7 @@ describe("Default mode registration", () => {
       globalConfigPath(agentDir),
       JSON.stringify({ defaultMode: "auto" }),
     );
-    const reviewer = { review: vi.fn() };
+    const reviewer = { invalidateSession: vi.fn(), review: vi.fn() };
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
@@ -794,6 +828,7 @@ describe("Default mode registration", () => {
 
   it("does not reuse an older approval after the same tool-call ID is denied", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi
         .fn()
         .mockResolvedValueOnce({
@@ -845,6 +880,7 @@ describe("Default mode registration", () => {
 
   it("returns reviewer denial to the agent and never executes", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
@@ -883,6 +919,7 @@ describe("Default mode registration", () => {
 
   it("lets /approve authorize one exact Auto-reviewed retry", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async (request: any) =>
         request.approvalOverride
           ? {
@@ -984,6 +1021,7 @@ describe("Default mode registration", () => {
 
   it("fails closed without human fallback when the reviewer is unavailable", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("timeout", "review timed out");
       }),
@@ -1017,6 +1055,7 @@ describe("Default mode registration", () => {
 
   it("fails closed on reviewer failure without dialog-capable UI", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("provider", "provider unavailable");
       }),
@@ -1049,6 +1088,7 @@ describe("Default mode registration", () => {
 
   it("fails closed when the reviewer request cannot be built", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(),
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
@@ -1081,6 +1121,7 @@ describe("Default mode registration", () => {
 
   it("pauses after three denials and resumes on the next agent turn", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
@@ -1149,6 +1190,7 @@ describe("Default mode registration", () => {
       }) => void
     > = [];
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(
         async () =>
           new Promise<{
@@ -1276,6 +1318,7 @@ describe("Default mode registration", () => {
       JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
     );
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
@@ -1360,6 +1403,7 @@ describe("Default mode registration", () => {
     }) => void;
     let reviewSignal: AbortSignal | undefined;
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(
         async (_request, _context, signal) => {
           reviewSignal = signal;
@@ -1455,6 +1499,7 @@ describe("Default mode registration", () => {
       rationale: string;
     }>();
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi
         .fn()
         .mockImplementationOnce(async () => firstReview.promise)
@@ -1520,6 +1565,7 @@ describe("Default mode registration", () => {
       rationale: string;
     }) => void;
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(
         async () =>
           new Promise<{
@@ -1579,6 +1625,7 @@ describe("Default mode registration", () => {
       rationale: string;
     }) => void;
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(
         async () =>
           new Promise<{

@@ -8,6 +8,7 @@ const context = {} as any;
 describe("Auto review policy", () => {
   it("approves and resets consecutive denials", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "approve" as const,
         risk: "low" as const,
@@ -31,6 +32,7 @@ describe("Auto review policy", () => {
 
   it("denies and pauses on the configured consecutive threshold", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
         decision: "deny" as const,
         risk: "high" as const,
@@ -48,6 +50,7 @@ describe("Auto review policy", () => {
 
   it("returns a closed failure without mutating denial state", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("timeout", "review timed out");
       }),
@@ -61,6 +64,7 @@ describe("Auto review policy", () => {
 
   it("propagates caller cancellation instead of requesting fallback", async () => {
     const reviewer = {
+      invalidateSession: vi.fn(),
       review: vi.fn(async () => {
         throw new AutoReviewerFailure("cancelled", "turn aborted");
       }),
