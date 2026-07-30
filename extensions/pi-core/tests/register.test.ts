@@ -6,6 +6,7 @@ describe("pi-core registration", () => {
     const tools = new Map<string, any>();
     registerExtension({
       on: vi.fn(),
+      registerCommand: vi.fn(),
       registerTool: (tool: any) => tools.set(tool.name, tool),
     } as any);
 
@@ -21,6 +22,7 @@ describe("pi-core registration", () => {
     const tools = new Map<string, any>();
     registerExtension({
       on: vi.fn(),
+      registerCommand: vi.fn(),
       registerTool: (tool: any) => tools.set(tool.name, tool),
     } as any);
     const theme = {

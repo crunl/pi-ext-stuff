@@ -21,7 +21,13 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui, locateEditor } from "./editor-float-panel.ts";
 import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
 
-/** Selector component constructor names cleared for floating. */
+/**
+ * Cross-jiti brand for selectors we own. constructor.name alone is brittle
+ * across loaders; host components (SettingsSelectorComponent) still match by name.
+ */
+const FLOATABLE_SELECTOR = Symbol.for("@x1a2h1/pi-core:floatable-selector");
+
+/** Host selector constructor names cleared for floating. */
 const FLOAT_ALLOWLIST = new Set(["SettingsSelectorComponent"]);
 
 /** Horizontal inset matching the editor's paddingX. */
@@ -40,8 +46,15 @@ interface PatchableContainer extends RenderableComponent {
 /** Border color used for the selector frame (theme dim fallback: identity). */
 type ColorFn = (text: string) => string;
 
-function isAllowlistedSelector(component: unknown): component is RenderableComponent {
+/** Mark a selector instance so selector-float will lift it into EditorFloatPanel. */
+export function markFloatableSelector<T extends object>(component: T): T {
+  (component as Record<symbol, true>)[FLOATABLE_SELECTOR] = true;
+  return component;
+}
+
+export function isAllowlistedSelector(component: unknown): component is RenderableComponent {
   if (!component || typeof (component as RenderableComponent).render !== "function") return false;
+  if ((component as Record<symbol, unknown>)[FLOATABLE_SELECTOR] === true) return true;
   const name = (component as object).constructor?.name;
   return typeof name === "string" && FLOAT_ALLOWLIST.has(name);
 }

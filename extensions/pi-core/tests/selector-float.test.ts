@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { FloatingTui } from "../src/tui/editor-float-panel.ts";
-import { installSelectorFloat } from "../src/tui/selector-float.ts";
+import { EffortSelectorComponent } from "../src/tui/effort-command.ts";
+import { installSelectorFloat, isAllowlistedSelector } from "../src/tui/selector-float.ts";
+import { fakeSelectListTheme, fakeTheme } from "./helpers/effort-fixtures.ts";
 
 // Named class so constructor-name allowlisting matches the real host.
 class SettingsSelectorComponent {
@@ -94,6 +96,31 @@ describe("installSelectorFloat", () => {
     expect(panelLines[1]).toContain("Settings");
     expect(panelLines[1]).toContain("│");
     expect(tui.overlays[0].options.nonCapturing).toBe(true);
+  });
+
+  it("floats /effort via Symbol brand (not constructor.name)", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    installSelectorFloat(tui, editor);
+
+    const effort = new EffortSelectorComponent(
+      fakeTheme,
+      "high",
+      ["off", "high"],
+      vi.fn(),
+      vi.fn(),
+      fakeSelectListTheme,
+    );
+    expect(isAllowlistedSelector(effort)).toBe(true);
+
+    tui.editorContainer.children[0] = effort;
+    const lines = tui.editorContainer.render(80);
+
+    expect(lines).toEqual([]);
+    expect(tui.overlays).toHaveLength(1);
+    const panelLines = tui.overlays[0].component.render(0).join("\n");
+    expect(panelLines).toContain("╭");
+    expect(panelLines).toContain("Thinking Level");
   });
 
   it("leaves non-allowlisted selectors inline", () => {
