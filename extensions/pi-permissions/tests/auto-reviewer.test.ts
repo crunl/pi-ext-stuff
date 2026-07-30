@@ -162,6 +162,73 @@ describe("PiAutoReviewer", () => {
     await expect(pending).rejects.toMatchObject({ kind: "cancelled" });
   });
 
+  it("stops after cancellation during Guardian selection before request auth", async () => {
+    const controller = new AbortController();
+    let resolveSelectionAuth: (auth: { ok: true }) => void;
+    const selectionAuth = new Promise<{ ok: true }>((resolve) => {
+      resolveSelectionAuth = resolve;
+    });
+    const complete = vi.fn(async () => response);
+    const modelRegistry = {
+      find: () => ({ provider: "deepseek", id: "reasoner" }),
+      getApiKeyAndHeaders: vi.fn(() => selectionAuth),
+    } as any;
+    const reviewer = new PiAutoReviewer(complete as any);
+
+    const pending = reviewer.review(
+      request,
+      {
+        modelRegistry,
+        activeModel: { provider: "openai", id: "main" } as any,
+        reviewer: {
+          provider: "deepseek",
+          model: "reasoner",
+          reasoningEffort: "medium",
+        },
+      },
+      controller.signal,
+    );
+    controller.abort();
+    resolveSelectionAuth!({ ok: true });
+
+    await expect(pending).rejects.toMatchObject({ kind: "cancelled" });
+    expect(modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back after selected Guardian request auth fails", async () => {
+    const configuredModel = { provider: "deepseek", id: "reasoner" } as any;
+    const activeModel = { provider: "openai", id: "main" } as any;
+    const complete = vi.fn(async () => response);
+    const modelRegistry = {
+      find: () => configuredModel,
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true })
+        .mockResolvedValueOnce({ ok: false, error: "unavailable" }),
+    } as any;
+    const reviewer = new PiAutoReviewer(complete as any);
+
+    await expect(
+      reviewer.review(request, {
+        modelRegistry,
+        activeModel,
+        reviewer: {
+          provider: "deepseek",
+          model: "reasoner",
+          reasoningEffort: "medium",
+        },
+      }),
+    ).rejects.toMatchObject({
+      kind: "unavailable",
+      message: "No usable Guardian or active Pi model is available",
+    });
+
+    expect(modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledTimes(2);
+    expect(modelRegistry.getApiKeyAndHeaders).not.toHaveBeenCalledWith(activeModel);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
   it("enforces timeout when a provider ignores the abort signal", async () => {
     const timeout = new AbortController();
     const timeoutSpy = vi

@@ -77,6 +77,9 @@ export class PiAutoReviewer implements AutoReviewer {
     }
 
     const guardian = await resolveGuardianModel(context);
+    if (callerSignal?.aborted) {
+      throw new AutoReviewerFailure("cancelled", "Auto review was cancelled");
+    }
     const model = guardian.model;
 
     let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
