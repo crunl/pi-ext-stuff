@@ -194,6 +194,203 @@ describe("Default mode registration", () => {
     expect(app.filteringProxyFactory).not.toHaveBeenCalled();
   });
 
+  it("starts configured YOLO even when sandbox initialization would fail", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    app.sandboxManager.initialize.mockRejectedValue(
+      new Error("unsupported"),
+    );
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await expect(
+      app.tools.get("bash").execute(
+        "yolo-no-sandbox",
+        { command: "pwd" },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it("keeps YOLO active when switching to Default cannot initialize sandbox", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.sandboxManager.initialize.mockRejectedValueOnce(
+      new Error("sandbox unavailable"),
+    );
+
+    await app.commands.get("default")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("sandbox unavailable"),
+      "error",
+    );
+  });
+
+  it("initializes sandbox before committing a switch from YOLO to Default", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.commands.get("default")!.handler("", app.context);
+
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
+  it("restores YOLO before deciding whether to initialize sandbox", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.context.sessionManager.getBranch = (() => [
+      {
+        type: "custom",
+        customType: "pi-permissions-state",
+        data: {
+          mode: "yolo",
+          auto: { consecutiveDenials: 0, paused: false },
+          sandboxProfile: "workspace-write",
+          configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
+        },
+      },
+    ]) as any;
+    app.sandboxManager.initialize.mockRejectedValue(
+      new Error("must not initialize"),
+    );
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+
+    expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+  });
+
+  it("enters YOLO without waiting for a sandbox lease while working", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const exclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: exclusive,
+    };
+    const app = harness(
+      agentDir,
+      false,
+      true,
+      {},
+      coordinator as any,
+    );
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const callsBeforeSwitch = exclusive.mock.calls.length;
+
+    await app.commands.get("yolo")!.handler("", app.context);
+
+    expect(exclusive).toHaveBeenCalledTimes(callsBeforeSwitch);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+  });
+
+  it("does not unsandbox an operation that started before entering YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const started = deferred<void>();
+    const release = deferred<void>();
+    app.bashExecute.mockImplementationOnce(async () => {
+      started.resolve();
+      await release.promise;
+      return { content: [], details: undefined };
+    });
+
+    const running = app.tools.get("bash").execute(
+      "sandboxed-before-yolo",
+      { command: "pwd" },
+      undefined,
+      undefined,
+      app.context,
+    );
+    await started.promise;
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(
+      agentDir,
+      expect.objectContaining({ operations: expect.any(Object) }),
+    );
+
+    await app.commands.get("yolo")!.handler("", app.context);
+    release.resolve();
+    await running;
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+  });
+
+  it("does not sandbox a native operation that started before leaving YOLO", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const started = deferred<void>();
+    const release = deferred<void>();
+    app.bashExecute.mockImplementationOnce(async () => {
+      started.resolve();
+      await release.promise;
+      return { content: [], details: undefined };
+    });
+
+    const running = app.tools.get("bash").execute(
+      "native-before-default",
+      { command: "pwd" },
+      undefined,
+      undefined,
+      app.context,
+    );
+    await started.promise;
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
+
+    await app.commands.get("default")!.handler("", app.context);
+    release.resolve();
+    await running;
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
   it("uses native Write and Edit backends in YOLO", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
@@ -1897,6 +2094,33 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 
+  it("keeps YOLO active when a forced reload cannot prepare restored Default", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    await app.commands.get("yolo")!.handler("", app.context);
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ sandbox: { network: { allowedDomains: ["candidate.example"] } } }),
+    );
+    app.sandboxManager.initialize.mockImplementation(async (config: any) => {
+      if (config.network.allowedDomains.includes("candidate.example")) {
+        throw new Error("candidate rejected");
+      }
+    });
+
+    await app.commands.get("permissions")!.handler("", app.context);
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining("candidate rejected"),
+      "error",
+    );
+  });
+
   it("cycles Default, Auto, and YOLO with Shift+Tab after thinking is migrated", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
@@ -1914,6 +2138,29 @@ describe("Default mode registration", () => {
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
+  it("initializes sandbox before cycling from configured YOLO to Default", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ defaultMode: "yolo" }),
+    );
+    await writeFile(
+      join(agentDir, "keybindings.json"),
+      JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
+    );
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.sandboxManager.initialize.mockClear();
+
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
   });
 

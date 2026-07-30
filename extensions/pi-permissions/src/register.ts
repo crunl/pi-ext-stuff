@@ -90,6 +90,23 @@ const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
 const guardianFallbackNoticeKeys = new Set<string>();
 
+function executableMode(mode: PermissionMode): ExecutablePermissionMode {
+  return mode === "plan" ? "default" : mode;
+}
+
+function requiresSandbox(
+  mode: ExecutablePermissionMode,
+  config: PermissionsConfig,
+): boolean {
+  return mode !== "yolo" && config.sandbox.enabled;
+}
+
+function nextExecutableMode(mode: ExecutablePermissionMode): ExecutablePermissionMode {
+  if (mode === "default") return "auto";
+  if (mode === "auto") return "yolo";
+  return "default";
+}
+
 function countWrittenLines(content: string): number {
   if (content.length === 0) return 0;
   const normalized = content.replace(/\r\n?/g, "\n");
@@ -242,12 +259,29 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const activateConfigUnlocked = async (
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
+    targetMode?: ExecutablePermissionMode,
+    candidateOverride?: LoadedPermissionsConfig,
   ): Promise<LoadedPermissionsConfig> => {
     const key = configKey(ctx);
-    if (!force && loaded && loadedKey === key) return loaded;
-    if (!force && activationFailure?.key === key) throw activationFailure.error;
+    const cachedMode =
+      targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
+    if (!force && loaded && loadedKey === key) {
+      const effectiveCachedMode =
+        cachedMode ?? executableMode(loaded.config.defaultMode);
+      if (
+        !requiresSandbox(effectiveCachedMode, loaded.config) ||
+        sandboxState.kind === "ready"
+      ) {
+        return loaded;
+      }
+    }
+    if (!force && activationFailure?.key === key && cachedMode !== "yolo") {
+      throw activationFailure.error;
+    }
 
-    const candidate = await loadPermissionsConfig(agentDir);
+    const candidate = candidateOverride ?? await loadPermissionsConfig(agentDir);
+    const effectiveMode =
+      cachedMode ?? executableMode(candidate.config.defaultMode);
     const previous = {
       loaded,
       loadedKey,
@@ -261,6 +295,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           defaultProtectedWritePaths(ctx.cwd, agentDir),
         )
       : undefined;
+
+    if (!requiresSandbox(effectiveMode, candidate.config)) {
+      activationFailure = undefined;
+      if (force) invalidatePermissionContext("permission context changed");
+      loaded = candidate;
+      loadedKey = key;
+      baseSandboxConfig = candidateSandbox;
+      sandboxState = { kind: "disabled" };
+      setDefaultStatus(ctx);
+      return candidate;
+    }
 
     try {
       await sandboxManager.reset();
@@ -312,8 +357,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const activateConfig = (
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
+    targetMode?: ExecutablePermissionMode,
+    candidateOverride?: LoadedPermissionsConfig,
   ): Promise<LoadedPermissionsConfig> =>
-    sandboxCoordinator.runExclusive(() => activateConfigUnlocked(ctx, force));
+    targetMode === "yolo" && !force && loaded && loadedKey === configKey(ctx)
+      ? Promise.resolve(loaded)
+      : sandboxCoordinator.runExclusive(() =>
+          activateConfigUnlocked(ctx, force, targetMode, candidateOverride),
+        );
 
   const assertExecutionAuthorized = async (
     tool: string,
@@ -637,9 +688,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
     try {
-      const result = await activateConfig(ctx, true);
-      modeRuntime = new PermissionModeRuntime(result.config, pi.appendEntry.bind(pi));
-      restoreModeState(ctx, result.config);
+      const candidate = await loadPermissionsConfig(agentDir);
+      const restoredRuntime = new PermissionModeRuntime(
+        candidate.config,
+        pi.appendEntry.bind(pi),
+      );
+      restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
+      const restoredMode = executableMode(restoredRuntime.mode);
+      await activateConfig(ctx, true, restoredMode, candidate);
+      modeRuntime = restoredRuntime;
       setDefaultStatus(ctx);
       if ((await shiftTabAvailability(agentDir)) === "reserved" && !shortcutWarningShown) {
         shortcutWarningShown = true;
@@ -900,7 +957,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const activateMode = async (mode: ExecutablePermissionMode, ctx: ExtensionContext): Promise<void> =>
     runModeMutation(async (generation) => {
       try {
-        const result = await activateConfig(ctx, ctx.isIdle());
+        const result = await activateConfig(
+          ctx,
+          mode === "yolo" ? false : ctx.isIdle(),
+          mode,
+        );
         if (generation !== modeMutationGeneration) return;
         const runtime = ensureModeRuntime(result.config);
         if (runtime.snapshot().configFingerprint !== fingerprintConfig(result.config)) {
@@ -1004,10 +1065,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           );
           return;
         }
-        const result = await activateConfig(ctx);
+        let runtime = modeRuntime;
+        if (!runtime) {
+          const initial = await activateConfig(ctx);
+          runtime = ensureModeRuntime(initial.config);
+        }
+        const targetMode = nextExecutableMode(executableMode(runtime.mode));
+        const result = await activateConfig(
+          ctx,
+          targetMode === "yolo" ? false : ctx.isIdle(),
+          targetMode,
+        );
         if (generation !== modeMutationGeneration) return;
-        const runtime = ensureModeRuntime(result.config);
-        runtime.cycle();
+        runtime = ensureModeRuntime(result.config);
+        runtime.activate(targetMode);
         invalidatePermissionContext("permission mode changed");
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
@@ -1027,12 +1098,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     description: "Show the active pi-permissions policy",
     handler: async (_args, ctx) => {
       try {
-        const result = await activateConfig(ctx, true);
+        const candidate = await loadPermissionsConfig(agentDir);
+        const candidateFingerprint = fingerprintConfig(candidate.config);
+        const restoredRuntime =
+          !modeRuntime ||
+          modeRuntime.snapshot().configFingerprint !== candidateFingerprint
+            ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
+            : undefined;
+        restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
+        const targetMode = executableMode(
+          (restoredRuntime ?? modeRuntime)?.mode ?? candidate.config.defaultMode,
+        );
+        const result = await activateConfig(ctx, true, targetMode, candidate);
+        if (restoredRuntime) modeRuntime = restoredRuntime;
         const config = result.config;
         const runtime = ensureModeRuntime(config);
-        if (runtime.snapshot().configFingerprint !== fingerprintConfig(config)) {
-          runtime.restore(ctx.sessionManager.getBranch(), config);
-        }
         setDefaultStatus(ctx);
         if (runtime.mode === "yolo") {
           ctx.ui.notify("YOLO · Full Access · sandbox off · approvals never", "info");
