@@ -572,8 +572,6 @@ export function shellCommandUsesDirectImplicitGitPush(command: string): boolean 
     .map((arg) => arg.toLowerCase())
     .find((arg) => !arg.startsWith("-"));
   return (
-    command.trim() === segment.source &&
-    executableIndex(shellWords(segment.source)) === 0 &&
     subcommand === "push" &&
     segmentUsesImplicitGitNetwork(segment) &&
     !segment.hasRedirect &&

@@ -159,7 +159,13 @@ describe("Default mode gate", () => {
     });
   });
 
-  it("blocks a private Git pushurl even when the fetch URL is public", async () => {
+  it.each([
+    "git push origin main",
+    "env git push origin main",
+    "command git push origin main",
+    "sudo -u root git push origin main",
+    "X=1 git push origin main",
+  ])("blocks a private Git pushurl for %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(
       join(cwd, ".git"),
@@ -171,13 +177,13 @@ describe("Default mode gate", () => {
       ].join("\n"),
     );
 
-    await expect(
-      evaluateDefaultRequest("bash", { command: "git push origin main" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("Private"),
-    });
+    await expect(evaluateDefaultRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
+      {
+        action: "block",
+        risk: "HARD",
+        reason: expect.stringContaining("Private"),
+      },
+    );
   });
 
   it("uses only the public fetch URL for Git fetch", async () => {

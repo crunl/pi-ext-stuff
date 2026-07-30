@@ -135,11 +135,16 @@ describe("Git metadata eligibility", () => {
   it.each([
     ["git push origin main", true],
     ["/usr/bin/git push origin main", true],
+    ["env git push origin main", true],
+    ["command git push origin main", true],
+    ["sudo -u root git push origin main", true],
+    ["X=1 git push origin main", true],
     ["git fetch origin", false],
     ["git push https://github.com/owner/repo.git main", false],
-    ["env git push origin main", false],
     ['bash -c "git push origin main"', false],
-  ] as const)("identifies direct implicit Git push in %s", (command, expected) => {
+    ["git push origin main; git status", false],
+    ["git push origin main > push.log", false],
+  ] as const)("identifies one parsed implicit Git push in %s", (command, expected) => {
     expect(shellCommandUsesDirectImplicitGitPush(command)).toBe(expected);
   });
 });
