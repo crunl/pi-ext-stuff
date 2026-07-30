@@ -1,7 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_SYSTEM_PROMPT } from "../src/auto-review-request.ts";
-import { type GuardianSessionKey, GuardianReviewSessionManager } from "../src/guardian-session.ts";
+import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
 
 const key: GuardianSessionKey = {
   cwd: "/workspace/project",
