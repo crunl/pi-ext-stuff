@@ -40,8 +40,9 @@ function harness(
   const setStatus = vi.fn();
   const notify = vi.fn();
   const confirm = vi.fn(async () => approved);
-  const select = vi.fn(async () =>
-    approved ? "Allow Once" : undefined as string | undefined);
+  const select = vi.fn(async (_prompt?: string, _choices?: string[]) =>
+    approved ? "Allow Once" : (undefined as string | undefined),
+  );
   const sandboxManager = {
     initialize: vi.fn(async (_config: unknown) => undefined),
     wrapWithSandbox: vi.fn(async (command: string) => command),
@@ -479,17 +480,23 @@ describe("Default mode registration", () => {
     expect(app.select).toHaveBeenCalledOnce();
   });
 
-  it("keeps mode switching out of the Default approval panel", async () => {
+  it("switches future approvals to Auto while authorizing only the current exact call", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
-    app.select.mockResolvedValueOnce("Allow Once");
+    app.select.mockResolvedValueOnce(
+      "Allow, switch future approvals to Auto",
+    );
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
+    const resetCount = app.sandboxManager.reset.mock.calls.length;
+    const invalidationCount = vi.mocked(
+      app.autoReviewer.invalidateSession,
+    ).mock.calls.length;
     const current = {
       toolName: "bash",
-      toolCallId: "human-allow-current",
+      toolCallId: "human-transition-current",
       input: { command: "rm -rf build" },
     };
 
@@ -500,10 +507,19 @@ describe("Default mode registration", () => {
       expect.stringContaining("rm -rf build"),
       [
         "Allow Once",
+        "Allow, switch future approvals to Auto",
         "Deny",
       ],
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.notify).toHaveBeenLastCalledWith(
+      "pi-permissions: Auto mode 已启用",
+      "info",
+    );
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetCount);
+    expect(app.autoReviewer.invalidateSession).toHaveBeenCalledTimes(
+      invalidationCount,
+    );
     await expect(
       app.tools.get("bash").execute(
         current.toolCallId,
@@ -513,7 +529,56 @@ describe("Default mode registration", () => {
         app.context,
       ),
     ).resolves.toBeDefined();
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        current.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
     expect(app.select).toHaveBeenCalledOnce();
+  });
+
+  it("consumes a Default-to-Auto approval when the execution input changes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.select.mockResolvedValueOnce(
+      "Allow, switch future approvals to Auto",
+    );
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const current = {
+      toolName: "bash",
+      toolCallId: "human-transition-altered",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(
+      app.handlers.get("tool_call")!(current, app.context),
+    ).resolves.toBeUndefined();
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        { command: "rm -rf dist" },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+    await expect(
+      app.tools.get("bash").execute(
+        current.toolCallId,
+        current.input,
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
   });
 
   it("routes only Default prompts through Auto reviewer", async () => {
@@ -1019,45 +1084,66 @@ describe("Default mode registration", () => {
     );
   });
 
-  it("fails closed without human fallback when the reviewer is unavailable", async () => {
-    const reviewer = {
-      invalidateSession: vi.fn(),
-      review: vi.fn(async () => {
-        throw new AutoReviewerFailure("timeout", "review timed out");
-      }),
-    };
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    await writeFile(
-      globalConfigPath(agentDir),
-      JSON.stringify({ defaultMode: "auto" }),
-    );
-    const app = harness(agentDir, true, true, {}, undefined, reviewer);
-    await app.handlers.get("session_start")?.(
-      { type: "session_start", reason: "startup" },
-      app.context,
-    );
-
-    await expect(
-      app.handlers.get("tool_call")!(
-        {
-          toolName: "bash",
-          toolCallId: "fallback",
-          input: { command: "rm -rf build" },
-        },
+  it.each(["timeout", "provider", "parse"] as const)(
+    "offers sanitized human fallback after final Guardian %s failure",
+    async (kind) => {
+      const rawError = `secret ${kind} endpoint error`;
+      const reviewer = {
+        invalidateSession: vi.fn(),
+        review: vi.fn(async () => {
+          throw new AutoReviewerFailure(kind, rawError);
+        }),
+      };
+      const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+      await writeFile(
+        globalConfigPath(agentDir),
+        JSON.stringify({ defaultMode: "auto" }),
+      );
+      const app = harness(agentDir, false, true, {}, undefined, reviewer);
+      app.select.mockResolvedValueOnce("Allow Once");
+      await app.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
         app.context,
-      ),
-    ).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringMatching(/timed out[\s\S]*not proof/i),
-    });
-    expect(app.select).not.toHaveBeenCalled();
-  });
+      );
+      const current = {
+        toolName: "bash",
+        toolCallId: `fallback-${kind}`,
+        input: { command: "rm -rf build" },
+      };
 
-  it("fails closed on reviewer failure without dialog-capable UI", async () => {
+      await expect(
+        app.handlers.get("tool_call")!(current, app.context),
+      ).resolves.toBeUndefined();
+      expect(app.select).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `Guardian review failed (${kind}); manual approval is required.`,
+        ),
+        [
+          "Allow Once",
+          "Allow, switch future approvals to Auto",
+          "Deny",
+        ],
+      );
+      expect(app.select.mock.calls[0]?.[0]).not.toContain(rawError);
+      expect(app.abort).not.toHaveBeenCalled();
+      await expect(
+        app.tools.get("bash").execute(
+          current.toolCallId,
+          current.input,
+          undefined,
+          undefined,
+          app.context,
+        ),
+      ).resolves.toBeDefined();
+    },
+  );
+
+  it("fails closed with a generic reason on reviewer failure without UI", async () => {
+    const rawError = "secret provider endpoint unavailable";
     const reviewer = {
       invalidateSession: vi.fn(),
       review: vi.fn(async () => {
-        throw new AutoReviewerFailure("provider", "provider unavailable");
+        throw new AutoReviewerFailure("provider", rawError);
       }),
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
@@ -1082,8 +1168,91 @@ describe("Default mode registration", () => {
       ),
     ).resolves.toMatchObject({
       block: true,
-      reason: expect.stringContaining("provider unavailable"),
+      reason:
+        "pi-permissions Auto review failed closed; interactive approval is required",
     });
+    const result = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "headless-fallback-repeat",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    expect(result?.reason).not.toContain(rawError);
+    expect(app.select).not.toHaveBeenCalled();
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
+  it("notifies once when configured Guardian selection falls back to the active model", async () => {
+    const response = {
+      role: "assistant",
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          risk_level: "low",
+          user_authorization: "high",
+          outcome: "allow",
+          rationale: "Authorized.",
+        }),
+      }],
+      stopReason: "stop",
+    };
+    const invoke = vi.fn(async (_model: unknown) => response);
+    const reviewer = new PiAutoReviewer(invoke as any);
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "auto",
+        reviewer: {
+          provider: "configured-provider",
+          model: "configured-guardian",
+          reasoningEffort: "medium",
+        },
+      }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    const activeModel = {
+      provider: "active-provider",
+      id: "active-task-5-model",
+    };
+    app.context.model = activeModel as any;
+    app.context.modelRegistry = {
+      find: vi.fn(() => undefined),
+      getApiKeyAndHeaders: vi.fn(async () => ({
+        ok: true,
+        apiKey: "token",
+      })),
+    } as any;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    for (const toolCallId of ["fallback-notice-1", "fallback-notice-2"]) {
+      await expect(
+        app.handlers.get("tool_call")!(
+          {
+            toolName: "bash",
+            toolCallId,
+            input: { command: "rm -rf build" },
+          },
+          app.context,
+        ),
+      ).resolves.toBeUndefined();
+    }
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[0]?.[0]).toBe(activeModel);
+    expect(invoke.mock.calls[1]?.[0]).toBe(activeModel);
+    expect(
+      app.notify.mock.calls.filter(
+        ([message]) =>
+          message ===
+          "Guardian preferred model unavailable; using active model",
+      ),
+    ).toHaveLength(1);
   });
 
   it("fails closed when the reviewer request cannot be built", async () => {

@@ -33,6 +33,7 @@ import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { buildAutoReviewRequest } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
+  type AutoReviewerFailureKind,
   PiAutoReviewer,
 } from "./auto-reviewer.ts";
 import { reviewAutoPrompt } from "./auto-policy.ts";
@@ -82,14 +83,16 @@ export interface RegisterExtensionOptions {
 
 interface ApprovedCall {
   authority: "user" | "auto-review";
-  mode: "default" | "auto";
+  mode: "default" | "auto" | "user-transition";
   configFingerprint: string;
   cwd: string;
   requestFingerprint: string;
 }
 
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
+const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
+const guardianFallbackNoticeKeys = new Set<string>();
 
 function countWrittenLines(content: string): number {
   if (content.length === 0) return 0;
@@ -210,7 +213,7 @@ export function registerExtension(
     config: PermissionsConfig,
     cwd: string,
     authority: "user" | "auto-review",
-    mode: "default" | "auto",
+    mode: ApprovedCall["mode"],
   ): void => {
     if (!event.toolCallId) return;
     approvedCalls.set(event.toolCallId, {
@@ -331,14 +334,16 @@ export function registerExtension(
   ): Promise<void> => {
     const approval = approvedCalls.get(id);
     approvedCalls.delete(id);
-    const approved = approval !== undefined
-      && approval.cwd === resolve(ctx.cwd)
-      && approval.configFingerprint === fingerprintConfig(loaded!.config)
-      && approval.mode === modeRuntime?.mode
-      && approval.requestFingerprint === fingerprintValue({
-        tool: tool.toLowerCase(),
-        input,
-      });
+    const approved =
+      approval !== undefined &&
+      approval.cwd === resolve(ctx.cwd) &&
+      approval.configFingerprint === fingerprintConfig(loaded!.config) &&
+      (approval.mode === "user-transition" || approval.mode === modeRuntime?.mode) &&
+      approval.requestFingerprint ===
+        fingerprintValue({
+          tool: tool.toLowerCase(),
+          input,
+        });
     const currentDecision = await evaluateDefaultRequest(
       tool,
       input,
@@ -584,6 +589,9 @@ export function registerExtension(
     decision: Extract<DefaultDecision, { action: "prompt" }>,
     config: PermissionsConfig,
     ctx: ExtensionContext,
+    options: {
+      guardianFailure?: AutoReviewerFailureKind;
+    } = {},
   ): Promise<ToolCallEventResult | void> => {
     if (!ctx.hasUI) {
       return {
@@ -601,7 +609,10 @@ export function registerExtension(
     const approvalEpoch = permissionContextEpoch;
 
     try {
-      const prompt = `pi-permissions · ${decision.risk}\n\n${event.toolName}: ${decision.summary}\n\n${decision.reason}${
+      const guardianFailure = options.guardianFailure === undefined
+        ? ""
+        : `Guardian review failed (${options.guardianFailure}); manual approval is required.\n\n`;
+      const prompt = `${guardianFailure}pi-permissions · ${decision.risk}\n\n${event.toolName}: ${decision.summary}\n\n${decision.reason}${
           decision.networkHosts?.length
             ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
             : ""
@@ -616,16 +627,45 @@ export function registerExtension(
         }`;
       const choice = await ctx.ui.select(
         prompt,
-        [DEFAULT_ALLOW_ONCE_CHOICE, DEFAULT_DENY_CHOICE],
+        [
+          DEFAULT_ALLOW_ONCE_CHOICE,
+          DEFAULT_ALLOW_AND_AUTO_CHOICE,
+          DEFAULT_DENY_CHOICE,
+        ],
       );
-      if (choice === DEFAULT_ALLOW_ONCE_CHOICE) {
+      if (
+        choice === DEFAULT_ALLOW_ONCE_CHOICE
+        || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE
+      ) {
         if (permissionContextEpoch !== approvalEpoch) {
           return {
             block: true,
             reason: "pi-permissions: approval context changed before confirmation",
           };
         }
-        grantApprovedCall(event, decision, config, ctx.cwd, "user", "default");
+        if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
+          grantApprovedCall(
+            event,
+            decision,
+            config,
+            ctx.cwd,
+            "user",
+            "user-transition",
+          );
+          runtime.activate("auto");
+          setDefaultStatus(ctx);
+          ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
+          return;
+        }
+        const approvalMode = runtime.mode === "auto" ? "auto" : "default";
+        grantApprovedCall(
+          event,
+          decision,
+          config,
+          ctx.cwd,
+          "user",
+          approvalMode,
+        );
         return;
       }
       return {
@@ -802,6 +842,30 @@ export function registerExtension(
             reason: "pi-permissions: permission context changed during Auto review",
           };
         }
+        if (
+          auto.action !== "error"
+          && auto.review.guardian?.source === "active-fallback"
+          && auto.review.guardian.fallbackNotice ===
+            "configured-reviewer-unavailable"
+          && ctx.hasUI
+        ) {
+          const preferred = result.config.reviewer;
+          const active = ctx.model;
+          const noticeKey = fingerprintValue({
+            configFingerprint,
+            preferredProvider: preferred?.provider,
+            preferredModel: preferred?.model,
+            activeProvider: active?.provider,
+            activeModel: active?.id,
+          });
+          if (!guardianFallbackNoticeKeys.has(noticeKey)) {
+            guardianFallbackNoticeKeys.add(noticeKey);
+            ctx.ui.notify(
+              "Guardian preferred model unavailable; using active model",
+              "warning",
+            );
+          }
+        }
         if (auto.action === "approve") {
           runtime.recordAutoReview("approve");
           grantApprovedCall(
@@ -840,14 +904,20 @@ export function registerExtension(
               `pi-permissions Auto denied: ${auto.review.rationale} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`,
           };
         }
-        const timeoutNote = auto.error.kind === "timeout"
-          ? " A timeout alone is not proof that the action is unsafe."
-          : "";
         runtime.recordAutoNonDenial();
+        if (ctx.hasUI) {
+          return requestHumanApproval(
+            event,
+            decision,
+            result.config,
+            ctx,
+            { guardianFailure: auto.error.kind },
+          );
+        }
         return {
           block: true,
           reason:
-            `pi-permissions Auto review failed closed: ${auto.error.message}.${timeoutNote} The action was not run.`,
+            "pi-permissions Auto review failed closed; interactive approval is required",
         };
       } catch (error: unknown) {
         if (reviewSignal.aborted) {
