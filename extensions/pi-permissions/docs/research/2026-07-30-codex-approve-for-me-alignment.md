@@ -6,7 +6,7 @@
   `789c72dcf62d7439863d4d2846454f05b3d51db6`](https://github.com/openai/codex/tree/789c72dcf62d7439863d4d2846454f05b3d51db6)。比较范围是 Guardian
   的 policy、prompt、review parser 和拒绝后精确重试语义；未来上游变更不会自动继承。
 - 本地实现基准：Task 1--3 与最终 Git command boundary 修复完成后的
-  `pi-permissions` `303aaaebef6ce7298c6ea9923d823dcd79b5332d`。本文件记录该实现，
+  `pi-permissions` `cc94b905df8b27e068954c458a5dda485b8bee7c`。本文件记录该实现，
   而不是把 Pi 的整套权限执行面宣称为 Codex 的复制品。
 - 核心分层：Guardian parser 只验证结构化响应契约；高风险是否可允许、授权证据的含义仍由 Guardian prompt/policy 决定。Pi 的 shell、Git metadata、受保护路径及网络判断是进入 Guardian 前的确定性本地策略，不属于 Guardian parity。
 
@@ -33,7 +33,7 @@
 | quote/escape-aware shell scanner | 只对活跃的 substitution、redirect 和真正以 `-c`/`--command` 执行的 shell 判为结构风险；普通参数里的 `bash` 或 `fish` 不是 nested shell。完整命令扫描还记录未引用、未转义的 `&`、`;`、`|`、换行和括号，因而 leading/trailing separator、background 与 outer grouping 都不能获得 Git metadata grant；引用或转义的字面 control 保持可用。 |
 | Git metadata ownership | `.git` 以 `lstat` 开始检查，拒绝 symlink，并验证普通仓库、linked worktree 与 submodule 的 metadata/back-pointer/`core.worktree` 所有权。失败闭合；只把验证后的 metadata roots 授予合格的直接 mutation。SSH remote 保持 SSH，读取配置不会重写 remote。 |
 | Git invocation / executable 边界 | Git global option 按真实 arity 解析；`-C`、`--git-dir`、`--work-tree`、`-c`、`--config-env` 等改变 target/config 的 option，以及未知或缺值 option，仍会暴露其后的 mutation/network candidate，但 metadata grant 失败闭合。只信任 plain `git`/`gh`、明确的只读系统 binary 路径及安全 wrapper context；`./git`、`/tmp/git`、command-scoped `PATH`/`GIT_*` 和 `env`/`sudo` cwd override 均确定性 HARD block。 |
-| Git remote 的网络目的 | 只按 Git subcommand grammar 解析 remote operand，不扫描后续 refspec。显式 `http`、`https`、`ssh`、`git` 与 SCP-like operand 共用 host normalizer，支持 IPv4、IPv6 与 ambiguous numeric target；确定的 local path 不进入网络策略。named/omitted remote 的 `fetch` 对每个 remote 只使用 `url`；`push` 优先该 remote 的 `pushurl`，没有时才回退 `url`，local `pushurl` 会抑制回退。未知 remote option 或无法解析且非确定 local 的 remote 产生 typed unsafe 结果并 HARD block。 |
+| Git remote 的网络目的 | 按 Git subcommand grammar 解析 remote operand，不扫描后续 refspec；`push --repo`、`fetch --multiple` 和 `submodule add` 的 option arity 分别保留显式 remote、检查全部 remotes、跳过 option value。显式 `http`、`https`、`ssh`、`git` 与 SCP-like operand 共用 host normalizer，支持 IPv4、IPv6 与 ambiguous numeric target；确定的 local path 不进入网络策略，remote-helper `transport::address` 失败闭合。named/omitted remote 的 `fetch` 对每个 remote 只使用 `url`；`push` 优先该 remote 的 `pushurl`，没有时才回退 `url`，local `pushurl` 会抑制回退。未知 remote option 或无法解析且非确定 local 的 remote 产生 typed unsafe 结果并 HARD block。 |
 | `git init` | 只为语法安全、单段、当前目录的 `git init` 或 `git init .` 处理初始化；bare、空参数或其他目标一律不获 metadata grant。当前目录没有 `.git` 时，prospective root 仅是 `realpath(cwd)/.git`；不会借用父仓库 metadata，存在 malformed/unsafe 当前 metadata 时仍失败闭合。 |
 | Default / Auto / YOLO 分层 | Default 与 Auto 都先经过 Pi 确定性策略；仅 review-eligible 的 Auto 请求到 Guardian。YOLO 在风险 evaluator、Guardian、人工 approval 和 sandbox execution 前返回原生工具执行。 |
 
@@ -41,12 +41,12 @@
 
 ## 最终验证证据
 
-- 六文件 focused suite：6/6 files、380/380 tests 通过。
+- 六文件 focused suite：6/6 files、387/387 tests 通过。
 - `npm run check`：`tsc --noEmit` 通过；所有本轮触及的 source/test 文件通过
   `biome check --error-on-warnings`，无 warning。
 - 完整 `npm test` 在外层 sandbox 首次仅因九个 filtering-proxy case 无法
   `listen 127.0.0.1` 而报 `EPERM`；在获准的本地 loopback 环境重跑同一命令后，
-  20 files / 470 tests 通过，1 file / 1 test（外部 core regression）按设计 skip。
+  20 files / 477 tests 通过，1 file / 1 test（外部 core regression）按设计 skip。
 - `npm run core:check` 验证已安装 `agent-loop.js`，SHA-256 为
   `e4af3082d8c95203aff6bf7aa590e63d6cd1d0225723db271eeb315ded01dd63`；
   `npm run core:test` 的 abort-ignorant prepared-tool regression 为 1/1 通过。

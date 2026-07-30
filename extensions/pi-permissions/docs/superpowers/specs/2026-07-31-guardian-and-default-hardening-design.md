@@ -205,6 +205,10 @@ text. Explicit `http`, `https`, `ssh`, `git`, and SCP-like operands share one
 host normalizer; deterministic local paths are suppressed from network policy.
 Named or omitted remotes use repository config, with fetch selecting `url` and
 push selecting `pushurl` when present or otherwise `url` for each remote.
+`push --repo` remains authoritative across `--`, `fetch --multiple` checks
+every remote operand, and `submodule add` skips recognized option values before
+classifying its repository. Git remote-helper `transport::address` syntax is
+unsupported and fails closed.
 
 Unknown or malformed remote options and non-local remote values that cannot be
 parsed produce a typed unsafe result and a deterministic HARD block.
