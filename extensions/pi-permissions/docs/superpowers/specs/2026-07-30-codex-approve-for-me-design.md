@@ -100,14 +100,17 @@ After a model is selected, the selection is fixed for the whole review:
 | transient connection/server/stream failure | retry the same model with backoff |
 | malformed Guardian JSON | retry the same model |
 | maximum three attempts or 90-second deadline reached | fail closed to human approval |
-| cancellation or mode/config/session change | invalidate the old review; restrictive targets require fresh approval, while an explicit `Auto` → `YOLO` switch may continue the exact in-flight call under YOLO without aborting the outer agent run |
+| cancellation or config/session change | invalidate the old review and require fresh approval |
+| permission-mode change | keep the in-flight permission turn's snapshot; apply the selected mode and fresh approval context at its next `agent_start` without aborting the outer agent run |
 | Guardian deny | deny the action and update the existing circuit breaker |
 | Guardian allow | grant only the exact normalized call and config fingerprint |
 
-The old Guardian decision is invalid in every mode-change path. `YOLO` has no
-approval gate, so the explicit `Auto` → `YOLO` transition may continue the
-already-prepared exact tool call after cancelling its Guardian request. This
-does not reuse the stale decision, broaden a call, or apply to session/config
+Permission-mode transitions have one uniform turn-snapshot rule: every change is
+future-effective. An exact in-flight call retains the mode, configuration, and
+approval context captured for its permission turn. After `agent_end`, the next
+`agent_start` captures the selected mode and receives fresh approval context,
+even if a queued continuation begins while Pi still reports working. This does
+not reuse a stale approval, broaden a call, or apply to config/session
 invalidations; those paths remain fail-closed.
 
 There is deliberately no second-model fallback after a request has started.
@@ -186,8 +189,9 @@ implicit side effect of `Auto`.
 
 ## UI behavior
 
-- `Shift+Tab` continues to switch `Default` and `Auto` immediately. The next
-  approval uses the then-current reviewer and fresh authorization context.
+- `Shift+Tab` switches the visible future mode immediately. It does not call
+  `ctx.abort()` or alter an in-flight permission-turn snapshot; the next
+  `agent_start` uses the then-current reviewer and fresh authorization context.
 - The bottom border displays a non-default mode only, preserving the existing
   compact status-line convention.
 - `Allow, switch future approvals to Auto` grants the current exact call as a
@@ -231,3 +235,13 @@ Unit and integration coverage must prove:
 4. Wire concise UI fallback reporting and confirm mode/sandbox invariants.
 5. Run typecheck, full test suite, focused manual TUI checks, and a final
    Codex-alignment review.
+
+## Permission-turn lifecycle
+
+- `agent_start` creates the authoritative permission-turn snapshot.
+- `agent_end` closes it, including before a queued continuation where
+  `ctx.isIdle()` remains `false`.
+- `agent_settled` is only an outer-run cleanup fallback. It must not delay the
+  next turn's snapshot.
+- `turn_start` and `turn_end` are model/tool rounds inside a permission turn,
+  so they are too granular to define this authorization boundary.

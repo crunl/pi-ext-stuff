@@ -59,11 +59,11 @@ The mode cycle is:
 Default -> Auto -> YOLO -> Default
 ```
 
-- `Shift+Tab` advances one step immediately.
-- `/default`, `/auto`, and `/yolo` activate the named mode immediately.
+- `Shift+Tab` is the only mode control and advances one step immediately.
 - No warning or confirmation panel is shown when entering `YOLO`.
-- A mode change invalidates pending reviews, approval grants, temporary
-  filesystem/network grants, and Guardian denial overrides.
+- A mode change updates the future mode immediately. The active permission turn
+  keeps its captured mode, config, sandbox readiness, and approval context until
+  `agent_end`; the next `agent_start` receives fresh context.
 - The bottom border continues to hide `Default` and displays non-default modes
   as `Auto` or `YOLO`.
 
@@ -94,28 +94,25 @@ For `YOLO`:
 4. Execute overridden Bash, Write, and Edit through their Pi-native backends;
    allow native Read and other tools to continue without extension policy.
 
-The YOLO path must be selected at both `tool_call` interception and tool
-execution. This prevents a call admitted under YOLO from executing after the
-mode has already returned to `Default` or `Auto`.
+The effective path is selected from the active permission-turn snapshot at both
+`tool_call` interception and tool execution. A later mode change does not
+retroactively alter an already admitted exact call; it affects the snapshot
+created by the next `agent_start`.
 
 ### Switching while work is active
 
-Mode changes affect future execution decisions and do not retroactively alter
-an operation that has already started:
+Every mode change is future-effective. `Shift+Tab` immediately updates the
+visible and persisted target mode without calling `ctx.abort()`. The active
+permission turn retains the mode, config, sandbox readiness, and approval
+context captured at `agent_start`, so an already-running operation keeps its
+existing backend and exact calls in the turn do not gain or lose permissions
+mid-turn.
 
-- An already-running sandboxed operation remains sandboxed after switching to
-  `YOLO`.
-- An already-running native YOLO operation is not terminated or moved into a
-  sandbox after switching away.
-- A call admitted under YOLO but not yet executing must pass the current
-  `Default`/`Auto` authorization gate if the mode changes before execution.
-- A previously approved `Default`/`Auto` call may execute natively if the
-  active mode has become YOLO, because the current boundary is broader.
-
-The existing mode-mutation queue and permission-context epoch remain the
-serialization mechanism. The sandbox manager may stay initialized but dormant
-while YOLO is active; native execution must not use its operations. Avoiding a
-reset on entry prevents disruption of an in-flight sandboxed command.
+`agent_end` is the authoritative end of that snapshot. The next
+`agent_start` creates a fresh snapshot, even when Pi starts a queued
+continuation before `ctx.isIdle()` becomes true. `agent_settled` is only
+an outer-run cleanup fallback; `turn_start`/`turn_end` describe model/tool
+rounds and are too granular for this boundary.
 
 ### Sandbox availability
 
@@ -202,7 +199,7 @@ Tests must prove:
 3. A syntactically invalid project `.pi/permissions.json` is ignored.
 4. Project settings cannot alter mode, reviewer, rules, filesystem roots, or
    network domains.
-5. The cycle order and named commands are
+5. Shift+Tab is the only mode control and cycles
    `Default -> Auto -> YOLO -> Default`.
 6. YOLO does not call the risk evaluator, human approval UI, Guardian,
    approval ledger, filtering proxy, or sandbox operations.
@@ -210,15 +207,15 @@ Tests must prove:
    other tools pass through without extension policy.
 8. Reads, writes, commands, and hosts that are hard-blocked in Default/Auto
    execute through the YOLO authorization path.
-9. Switching away from YOLO before execution requires fresh authorization
-   under the new mode.
+9. A mode change remains future-effective: exact calls in the active turn use
+   its snapshot, while the next `agent_start` uses fresh authorization under the new mode.
 10. Switching during an already-running operation does not change that
     operation's execution backend.
 11. A YOLO-default session works when sandbox initialization would fail.
 12. A transition from YOLO to Default/Auto commits only after successful
     sandbox initialization.
-13. Pending Guardian and human approval context is invalidated on every mode
-    transition.
+13. Pending Guardian and human approval context remains valid only for its
+    active turn and is replaced at the next `agent_start` after `agent_end`.
 14. `/permissions` and bottom-border rendering report YOLO correctly.
 15. Existing Default and Auto tests continue to pass unchanged in behavior.
 
@@ -245,7 +242,7 @@ pnpm exec biome check <touched files>
 
 1. Simplify configuration loading to the single global source and remove
    project-config protection/classification.
-2. Add YOLO to configuration, state, mode runtime, cycle order, commands, and
+2. Add YOLO to configuration, state, mode runtime, Shift+Tab cycle order, and
    status rendering.
 3. Introduce an effective execution-profile decision that selects sandboxed
    or native tool backends without weakening Default/Auto.
