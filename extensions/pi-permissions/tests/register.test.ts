@@ -4114,6 +4114,69 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
+  it("does not initialize the sandbox for a session start superseded during config loading", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+
+    const staleStart = app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
+    await staleStart;
+
+    expect(app.sandboxManager.reset).not.toHaveBeenCalled();
+    expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    expect(app.sandboxManager.reset).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-session-read", input: { path: "README.md" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("silences a stale failing permissions reload without aborting working YOLO", async () => {
+    const initializationStarted = deferred<void>();
+    const releaseFailure = deferred<void>();
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "default" }));
+    app.sandboxManager.initialize.mockImplementationOnce(async () => {
+      initializationStarted.resolve();
+      await releaseFailure.promise;
+      throw new Error("candidate rejected");
+    });
+
+    const reload = app.commands.get("permissions")!.handler("", app.context);
+    await initializationStarted.promise;
+    app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
+    releaseFailure.resolve();
+    await reload;
+
+    expect(app.abort).not.toHaveBeenCalled();
+    expect(app.notify).not.toHaveBeenCalledWith(expect.stringContaining("配置重载失败"), "error");
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+  });
+
   it("rejects an old human approval after its permission turn ends", async () => {
     const choice = deferred<string>();
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));

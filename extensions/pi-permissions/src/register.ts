@@ -469,6 +469,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       throw error;
     }
+    // A session/tree reset can supersede the activation while its candidate config
+    // is loading. Do not let that obsolete activation reset or initialize the
+    // shared sandbox runtime for the new generation.
+    if (!isActivationCurrent(expectedGeneration)) return candidate;
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
     assertYoloCapability(effectiveMode);
     const previous = {
@@ -984,6 +988,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         }
       }
     } catch (error: unknown) {
+      if (generation !== modeMutationGeneration) return;
       reportConfigError(ctx, error);
     }
   });
@@ -1003,6 +1008,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         try {
           await activateConfig(ctx, false, restoredMode, loaded, generation);
         } catch (error: unknown) {
+          if (generation !== modeMutationGeneration) return;
           reportConfigError(ctx, error);
           return;
         }
@@ -1518,6 +1524,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             "info",
           );
         } catch (error: unknown) {
+          if (generation !== modeMutationGeneration) return;
           if (!candidateLoaded) {
             configFailure = error instanceof Error ? error : new Error(String(error));
           }
