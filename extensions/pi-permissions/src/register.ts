@@ -429,6 +429,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
+  const isActivationCurrent = (expectedGeneration: number): boolean =>
+    expectedGeneration === modeMutationGeneration;
   const assertYoloCapability = (mode: ExecutablePermissionMode): void => {
     if (mode === "yolo" && !coreExecutionAbortGateAvailable()) {
       throw new Error(
@@ -442,6 +444,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     force = false,
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
+    expectedGeneration = modeMutationGeneration,
   ): Promise<LoadedPermissionsConfig> => {
     const key = configKey(ctx);
     if (!force && configFailure) throw configFailure;
@@ -461,7 +464,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     try {
       candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
     } catch (error: unknown) {
-      configFailure = error instanceof Error ? error : new Error(String(error));
+      if (isActivationCurrent(expectedGeneration)) {
+        configFailure = error instanceof Error ? error : new Error(String(error));
+      }
       throw error;
     }
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
@@ -481,6 +486,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       : undefined;
 
     if (!requiresSandbox(effectiveMode, candidate.config)) {
+      if (!isActivationCurrent(expectedGeneration)) return candidate;
       configFailure = undefined;
       activationFailure = undefined;
       if (force) invalidatePermissionContext("permission context changed");
@@ -496,10 +502,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       await sandboxManager.reset();
       if (candidateSandbox) await sandboxManager.initialize(candidateSandbox);
     } catch (error: unknown) {
+      if (!isActivationCurrent(expectedGeneration)) throw error;
       try {
         await sandboxManager.reset();
+        if (!isActivationCurrent(expectedGeneration)) throw error;
         if (previous.sandboxState.kind === "ready" && previous.baseSandboxConfig) {
           await sandboxManager.initialize(previous.baseSandboxConfig);
+          if (!isActivationCurrent(expectedGeneration)) throw error;
           sandboxState = previous.sandboxState;
         } else if (previous.sandboxState.kind === "disabled") {
           sandboxState = previous.sandboxState;
@@ -508,10 +517,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           sandboxState = { kind: "failed", error: message };
         }
       } catch (rollbackError: unknown) {
+        if (!isActivationCurrent(expectedGeneration)) throw error;
         const message =
           rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
         sandboxState = { kind: "failed", error: `rollback failed: ${message}` };
       }
+      if (!isActivationCurrent(expectedGeneration)) throw error;
       loaded = previous.loaded;
       loadedKey = previous.loadedKey;
       baseSandboxConfig = previous.baseSandboxConfig;
@@ -525,6 +536,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw error;
     }
 
+    if (!isActivationCurrent(expectedGeneration)) return candidate;
     activationFailure = undefined;
     configFailure = undefined;
     if (force) {
@@ -545,11 +557,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     force = false,
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
+    expectedGeneration = modeMutationGeneration,
   ): Promise<LoadedPermissionsConfig> =>
     targetMode === "yolo"
-      ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride)
+      ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration)
       : sandboxCoordinator.runExclusive(() =>
-          activateConfigUnlocked(ctx, force, targetMode, candidateOverride),
+          activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
 
   const assertExecutionAuthorized = async (
@@ -942,10 +955,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
     lifecycleEventsObserved = false;
+    const generation = modeMutationGeneration;
     let candidate: LoadedPermissionsConfig;
     try {
       candidate = await loadPermissionsConfig(agentDir);
     } catch (error: unknown) {
+      if (generation !== modeMutationGeneration) return;
       configFailure = error instanceof Error ? error : new Error(String(error));
       reportConfigError(ctx, error);
       return;
@@ -954,10 +969,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       const restoredRuntime = new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi));
       restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
       const restoredMode = executableMode(restoredRuntime.mode);
-      await activateConfig(ctx, true, restoredMode, candidate);
+      await activateConfig(ctx, true, restoredMode, candidate, generation);
+      if (generation !== modeMutationGeneration) return;
       modeRuntime = restoredRuntime;
       setDefaultStatus(ctx);
       if ((await shiftTabAvailability(agentDir)) === "reserved" && !shortcutWarningShown) {
+        if (generation !== modeMutationGeneration) return;
         shortcutWarningShown = true;
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -984,7 +1001,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         restoredRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
         const restoredMode = executableMode(restoredRuntime.mode);
         try {
-          await activateConfig(ctx, false, restoredMode, loaded);
+          await activateConfig(ctx, false, restoredMode, loaded, generation);
         } catch (error: unknown) {
           reportConfigError(ctx, error);
           return;
@@ -1378,12 +1395,22 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           let runtime = modeRuntime;
           if (!runtime) {
-            const initial = await activateConfig(ctx);
+            const initial = await activateConfig(ctx, false, undefined, undefined, generation);
+            if (generation !== modeMutationGeneration) {
+              settleModeTransitionBarrier(transitionBarrier, false);
+              return;
+            }
             runtime = ensureModeRuntime(initial.config);
           }
           const previousMode = executableMode(runtime.mode);
           const targetMode = nextExecutableMode(previousMode);
-          const result = await activateConfig(ctx, !beganDuringActiveTurn, targetMode);
+          const result = await activateConfig(
+            ctx,
+            !beganDuringActiveTurn,
+            targetMode,
+            undefined,
+            generation,
+          );
           if (generation !== modeMutationGeneration) {
             if (transition && transitionOwnsPendingState) {
               clearPendingModeTransitionIfCurrent(transition);
@@ -1447,7 +1474,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const targetMode = executableMode(
             (restoredRuntime ?? modeRuntime)?.mode ?? candidate.config.defaultMode,
           );
-          const result = await activateConfig(ctx, true, targetMode, candidate);
+          const result = await activateConfig(ctx, true, targetMode, candidate, generation);
           if (generation !== modeMutationGeneration) return;
           if (restoredRuntime) modeRuntime = restoredRuntime;
           const config = result.config;

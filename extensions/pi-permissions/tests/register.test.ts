@@ -4075,6 +4075,45 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
+  it("does not let a stale transition activation overwrite a new session configuration", async () => {
+    const oldInitializationStarted = deferred<void>();
+    const releaseOldInitialization = deferred<void>();
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    app.sandboxManager.initialize.mockImplementationOnce(async () => {
+      oldInitializationStarted.resolve();
+      await releaseOldInitialization.promise;
+    });
+    const transition = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await oldInitializationStarted.promise;
+
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "yolo",
+        sandbox: { profile: "read-only" },
+      }),
+    );
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    releaseOldInitialization.resolve();
+    await transition;
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "new-session-yolo", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
   it("rejects an old human approval after its permission turn ends", async () => {
     const choice = deferred<string>();
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
