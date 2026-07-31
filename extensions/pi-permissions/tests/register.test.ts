@@ -3385,7 +3385,6 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
     expect(app.abort).not.toHaveBeenCalled();
-    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
     choice.resolve("Allow Once");
     await expect(pending).resolves.toMatchObject({
@@ -3397,6 +3396,19 @@ describe("Default mode registration", () => {
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
     ).rejects.toThrow("no longer authorized");
+
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "fresh-auto-approval",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.autoReviewer.review).toHaveBeenCalledOnce();
     idle = true;
   });
 });
