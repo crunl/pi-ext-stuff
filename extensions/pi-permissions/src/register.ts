@@ -100,6 +100,14 @@ interface PermissionExecutionSnapshot {
   sandboxReady: boolean;
 }
 
+interface EffectiveExecutionContext {
+  snapshot: PermissionExecutionSnapshot;
+  mode: ExecutablePermissionMode;
+  config: PermissionsConfig;
+  baseSandboxConfig?: SandboxRuntimeConfig;
+  sandboxReady: boolean;
+}
+
 interface PendingModeTransition {
   id: number;
   turnId: number;
@@ -286,6 +294,22 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
     currentExecutionSnapshot() === snapshot;
 
+  const getEffectiveExecutionContext = (
+    snapshot: PermissionExecutionSnapshot,
+  ): EffectiveExecutionContext | undefined => {
+    if (!isCurrentExecutionSnapshot(snapshot)) return undefined;
+    if (!loaded || fingerprintConfig(loaded.config) !== fingerprintConfig(snapshot.config)) {
+      return undefined;
+    }
+    return {
+      snapshot,
+      mode: snapshot.mode,
+      config: snapshot.config,
+      baseSandboxConfig: snapshot.baseSandboxConfig,
+      sandboxReady: snapshot.sandboxReady,
+    };
+  };
+
   const scheduleModeTransition = (): PendingModeTransition | undefined => {
     if (permissionTurnPhase !== "active" || activeTurnId === undefined) return undefined;
     if (pendingModeTransition) {
@@ -323,7 +347,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const grantApprovedCall = (
     event: ToolCallEvent,
     decision: Extract<DefaultDecision, { action: "prompt" }>,
-    snapshot: PermissionExecutionSnapshot,
+    executionContext: EffectiveExecutionContext,
     cwd: string,
     authority: "user" | "auto-review",
     mode: ApprovedCall["mode"],
@@ -332,7 +356,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     approvedCalls.set(event.toolCallId, {
       authority,
       mode,
-      configFingerprint: fingerprintConfig(snapshot.config),
+      configFingerprint: fingerprintConfig(executionContext.config),
       cwd: resolve(cwd),
       requestFingerprint: fingerprintValue({
         tool: event.toolName.toLowerCase(),
@@ -479,13 +503,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     id: string,
     input: Record<string, unknown>,
     ctx: Pick<ExtensionContext, "cwd">,
-    snapshot: PermissionExecutionSnapshot,
+    executionContext: EffectiveExecutionContext,
   ): Promise<void> => {
-    if (!isCurrentExecutionSnapshot(snapshot)) {
-      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+    if (!getEffectiveExecutionContext(executionContext.snapshot)) {
+      throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
-    const activeConfig = snapshot.config;
-    const activeMode = snapshot.mode;
+    const activeConfig = executionContext.config;
+    const activeMode = executionContext.mode;
     const executionEpoch = permissionContextEpoch;
     const approval = approvedCalls.get(id);
     approvedCalls.delete(id);
@@ -506,8 +530,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       activeConfig,
       defaultProtectedWritePaths(ctx.cwd, agentDir),
     );
-    if (permissionContextEpoch !== executionEpoch || !isCurrentExecutionSnapshot(snapshot)) {
-      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+    if (
+      permissionContextEpoch !== executionEpoch ||
+      !getEffectiveExecutionContext(executionContext.snapshot)
+    ) {
+      throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
     if (currentDecision.action === "block" || (currentDecision.action === "prompt" && !approved)) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
@@ -516,9 +543,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const sandboxOperations = (
     customConfig?: SandboxRuntimeConfig,
-    snapshot?: PermissionExecutionSnapshot,
+    executionContext?: EffectiveExecutionContext,
   ): BashOperations => {
-    if (!snapshot?.sandboxReady) {
+    if (!executionContext?.sandboxReady) {
       const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
@@ -528,15 +555,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const sandboxFileOperations = (
     writeRoots: readonly string[],
     signal?: AbortSignal,
-    snapshot?: PermissionExecutionSnapshot,
+    executionContext?: EffectiveExecutionContext,
   ) => {
-    if (!snapshot?.sandboxReady || !snapshot.baseSandboxConfig) {
+    if (!executionContext?.sandboxReady || !executionContext.baseSandboxConfig) {
       const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
     return createSandboxedFileOperations(
       sandboxManager,
-      snapshot.baseSandboxConfig,
+      executionContext.baseSandboxConfig,
       writeRoots,
       signal,
     );
@@ -565,7 +592,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
       }
-      if (executionSnapshot.mode === "yolo") {
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        throw new Error("pi-permissions: call is no longer authorized; request approval again");
+      }
+      if (executionContext.mode === "yolo") {
         revokeApprovedCall(id);
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -581,14 +612,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           id,
           params as Record<string, unknown>,
           ctx,
-          executionSnapshot,
+          executionContext,
         );
 
-        if (!executionSnapshot.config.sandbox.enabled) {
+        if (!executionContext.config.sandbox.enabled) {
           return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
         }
-        const baseConfig = executionSnapshot.baseSandboxConfig;
-        if (!executionSnapshot.sandboxReady || !baseConfig) {
+        const baseConfig = executionContext.baseSandboxConfig;
+        if (!executionContext.sandboxReady || !baseConfig) {
           const reason =
             sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
           throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
@@ -623,7 +654,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
 
           const sandboxedBash = bashToolFactory(ctx.cwd, {
-            operations: sandboxOperations(commandConfig, executionSnapshot),
+            operations: sandboxOperations(commandConfig, executionContext),
           });
           return await sandboxedBash.execute(id, params, signal, onUpdate);
         } finally {
@@ -671,7 +702,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
       }
-      if (executionSnapshot.mode === "yolo") {
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        throw new Error("pi-permissions: call is no longer authorized; request approval again");
+      }
+      if (executionContext.mode === "yolo") {
         revokeApprovedCall(id);
         return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -683,13 +718,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           id,
           params as Record<string, unknown>,
           ctx,
-          executionSnapshot,
+          executionContext,
         );
-        if (!executionSnapshot.config.sandbox.enabled) {
+        if (!executionContext.config.sandbox.enabled) {
           return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
         const tool = createWriteTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal, executionSnapshot),
+          operations: sandboxFileOperations(writeRoots, signal, executionContext),
         });
         return tool.execute(id, params, signal, onUpdate);
       }, signal);
@@ -720,7 +755,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
       }
-      if (executionSnapshot.mode === "yolo") {
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        throw new Error("pi-permissions: call is no longer authorized; request approval again");
+      }
+      if (executionContext.mode === "yolo") {
         revokeApprovedCall(id);
         return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -732,13 +771,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           id,
           params as Record<string, unknown>,
           ctx,
-          executionSnapshot,
+          executionContext,
         );
-        if (!executionSnapshot.config.sandbox.enabled) {
+        if (!executionContext.config.sandbox.enabled) {
           return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
         const tool = createEditTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal, executionSnapshot),
+          operations: sandboxFileOperations(writeRoots, signal, executionContext),
         });
         return tool.execute(id, params, signal, onUpdate);
       }, signal);
@@ -755,7 +794,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const requestHumanApproval = async (
     event: ToolCallEvent,
     decision: Extract<DefaultDecision, { action: "prompt" }>,
-    snapshot: PermissionExecutionSnapshot,
+    executionContext: EffectiveExecutionContext,
     ctx: ExtensionContext,
     options: {
       guardianFailure?: AutoReviewerFailureKind;
@@ -767,7 +806,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         reason: `pi-permissions: ${decision.risk} operation requires interactive approval`,
       };
     }
-    const runtime = ensureModeRuntime(snapshot.config);
+    const runtime = ensureModeRuntime(executionContext.config);
     const humanApprovalToken = runtime.beginHumanApproval();
     if (humanApprovalToken === undefined) {
       return {
@@ -798,14 +837,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         DEFAULT_DENY_CHOICE,
       ]);
       if (choice === DEFAULT_ALLOW_ONCE_CHOICE || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-        if (permissionContextEpoch !== approvalEpoch || !isCurrentExecutionSnapshot(snapshot)) {
+        if (
+          permissionContextEpoch !== approvalEpoch ||
+          !getEffectiveExecutionContext(executionContext.snapshot)
+        ) {
           return {
             block: true,
             reason: "pi-permissions: approval context changed before confirmation",
           };
         }
         if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-          grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", "user-transition");
+          grantApprovedCall(event, decision, executionContext, ctx.cwd, "user", "user-transition");
           transitionGrantCreated = true;
           runtime.activate("auto", {
             preserveAutoTransientState: permissionTurnPhase === "active",
@@ -815,8 +857,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
           return;
         }
-        const approvalMode = snapshot.mode === "auto" ? "auto" : "default";
-        grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", approvalMode);
+        const approvalMode = executionContext.mode === "auto" ? "auto" : "default";
+        grantApprovedCall(event, decision, executionContext, ctx.cwd, "user", approvalMode);
         return;
       }
       return {
@@ -964,7 +1006,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: "pi-permissions: active permission turn snapshot is unavailable",
         };
       }
-      if (executionSnapshot.mode === "yolo") return;
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        return {
+          block: true,
+          reason: "pi-permissions: active permission turn snapshot is unavailable",
+        };
+      }
+      if (executionContext.mode === "yolo") return;
 
       const evaluationEpoch = permissionContextEpoch;
       let decision: DefaultDecision;
@@ -973,13 +1022,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           event.toolName,
           event.input as Record<string, unknown>,
           ctx.cwd,
-          executionSnapshot.config,
+          executionContext.config,
           defaultProtectedWritePaths(ctx.cwd, agentDir),
         );
       } catch (error: unknown) {
         if (
           permissionContextEpoch !== evaluationEpoch ||
-          !isCurrentExecutionSnapshot(executionSnapshot)
+          !getEffectiveExecutionContext(executionContext.snapshot)
         ) {
           return {
             block: true,
@@ -992,7 +1041,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
       if (
         permissionContextEpoch !== evaluationEpoch ||
-        !isCurrentExecutionSnapshot(executionSnapshot)
+        !getEffectiveExecutionContext(executionContext.snapshot)
       ) {
         return {
           block: true,
@@ -1003,7 +1052,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const effectiveMode = executionSnapshot.mode === "auto" ? "auto" : "default";
+      const effectiveMode = executionContext.mode === "auto" ? "auto" : "default";
       if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
           block: true,
@@ -1032,7 +1081,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             tool: event.toolName.toLowerCase(),
             input: event.input,
           });
-          const configFingerprint = fingerprintConfig(executionSnapshot.config);
+          const configFingerprint = fingerprintConfig(executionContext.config);
           const approvalOverride = autoApprovalLedger.takeOverride({
             actionFingerprint,
             cwd: resolve(ctx.cwd),
@@ -1042,7 +1091,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             event,
             decision,
             ctx.cwd,
-            executionSnapshot.config.sandbox.profile,
+            executionContext.config.sandbox.profile,
             trustedUserMessages,
             approvalOverride,
           );
@@ -1052,7 +1101,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             {
               modelRegistry: ctx.modelRegistry,
               activeModel: ctx.model,
-              reviewer: executionSnapshot.config.reviewer,
+              reviewer: executionContext.config.reviewer,
               guardianSession: {
                 cwd: resolve(ctx.cwd),
                 configFingerprint,
@@ -1062,6 +1111,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             reviewSignal,
           );
           if (reviewSignal.aborted) {
+            return {
+              block: true,
+              reason: "pi-permissions: permission context changed during Auto review",
+            };
+          }
+          if (!getEffectiveExecutionContext(executionContext.snapshot)) {
             return {
               block: true,
               reason: "pi-permissions: permission context changed during Auto review",
@@ -1080,7 +1135,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             guardian.fallbackNotice === "configured-reviewer-unavailable" &&
             ctx.hasUI
           ) {
-            const preferred = executionSnapshot.config.reviewer;
+            const preferred = executionContext.config.reviewer;
             const noticeKey = fingerprintValue({
               configFingerprint,
               preferredProvider: preferred?.provider,
@@ -1098,7 +1153,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             grantApprovedCall(
               event,
               decision,
-              executionSnapshot,
+              executionContext,
               ctx.cwd,
               "auto-review",
               effectiveMode,
@@ -1132,7 +1187,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           runtime.recordAutoNonDenial();
           if (ctx.hasUI) {
-            return requestHumanApproval(event, decision, executionSnapshot, ctx, {
+            return requestHumanApproval(event, decision, executionContext, ctx, {
               guardianFailure: auto.error.kind,
             });
           }
@@ -1159,7 +1214,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
         }
       }
-      return requestHumanApproval(event, decision, executionSnapshot, ctx);
+      return requestHumanApproval(event, decision, executionContext, ctx);
     },
   );
 

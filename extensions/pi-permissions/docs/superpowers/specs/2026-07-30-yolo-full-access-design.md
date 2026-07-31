@@ -99,6 +99,13 @@ The effective path is selected from the active permission-turn snapshot at both
 retroactively alter an already admitted exact call; it affects the snapshot
 created by the next `agent_start`.
 
+The bypass is deliberately narrow: only a valid active snapshot whose captured
+mode is `YOLO` skips policy evaluation. A missing or ended snapshot, a changed
+configuration fingerprint, or a session-tree reset fails closed rather than
+falling through to native execution. Bash, Write, Edit, risk evaluation,
+Guardian, human confirmation, and exact-call grant matching consume the same
+snapshot-backed effective execution context.
+
 ### Switching while work is active
 
 Every mode change is future-effective. `Shift+Tab` immediately updates the

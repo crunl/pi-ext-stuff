@@ -508,6 +508,116 @@ describe("Default mode registration", () => {
     expect(app.autoReviewer.review).not.toHaveBeenCalled();
   });
 
+  it("fails closed when a risk result returns after its config fingerprint changes", async () => {
+    const evaluation = deferred<DefaultDecision>();
+    const riskEvaluator = vi.fn(async () => evaluation.promise);
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    const pending = app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "stale-risk-config-fingerprint",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
+
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ rules: [{ action: "ask", tool: "bash", pattern: "rm *" }] }),
+    );
+    await app.commands.get("permissions")!.handler("", app.context);
+    evaluation.resolve({ action: "allow", risk: "LOW", reason: "Old policy allowed this." });
+
+    await expect(pending).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context changed during risk evaluation"),
+    });
+    expect(app.select).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a Guardian response arrives after a session-tree change", async () => {
+    const review = deferred<{
+      decision: "approve";
+      risk: "low";
+      userAuthorization: "high";
+      rationale: string;
+    }>();
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => review.promise),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "late-guardian-session-tree",
+      input: { command: "rm -rf build" },
+    };
+
+    const pending = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
+    await app.handlers.get("session_before_tree")?.({ type: "session_before_tree" }, app.context);
+    await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
+    review.resolve({
+      decision: "approve",
+      risk: "low",
+      userAuthorization: "high",
+      rationale: "Stale approval.",
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("permission context changed during Auto review"),
+    });
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it("bypasses only with a live YOLO snapshot and fails closed after it ends", async () => {
+    const riskEvaluator = vi.fn(
+      async (): Promise<DefaultDecision> => ({
+        action: "block",
+        risk: "HARD",
+        reason: "This must never be evaluated in YOLO.",
+      }),
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "live-yolo-snapshot", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(riskEvaluator).not.toHaveBeenCalled();
+
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "ended-yolo-snapshot", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("snapshot is unavailable"),
+    });
+    expect(riskEvaluator).not.toHaveBeenCalled();
+  });
+
   it("keeps YOLO execution for the active snapshot after switching future mode", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));

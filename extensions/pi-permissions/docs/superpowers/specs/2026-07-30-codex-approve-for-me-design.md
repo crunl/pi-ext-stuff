@@ -113,6 +113,14 @@ even if a queued continuation begins while Pi still reports working. This does
 not reuse a stale approval, broaden a call, or apply to config/session
 invalidations; those paths remain fail-closed.
 
+All mediated authorization sites use one effective execution context derived
+from that snapshot: Bash, native Write/Edit, risk evaluation, Guardian review,
+human confirmation, and exact-call grant matching. The context is usable only
+while its turn is active and its captured configuration fingerprint still
+matches the loaded global configuration. A changed config, session tree, ended
+turn, or late async result therefore blocks or requires a fresh approval; it
+cannot inherit a later mode or silently return an authorization result.
+
 There is deliberately no second-model fallback after a request has started.
 That avoids hidden policy changes, duplicate long waits, and accidental extra
 provider cost. This matches Codex's same-model retry/fail-closed behavior.
