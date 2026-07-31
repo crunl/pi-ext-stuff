@@ -34,7 +34,6 @@ function harness(
   },
   reviewer?: AutoReviewer,
   riskEvaluator?: (...args: any[]) => Promise<DefaultDecision>,
-  coreExecutionAbortGateAvailable: () => boolean = () => true,
 ) {
   writeFileSync(
     join(agentDir, "keybindings.json"),
@@ -99,7 +98,6 @@ function harness(
     sandboxCoordinator,
     autoReviewer,
     riskEvaluator,
-    coreExecutionAbortGateAvailable,
   });
   const context = {
     cwd: agentDir,
@@ -138,9 +136,9 @@ function harness(
 
 async function cycleToMode(
   app: ReturnType<typeof harness>,
-  target: "Default" | "Auto" | "YOLO",
+  target: "default" | "approve for me" | "full bypass",
 ): Promise<void> {
-  const modes = ["Default", "Auto", "YOLO"] as const;
+  const modes = ["default", "approve for me", "full bypass"] as const;
   const current = app.setStatus.mock.calls.at(-1)?.[1] as (typeof modes)[number] | undefined;
   const currentIndex = current ? modes.indexOf(current) : 0;
   const targetIndex = modes.indexOf(target);
@@ -151,43 +149,39 @@ async function cycleToMode(
 }
 
 describe("Default mode registration", () => {
-  it("fails closed when configured YOLO lacks the core execution abort gate", async () => {
+  it("starts configured YOLO without the optional core execution abort gate", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
-    const app = harness(agentDir, false, true, {}, undefined, undefined, undefined, () => false);
+    const app = harness(agentDir);
 
     await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    expect(app.setStatus).not.toHaveBeenCalledWith("pi-permissions", "YOLO");
-    expect(app.notify).toHaveBeenCalledWith(
-      expect.stringContaining("core execution abort gate"),
-      "error",
-    );
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     await expect(
       app.handlers.get("tool_call")!(
-        { toolName: "read", toolCallId: "unsafe-yolo", input: { path: ".env" } },
+        { toolName: "read", toolCallId: "yolo-without-gate", input: { path: ".env" } },
         app.context,
       ),
-    ).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringContaining("core execution abort gate"),
-    });
+    ).resolves.toBeUndefined();
   });
 
-  it("refuses a live switch to YOLO when the core gate is absent", async () => {
+  it("cycles idle Auto to YOLO and back to Default without the core gate", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    const app = harness(agentDir, false, true, {}, undefined, undefined, undefined, () => false);
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir);
+
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
 
-    await cycleToMode(app, "YOLO");
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.abort).not.toHaveBeenCalled();
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
-    expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("core execution abort gate"),
-      "error",
-    );
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
+    expect(app.abort).not.toHaveBeenCalled();
   });
 
   it("bypasses hard blocks and every reviewer in YOLO", async () => {
@@ -261,7 +255,7 @@ describe("Default mode registration", () => {
     );
 
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     await expect(
       app.tools
         .get("bash")
@@ -279,9 +273,9 @@ describe("Default mode registration", () => {
     );
     app.sandboxManager.initialize.mockRejectedValueOnce(new Error("sandbox unavailable"));
 
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     expect(app.notify).toHaveBeenLastCalledWith(
       expect.stringContaining("sandbox unavailable"),
       "error",
@@ -297,10 +291,10 @@ describe("Default mode registration", () => {
       app.context,
     );
 
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
 
     expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("restores YOLO before deciding whether to initialize sandbox", async () => {
@@ -326,7 +320,7 @@ describe("Default mode registration", () => {
     );
 
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
   });
 
   it("enters YOLO without waiting for a sandbox lease while working", async () => {
@@ -345,10 +339,10 @@ describe("Default mode registration", () => {
     );
     const callsBeforeSwitch = exclusive.mock.calls.length;
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
 
     expect(exclusive).toHaveBeenCalledTimes(callsBeforeSwitch);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
   });
 
   it("does not unsandbox an operation that started before entering YOLO", async () => {
@@ -376,11 +370,11 @@ describe("Default mode registration", () => {
       expect.objectContaining({ operations: expect.any(Object) }),
     );
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     release.resolve();
     await running;
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
   });
 
   it("does not sandbox a native operation that started before leaving YOLO", async () => {
@@ -405,11 +399,11 @@ describe("Default mode registration", () => {
     await started.promise;
     expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
 
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
     release.resolve();
     await running;
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("uses native Write and Edit backends in YOLO", async () => {
@@ -466,7 +460,7 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     evaluation.resolve({
       action: "block",
       risk: "HARD",
@@ -500,7 +494,7 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     evaluationStarted.resolve();
 
     await expect(pending).resolves.toMatchObject({ block: true });
@@ -633,7 +627,7 @@ describe("Default mode registration", () => {
     };
 
     await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
 
     await expect(
       app.tools
@@ -670,9 +664,9 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "YOLO");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    await cycleToMode(app, "approve for me");
     review.resolve({
       decision: "approve",
       risk: "low",
@@ -705,11 +699,11 @@ describe("Default mode registration", () => {
     const pending = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     choice.resolve("Allow Once");
 
     await expect(pending).resolves.toBeUndefined();
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
     await expect(
       app.tools
         .get("bash")
@@ -786,7 +780,7 @@ describe("Default mode registration", () => {
         app.context,
       ),
     );
-    await expectActualHistoryCleared(() => cycleToMode(app, "Auto"));
+    await expectActualHistoryCleared(() => cycleToMode(app, "approve for me"));
     await expectActualHistoryCleared(() =>
       app.commands.get("permissions")?.handler("", app.context),
     );
@@ -805,7 +799,7 @@ describe("Default mode registration", () => {
 
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
 
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "default");
     expect(app.commands.has("default")).toBe(false);
     expect(app.commands.has("auto")).toBe(false);
     expect(app.commands.has("yolo")).toBe(false);
@@ -1110,8 +1104,11 @@ describe("Default mode registration", () => {
       "Allow, switch future approvals to Auto",
       "Deny",
     ]);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
-    expect(app.notify).toHaveBeenLastCalledWith("pi-permissions: Auto mode 已启用", "info");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.notify).toHaveBeenLastCalledWith(
+      "pi-permissions: approve for me mode 已启用",
+      "info",
+    );
     expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetCount);
     expect(app.autoReviewer.invalidateSession).toHaveBeenCalledTimes(invalidationCount);
     await expect(
@@ -1152,7 +1149,7 @@ describe("Default mode registration", () => {
         .get("bash")
         .execute(current.toolCallId, current.input, undefined, undefined, app.context),
     ).rejects.toThrow("no longer authorized");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
   });
 
   it("revokes the transition approval when the Auto status update throws", async () => {
@@ -2262,17 +2259,17 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    await cycleToMode(app, "Auto");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
-    await cycleToMode(app, "YOLO");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    await cycleToMode(app, "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    await cycleToMode(app, "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     await app.commands.get("permissions")!.handler("", app.context);
     expect(app.notify).toHaveBeenLastCalledWith(
       "YOLO · Full Access · sandbox off · approvals never",
       "info",
     );
-    await cycleToMode(app, "Default");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    await cycleToMode(app, "default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("keeps YOLO active when a forced reload cannot prepare restored Default", async () => {
@@ -2282,7 +2279,7 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     await writeFile(
       globalConfigPath(agentDir),
       JSON.stringify({ sandbox: { network: { allowedDomains: ["candidate.example"] } } }),
@@ -2295,7 +2292,7 @@ describe("Default mode registration", () => {
 
     await app.commands.get("permissions")!.handler("", app.context);
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     expect(app.notify).toHaveBeenLastCalledWith(
       expect.stringContaining("candidate rejected"),
       "error",
@@ -2321,11 +2318,11 @@ describe("Default mode registration", () => {
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("initializes sandbox before cycling from configured YOLO to Default", async () => {
@@ -2345,7 +2342,7 @@ describe("Default mode registration", () => {
     await app.shortcuts.get("shift+tab")!.handler(app.context);
 
     expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("keeps the active YOLO turn after switching to Default", async () => {
@@ -2356,9 +2353,9 @@ describe("Default mode registration", () => {
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
     expect(app.abort).not.toHaveBeenCalled();
     await expect(
       app.handlers.get("tool_call")!(
@@ -2384,9 +2381,9 @@ describe("Default mode registration", () => {
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await writeFile(globalConfigPath(agentDir), "{");
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
     expect(app.notify).toHaveBeenLastCalledWith(expect.stringContaining("mode 切换失败"), "error");
   });
 
@@ -2442,7 +2439,7 @@ describe("Default mode registration", () => {
 
     await app.commands.get("permissions")!.handler("", app.context);
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
     expect(app.abort).toHaveBeenCalledOnce();
   });
 
@@ -2454,7 +2451,7 @@ describe("Default mode registration", () => {
     const gate = deferred<undefined>();
     app.sandboxManager.initialize.mockImplementationOnce(() => gate.promise);
 
-    const transition = cycleToMode(app, "Default");
+    const transition = cycleToMode(app, "default");
     await vi.waitFor(() => expect(app.sandboxManager.initialize).toHaveBeenCalledOnce());
     const reload = app.commands.get("permissions")!.handler("", app.context);
     await Promise.resolve();
@@ -2462,7 +2459,7 @@ describe("Default mode registration", () => {
 
     gate.resolve(undefined);
     await Promise.all([transition, reload]);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("keeps YOLO active when session-tree restrictive restoration cannot initialize", async () => {
@@ -2486,7 +2483,7 @@ describe("Default mode registration", () => {
 
     await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     await expect(
       app.handlers.get("tool_call")!(
         { toolName: "read", toolCallId: "still-yolo", input: { path: ".env" } },
@@ -2509,12 +2506,12 @@ describe("Default mode registration", () => {
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("Auto mode 已启用"),
+      expect.stringContaining("approve for me mode 已启用"),
       "info",
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Auto");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
     expect(app.abort).not.toHaveBeenCalled();
   });
 
@@ -2587,10 +2584,10 @@ describe("Default mode registration", () => {
     const secondCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
     await Promise.all([firstCycle, secondCycle]);
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("YOLO mode 已启用"),
+      expect.stringContaining("full bypass mode 已启用"),
       "info",
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
   });
 
   it("discards a restored legacy pending transition", async () => {
@@ -2615,7 +2612,7 @@ describe("Default mode registration", () => {
       app.context,
     );
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("keeps the current Auto review after switching to YOLO", async () => {
@@ -2673,7 +2670,7 @@ describe("Default mode registration", () => {
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
     expect(reviewSignal?.aborted).toBe(false);
     expect(app.abort).not.toHaveBeenCalled();
     resolveReview({
@@ -2823,7 +2820,7 @@ describe("Default mode registration", () => {
     const pending = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "Default");
+    await cycleToMode(app, "default");
     resolveReview({
       decision: "approve",
       risk: "low",
@@ -3431,7 +3428,7 @@ describe("Default mode registration", () => {
         .get("bash")
         .execute("call-1", { command: "pwd" }, undefined, undefined, app.context),
     ).rejects.toThrow("sandbox unavailable");
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "default");
   });
 
   it("uses the native bash backend only when sandbox is explicitly disabled", async () => {
@@ -3446,7 +3443,7 @@ describe("Default mode registration", () => {
 
     expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "default");
   });
 
   it("keeps the active permission turn snapshot through Shift+Tab and gives the next turn the new mode", async () => {
@@ -3466,7 +3463,7 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     expect(app.handlers.has("agent_end")).toBe(true);
 
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "approve for me");
     expect(app.abort).not.toHaveBeenCalled();
     expect(app.context.isIdle()).toBe(false);
 
@@ -3514,7 +3511,7 @@ describe("Default mode registration", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "approve for me");
     app.context.isIdle = () => false;
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -3529,9 +3526,9 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledTimes(3);
     app.abort.mockClear();
 
-    await cycleToMode(app, "YOLO");
-    await cycleToMode(app, "Default");
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "default");
+    await cycleToMode(app, "approve for me");
     expect(app.abort).not.toHaveBeenCalled();
 
     await expect(
@@ -3602,7 +3599,7 @@ describe("Default mode registration", () => {
     );
   });
 
-  it.each(["Default", "YOLO"] as const)(
+  it.each(["default", "full bypass"] as const)(
     "clears Auto denials before a new turn that starts in %s and returns to Auto",
     async (nextMode) => {
       const reviewer = {
@@ -3617,7 +3614,7 @@ describe("Default mode registration", () => {
       const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
       const app = harness(agentDir, false, true, {}, undefined, reviewer);
       await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
-      await cycleToMode(app, "Auto");
+      await cycleToMode(app, "approve for me");
       app.context.isIdle = () => false;
       await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -3633,7 +3630,7 @@ describe("Default mode registration", () => {
       app.abort.mockClear();
       await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
       await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
-      await cycleToMode(app, "Auto");
+      await cycleToMode(app, "approve for me");
 
       expect(app.abort).not.toHaveBeenCalled();
       expect(app.appendEntry).toHaveBeenLastCalledWith(
@@ -3679,8 +3676,8 @@ describe("Default mode registration", () => {
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
-    await cycleToMode(app, "Auto");
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "full bypass");
     expect(app.abort).not.toHaveBeenCalled();
     await expect(
       app.handlers.get("tool_call")!(
@@ -3726,7 +3723,7 @@ describe("Default mode registration", () => {
     app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "approve for me");
 
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     await expect(
@@ -3760,11 +3757,11 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     expect(app.handlers.has("agent_end")).toBe(true);
 
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "approve for me");
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
 
-    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "full bypass");
     expect(app.abort).not.toHaveBeenCalled();
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -4326,7 +4323,7 @@ describe("Default mode registration", () => {
       app.context,
     );
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Default");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
 
   it("rejects an old human approval after its permission turn ends", async () => {
@@ -4347,7 +4344,7 @@ describe("Default mode registration", () => {
 
     const pending = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
-    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "approve for me");
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
     expect(app.abort).not.toHaveBeenCalled();

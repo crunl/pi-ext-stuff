@@ -41,7 +41,6 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
-import { hasCoreExecutionAbortGate } from "./core-capability.ts";
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
@@ -77,7 +76,6 @@ export interface RegisterExtensionOptions {
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
   riskEvaluator?: typeof evaluateDefaultRequest;
-  coreExecutionAbortGateAvailable?: () => boolean;
 }
 
 interface ApprovedCall {
@@ -169,8 +167,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
-  const coreExecutionAbortGateAvailable =
-    options.coreExecutionAbortGateAvailable ?? hasCoreExecutionAbortGate;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
@@ -219,7 +215,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Default");
+    ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "default");
   };
 
   const runModeMutation = <T>(
@@ -445,14 +441,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const assertActivationCurrent = (expectedGeneration: number): void => {
     if (!isActivationCurrent(expectedGeneration)) throw new ActivationSupersededError();
   };
-  const assertYoloCapability = (mode: ExecutablePermissionMode): void => {
-    if (mode === "yolo" && !coreExecutionAbortGateAvailable()) {
-      throw new Error(
-        "pi-permissions: YOLO requires the patched core execution abort gate; run npm run core:install",
-      );
-    }
-  };
-
   const activateConfigUnlocked = async (
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
@@ -469,7 +457,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
     if (!force && loaded && loadedKey === key) {
       const effectiveCachedMode = cachedMode ?? executableMode(loaded.config.defaultMode);
-      assertYoloCapability(effectiveCachedMode);
       if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
         return loaded;
       }
@@ -491,7 +478,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // shared sandbox runtime for the new generation.
     assertActivationCurrent(expectedGeneration);
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
-    assertYoloCapability(effectiveMode);
     const previous = {
       loaded,
       loadedKey,
@@ -952,7 +938,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           });
           scheduleModeTransition();
           setDefaultStatus(ctx);
-          ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
+          ctx.ui.notify("pi-permissions: approve for me mode 已启用", "info");
           return;
         }
         const approvalMode = executionContext.mode === "auto" ? "auto" : "default";
