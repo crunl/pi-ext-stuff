@@ -14,7 +14,7 @@ export function partitionExtensionStatuses(
 ): { mode: string | undefined; remaining: Array<[string, string]> } {
 	const publishedMode = statuses.get("pi-permissions");
 	return {
-		mode: publishedMode === "Default" ? undefined : publishedMode,
+		mode: publishedMode === "default" ? undefined : publishedMode,
 		remaining: [...statuses.entries()].filter(([key]) => key !== "pi-permissions"),
 	};
 }

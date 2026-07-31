@@ -29,7 +29,7 @@ test("falls back to inverse video without truecolor data", () => {
 });
 
 test("YOLO badge escalates to error color; other modes stay warning", () => {
-	assert.equal(badgeColorFor("YOLO"), "error");
-	assert.equal(badgeColorFor("Auto"), "warning");
+	assert.equal(badgeColorFor("full bypass"), "error");
+	assert.equal(badgeColorFor("approve for me"), "warning");
 	assert.equal(badgeColorFor("Plan"), "warning");
 });

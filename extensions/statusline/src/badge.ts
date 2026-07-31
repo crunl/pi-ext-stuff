@@ -13,7 +13,7 @@
 
 /** Theme color backing the badge for a given permissions mode. */
 export function badgeColorFor(mode: string): "warning" | "error" {
-	return mode === "YOLO" ? "error" : "warning";
+	return mode === "full bypass" ? "error" : "warning";
 }
 
 /** Parse a truecolor SGR sequence (38/48;2;r;g;b) into RGB. */

@@ -27,7 +27,7 @@ test("omits the effort segment when effort is absent", () => {
 test("hides Default while preserving unrelated statuses", () => {
 	const result = partitionExtensionStatuses(new Map([
 		["other", "Indexing"],
-		["pi-permissions", "Default"],
+		["pi-permissions", "default"],
 	]));
 	assert.equal(result.mode, undefined);
 	assert.deepEqual(result.remaining, [["other", "Indexing"]]);
@@ -35,17 +35,17 @@ test("hides Default while preserving unrelated statuses", () => {
 
 test("keeps non-default permission modes visible", () => {
 	const result = partitionExtensionStatuses(
-		new Map([["pi-permissions", "Auto"]]),
+		new Map([["pi-permissions", "approve for me"]]),
 	);
-	assert.equal(result.mode, "Auto");
+	assert.equal(result.mode, "approve for me");
 	assert.deepEqual(result.remaining, []);
 });
 
 test("mode state reports only distinct changes", () => {
 	const state = new PermissionsModeState();
-	assert.equal(state.update("Default"), true);
-	assert.equal(state.update("Default"), false);
-	assert.equal(state.get(), "Default");
+	assert.equal(state.update("default"), true);
+	assert.equal(state.update("default"), false);
+	assert.equal(state.get(), "default");
 	assert.equal(state.update(undefined), true);
 });
 
@@ -54,7 +54,7 @@ test("sync requests one render per distinct mode and returns other statuses", ()
 	let renders = 0;
 	const statuses = new Map([
 		["other", "Indexing"],
-		["pi-permissions", "Default"],
+		["pi-permissions", "default"],
 	]);
 
 	assert.deepEqual(
@@ -66,12 +66,12 @@ test("sync requests one render per distinct mode and returns other statuses", ()
 	assert.equal(renders, 0);
 
 	syncPermissionsMode(
-		new Map([["pi-permissions", "Auto"]]),
+		new Map([["pi-permissions", "approve for me"]]),
 		state,
 		() => renders++,
 	);
 	assert.equal(renders, 1);
-	assert.equal(state.get(), "Auto");
+	assert.equal(state.get(), "approve for me");
 
 	syncPermissionsMode(statuses, state, () => renders++);
 	assert.equal(renders, 2);
