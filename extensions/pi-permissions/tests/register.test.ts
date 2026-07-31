@@ -447,7 +447,7 @@ describe("Default mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
-  it("ignores a stale hard block when risk evaluation resolves after entering YOLO", async () => {
+  it("keeps a hard block when risk evaluation resolves after a future YOLO switch", async () => {
     const evaluation = deferred<DefaultDecision>();
     const riskEvaluator = vi.fn(async () => evaluation.promise);
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
@@ -473,12 +473,12 @@ describe("Default mode registration", () => {
       reason: "Stale private-network block.",
     });
 
-    await expect(pending).resolves.toBeUndefined();
+    await expect(pending).resolves.toMatchObject({ block: true });
     expect(app.select).not.toHaveBeenCalled();
     expect(app.autoReviewer.review).not.toHaveBeenCalled();
   });
 
-  it("ignores a stale risk-evaluator rejection after entering YOLO", async () => {
+  it("fails closed when risk evaluation rejects after a future YOLO switch", async () => {
     const evaluationStarted = deferred();
     const riskEvaluator = vi.fn(async (): Promise<DefaultDecision> => {
       await evaluationStarted.promise;
@@ -503,12 +503,12 @@ describe("Default mode registration", () => {
     await cycleToMode(app, "YOLO");
     evaluationStarted.resolve();
 
-    await expect(pending).resolves.toBeUndefined();
+    await expect(pending).resolves.toMatchObject({ block: true });
     expect(app.select).not.toHaveBeenCalled();
     expect(app.autoReviewer.review).not.toHaveBeenCalled();
   });
 
-  it("requires fresh authorization when YOLO ends before execution", async () => {
+  it("keeps YOLO execution for the active snapshot after switching future mode", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
     const app = harness(agentDir);
@@ -529,10 +529,10 @@ describe("Default mode registration", () => {
       app.tools
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
+    ).resolves.toBeDefined();
   });
 
-  it("invalidates a pending Guardian review when entering YOLO", async () => {
+  it("keeps a pending Guardian review in its active snapshot when entering YOLO", async () => {
     const review = deferred<{
       decision: "approve";
       risk: "low";
@@ -570,18 +570,15 @@ describe("Default mode registration", () => {
       rationale: "Stale approval.",
     });
 
-    await expect(pending).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringContaining("permission context changed"),
-    });
+    await expect(pending).resolves.toBeUndefined();
     await expect(
       app.tools
         .get("bash")
         .execute("auto-to-yolo", { command: "rm -rf build" }, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
+    ).resolves.toBeDefined();
   });
 
-  it("invalidates a pending human approval when entering YOLO", async () => {
+  it("keeps a pending human approval in its active snapshot when entering YOLO", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
     await app.handlers.get("session_start")?.(
@@ -601,16 +598,13 @@ describe("Default mode registration", () => {
     await cycleToMode(app, "YOLO");
     choice.resolve("Allow Once");
 
-    await expect(pending).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringContaining("context changed"),
-    });
+    await expect(pending).resolves.toBeUndefined();
     await cycleToMode(app, "Default");
     await expect(
       app.tools
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
+    ).resolves.toBeDefined();
   });
 
   it("invalidates the configured reviewer's Guardian history across lifecycle boundaries", async () => {
@@ -1996,6 +1990,7 @@ describe("Default mode registration", () => {
     expect(app.select).not.toHaveBeenCalled();
     expect(app.abort).toHaveBeenCalledOnce();
 
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     await app.handlers.get("tool_call")!(
       {
@@ -2610,7 +2605,7 @@ describe("Default mode registration", () => {
     await expect(active).resolves.toBeUndefined();
   });
 
-  it("invalidates a late Auto approval when mode changes", async () => {
+  it("keeps a late Auto approval in its active snapshot when mode changes", async () => {
     let resolveReview!: (value: {
       decision: "approve";
       risk: "low";
@@ -2654,13 +2649,13 @@ describe("Default mode registration", () => {
       rationale: "Late approval.",
     });
 
-    await expect(pending).resolves.toMatchObject({ block: true });
+    await expect(pending).resolves.toBeUndefined();
     await expect(
       app.tools
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
-    expect(app.bashExecute).not.toHaveBeenCalled();
+    ).resolves.toBeDefined();
+    expect(app.bashExecute).toHaveBeenCalledOnce();
   });
 
   it("invalidates a late Auto approval on session shutdown", async () => {
@@ -3363,6 +3358,52 @@ describe("Default mode registration", () => {
     expect(reviewer.review).not.toHaveBeenCalled();
   });
 
+  it("fails closed between agent_end and a queued agent_start instead of recreating a YOLO snapshot", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "between-turn-yolo", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("snapshot is unavailable"),
+    });
+
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "queued-yolo-snapshot", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not invalidate permission context twice when agent_settled follows agent_end", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const invalidationsBeforeTurn = reviewer.invalidateSession.mock.calls.length;
+
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsBeforeTurn + 1);
+
+    await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
+    expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsBeforeTurn + 1);
+  });
+
   it("rejects an old human approval after its permission turn ends", async () => {
     const choice = deferred<string>();
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
@@ -3395,7 +3436,7 @@ describe("Default mode registration", () => {
       app.tools
         .get("bash")
         .execute(event.toolCallId, event.input, undefined, undefined, app.context),
-    ).rejects.toThrow("no longer authorized");
+    ).rejects.toThrow("snapshot is unavailable");
 
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     await expect(

@@ -90,6 +90,21 @@ interface ApprovedCall {
 
 type ExecutablePermissionMode = Exclude<PermissionMode, "plan">;
 
+type PermissionTurnPhase = "idle" | "active" | "between";
+
+interface PermissionExecutionSnapshot {
+  turnId: number;
+  mode: ExecutablePermissionMode;
+  config: PermissionsConfig;
+  baseSandboxConfig?: SandboxRuntimeConfig;
+  sandboxReady: boolean;
+}
+
+interface PendingModeTransition {
+  id: number;
+  turnId: number;
+}
+
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
@@ -154,6 +169,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
   let permissionContextEpoch = 0;
+  let permissionTurnPhase: PermissionTurnPhase = "idle";
+  let permissionTurnId = 0;
+  let activeTurnId: number | undefined;
+  let lifecycleEventsObserved = false;
+  let activeExecutionSnapshot: PermissionExecutionSnapshot | undefined;
+  let pendingModeTransition: PendingModeTransition | undefined;
+  let modeTransitionId = 0;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -202,21 +224,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     autoReviewer.invalidateSession();
   };
 
-  const shouldContinueAfterYoloTransition = (
-    ctx: Pick<ExtensionContext, "signal">,
-    evaluationEpoch: number,
-    reviewController: AbortController,
-  ): boolean =>
-    !ctx.signal?.aborted &&
-    reviewController.signal.aborted &&
-    modeRuntime?.mode === "yolo" &&
-    permissionContextEpoch !== evaluationEpoch &&
-    reviewController.signal.reason instanceof Error &&
-    reviewController.signal.reason.message === PERMISSION_MODE_CHANGED_REASON;
-
   const resetBranchPermissionContext = (reason: string): void => {
     modeMutationGeneration += 1;
     trustedUserMessages.length = 0;
+    permissionTurnPhase = "idle";
+    activeTurnId = undefined;
+    activeExecutionSnapshot = undefined;
+    pendingModeTransition = undefined;
     invalidatePermissionContext(reason);
   };
 
@@ -234,10 +248,66 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return modeRuntime;
   };
 
+  const captureExecutionSnapshot = (turnId: number): PermissionExecutionSnapshot | undefined => {
+    if (activeExecutionSnapshot) return activeExecutionSnapshot;
+    if (!loaded || !modeRuntime) return undefined;
+    activeExecutionSnapshot = {
+      turnId,
+      mode: executableMode(modeRuntime.mode),
+      config: loaded.config,
+      baseSandboxConfig,
+      sandboxReady: sandboxState.kind === "ready",
+    };
+    return activeExecutionSnapshot;
+  };
+
+  const currentExecutionSnapshot = (): PermissionExecutionSnapshot | undefined =>
+    permissionTurnPhase === "active" &&
+    activeTurnId !== undefined &&
+    activeExecutionSnapshot?.turnId === activeTurnId
+      ? activeExecutionSnapshot
+      : undefined;
+
+  const ensureExecutionSnapshot = (
+    _ctx: Pick<ExtensionContext, "isIdle">,
+  ): PermissionExecutionSnapshot | undefined => {
+    const current = currentExecutionSnapshot();
+    if (current) return current;
+    if (permissionTurnPhase === "between" || lifecycleEventsObserved) return undefined;
+
+    // Direct tool-hook invocations without lifecycle events are themselves proof of active work.
+    permissionTurnId += 1;
+    activeTurnId = permissionTurnId;
+    permissionTurnPhase = "active";
+    return captureExecutionSnapshot(activeTurnId);
+  };
+
+  const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
+    currentExecutionSnapshot() === snapshot;
+
+  const scheduleModeTransition = (turnId: number | undefined): void => {
+    if (turnId === undefined) return;
+    pendingModeTransition = { id: ++modeTransitionId, turnId };
+  };
+
+  const clearPendingModeTransition = (turnId: number): void => {
+    if (pendingModeTransition?.turnId === turnId) pendingModeTransition = undefined;
+  };
+
+  const finishPermissionTurn = (reason: string): void => {
+    if (permissionTurnPhase !== "active") return;
+    const closingTurnId = activeTurnId;
+    activeExecutionSnapshot = undefined;
+    activeTurnId = undefined;
+    permissionTurnPhase = "between";
+    if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
+    invalidatePermissionContext(reason);
+  };
+
   const grantApprovedCall = (
     event: ToolCallEvent,
     decision: Extract<DefaultDecision, { action: "prompt" }>,
-    config: PermissionsConfig,
+    snapshot: PermissionExecutionSnapshot,
     cwd: string,
     authority: "user" | "auto-review",
     mode: ApprovedCall["mode"],
@@ -246,7 +316,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     approvedCalls.set(event.toolCallId, {
       authority,
       mode,
-      configFingerprint: fingerprintConfig(config),
+      configFingerprint: fingerprintConfig(snapshot.config),
       cwd: resolve(cwd),
       requestFingerprint: fingerprintValue({
         tool: event.toolName.toLowerCase(),
@@ -393,18 +463,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     id: string,
     input: Record<string, unknown>,
     ctx: Pick<ExtensionContext, "cwd">,
+    snapshot: PermissionExecutionSnapshot,
   ): Promise<void> => {
-    const activeConfig = loaded?.config;
-    if (!activeConfig) {
-      throw new Error("pi-permissions: active configuration is unavailable");
+    if (!isCurrentExecutionSnapshot(snapshot)) {
+      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
     }
+    const activeConfig = snapshot.config;
+    const activeMode = snapshot.mode;
+    const executionEpoch = permissionContextEpoch;
     const approval = approvedCalls.get(id);
     approvedCalls.delete(id);
     const approved =
       approval !== undefined &&
       approval.cwd === resolve(ctx.cwd) &&
       approval.configFingerprint === fingerprintConfig(activeConfig) &&
-      (approval.mode === "user-transition" || approval.mode === modeRuntime?.mode) &&
+      (approval.mode === "user-transition" || approval.mode === activeMode) &&
       approval.requestFingerprint ===
         fingerprintValue({
           tool: tool.toLowerCase(),
@@ -417,27 +490,40 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       activeConfig,
       defaultProtectedWritePaths(ctx.cwd, agentDir),
     );
+    if (permissionContextEpoch !== executionEpoch || !isCurrentExecutionSnapshot(snapshot)) {
+      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+    }
     if (currentDecision.action === "block" || (currentDecision.action === "prompt" && !approved)) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
   };
 
-  const sandboxOperations = (customConfig?: SandboxRuntimeConfig): BashOperations => {
-    if (sandboxState.kind !== "ready") {
-      const reason =
-        sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
+  const sandboxOperations = (
+    customConfig?: SandboxRuntimeConfig,
+    snapshot?: PermissionExecutionSnapshot,
+  ): BashOperations => {
+    if (!snapshot?.sandboxReady) {
+      const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
     return createSandboxedBashOperations(sandboxManager, customConfig);
   };
 
-  const sandboxFileOperations = (writeRoots: readonly string[], signal?: AbortSignal) => {
-    if (sandboxState.kind !== "ready" || !baseSandboxConfig) {
-      const reason =
-        sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
+  const sandboxFileOperations = (
+    writeRoots: readonly string[],
+    signal?: AbortSignal,
+    snapshot?: PermissionExecutionSnapshot,
+  ) => {
+    if (!snapshot?.sandboxReady || !snapshot.baseSandboxConfig) {
+      const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
       throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
     }
-    return createSandboxedFileOperations(sandboxManager, baseSandboxConfig, writeRoots, signal);
+    return createSandboxedFileOperations(
+      sandboxManager,
+      snapshot.baseSandboxConfig,
+      writeRoots,
+      signal,
+    );
   };
 
   pi.registerTool({
@@ -459,7 +545,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
-      if (modeRuntime?.mode === "yolo") {
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+      }
+      if (executionSnapshot.mode === "yolo") {
         revokeApprovedCall(id);
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -470,18 +560,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         approvedNetworkHosts.delete(id);
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized("bash", id, params as Record<string, unknown>, ctx);
+        await assertExecutionAuthorized(
+          "bash",
+          id,
+          params as Record<string, unknown>,
+          ctx,
+          executionSnapshot,
+        );
 
-        if (!loaded?.config.sandbox.enabled) {
+        if (!executionSnapshot.config.sandbox.enabled) {
           return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
         }
-        if (sandboxState.kind !== "ready" || !baseSandboxConfig) {
+        const baseConfig = executionSnapshot.baseSandboxConfig;
+        if (!executionSnapshot.sandboxReady || !baseConfig) {
           const reason =
-            sandboxState.kind === "failed" ? sandboxState.error : `sandbox is ${sandboxState.kind}`;
+            sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
           throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
         }
 
-        const baseConfig = baseSandboxConfig;
         let commandConfig =
           writeRoots.length > 0 ? withAdditionalWriteRoots(baseConfig, writeRoots) : baseConfig;
         let filteringProxy: HostFilteringProxy | undefined;
@@ -511,7 +607,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
 
           const sandboxedBash = bashToolFactory(ctx.cwd, {
-            operations: sandboxOperations(commandConfig),
+            operations: sandboxOperations(commandConfig, executionSnapshot),
           });
           return await sandboxedBash.execute(id, params, signal, onUpdate);
         } finally {
@@ -555,19 +651,29 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
-      if (modeRuntime?.mode === "yolo") {
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+      }
+      if (executionSnapshot.mode === "yolo") {
         revokeApprovedCall(id);
         return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized("write", id, params as Record<string, unknown>, ctx);
-        if (!loaded?.config.sandbox.enabled) {
+        await assertExecutionAuthorized(
+          "write",
+          id,
+          params as Record<string, unknown>,
+          ctx,
+          executionSnapshot,
+        );
+        if (!executionSnapshot.config.sandbox.enabled) {
           return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
         const tool = createWriteTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal),
+          operations: sandboxFileOperations(writeRoots, signal, executionSnapshot),
         });
         return tool.execute(id, params, signal, onUpdate);
       }, signal);
@@ -594,19 +700,29 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       await activateConfig(ctx);
-      if (modeRuntime?.mode === "yolo") {
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+      }
+      if (executionSnapshot.mode === "yolo") {
         revokeApprovedCall(id);
         return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
       return sandboxCoordinator.runShared(async () => {
         const writeRoots = approvedWriteRoots.get(id) ?? [];
         approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized("edit", id, params as Record<string, unknown>, ctx);
-        if (!loaded?.config.sandbox.enabled) {
+        await assertExecutionAuthorized(
+          "edit",
+          id,
+          params as Record<string, unknown>,
+          ctx,
+          executionSnapshot,
+        );
+        if (!executionSnapshot.config.sandbox.enabled) {
           return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
         const tool = createEditTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal),
+          operations: sandboxFileOperations(writeRoots, signal, executionSnapshot),
         });
         return tool.execute(id, params, signal, onUpdate);
       }, signal);
@@ -623,7 +739,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const requestHumanApproval = async (
     event: ToolCallEvent,
     decision: Extract<DefaultDecision, { action: "prompt" }>,
-    config: PermissionsConfig,
+    snapshot: PermissionExecutionSnapshot,
     ctx: ExtensionContext,
     options: {
       guardianFailure?: AutoReviewerFailureKind;
@@ -635,7 +751,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         reason: `pi-permissions: ${decision.risk} operation requires interactive approval`,
       };
     }
-    const runtime = ensureModeRuntime(config);
+    const runtime = ensureModeRuntime(snapshot.config);
     const humanApprovalToken = runtime.beginHumanApproval();
     if (humanApprovalToken === undefined) {
       return {
@@ -666,22 +782,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         DEFAULT_DENY_CHOICE,
       ]);
       if (choice === DEFAULT_ALLOW_ONCE_CHOICE || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-        if (permissionContextEpoch !== approvalEpoch) {
+        if (permissionContextEpoch !== approvalEpoch || !isCurrentExecutionSnapshot(snapshot)) {
           return {
             block: true,
             reason: "pi-permissions: approval context changed before confirmation",
           };
         }
         if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-          grantApprovedCall(event, decision, config, ctx.cwd, "user", "user-transition");
+          grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", "user-transition");
           transitionGrantCreated = true;
           runtime.activate("auto");
+          scheduleModeTransition(snapshot.turnId);
           setDefaultStatus(ctx);
           ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
           return;
         }
-        const approvalMode = runtime.mode === "auto" ? "auto" : "default";
-        grantApprovedCall(event, decision, config, ctx.cwd, "user", approvalMode);
+        const approvalMode = snapshot.mode === "auto" ? "auto" : "default";
+        grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", approvalMode);
         return;
       }
       return {
@@ -710,6 +827,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
+    lifecycleEventsObserved = false;
     let candidate: LoadedPermissionsConfig;
     try {
       candidate = await loadPermissionsConfig(agentDir);
@@ -767,6 +885,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("session_shutdown", async () => {
     modeMutationGeneration += 1;
+    permissionTurnPhase = "idle";
+    activeTurnId = undefined;
+    activeExecutionSnapshot = undefined;
+    pendingModeTransition = undefined;
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
@@ -781,7 +903,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("agent_start", () => {
+    lifecycleEventsObserved = true;
+    if (permissionTurnPhase === "active") return;
+    permissionTurnId += 1;
+    activeTurnId = permissionTurnId;
+    permissionTurnPhase = "active";
     modeRuntime?.beginAgentTurn();
+    captureExecutionSnapshot(activeTurnId);
+  });
+
+  pi.on("agent_end", () => {
+    lifecycleEventsObserved = true;
+    finishPermissionTurn("permission turn ended");
+  });
+
+  pi.on("agent_settled", () => {
+    lifecycleEventsObserved = true;
+    finishPermissionTurn("permission turn settled");
+    if (permissionTurnPhase === "between") permissionTurnPhase = "idle";
   });
 
   pi.on(
@@ -800,7 +939,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
 
       const runtime = ensureModeRuntime(result.config);
-      if (runtime.mode === "yolo") return;
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        return {
+          block: true,
+          reason: "pi-permissions: active permission turn snapshot is unavailable",
+        };
+      }
+      if (executionSnapshot.mode === "yolo") return;
 
       const evaluationEpoch = permissionContextEpoch;
       let decision: DefaultDecision;
@@ -809,12 +955,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           event.toolName,
           event.input as Record<string, unknown>,
           ctx.cwd,
-          result.config,
+          executionSnapshot.config,
           defaultProtectedWritePaths(ctx.cwd, agentDir),
         );
       } catch (error: unknown) {
-        if (modeRuntime?.mode === "yolo") return;
-        if (permissionContextEpoch !== evaluationEpoch) {
+        if (
+          permissionContextEpoch !== evaluationEpoch ||
+          !isCurrentExecutionSnapshot(executionSnapshot)
+        ) {
           return {
             block: true,
             reason: "pi-permissions: permission context changed during risk evaluation",
@@ -824,8 +972,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return { block: true, reason: `pi-permissions failed closed: ${message}` };
       }
 
-      if (modeRuntime?.mode === "yolo") return;
-      if (permissionContextEpoch !== evaluationEpoch) {
+      if (
+        permissionContextEpoch !== evaluationEpoch ||
+        !isCurrentExecutionSnapshot(executionSnapshot)
+      ) {
         return {
           block: true,
           reason: "pi-permissions: permission context changed during risk evaluation",
@@ -835,12 +985,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const effectiveMode = runtime.mode === "auto" ? "auto" : "default";
+      const effectiveMode = executionSnapshot.mode === "auto" ? "auto" : "default";
       if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
           block: true,
           reason:
-            "pi-permissions: Auto review paused after repeated denials; start a new turn or run /auto to resume",
+            "pi-permissions: Auto review paused after repeated denials; start a new turn or use Shift+Tab to re-enter Auto",
         };
       }
       if (effectiveMode === "auto") {
@@ -864,7 +1014,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             tool: event.toolName.toLowerCase(),
             input: event.input,
           });
-          const configFingerprint = fingerprintConfig(result.config);
+          const configFingerprint = fingerprintConfig(executionSnapshot.config);
           const approvalOverride = autoApprovalLedger.takeOverride({
             actionFingerprint,
             cwd: resolve(ctx.cwd),
@@ -874,7 +1024,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             event,
             decision,
             ctx.cwd,
-            result.config.sandbox.profile,
+            executionSnapshot.config.sandbox.profile,
             trustedUserMessages,
             approvalOverride,
           );
@@ -884,7 +1034,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             {
               modelRegistry: ctx.modelRegistry,
               activeModel: ctx.model,
-              reviewer: result.config.reviewer,
+              reviewer: executionSnapshot.config.reviewer,
               guardianSession: {
                 cwd: resolve(ctx.cwd),
                 configFingerprint,
@@ -894,9 +1044,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             reviewSignal,
           );
           if (reviewSignal.aborted) {
-            if (shouldContinueAfterYoloTransition(ctx, evaluationEpoch, reviewController)) {
-              return;
-            }
             return {
               block: true,
               reason: "pi-permissions: permission context changed during Auto review",
@@ -915,7 +1062,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             guardian.fallbackNotice === "configured-reviewer-unavailable" &&
             ctx.hasUI
           ) {
-            const preferred = result.config.reviewer;
+            const preferred = executionSnapshot.config.reviewer;
             const noticeKey = fingerprintValue({
               configFingerprint,
               preferredProvider: preferred?.provider,
@@ -933,7 +1080,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             grantApprovedCall(
               event,
               decision,
-              result.config,
+              executionSnapshot,
               ctx.cwd,
               "auto-review",
               effectiveMode,
@@ -967,7 +1114,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           runtime.recordAutoNonDenial();
           if (ctx.hasUI) {
-            return requestHumanApproval(event, decision, result.config, ctx, {
+            return requestHumanApproval(event, decision, executionSnapshot, ctx, {
               guardianFailure: auto.error.kind,
             });
           }
@@ -977,9 +1124,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           };
         } catch {
           if (reviewSignal.aborted) {
-            if (shouldContinueAfterYoloTransition(ctx, evaluationEpoch, reviewController)) {
-              return;
-            }
             return {
               block: true,
               reason: "pi-permissions: permission context changed during Auto review",
@@ -997,49 +1141,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
         }
       }
-      return requestHumanApproval(event, decision, result.config, ctx);
+      return requestHumanApproval(event, decision, executionSnapshot, ctx);
     },
   );
-
-  const activateMode = async (
-    mode: ExecutablePermissionMode,
-    ctx: ExtensionContext,
-  ): Promise<void> =>
-    runModeMutation(async (generation) => {
-      try {
-        const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : undefined;
-        const result = await activateConfig(ctx, ctx.isIdle(), mode);
-        if (generation !== modeMutationGeneration) return;
-        const runtime = ensureModeRuntime(result.config);
-        if (runtime.snapshot().configFingerprint !== fingerprintConfig(result.config)) {
-          runtime.restore([], result.config);
-        }
-        runtime.activate(mode);
-        invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
-        setDefaultStatus(ctx);
-        ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
-        if (previousMode === "yolo" && mode !== "yolo" && !ctx.isIdle()) ctx.abort();
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        setDefaultStatus(ctx);
-        ctx.ui.notify(`pi-permissions 配置重载失败；继续使用上一份有效策略：${message}`, "error");
-      }
-    });
-
-  pi.registerCommand("default", {
-    description: "Activate pi-permissions Default mode",
-    handler: async (_args, ctx) => activateMode("default", ctx),
-  });
-
-  pi.registerCommand("auto", {
-    description: "Activate pi-permissions Auto mode",
-    handler: async (_args, ctx) => activateMode("auto", ctx),
-  });
-
-  pi.registerCommand("yolo", {
-    description: "Activate pi-permissions YOLO Full Access mode",
-    handler: async (_args, ctx) => activateMode("yolo", ctx),
-  });
 
   pi.registerCommand("approve", {
     description: "Approve one exact retry of a recent Auto-review denial",
@@ -1118,16 +1222,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const initial = await activateConfig(ctx);
           runtime = ensureModeRuntime(initial.config);
         }
+        if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
+        const working = permissionTurnPhase === "active";
         const previousMode = executableMode(runtime.mode);
         const targetMode = nextExecutableMode(previousMode);
-        const result = await activateConfig(ctx, ctx.isIdle(), targetMode);
+        const result = await activateConfig(ctx, !working, targetMode);
         if (generation !== modeMutationGeneration) return;
         runtime = ensureModeRuntime(result.config);
         runtime.activate(targetMode);
-        invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+        if (working) {
+          scheduleModeTransition(activeTurnId);
+        } else {
+          invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+        }
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
-        if (previousMode === "yolo" && targetMode !== "yolo" && !ctx.isIdle()) ctx.abort();
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
