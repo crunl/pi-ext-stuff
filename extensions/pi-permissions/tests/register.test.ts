@@ -4075,6 +4075,63 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
+  it("fails closed when a cached old-session tool call is released after session reset", async () => {
+    const staleActivationStarted = deferred<void>();
+    const releaseStaleActivation = deferred<void>();
+    let pauseNextExclusive = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        if (pauseNextExclusive) {
+          pauseNextExclusive = false;
+          staleActivationStarted.resolve();
+          await releaseStaleActivation.promise;
+        }
+        return operation();
+      },
+    };
+    const riskEvaluator = vi.fn(
+      async (): Promise<DefaultDecision> => ({
+        action: "allow",
+        risk: "LOW",
+        reason: "Fresh session read is allowed.",
+      }),
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, coordinator, undefined, riskEvaluator);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    pauseNextExclusive = true;
+    const staleToolCall = app.handlers.get("tool_call")!(
+      { toolName: "read", toolCallId: "old-cached-read", input: { path: "README.md" } },
+      app.context,
+    );
+    await staleActivationStarted.promise;
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+    releaseStaleActivation.resolve();
+
+    await expect(staleToolCall).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("activation was superseded"),
+    });
+    // The stale handler must stop before ensureExecutionSnapshot can synthesize a
+    // compatibility turn for the newly reset session.
+    expect(riskEvaluator).not.toHaveBeenCalled();
+
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-session-read", input: { path: "README.md" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(riskEvaluator).toHaveBeenCalledOnce();
+  });
+
   it("does not let a stale transition activation overwrite a new session configuration", async () => {
     const oldInitializationStarted = deferred<void>();
     const releaseOldInitialization = deferred<void>();

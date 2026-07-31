@@ -120,6 +120,17 @@ interface ModeTransitionBarrier {
   settle(readyForNextTurn: boolean): void;
 }
 
+class ActivationSupersededError extends Error {
+  constructor() {
+    super("pi-permissions: permission activation was superseded by a newer session");
+    this.name = "ActivationSupersededError";
+  }
+}
+
+function isActivationSupersededError(error: unknown): error is ActivationSupersededError {
+  return error instanceof ActivationSupersededError;
+}
+
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
@@ -431,6 +442,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
   const isActivationCurrent = (expectedGeneration: number): boolean =>
     expectedGeneration === modeMutationGeneration;
+  const assertActivationCurrent = (expectedGeneration: number): void => {
+    if (!isActivationCurrent(expectedGeneration)) throw new ActivationSupersededError();
+  };
   const assertYoloCapability = (mode: ExecutablePermissionMode): void => {
     if (mode === "yolo" && !coreExecutionAbortGateAvailable()) {
       throw new Error(
@@ -446,6 +460,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     candidateOverride?: LoadedPermissionsConfig,
     expectedGeneration = modeMutationGeneration,
   ): Promise<LoadedPermissionsConfig> => {
+    // The exclusive coordinator can delay this work until after a session/tree reset.
+    // Check before every cache shortcut so an old tool call cannot borrow the new
+    // session's cached policy and synthesize a compatibility snapshot.
+    assertActivationCurrent(expectedGeneration);
     const key = configKey(ctx);
     if (!force && configFailure) throw configFailure;
     const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
@@ -464,15 +482,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     try {
       candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
     } catch (error: unknown) {
-      if (isActivationCurrent(expectedGeneration)) {
-        configFailure = error instanceof Error ? error : new Error(String(error));
-      }
+      assertActivationCurrent(expectedGeneration);
+      configFailure = error instanceof Error ? error : new Error(String(error));
       throw error;
     }
     // A session/tree reset can supersede the activation while its candidate config
     // is loading. Do not let that obsolete activation reset or initialize the
     // shared sandbox runtime for the new generation.
-    if (!isActivationCurrent(expectedGeneration)) return candidate;
+    assertActivationCurrent(expectedGeneration);
     const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
     assertYoloCapability(effectiveMode);
     const previous = {
@@ -490,7 +507,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       : undefined;
 
     if (!requiresSandbox(effectiveMode, candidate.config)) {
-      if (!isActivationCurrent(expectedGeneration)) return candidate;
+      assertActivationCurrent(expectedGeneration);
       configFailure = undefined;
       activationFailure = undefined;
       if (force) invalidatePermissionContext("permission context changed");
@@ -506,13 +523,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       await sandboxManager.reset();
       if (candidateSandbox) await sandboxManager.initialize(candidateSandbox);
     } catch (error: unknown) {
-      if (!isActivationCurrent(expectedGeneration)) throw error;
+      assertActivationCurrent(expectedGeneration);
       try {
         await sandboxManager.reset();
-        if (!isActivationCurrent(expectedGeneration)) throw error;
+        assertActivationCurrent(expectedGeneration);
         if (previous.sandboxState.kind === "ready" && previous.baseSandboxConfig) {
           await sandboxManager.initialize(previous.baseSandboxConfig);
-          if (!isActivationCurrent(expectedGeneration)) throw error;
+          assertActivationCurrent(expectedGeneration);
           sandboxState = previous.sandboxState;
         } else if (previous.sandboxState.kind === "disabled") {
           sandboxState = previous.sandboxState;
@@ -521,12 +538,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           sandboxState = { kind: "failed", error: message };
         }
       } catch (rollbackError: unknown) {
-        if (!isActivationCurrent(expectedGeneration)) throw error;
+        assertActivationCurrent(expectedGeneration);
         const message =
           rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
         sandboxState = { kind: "failed", error: `rollback failed: ${message}` };
       }
-      if (!isActivationCurrent(expectedGeneration)) throw error;
+      assertActivationCurrent(expectedGeneration);
       loaded = previous.loaded;
       loadedKey = previous.loadedKey;
       baseSandboxConfig = previous.baseSandboxConfig;
@@ -540,7 +557,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw error;
     }
 
-    if (!isActivationCurrent(expectedGeneration)) return candidate;
+    assertActivationCurrent(expectedGeneration);
     activationFailure = undefined;
     configFailure = undefined;
     if (force) {
@@ -1086,6 +1103,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       try {
         result = await activateConfig(ctx);
       } catch (error: unknown) {
+        if (isActivationSupersededError(error)) {
+          return {
+            block: true,
+            reason:
+              "pi-permissions: permission activation was superseded; retry in the active session",
+          };
+        }
         return reportConfigError(ctx, error);
       }
 
@@ -1316,6 +1340,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       try {
         result = await activateConfig(ctx);
       } catch (error: unknown) {
+        if (isActivationSupersededError(error)) return;
         reportConfigError(ctx, error);
         return;
       }
