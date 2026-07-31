@@ -2435,16 +2435,14 @@ describe("Default mode registration", () => {
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "YOLO");
     expect(reviewSignal?.aborted).toBe(true);
+    expect(app.abort).not.toHaveBeenCalled();
     resolveReview({
       decision: "approve",
       risk: "low",
       userAuthorization: "high",
       rationale: "Late approval from the previous mode.",
     });
-    await expect(pendingReview).resolves.toMatchObject({
-      block: true,
-      reason: expect.stringContaining("permission context changed"),
-    });
+    await expect(pendingReview).resolves.toBeUndefined();
     await expect(
       app.tools
         .get("bash")

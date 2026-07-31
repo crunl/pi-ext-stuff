@@ -93,6 +93,7 @@ type ExecutablePermissionMode = Exclude<PermissionMode, "plan">;
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
+const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
 const guardianFallbackNoticeKeys = new Set<string>();
 
 function executableMode(mode: PermissionMode): ExecutablePermissionMode {
@@ -200,6 +201,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     autoApprovalLedger.clear();
     autoReviewer.invalidateSession();
   };
+
+  const shouldContinueAfterYoloTransition = (
+    ctx: Pick<ExtensionContext, "signal">,
+    evaluationEpoch: number,
+    reviewController: AbortController,
+  ): boolean =>
+    !ctx.signal?.aborted &&
+    reviewController.signal.aborted &&
+    modeRuntime?.mode === "yolo" &&
+    permissionContextEpoch !== evaluationEpoch &&
+    reviewController.signal.reason instanceof Error &&
+    reviewController.signal.reason.message === PERMISSION_MODE_CHANGED_REASON;
 
   const resetBranchPermissionContext = (reason: string): void => {
     modeMutationGeneration += 1;
@@ -881,6 +894,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             reviewSignal,
           );
           if (reviewSignal.aborted) {
+            if (shouldContinueAfterYoloTransition(ctx, evaluationEpoch, reviewController)) {
+              return;
+            }
             return {
               block: true,
               reason: "pi-permissions: permission context changed during Auto review",
@@ -961,6 +977,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           };
         } catch {
           if (reviewSignal.aborted) {
+            if (shouldContinueAfterYoloTransition(ctx, evaluationEpoch, reviewController)) {
+              return;
+            }
             return {
               block: true,
               reason: "pi-permissions: permission context changed during Auto review",
@@ -996,7 +1015,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.restore([], result.config);
         }
         runtime.activate(mode);
-        invalidatePermissionContext("permission mode changed");
+        invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
         if (previousMode === "yolo" && mode !== "yolo" && !ctx.isIdle()) ctx.abort();
@@ -1105,7 +1124,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (generation !== modeMutationGeneration) return;
         runtime = ensureModeRuntime(result.config);
         runtime.activate(targetMode);
-        invalidatePermissionContext("permission mode changed");
+        invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
         if (previousMode === "yolo" && targetMode !== "yolo" && !ctx.isIdle()) ctx.abort();

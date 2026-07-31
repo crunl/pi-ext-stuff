@@ -100,9 +100,15 @@ After a model is selected, the selection is fixed for the whole review:
 | transient connection/server/stream failure | retry the same model with backoff |
 | malformed Guardian JSON | retry the same model |
 | maximum three attempts or 90-second deadline reached | fail closed to human approval |
-| cancellation or mode/config/session change | abort review; require a fresh approval under the new context |
+| cancellation or mode/config/session change | invalidate the old review; restrictive targets require fresh approval, while an explicit `Auto` → `YOLO` switch may continue the exact in-flight call under YOLO without aborting the outer agent run |
 | Guardian deny | deny the action and update the existing circuit breaker |
 | Guardian allow | grant only the exact normalized call and config fingerprint |
+
+The old Guardian decision is invalid in every mode-change path. `YOLO` has no
+approval gate, so the explicit `Auto` → `YOLO` transition may continue the
+already-prepared exact tool call after cancelling its Guardian request. This
+does not reuse the stale decision, broaden a call, or apply to session/config
+invalidations; those paths remain fail-closed.
 
 There is deliberately no second-model fallback after a request has started.
 That avoids hidden policy changes, duplicate long waits, and accidental extra
