@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	formatModelStatus,
+	isPermissionsModeEvent,
 	partitionExtensionStatuses,
 	PermissionsModeState,
 	syncPermissionsMode,
@@ -24,32 +25,81 @@ test("omits the effort segment when effort is absent", () => {
 	);
 });
 
-test("hides Default while preserving unrelated statuses", () => {
+test("partition splits pi-permissions from unrelated statuses", () => {
 	const result = partitionExtensionStatuses(new Map([
 		["other", "Indexing"],
 		["pi-permissions", "default"],
 	]));
-	assert.equal(result.mode, undefined);
+	assert.equal(result.mode, "default");
 	assert.deepEqual(result.remaining, [["other", "Indexing"]]);
 });
 
-test("keeps non-default permission modes visible", () => {
-	const result = partitionExtensionStatuses(
-		new Map([["pi-permissions", "approve for me"]]),
+test("validates structured mode events", () => {
+	assert.equal(
+		isPermissionsModeEvent({ mode: "yolo", label: "full bypass", severity: "error" }),
+		true,
 	);
-	assert.equal(result.mode, "approve for me");
-	assert.deepEqual(result.remaining, []);
+	assert.equal(isPermissionsModeEvent({ mode: "yolo", label: "full bypass" }), false);
+	assert.equal(
+		isPermissionsModeEvent({ mode: "yolo", label: "full bypass", severity: "fatal" }),
+		false,
+	);
+	assert.equal(isPermissionsModeEvent(undefined), false);
+	assert.equal(isPermissionsModeEvent("full bypass"), false);
+});
+
+test("event severity drives badge visibility and color", () => {
+	const state = new PermissionsModeState();
+	assert.equal(
+		state.applyEvent({ mode: "default", label: "default", severity: "none" }),
+		false,
+	);
+	assert.equal(state.get(), undefined);
+
+	assert.equal(
+		state.applyEvent({ mode: "yolo", label: "full bypass", severity: "error" }),
+		true,
+	);
+	assert.equal(state.get(), "full bypass");
+	assert.equal(state.severity(), "error");
+
+	// Renamed label with same severity still renders — no string coupling.
+	assert.equal(
+		state.applyEvent({ mode: "yolo", label: "renamed later", severity: "error" }),
+		true,
+	);
+	assert.equal(state.get(), "renamed later");
+	assert.equal(state.severity(), "error");
+});
+
+test("legacy labels map to severities until the first event arrives", () => {
+	const state = new PermissionsModeState();
+	assert.equal(state.applyLegacyLabel("default"), false);
+	assert.equal(state.get(), undefined);
+
+	assert.equal(state.applyLegacyLabel("approve for me"), true);
+	assert.equal(state.get(), "approve for me");
+	assert.equal(state.severity(), "warning");
+
+	assert.equal(state.applyLegacyLabel("full bypass"), true);
+	assert.equal(state.severity(), "error");
+
+	// Once events flow, legacy strings are ignored.
+	state.applyEvent({ mode: "default", label: "default", severity: "none" });
+	assert.equal(state.applyLegacyLabel("full bypass"), false);
+	assert.equal(state.get(), undefined);
 });
 
 test("mode state reports only distinct changes", () => {
 	const state = new PermissionsModeState();
-	assert.equal(state.update("default"), true);
-	assert.equal(state.update("default"), false);
-	assert.equal(state.get(), "default");
-	assert.equal(state.update(undefined), true);
+	const event = { mode: "auto", label: "approve for me", severity: "warning" } as const;
+	assert.equal(state.applyEvent(event), true);
+	assert.equal(state.applyEvent(event), false);
+	assert.equal(state.reset(), true);
+	assert.equal(state.reset(), false);
 });
 
-test("sync requests one render per distinct mode and returns other statuses", () => {
+test("sync requests one render per distinct legacy mode and returns other statuses", () => {
 	const state = new PermissionsModeState();
 	let renders = 0;
 	const statuses = new Map([

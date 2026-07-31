@@ -20,6 +20,7 @@ export function installFooter(
 	ctx: ExtensionContext,
 	permissionsMode: PermissionsModeState,
 	onTheme?: (theme: { getFgAnsi(color: string): string }) => void,
+	onRequestRender?: (requestRender: () => void) => void,
 ): void {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
@@ -29,6 +30,7 @@ export function installFooter(
 		} catch {
 			// theme without getFgAnsi: badge falls back to inverse video
 		}
+		onRequestRender?.(() => queueMicrotask(() => tui.requestRender()));
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 
 		return {

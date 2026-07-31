@@ -29,7 +29,7 @@ export interface StatsProvider {
 }
 
 export interface PermissionsModeProvider {
-	(): string | undefined;
+	(): { label: string; severity: "warning" | "error" } | undefined;
 }
 
 export class ModelLineEditor extends CustomEditor {
@@ -64,12 +64,12 @@ export class ModelLineEditor extends CustomEditor {
 		// fg/bg codes must not leak into (or cut) the border color.
 		if (topIdx !== -1) {
 			const mode = this.getPermissionsMode();
-			const top = buildTopBorder(width, mode, this.getStats());
+			const top = buildTopBorder(width, mode?.label, this.getStats());
 			if (top !== undefined) {
 				// Builders guarantee pre+mode+post is exactly `width` (tested),
 				// so no re-truncation is needed here.
 				const decorate = makeModeBadgeDecorator(
-					mode ? this.getBadgeFgAnsi(badgeColorFor(mode)) : undefined,
+					mode ? this.getBadgeFgAnsi(badgeColorFor(mode.severity)) : undefined,
 				);
 				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
 				lines[topIdx] =

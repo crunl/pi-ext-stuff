@@ -11,9 +11,9 @@
  * This file must not import pi packages (tests run under bare node).
  */
 
-/** Theme color backing the badge for a given permissions mode. */
-export function badgeColorFor(mode: string): "warning" | "error" {
-	return mode === "full bypass" ? "error" : "warning";
+/** Theme color backing the badge for a given severity ("none" never renders). */
+export function badgeColorFor(severity: "warning" | "error"): "warning" | "error" {
+	return severity;
 }
 
 /** Parse a truecolor SGR sequence (38/48;2;r;g;b) into RGB. */

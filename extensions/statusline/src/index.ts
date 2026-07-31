@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { applyAutocompleteAbove } from "../../pi-core/standalone.ts";
 import { installFooter } from "./footer.ts";
 import { ModelLineEditor } from "./model-editor.ts";
-import { PermissionsModeState } from "./status-mode.ts";
+import { isPermissionsModeEvent, PermissionsModeState } from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
 
 export default function statusline(pi: ExtensionAPI) {
@@ -27,6 +27,16 @@ export default function statusline(pi: ExtensionAPI) {
 	// Live model info shared with the editor via closure; updated on events.
 	let currentCtx: ExtensionContext | undefined;
 	const permissionsMode = new PermissionsModeState();
+
+	// Preferred mode source: structured events from pi-permissions. The
+	// setStatus string (see footer.ts / syncPermissionsMode) stays as a
+	// fallback for pi-permissions builds that predate this event.
+	// requestRender is captured from the footer factory once installed.
+	let requestRender: (() => void) | undefined;
+	pi.events.on("pi-permissions:mode", (data) => {
+		if (!isPermissionsModeEvent(data)) return;
+		if (permissionsMode.applyEvent(data)) requestRender?.();
+	});
 
 	const modelInfo = () => {
 		const ctx = currentCtx;
@@ -50,15 +60,27 @@ export default function statusline(pi: ExtensionAPI) {
 		currentCtx = ctx;
 		// Captured from the footer factory's theme (full Theme, not EditorTheme).
 		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
-		installFooter(ctx, permissionsMode, (theme) => {
-			badgeFgAnsi.warning = theme.getFgAnsi("warning");
-			badgeFgAnsi.error = theme.getFgAnsi("error");
-		});
+		installFooter(
+			ctx,
+			permissionsMode,
+			(theme) => {
+				badgeFgAnsi.warning = theme.getFgAnsi("warning");
+				badgeFgAnsi.error = theme.getFgAnsi("error");
+			},
+			(fn) => {
+				requestRender = fn;
+			},
+		);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			const editor = new ModelLineEditor(tui, theme, keybindings);
 			editor.getModelInfo = modelInfo;
 			editor.getStats = stats;
-			editor.getPermissionsMode = () => permissionsMode.get();
+			editor.getPermissionsMode = () => {
+				const severity = permissionsMode.severity();
+				const label = permissionsMode.get();
+				if (severity === "none" || label === undefined) return undefined;
+				return { label, severity };
+			};
 			editor.getBadgeFgAnsi = (color) => badgeFgAnsi[color];
 			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
@@ -67,7 +89,7 @@ export default function statusline(pi: ExtensionAPI) {
 	const uninstall = (ctx: ExtensionContext) => {
 		ctx.ui.setFooter(undefined);
 		ctx.ui.setEditorComponent(undefined);
-		permissionsMode.update(undefined);
+		permissionsMode.reset();
 	};
 
 	// Install on every session (also covers /resume, forks, session switches)
