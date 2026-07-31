@@ -3484,6 +3484,80 @@ describe("Default mode registration", () => {
     expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsBeforeTurn + 1);
   });
 
+  it("does not let a delayed active-turn Shift+Tab transition leak approvals into the following turn", async () => {
+    const choice = deferred<string>();
+    const transitionStarted = deferred<void>();
+    const releaseTransition = deferred<void>();
+    let pauseExclusive = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        if (pauseExclusive) {
+          transitionStarted.resolve();
+          await releaseTransition.promise;
+        }
+        return operation();
+      },
+    };
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, coordinator, reviewer);
+    app.context.isIdle = () => false;
+    app.select.mockImplementationOnce(async () => choice.promise);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    const oldApproval = app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "approval-before-delayed-transition",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+    await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
+
+    pauseExclusive = true;
+    const transition = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await transitionStarted.promise;
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
+
+    choice.resolve("Allow Once");
+    await expect(oldApproval).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context changed"),
+    });
+
+    releaseTransition.resolve();
+    await transition;
+    expect(app.abort).not.toHaveBeenCalled();
+
+    const invalidationsAfterSettling = reviewer.invalidateSession.mock.calls.length;
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "fresh-approval-after-delayed-transition",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.select).toHaveBeenCalledOnce();
+    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsAfterSettling);
+  });
+
   it("rejects an old human approval after its permission turn ends", async () => {
     const choice = deferred<string>();
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));

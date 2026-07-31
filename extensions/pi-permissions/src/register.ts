@@ -103,6 +103,7 @@ interface PermissionExecutionSnapshot {
 interface PendingModeTransition {
   id: number;
   turnId: number;
+  phase: "active";
 }
 
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
@@ -285,18 +286,28 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
     currentExecutionSnapshot() === snapshot;
 
-  const scheduleModeTransition = (turnId: number | undefined): void => {
-    if (turnId === undefined) return;
+  const scheduleModeTransition = (): PendingModeTransition | undefined => {
+    if (permissionTurnPhase !== "active" || activeTurnId === undefined) return undefined;
     if (pendingModeTransition) {
       // Keep the first token as the owner for this turn. The lifecycle boundary
       // that owns it is the only path that may clear it.
-      return;
+      return pendingModeTransition;
     }
-    pendingModeTransition = { id: ++modeTransitionId, turnId };
+    pendingModeTransition = { id: ++modeTransitionId, turnId: activeTurnId, phase: "active" };
+    return pendingModeTransition;
   };
 
   const clearPendingModeTransition = (turnId: number): void => {
     if (pendingModeTransition?.turnId === turnId) pendingModeTransition = undefined;
+  };
+
+  const isPendingModeTransitionCurrent = (transition: PendingModeTransition): boolean =>
+    pendingModeTransition?.id === transition.id &&
+    permissionTurnPhase === transition.phase &&
+    activeTurnId === transition.turnId;
+
+  const clearPendingModeTransitionIfCurrent = (transition: PendingModeTransition): void => {
+    if (pendingModeTransition?.id === transition.id) pendingModeTransition = undefined;
   };
 
   const finishPermissionTurn = (reason: string): void => {
@@ -797,7 +808,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", "user-transition");
           transitionGrantCreated = true;
           runtime.activate("auto");
-          scheduleModeTransition(snapshot.turnId);
+          scheduleModeTransition();
           setDefaultStatus(ctx);
           ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
           return;
@@ -1214,6 +1225,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> =>
     runModeMutation(async (generation) => {
+      let transition: PendingModeTransition | undefined;
+      let transitionOwnsPendingState = false;
       try {
         if ((await shiftTabAvailability(agentDir)) !== "available") {
           ctx.ui.notify(
@@ -1222,27 +1235,52 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           );
           return;
         }
+        if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
+        const beganDuringActiveTurn = permissionTurnPhase === "active";
+        // Capture ownership before configuration activation can yield to a lifecycle event.
+        // A settled turn clears this token, so a late continuation cannot attach it to a
+        // later turn or recreate the earlier snapshot.
+        const pendingBeforeTransition = pendingModeTransition;
+        transition = beganDuringActiveTurn ? scheduleModeTransition() : undefined;
+        transitionOwnsPendingState =
+          transition !== undefined && transition !== pendingBeforeTransition;
+        if (!transition) {
+          // Between turns and while idle there is no snapshot to preserve. Revoke any
+          // approval context before the async activation work begins.
+          invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+        }
         let runtime = modeRuntime;
         if (!runtime) {
           const initial = await activateConfig(ctx);
           runtime = ensureModeRuntime(initial.config);
         }
-        if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
-        const working = permissionTurnPhase === "active";
         const previousMode = executableMode(runtime.mode);
         const targetMode = nextExecutableMode(previousMode);
-        const result = await activateConfig(ctx, !working, targetMode);
-        if (generation !== modeMutationGeneration) return;
+        const result = await activateConfig(ctx, !beganDuringActiveTurn, targetMode);
+        if (generation !== modeMutationGeneration) {
+          if (transition && transitionOwnsPendingState) {
+            clearPendingModeTransitionIfCurrent(transition);
+          }
+          return;
+        }
         runtime = ensureModeRuntime(result.config);
         runtime.activate(targetMode);
-        if (working) {
-          scheduleModeTransition(activeTurnId);
-        } else {
-          invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+        if (
+          transition &&
+          transitionOwnsPendingState &&
+          !isPendingModeTransitionCurrent(transition)
+        ) {
+          // agent_end/agent_settled (or a superseding lifecycle reset) already cleaned
+          // the old turn. Do not restore its invalidation token or snapshot.
+          clearPendingModeTransitionIfCurrent(transition);
         }
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
       } catch (error: unknown) {
+        if (transition && transitionOwnsPendingState) {
+          clearPendingModeTransitionIfCurrent(transition);
+        }
+        if (generation !== modeMutationGeneration) return;
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
         ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
