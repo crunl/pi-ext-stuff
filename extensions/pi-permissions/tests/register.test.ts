@@ -4132,6 +4132,101 @@ describe("Default mode registration", () => {
     expect(riskEvaluator).toHaveBeenCalledOnce();
   });
 
+  it("fails closed when reset wins after a cached tool activation resolves to its caller", async () => {
+    const staleActivationCompleted = deferred<void>();
+    const releaseStaleCaller = deferred<void>();
+    let pauseAfterActivation = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        const result = await operation();
+        if (pauseAfterActivation) {
+          pauseAfterActivation = false;
+          staleActivationCompleted.resolve();
+          await releaseStaleCaller.promise;
+        }
+        return result;
+      },
+    };
+    const riskEvaluator = vi.fn(
+      async (): Promise<DefaultDecision> => ({
+        action: "allow",
+        risk: "LOW",
+        reason: "Fresh session read is allowed.",
+      }),
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, coordinator, undefined, riskEvaluator);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    pauseAfterActivation = true;
+    const staleToolCall = app.handlers.get("tool_call")!(
+      { toolName: "read", toolCallId: "old-cached-read", input: { path: "README.md" } },
+      app.context,
+    );
+    await staleActivationCompleted.promise;
+
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    releaseStaleCaller.resolve();
+
+    await expect(staleToolCall).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("activation was superseded"),
+    });
+    // The stale caller must stop before it can synthesize or borrow the fresh
+    // YOLO session's execution snapshot.
+    expect(riskEvaluator).not.toHaveBeenCalled();
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-yolo-read", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not initialize a sandbox after reset is superseded by a new YOLO session", async () => {
+    const resetCompleted = deferred<void>();
+    const releaseReset = deferred<void>();
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({ sandbox: { profile: "read-only" } }),
+    );
+    app.sandboxManager.reset.mockImplementationOnce(async () => {
+      resetCompleted.resolve();
+      await releaseReset.promise;
+    });
+    const reload = app.commands.get("permissions")!.handler("", app.context);
+    await resetCompleted.promise;
+
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "resume" },
+      app.context,
+    );
+    releaseReset.resolve();
+    await reload;
+
+    // The initial Default activation is the only sandbox initialization. The
+    // stale reload reached reset but must not hand off to initialize().
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-yolo-read", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not let a stale transition activation overwrite a new session configuration", async () => {
     const oldInitializationStarted = deferred<void>();
     const releaseOldInitialization = deferred<void>();

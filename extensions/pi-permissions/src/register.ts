@@ -521,6 +521,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
     try {
       await sandboxManager.reset();
+      // reset() yields control to lifecycle handlers. A reset/session transition
+      // that wins during that await must not let this old activation bring up a
+      // sandbox for its obsolete configuration.
+      assertActivationCurrent(expectedGeneration);
       if (candidateSandbox) await sandboxManager.initialize(candidateSandbox);
     } catch (error: unknown) {
       assertActivationCurrent(expectedGeneration);
@@ -675,7 +679,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     parameters: permissionedBashParameters,
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
-      await activateConfig(ctx);
+      const activationGeneration = modeMutationGeneration;
+      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+      assertActivationCurrent(activationGeneration);
       const executionSnapshot = ensureExecutionSnapshot(ctx);
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
@@ -785,7 +791,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
-      await activateConfig(ctx);
+      const activationGeneration = modeMutationGeneration;
+      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+      assertActivationCurrent(activationGeneration);
       const executionSnapshot = ensureExecutionSnapshot(ctx);
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
@@ -838,7 +846,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
-      await activateConfig(ctx);
+      const activationGeneration = modeMutationGeneration;
+      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+      assertActivationCurrent(activationGeneration);
       const executionSnapshot = ensureExecutionSnapshot(ctx);
       if (!executionSnapshot) {
         throw new Error("pi-permissions: active permission turn snapshot is unavailable");
@@ -1100,8 +1110,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         approvedWriteRoots.delete(event.toolCallId);
       }
       let result: LoadedPermissionsConfig;
+      const activationGeneration = modeMutationGeneration;
       try {
-        result = await activateConfig(ctx);
+        result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+        assertActivationCurrent(activationGeneration);
       } catch (error: unknown) {
         if (isActivationSupersededError(error)) {
           return {
@@ -1337,8 +1349,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     description: "Approve one exact retry of a recent Auto-review denial",
     handler: async (_args, ctx) => {
       let result: LoadedPermissionsConfig;
+      const activationGeneration = modeMutationGeneration;
       try {
-        result = await activateConfig(ctx);
+        result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+        assertActivationCurrent(activationGeneration);
       } catch (error: unknown) {
         if (isActivationSupersededError(error)) return;
         reportConfigError(ctx, error);
