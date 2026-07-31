@@ -61,6 +61,19 @@ export class PermissionModeRuntime {
     throw new Error("Plan mode is not implemented");
   }
 
+  /**
+   * Badge severity for status consumers (e.g. statusline): "none" hides the
+   * badge, "warning" marks guardian-reviewed hand-off, "error" marks
+   * unreviewed execution. Consumers must key behavior off this field, not
+   * off the human-readable label.
+   */
+  get statusSeverity(): "none" | "warning" | "error" {
+    if (this.mode === "default") return "none";
+    if (this.mode === "auto") return "warning";
+    if (this.mode === "yolo") return "error";
+    throw new Error("Plan mode is not implemented");
+  }
+
   beginReview(toolCallId: string): boolean {
     if (this.activeReviewIds.has(toolCallId)) return false;
     this.activeReviewIds.add(toolCallId);

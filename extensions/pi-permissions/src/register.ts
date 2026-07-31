@@ -216,6 +216,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "default");
+    // Structured mode event for status consumers (e.g. statusline). The
+    // string published via setStatus above stays as the built-in-footer
+    // fallback; consumers should key off `mode`/`severity`, never the label.
+    pi.events.emit("pi-permissions:mode", {
+      mode: modeRuntime?.mode ?? "default",
+      label: modeRuntime?.statusLabel ?? "default",
+      severity: modeRuntime?.statusSeverity ?? "none",
+    });
   };
 
   const runModeMutation = <T>(

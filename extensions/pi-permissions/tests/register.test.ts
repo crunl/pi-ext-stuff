@@ -69,6 +69,7 @@ function harness(
   const filteringProxyFactory = vi.fn(async () => filteringProxy);
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
+  const emitBusEvent = vi.fn();
   const abort = vi.fn();
   const autoReviewer = reviewer ?? {
     invalidateSession: vi.fn(),
@@ -88,6 +89,7 @@ function harness(
     registerTool: (tool: any) => tools.set(tool.name, tool),
     appendEntry,
     sendMessage,
+    events: { emit: emitBusEvent, on: vi.fn() },
   };
   registerExtension(pi as any, {
     agentDir,
@@ -129,6 +131,7 @@ function harness(
     filteringProxyFactory,
     appendEntry,
     sendMessage,
+    emitBusEvent,
     abort,
     autoReviewer,
   };
@@ -174,13 +177,28 @@ describe("Default mode registration", () => {
 
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.emitBusEvent).toHaveBeenLastCalledWith("pi-permissions:mode", {
+      mode: "auto",
+      label: "approve for me",
+      severity: "warning",
+    });
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.emitBusEvent).toHaveBeenLastCalledWith("pi-permissions:mode", {
+      mode: "yolo",
+      label: "full bypass",
+      severity: "error",
+    });
     expect(app.abort).not.toHaveBeenCalled();
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
+    expect(app.emitBusEvent).toHaveBeenLastCalledWith("pi-permissions:mode", {
+      mode: "default",
+      label: "default",
+      severity: "none",
+    });
     expect(app.abort).not.toHaveBeenCalled();
   });
 
