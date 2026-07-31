@@ -1607,6 +1607,7 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
     await app.handlers.get("tool_call")!(
       {
@@ -1616,6 +1617,8 @@ describe("Default mode registration", () => {
       },
       app.context,
     );
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
     app.select.mockResolvedValueOnce(
       "1. bash: rm -rf build — Remote publication was not authorized.",
     );
@@ -1633,6 +1636,7 @@ describe("Default mode registration", () => {
       }),
       { triggerTurn: true },
     );
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
     await expect(
       app.handlers.get("tool_call")!(
@@ -1675,6 +1679,74 @@ describe("Default mode registration", () => {
     ).resolves.toMatchObject({ block: true });
     expect(reviewer.review.mock.calls[3]![0]).not.toHaveProperty("approvalOverride");
   });
+
+  it.each(["turn", "config", "session"] as const)(
+    "does not carry an unused /approve override across a %s boundary",
+    async (boundary) => {
+      const reviewer = {
+        invalidateSession: vi.fn(),
+        review: vi.fn(async (request: any) =>
+          request.approvalOverride
+            ? {
+                decision: "approve" as const,
+                risk: "high" as const,
+                userAuthorization: "high" as const,
+                rationale: "The exact retry was explicitly approved.",
+              }
+            : {
+                decision: "deny" as const,
+                risk: "high" as const,
+                userAuthorization: "low" as const,
+                rationale: "Remote publication was not authorized.",
+              },
+        ),
+      };
+      const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+      await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+      const app = harness(agentDir, false, true, {}, undefined, reviewer);
+      await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+      await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+      await app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "denied-before-unused-override",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      );
+      await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+
+      app.select.mockResolvedValueOnce(
+        "1. bash: rm -rf build — Remote publication was not authorized.",
+      );
+      await app.commands.get("approve")!.handler("", app.context);
+      if (boundary === "turn") {
+        await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+        await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+      } else if (boundary === "config") {
+        await app.commands.get("permissions")!.handler("", app.context);
+      } else {
+        await app.handlers.get("session_before_tree")?.(
+          { type: "session_before_tree" },
+          app.context,
+        );
+        await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
+      }
+      await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+      await expect(
+        app.handlers.get("tool_call")!(
+          {
+            toolName: "bash",
+            toolCallId: "retry-after-capability-boundary",
+            input: { command: "rm -rf build" },
+          },
+          app.context,
+        ),
+      ).resolves.toMatchObject({ block: true });
+      expect(reviewer.review.mock.calls.at(-1)?.[0]).not.toHaveProperty("approvalOverride");
+    },
+  );
 
   it.each(["timeout", "provider", "parse"] as const)(
     "offers sanitized human fallback after final Guardian %s failure",
@@ -3829,6 +3901,104 @@ describe("Default mode registration", () => {
     expect(app.select).toHaveBeenCalledOnce();
     expect(reviewer.review).toHaveBeenCalledOnce();
     expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsAfterSettling);
+  });
+
+  it("waits for a delayed YOLO to Default transition before starting a queued turn", async () => {
+    const transitionStarted = deferred<void>();
+    const releaseTransition = deferred<void>();
+    let pauseExclusive = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        if (pauseExclusive) {
+          transitionStarted.resolve();
+          await releaseTransition.promise;
+        }
+        return operation();
+      },
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir, false, true, {}, coordinator);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    pauseExclusive = true;
+    const transition = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await transitionStarted.promise;
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+
+    let queuedStartCompleted = false;
+    const queuedStart = Promise.resolve(
+      app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context),
+    ).then(() => {
+      queuedStartCompleted = true;
+    });
+    await Promise.resolve();
+    expect(queuedStartCompleted).toBe(false);
+
+    releaseTransition.resolve();
+    await Promise.all([transition, queuedStart]);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "queued-default-after-delayed-transition",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
+  it("leaves a queued turn without an executable snapshot when its delayed transition fails", async () => {
+    const transitionStarted = deferred<void>();
+    const releaseTransition = deferred<void>();
+    let pauseExclusive = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        if (pauseExclusive) {
+          transitionStarted.resolve();
+          await releaseTransition.promise;
+        }
+        return operation();
+      },
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir, false, true, {}, coordinator);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    pauseExclusive = true;
+    app.sandboxManager.initialize.mockRejectedValueOnce(new Error("sandbox unavailable"));
+    const transition = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await transitionStarted.promise;
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    const queuedStart = app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    releaseTransition.resolve();
+    await Promise.all([transition, queuedStart]);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "read",
+          toolCallId: "queued-after-failed-transition",
+          input: { path: ".env" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("snapshot is unavailable"),
+    });
+    expect(app.abort).not.toHaveBeenCalled();
   });
 
   it("rejects an old human approval after its permission turn ends", async () => {

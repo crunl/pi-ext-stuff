@@ -114,6 +114,12 @@ interface PendingModeTransition {
   phase: "active";
 }
 
+interface ModeTransitionBarrier {
+  id: number;
+  completion: Promise<boolean>;
+  settle(readyForNextTurn: boolean): void;
+}
+
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
@@ -185,6 +191,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let activeExecutionSnapshot: PermissionExecutionSnapshot | undefined;
   let pendingModeTransition: PendingModeTransition | undefined;
   let modeTransitionId = 0;
+  let modeTransitionBarrierId = 0;
+  let inFlightModeTransition: ModeTransitionBarrier | undefined;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -219,7 +227,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return result;
   };
 
-  const invalidatePermissionContext = (reason: string): void => {
+  const invalidatePermissionContext = (
+    reason: string,
+    { preserveAutoDenials = false }: { preserveAutoDenials?: boolean } = {},
+  ): void => {
     permissionContextEpoch += 1;
     for (const controller of reviewControllers.values()) {
       controller.abort(new Error(reason));
@@ -229,7 +240,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     approvedCalls.clear();
     approvedNetworkHosts.clear();
     approvedWriteRoots.clear();
-    autoApprovalLedger.clear();
+    if (preserveAutoDenials) {
+      autoApprovalLedger.clearPendingOverride();
+    } else {
+      autoApprovalLedger.clear();
+    }
     autoReviewer.invalidateSession();
   };
 
@@ -282,6 +297,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): PermissionExecutionSnapshot | undefined => {
     const current = currentExecutionSnapshot();
     if (current) return current;
+    if (inFlightModeTransition) return undefined;
     if (permissionTurnPhase === "between" || lifecycleEventsObserved) return undefined;
 
     // Direct tool-hook invocations without lifecycle events are themselves proof of active work.
@@ -334,6 +350,34 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (pendingModeTransition?.id === transition.id) pendingModeTransition = undefined;
   };
 
+  const createModeTransitionBarrier = (): ModeTransitionBarrier => {
+    let resolveCompletion!: (readyForNextTurn: boolean) => void;
+    let settled = false;
+    const barrier: ModeTransitionBarrier = {
+      id: ++modeTransitionBarrierId,
+      completion: new Promise<boolean>((resolvePromise) => {
+        resolveCompletion = resolvePromise;
+      }),
+      settle(readyForNextTurn) {
+        if (settled) return;
+        settled = true;
+        resolveCompletion(readyForNextTurn);
+      },
+    };
+    inFlightModeTransition = barrier;
+    return barrier;
+  };
+
+  const settleModeTransitionBarrier = (
+    barrier: ModeTransitionBarrier,
+    readyForNextTurn: boolean,
+  ): void => {
+    barrier.settle(readyForNextTurn);
+    if (readyForNextTurn && inFlightModeTransition?.id === barrier.id) {
+      inFlightModeTransition = undefined;
+    }
+  };
+
   const finishPermissionTurn = (reason: string): void => {
     if (permissionTurnPhase !== "active") return;
     const closingTurnId = activeTurnId;
@@ -341,7 +385,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     activeTurnId = undefined;
     permissionTurnPhase = "between";
     if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
-    invalidatePermissionContext(reason);
+    invalidatePermissionContext(reason, { preserveAutoDenials: true });
   };
 
   const grantApprovedCall = (
@@ -962,14 +1006,27 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   });
 
-  pi.on("agent_start", () => {
+  pi.on("agent_start", async () => {
     lifecycleEventsObserved = true;
     if (permissionTurnPhase === "active") return;
     permissionTurnId += 1;
-    activeTurnId = permissionTurnId;
+    const startingTurnId = permissionTurnId;
+    activeTurnId = startingTurnId;
     permissionTurnPhase = "active";
+    const transition = inFlightModeTransition;
+    if (transition) {
+      const readyForNextTurn = await transition.completion;
+      if (inFlightModeTransition?.id === transition.id) inFlightModeTransition = undefined;
+      if (
+        !readyForNextTurn ||
+        permissionTurnPhase !== "active" ||
+        activeTurnId !== startingTurnId
+      ) {
+        return;
+      }
+    }
     modeRuntime?.beginAgentTurn();
-    captureExecutionSnapshot(activeTurnId);
+    captureExecutionSnapshot(startingTurnId);
   });
 
   pi.on("agent_end", () => {
@@ -1280,71 +1337,81 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     },
   });
 
-  const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> =>
-    runModeMutation(async (generation) => {
-      let transition: PendingModeTransition | undefined;
-      let transitionOwnsPendingState = false;
-      try {
-        if ((await shiftTabAvailability(agentDir)) !== "available") {
-          ctx.ui.notify(
-            "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
-            "warning",
-          );
-          return;
-        }
-        if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
-        const beganDuringActiveTurn = permissionTurnPhase === "active";
-        // Capture ownership before configuration activation can yield to a lifecycle event.
-        // A settled turn clears this token, so a late continuation cannot attach it to a
-        // later turn or recreate the earlier snapshot.
-        const pendingBeforeTransition = pendingModeTransition;
-        transition = beganDuringActiveTurn ? scheduleModeTransition() : undefined;
-        transitionOwnsPendingState =
-          transition !== undefined && transition !== pendingBeforeTransition;
-        if (!transition) {
-          // Between turns and while idle there is no snapshot to preserve. Revoke any
-          // approval context before the async activation work begins.
-          invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
-        }
-        let runtime = modeRuntime;
-        if (!runtime) {
-          const initial = await activateConfig(ctx);
-          runtime = ensureModeRuntime(initial.config);
-        }
-        const previousMode = executableMode(runtime.mode);
-        const targetMode = nextExecutableMode(previousMode);
-        const result = await activateConfig(ctx, !beganDuringActiveTurn, targetMode);
-        if (generation !== modeMutationGeneration) {
+  const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {
+    if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
+    const beganDuringActiveTurn = permissionTurnPhase === "active";
+    // Register the barrier synchronously with the shortcut invocation. A queued
+    // agent_start must observe it even if agent_end runs before this mutation's
+    // first asynchronous continuation.
+    const transitionBarrier = createModeTransitionBarrier();
+    const pendingBeforeTransition = pendingModeTransition;
+    const transition = beganDuringActiveTurn ? scheduleModeTransition() : undefined;
+    const transitionOwnsPendingState =
+      transition !== undefined && transition !== pendingBeforeTransition;
+
+    try {
+      await runModeMutation(async (generation) => {
+        try {
+          if ((await shiftTabAvailability(agentDir)) !== "available") {
+            ctx.ui.notify(
+              "Shift+Tab 仍由 app.thinking.cycle 占用；请迁移 ~/.pi/agent/keybindings.json 后 /reload",
+              "warning",
+            );
+            settleModeTransitionBarrier(transitionBarrier, true);
+            return;
+          }
+          if (!transition) {
+            // Between turns and while idle there is no snapshot to preserve. Revoke any
+            // approval context before the async activation work begins.
+            invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+          }
+          let runtime = modeRuntime;
+          if (!runtime) {
+            const initial = await activateConfig(ctx);
+            runtime = ensureModeRuntime(initial.config);
+          }
+          const previousMode = executableMode(runtime.mode);
+          const targetMode = nextExecutableMode(previousMode);
+          const result = await activateConfig(ctx, !beganDuringActiveTurn, targetMode);
+          if (generation !== modeMutationGeneration) {
+            if (transition && transitionOwnsPendingState) {
+              clearPendingModeTransitionIfCurrent(transition);
+            }
+            settleModeTransitionBarrier(transitionBarrier, false);
+            return;
+          }
+          runtime = ensureModeRuntime(result.config);
+          runtime.activate(targetMode, {
+            preserveAutoTransientState: beganDuringActiveTurn,
+          });
+          if (
+            transition &&
+            transitionOwnsPendingState &&
+            !isPendingModeTransitionCurrent(transition)
+          ) {
+            // agent_end/agent_settled (or a superseding lifecycle reset) already cleaned
+            // the old turn. Do not restore its invalidation token or snapshot.
+            clearPendingModeTransitionIfCurrent(transition);
+          }
+          setDefaultStatus(ctx);
+          ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
+          settleModeTransitionBarrier(transitionBarrier, true);
+        } catch (error: unknown) {
           if (transition && transitionOwnsPendingState) {
             clearPendingModeTransitionIfCurrent(transition);
           }
-          return;
+          settleModeTransitionBarrier(transitionBarrier, false);
+          if (generation !== modeMutationGeneration) return;
+          const message = error instanceof Error ? error.message : String(error);
+          setDefaultStatus(ctx);
+          ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
         }
-        runtime = ensureModeRuntime(result.config);
-        runtime.activate(targetMode, {
-          preserveAutoTransientState: beganDuringActiveTurn,
-        });
-        if (
-          transition &&
-          transitionOwnsPendingState &&
-          !isPendingModeTransitionCurrent(transition)
-        ) {
-          // agent_end/agent_settled (or a superseding lifecycle reset) already cleaned
-          // the old turn. Do not restore its invalidation token or snapshot.
-          clearPendingModeTransitionIfCurrent(transition);
-        }
-        setDefaultStatus(ctx);
-        ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
-      } catch (error: unknown) {
-        if (transition && transitionOwnsPendingState) {
-          clearPendingModeTransitionIfCurrent(transition);
-        }
-        if (generation !== modeMutationGeneration) return;
-        const message = error instanceof Error ? error.message : String(error);
-        setDefaultStatus(ctx);
-        ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
-      }
-    });
+      });
+    } finally {
+      // runModeMutation can discard a stale generation before invoking the operation.
+      settleModeTransitionBarrier(transitionBarrier, false);
+    }
+  };
 
   pi.registerShortcut("shift+tab", {
     description: "Cycle pi-permissions mode",

@@ -117,9 +117,12 @@ mid-turn.
 
 `agent_end` is the authoritative end of that snapshot. The next
 `agent_start` creates a fresh snapshot, even when Pi starts a queued
-continuation before `ctx.isIdle()` becomes true. `agent_settled` is only
-an outer-run cleanup fallback; `turn_start`/`turn_end` describe model/tool
-rounds and are too granular for this boundary.
+continuation before `ctx.isIdle()` becomes true. If the transition is still
+preparing the restrictive sandbox, the queued start waits for it; success
+commits `Default` before snapshot capture, while failure leaves the queued turn
+without an executable snapshot. `agent_settled` is only an outer-run cleanup
+fallback; `turn_start`/`turn_end` describe model/tool rounds and are too
+granular for this boundary.
 
 ### Sandbox availability
 

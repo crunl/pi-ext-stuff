@@ -113,6 +113,12 @@ even if a queued continuation begins while Pi still reports working. This does
 not reuse a stale approval, broaden a call, or apply to config/session
 invalidations; those paths remain fail-closed.
 
+A recent denial record is history, not an authorization capability. Ordinary
+`agent_end` cleanup retains those fingerprint-bound records so `/approve` can
+select one before triggering the next turn, while clearing any pending override,
+exact grant, active review, and human-approval token. Configuration, session,
+and branch invalidations clear both denial history and pending capability.
+
 All mediated authorization sites use one effective execution context derived
 from that snapshot: Bash, native Write/Edit, risk evaluation, Guardian review,
 human confirmation, and exact-call grant matching. The context is usable only
@@ -252,8 +258,14 @@ Unit and integration coverage must prove:
 ## Permission-turn lifecycle
 
 - `agent_start` creates the authoritative permission-turn snapshot.
+- If a `Shift+Tab` transition is still preparing its target sandbox/config,
+  `agent_start` waits for that transition. It snapshots only after a successful
+  commit; a failed or superseded transition leaves the turn without an
+  executable snapshot so tool hooks fail closed.
 - `agent_end` closes it, including before a queued continuation where
-  `ctx.isIdle()` remains `false`.
+  `ctx.isIdle()` remains `false`. It preserves recent denial records for
+  `/approve`, but clears pending one-shot overrides and all other authorization
+  capabilities.
 - `agent_settled` is only an outer-run cleanup fallback. It must not delay the
   next turn's snapshot.
 - `turn_start` and `turn_end` are model/tool rounds inside a permission turn,

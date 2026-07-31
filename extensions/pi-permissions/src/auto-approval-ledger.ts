@@ -65,10 +65,10 @@ export class AutoApprovalLedger {
   takeOverride(match: OverrideMatch): AutoReviewApprovalOverride | undefined {
     const pending = this.pendingOverride;
     if (
-      !pending
-      || pending.actionFingerprint !== match.actionFingerprint
-      || pending.cwd !== match.cwd
-      || pending.configFingerprint !== match.configFingerprint
+      !pending ||
+      pending.actionFingerprint !== match.actionFingerprint ||
+      pending.cwd !== match.cwd ||
+      pending.configFingerprint !== match.configFingerprint
     ) {
       return undefined;
     }
@@ -79,8 +79,12 @@ export class AutoApprovalLedger {
     };
   }
 
+  clearPendingOverride(): void {
+    this.pendingOverride = undefined;
+  }
+
   clear(): void {
     this.denials.length = 0;
-    this.pendingOverride = undefined;
+    this.clearPendingOverride();
   }
 }
