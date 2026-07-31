@@ -3531,17 +3531,18 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
 
+    const invalidationsAfterSettling = reviewer.invalidateSession.mock.calls.length;
+    releaseTransition.resolve();
+    await transition;
+    expect(app.abort).not.toHaveBeenCalled();
+    expect(reviewer.invalidateSession).toHaveBeenCalledTimes(invalidationsAfterSettling);
+
     choice.resolve("Allow Once");
     await expect(oldApproval).resolves.toMatchObject({
       block: true,
       reason: expect.stringContaining("context changed"),
     });
 
-    releaseTransition.resolve();
-    await transition;
-    expect(app.abort).not.toHaveBeenCalled();
-
-    const invalidationsAfterSettling = reviewer.invalidateSession.mock.calls.length;
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     await expect(
       app.handlers.get("tool_call")!(
