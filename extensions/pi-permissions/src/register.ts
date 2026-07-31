@@ -250,6 +250,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const resetBranchPermissionContext = (reason: string): void => {
     modeMutationGeneration += 1;
+    cancelInFlightModeTransition();
     trustedUserMessages.length = 0;
     permissionTurnPhase = "idle";
     activeTurnId = undefined;
@@ -374,6 +375,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): void => {
     barrier.settle(readyForNextTurn);
     if (readyForNextTurn && inFlightModeTransition?.id === barrier.id) {
+      inFlightModeTransition = undefined;
+    }
+  };
+
+  const cancelInFlightModeTransition = (): void => {
+    const barrier = inFlightModeTransition;
+    if (!barrier) return;
+    barrier.settle(false);
+    if (inFlightModeTransition?.id === barrier.id) {
       inFlightModeTransition = undefined;
     }
   };
@@ -989,6 +999,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("session_shutdown", async () => {
     modeMutationGeneration += 1;
+    cancelInFlightModeTransition();
     permissionTurnPhase = "idle";
     activeTurnId = undefined;
     activeExecutionSnapshot = undefined;

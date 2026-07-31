@@ -4001,6 +4001,80 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
+  it("clears a failed transition barrier before a new session starts", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    app.sandboxManager.initialize.mockRejectedValueOnce(new Error("sandbox unavailable"));
+
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-session-yolo", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
+  it("releases a queued agent start when session shutdown cancels a pending transition", async () => {
+    const transitionStarted = deferred<void>();
+    const releaseTransition = deferred<void>();
+    let pauseExclusive = false;
+    const coordinator = {
+      runShared: async <T>(operation: () => Promise<T>) => operation(),
+      runExclusive: async <T>(operation: () => Promise<T>) => {
+        if (pauseExclusive) {
+          pauseExclusive = false;
+          transitionStarted.resolve();
+          await releaseTransition.promise;
+        }
+        return operation();
+      },
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir, false, true, {}, coordinator);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    pauseExclusive = true;
+    const transition = app.shortcuts.get("shift+tab")!.handler(app.context);
+    await transitionStarted.promise;
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    let queuedStartCompleted = false;
+    const queuedStart = Promise.resolve(
+      app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context),
+    ).then(() => {
+      queuedStartCompleted = true;
+    });
+    await Promise.resolve();
+    expect(queuedStartCompleted).toBe(false);
+
+    await app.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, app.context);
+    await queuedStart;
+    expect(queuedStartCompleted).toBe(true);
+
+    releaseTransition.resolve();
+    await transition;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        { toolName: "read", toolCallId: "fresh-after-shutdown", input: { path: ".env" } },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.abort).not.toHaveBeenCalled();
+  });
+
   it("rejects an old human approval after its permission turn ends", async () => {
     const choice = deferred<string>();
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
