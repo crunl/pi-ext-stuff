@@ -119,7 +119,6 @@ export class PermissionModeRuntime {
 
   beginAgentTurn(): void {
     this.autoReviewWindow.length = 0;
-    if (this.mode !== "auto") return;
     if (this.state.auto.consecutiveDenials === 0 && !this.state.auto.paused) {
       return;
     }
