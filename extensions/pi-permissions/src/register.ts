@@ -287,6 +287,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const scheduleModeTransition = (turnId: number | undefined): void => {
     if (turnId === undefined) return;
+    if (pendingModeTransition) {
+      // Keep the first token as the owner for this turn. The lifecycle boundary
+      // that owns it is the only path that may clear it.
+      return;
+    }
     pendingModeTransition = { id: ++modeTransitionId, turnId };
   };
 

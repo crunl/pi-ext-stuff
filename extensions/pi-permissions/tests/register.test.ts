@@ -3319,6 +3319,86 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledOnce();
   });
 
+  it("keeps one transition owner when Shift+Tab is pressed repeatedly in one active turn", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    await cycleToMode(app, "Auto");
+    await cycleToMode(app, "YOLO");
+    expect(app.abort).not.toHaveBeenCalled();
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "repeated-shift-active-turn",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(app.select).toHaveBeenCalledOnce();
+    expect(reviewer.review).not.toHaveBeenCalled();
+
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "repeated-shift-next-turn",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.select).toHaveBeenCalledOnce();
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("ignores a duplicate agent_start without replacing the active snapshot", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await cycleToMode(app, "Auto");
+
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "duplicate-agent-start",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(app.select).toHaveBeenCalledOnce();
+    expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
   it("does not recreate an ended snapshot before an immediately queued agent_start", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
