@@ -3287,6 +3287,7 @@ describe("Default mode registration", () => {
     app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    expect(app.handlers.has("agent_end")).toBe(true);
 
     await cycleToMode(app, "Auto");
     expect(app.abort).not.toHaveBeenCalled();
@@ -3338,6 +3339,7 @@ describe("Default mode registration", () => {
     app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    expect(app.handlers.has("agent_end")).toBe(true);
 
     await cycleToMode(app, "Auto");
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
@@ -3359,5 +3361,42 @@ describe("Default mode registration", () => {
     ).resolves.toBeUndefined();
     expect(app.select).not.toHaveBeenCalled();
     expect(reviewer.review).not.toHaveBeenCalled();
+  });
+
+  it("rejects an old human approval after its permission turn ends", async () => {
+    const choice = deferred<string>();
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    let idle = false;
+    app.context.isIdle = () => idle;
+    app.select.mockImplementationOnce(async () => choice.promise);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    expect(app.handlers.has("agent_end")).toBe(true);
+    const event = {
+      toolName: "bash",
+      toolCallId: "stale-human-approval",
+      input: { command: "rm -rf build" },
+    };
+
+    const pending = app.handlers.get("tool_call")!(event, app.context);
+    await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
+    await cycleToMode(app, "Auto");
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    expect(app.context.isIdle()).toBe(false);
+    expect(app.abort).not.toHaveBeenCalled();
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    choice.resolve("Allow Once");
+    await expect(pending).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("context changed"),
+    });
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).rejects.toThrow("no longer authorized");
+    idle = true;
   });
 });

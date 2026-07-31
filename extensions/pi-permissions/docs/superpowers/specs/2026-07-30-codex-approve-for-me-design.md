@@ -140,9 +140,12 @@ Introduce a `GuardianReviewSessionManager` owned by each Pi agent session.
 - The trunk serializes its own reviews. If it is busy, the new review receives
   an **ephemeral fork** from the latest completed trunk snapshot so approval
   requests cannot interleave or contaminate each other.
-- A mode change, model resolution change, configuration reload, working
-  directory change, or parent-session reset cancels and discards affected
-  review contexts.
+- A configuration/session/cancellation event, model-resolution change,
+  configuration reload, working-directory change, or parent-session reset
+  immediately cancels and discards affected review contexts. A permission-mode
+  change instead preserves the active permission-turn context until
+  `agent_end`, then discards it before the next `agent_start` creates fresh
+  context.
 - Transport-level provider session reuse is an optimization only; correctness
   comes from the explicitly reconstructed bounded context. This keeps the
   behavior portable across Pi login-backed and custom providers.
@@ -194,8 +197,10 @@ implicit side effect of `Auto`.
   `agent_start` uses the then-current reviewer and fresh authorization context.
 - The bottom border displays a non-default mode only, preserving the existing
   compact status-line convention.
-- `Allow, switch future approvals to Auto` grants the current exact call as a
-  human-approved call, then changes future approval ownership to Guardian.
+- `Allow, switch future approvals to Auto` is a decision inside the current
+  human approval panel: it grants the current exact call as human-approved and
+  sets the future approval mode to Guardian. It is not an independent mode
+  control; `Shift+Tab` remains the only mode control.
 - A preferred-reviewer fallback is surfaced once as a concise extension notice,
   such as `Guardian preferred model unavailable; using active model`.
 
