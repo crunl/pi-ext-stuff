@@ -98,6 +98,39 @@ describe("PermissionModeRuntime", () => {
     });
   });
 
+  it("preserves the Auto circuit breaker when an active turn cycles back to Auto", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+    runtime.recordAutoReview("deny");
+    runtime.recordAutoReview("deny");
+    runtime.recordAutoReview("deny");
+
+    runtime.activate("yolo", { preserveAutoTransientState: true });
+    runtime.activate("default", { preserveAutoTransientState: true });
+    runtime.activate("auto", { preserveAutoTransientState: true });
+
+    expect(runtime.autoState).toEqual({ consecutiveDenials: 3, paused: true });
+
+    runtime.beginAgentTurn();
+
+    expect(runtime.autoState).toEqual({ consecutiveDenials: 0, paused: false });
+  });
+
+  it("preserves the rolling Auto denial window when an active turn returns to Auto", () => {
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
+    runtime.activate("auto");
+    for (let index = 0; index < 9; index += 1) {
+      runtime.recordAutoReview("deny");
+      runtime.recordAutoReview("approve");
+    }
+
+    runtime.activate("yolo", { preserveAutoTransientState: true });
+    runtime.activate("default", { preserveAutoTransientState: true });
+    runtime.activate("auto", { preserveAutoTransientState: true });
+
+    expect(runtime.recordAutoReview("deny")).toEqual({ consecutiveDenials: 1, paused: true });
+  });
+
   it("resets consecutive denials after a non-denial reviewer failure", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.activate("auto");

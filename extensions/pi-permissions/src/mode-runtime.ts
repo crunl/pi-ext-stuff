@@ -22,6 +22,10 @@ function functionalState(state: PermissionSessionState): PermissionSessionState 
   return normalized;
 }
 
+export interface PermissionModeActivationOptions {
+  preserveAutoTransientState?: boolean;
+}
+
 export class PermissionModeRuntime {
   private controller: ModeController;
   private state: PermissionSessionState;
@@ -84,12 +88,17 @@ export class PermissionModeRuntime {
     if (this.activeHumanApproval === token) this.activeHumanApproval = undefined;
   }
 
-  activate(mode: PermissionMode): PermissionMode {
+  activate(
+    mode: PermissionMode,
+    { preserveAutoTransientState = false }: PermissionModeActivationOptions = {},
+  ): PermissionMode {
     if (mode === "plan") throw new Error("Plan mode is not implemented");
     const result = this.controller.request(mode);
     this.state.mode = result;
-    this.autoReviewWindow.length = 0;
-    if (result === "auto") this.state.auto = resetAutoState();
+    if (!preserveAutoTransientState) {
+      this.autoReviewWindow.length = 0;
+      if (result === "auto") this.state.auto = resetAutoState();
+    }
     this.persist();
     return result;
   }

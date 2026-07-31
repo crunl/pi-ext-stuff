@@ -807,7 +807,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
           grantApprovedCall(event, decision, snapshot, ctx.cwd, "user", "user-transition");
           transitionGrantCreated = true;
-          runtime.activate("auto");
+          runtime.activate("auto", {
+            preserveAutoTransientState: permissionTurnPhase === "active",
+          });
           scheduleModeTransition();
           setDefaultStatus(ctx);
           ctx.ui.notify("pi-permissions: Auto mode 已启用", "info");
@@ -1264,7 +1266,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return;
         }
         runtime = ensureModeRuntime(result.config);
-        runtime.activate(targetMode);
+        runtime.activate(targetMode, {
+          preserveAutoTransientState: beganDuringActiveTurn,
+        });
         if (
           transition &&
           transitionOwnsPendingState &&

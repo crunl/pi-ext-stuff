@@ -3319,6 +3319,104 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledOnce();
   });
 
+  it("keeps Auto denials paused through active-turn Shift+Tab cycling and resets them next turn", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        userAuthorization: "low" as const,
+        rationale: "Denied.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await cycleToMode(app, "Auto");
+    app.context.isIdle = () => false;
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    for (const toolCallId of ["first-denial", "second-denial", "third-denial"]) {
+      await expect(
+        app.handlers.get("tool_call")!(
+          { toolName: "bash", toolCallId, input: { command: "rm -rf build" } },
+          app.context,
+        ),
+      ).resolves.toMatchObject({ block: true, reason: expect.stringContaining("Auto denied") });
+    }
+    expect(reviewer.review).toHaveBeenCalledTimes(3);
+    app.abort.mockClear();
+
+    await cycleToMode(app, "YOLO");
+    await cycleToMode(app, "Default");
+    await cycleToMode(app, "Auto");
+    expect(app.abort).not.toHaveBeenCalled();
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "paused-after-cycle",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true, reason: expect.stringContaining("Auto review paused") });
+    expect(reviewer.review).toHaveBeenCalledTimes(3);
+
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "review-after-next-turn-reset",
+          input: { command: "rm -rf release" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true, reason: expect.stringContaining("Auto denied") });
+    expect(reviewer.review).toHaveBeenCalledTimes(4);
+  });
+
+  it("preserves Auto denials when an active Default approval switches future approvals to Auto", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.context.sessionManager.getBranch = (() => [
+      {
+        type: "custom",
+        customType: "pi-permissions-state",
+        data: {
+          mode: "default",
+          auto: { consecutiveDenials: 3, paused: true },
+          sandboxProfile: "workspace-write",
+          configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
+        },
+      },
+    ]) as typeof app.context.sessionManager.getBranch;
+    app.select.mockResolvedValueOnce("Allow, switch future approvals to Auto");
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "default-approval-switch",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.appendEntry).toHaveBeenLastCalledWith(
+      "pi-permissions-state",
+      expect.objectContaining({
+        mode: "auto",
+        auto: { consecutiveDenials: 3, paused: true },
+      }),
+    );
+  });
+
   it("keeps one transition owner when Shift+Tab is pressed repeatedly in one active turn", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
