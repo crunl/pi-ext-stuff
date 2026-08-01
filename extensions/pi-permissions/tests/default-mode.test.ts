@@ -674,13 +674,21 @@ describe("Default mode gate", () => {
   it("blocks private shell network targets without offering approval", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
-    await expect(
-      evaluateDefaultRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, config()),
-    ).resolves.toMatchObject({
+    const decision = await evaluateDefaultRequest(
+      "bash",
+      { command: "curl http://127.0.0.1/admin" },
+      cwd,
+      config(),
+    );
+
+    expect(decision).toMatchObject({
       action: "block",
       risk: "HARD",
       reason: expect.stringContaining("Private"),
     });
+    if (decision.action === "block") {
+      expect(decision.reason).not.toContain("approval");
+    }
   });
 
   it("blocks private WebFetch targets without offering reviewer approval", async () => {

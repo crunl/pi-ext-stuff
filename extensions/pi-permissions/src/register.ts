@@ -44,8 +44,8 @@ import {
 } from "./config.ts";
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
-import { validateGuardianPolicy } from "./guardian-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
+import { validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
   appendGuardianTranscript,

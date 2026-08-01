@@ -5,9 +5,15 @@
 - 规范上游基准：[`openai/codex` commit
   `789c72dcf62d7439863d4d2846454f05b3d51db6`](https://github.com/openai/codex/tree/789c72dcf62d7439863d4d2846454f05b3d51db6)。比较范围是 Guardian
   的 policy、prompt、review parser 和拒绝后精确重试语义；未来上游变更不会自动继承。
-- 本地实现基准：Task 1--3 与最终 Git command boundary 修复完成后的
-  `pi-permissions` `cc94b905df8b27e068954c458a5dda485b8bee7c`。本文件记录该实现，
-  而不是把 Pi 的整套权限执行面宣称为 Codex 的复制品。
+- 当前上游 drift 基准：Codex `main`
+  [`6751b54cae32b23786001e2414d749a9916201e1`](https://github.com/openai/codex/tree/6751b54cae32b23786001e2414d749a9916201e1)。从原始
+  pin 到该 SHA 的 compare 为
+  [`789c72d...6751b54`](https://github.com/openai/codex/compare/789c72dcf62d7439863d4d2846454f05b3d51db6...6751b54cae32b23786001e2414d749a9916201e1)。
+  该 drift 显示 current-main runtime integration 已在 `mcp_tool_call.rs`、
+  `session/handlers.rs` 和 app-server 协议层继续演进；P1 未声明复制这些
+  runtime/lifecycle/telemetry 细节。
+- 本地实现基准：Task 1--4 完成后的 `pi-permissions`。本文件记录该实现，而不是把 Pi
+  的整套权限执行面宣称为 Codex 的复制品。
 - 核心分层：Guardian parser 只验证结构化响应契约；高风险是否可允许、授权证据的含义仍由 Guardian prompt/policy 决定。Pi 的 shell、Git metadata、受保护路径及网络判断是进入 Guardian 前的确定性本地策略，不属于 Guardian parity。
 
 ## Guardian 对齐项
@@ -16,6 +22,8 @@
 | --- | --- | --- |
 | policy、prompt 与输出契约 | `src/auto-review-request.ts` 的模板、默认 policy 和结果字段以固定 commit 的 Guardian 源文件为准；只要求 `outcome`，其余字段使用相应的 allow/deny 默认值。 | 本地命名可以提及 Pi，但不改变 policy 含义。 |
 | parser | 先解析完整 JSON；失败时只尝试首个 `{` 到最后一个 `}` 的单对象恢复。非对象、缺失/非法 `outcome`、非法 enum 和非字符串 rationale 仍会拒绝；额外字段会被忽略。高/critical `allow` 不会被 parser 二次拒绝。 | 这是结构验证，不在 parser 重写 Guardian 的风险或授权 policy。 |
+| bounded evidence / tools | Auto request 向 Guardian 传入 bounded role-tagged transcript（`user`、`assistant`、`tool` 与 tool error state）和 exact planned action。Guardian 可使用 bounded read-only local tools（`read`、`grep`、`find`、`ls`）补充证据；这些工具没有 write、shell、network、MCP/custom tool 或 nested approval 能力。 | Parent transcript、tool result 与 action arguments 均是不可信 evidence，不是 policy。read-only tool error 后的 allow 会 fail closed；deny 可保留为 bounded history。 |
+| Auto failure block | provider、parse、timeout、cancelled 和未知 reviewer failure 在 Auto 中均 fail closed；UI 和 headless 都不会自动打开人工 approval fallback，也不会创建 exact grant。 | 用户若需要人工判断，必须切回 Default 或提交新的明确 action。 |
 | 拒绝后精确批准 | approval ledger 将批准绑定到原 tool、input、cwd、config 与 action fingerprint；仅可消费一次，并由 Guardian 重新评估。传给可信 developer context 的首行精确为：`The user has manually approved a specific action that was previously \`Rejected\`.` 随后是序列化的 exact action。 | 人工批准不是直接执行，也不会扩大到相似命令或后续 action。 |
 | retry / failure 边界 | Pi 保持 90 秒总 deadline、最多 3 次，且 review 异常不会自动执行 action。 | 具体 provider 错误分类和 UI 人工交接仍是 Pi 产品行为，不是对 Codex 内部实现逐行复刻。 |
 
@@ -39,6 +47,25 @@
 
 这些 Git/shell 规则解决 Pi 的权限边界问题；它们不是 Codex Guardian policy 的等价实现，也不应被用来推断两者的 ARC 或 sandbox 语义完全相同。
 
+## P1 回归覆盖结论
+
+- Default 与 Auto 初始化相同 workspace sandbox runtime config，并且 Auto reviewer 收到
+  `sandboxProfile: "workspace-write"`、当前 allow/deny network snapshot、请求的
+  network hosts 与 filesystem roots。
+- Guardian allow 只授予 exact normalized tool/input、当前 cwd 和当前 config
+  fingerprint；同一 tool-call ID 改 input、重复执行或 config reload 后执行都会失败闭合。
+- Guardian deny 会记录 recent denial；`/approve` 只能选择该 exact denial，触发新 turn
+  后仍需 Guardian 用 exact `approvalOverride` 重新评估，且不能扩大到相似 action。
+- provider、parse、timeout failure 在 UI 与 headless Auto 中都 block；不会 re-open
+  interactive approval fallback，也不会泄漏原始 provider 错误文本。
+- YOLO 是唯一跳过 permission evaluator/Guardian/sandbox 的路径。Auto snapshot 中已获
+  Guardian approval 的 call 即使 future mode 切到 YOLO，也继续通过该 snapshot 的 sandbox
+  execution path。
+- Git/private-network 额外 hard blocks 在 Auto 下仍作为外层 `pi-permissions:` policy
+  block 返回，且不进入 Guardian review。
+- 无 MCP metadata 的 custom-tool action 作为 `custom_tool_call` 送审，不会发明
+  `connectorId` 或 `connected_account_email`。
+
 ## 最终验证证据
 
 - 六文件 focused suite：6/6 files、387/387 tests 通过。
@@ -57,11 +84,26 @@
 
 ## 已知非目标
 
-- 不实现可复用的 Codex Guardian child-session manager（trunk/fork、rollout
-  snapshot 等完整 child-session 生命周期）。
 - 不复刻 Codex 的 Guardian lifecycle events、`GuardianAssessment` telemetry 或 app-server 协议事件。
-- 不实现相同的 review sandbox internals；Pi 没有声称具备 Codex 那种独立的 `Never`、read-only、MCP/apps/skills/features 清空以及仅继承 approved network hosts 的内部审查会话。Pi 仍保留自身 sandbox profiles、network allowlist 和 native completion 调用模型。
+- 不实现相同的 review sandbox internals；Pi 的 Guardian 仅暴露本扩展拥有的 bounded
+  read-only local tools，并不声称复制 Codex 的完整 internal child-session runtime、
+  MCP/apps/skills/features 清空或仅继承 approved network hosts 的机制。Pi 仍保留自身
+  sandbox profiles、network allowlist 和 native completion 调用模型。
+
+## 剩余 P2 边界
+
+1. Codex catalog `auto_review_model_override` / provider preferred review model
+   metadata 尚未由当前 Pi model registry 暴露。
+2. Pi 的 retry error taxonomy 与 Codex Rust classifier 行为相近，但不是逐 case 等价。
+3. 当前 Codex `main` 的 `mcp_tool_call.rs` 和 `session/handlers.rs` runtime integration
+   已超出 pinned prompt/policy 文件范围。
+4. Pi 的 deterministic pre-Guardian Git、protected-path、private-network hard blocks 是
+   有意保留的额外安全层；若未来要求 exact allow/deny parity，需另行设计且不能默认削弱。
+5. app-server lifecycle / telemetry parity 不属于本 P1。
 
 ## 结论
 
-本次对齐的承诺是固定 pin 下 Guardian 的 prompt、结构 parser 与 exact post-denial approval context；Pi 的确定性 Git/shell hardening 额外且独立。因而“对齐”不表示相同的 review sandbox/network internals，也不扩展到 Codex 的 child-session 管理或生命周期遥测。
+本次 P1 对齐的承诺是固定 pin 下 Guardian 的 prompt、结构 parser、bounded evidence/read-only
+review tools、Auto fail-closed、exact post-denial approval context 与 mode/sandbox
+boundary；Pi 的确定性 Git/shell hardening 额外且独立。因而“对齐”不表示相同的 review
+sandbox/network internals，也不扩展到 Codex 的 app-server lifecycle/telemetry。

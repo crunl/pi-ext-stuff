@@ -132,15 +132,11 @@ export function validateGuardianPolicy(policy: string): string {
   return policy;
 }
 
-export function renderGuardianSystemPrompt(
-  policy = CODEX_GUARDIAN_DEFAULT_POLICY,
-): string {
-  return (
-    CODEX_GUARDIAN_POLICY_TEMPLATE.replace(
-      "{{ tenant_policy_config }}",
-      validateGuardianPolicy(policy),
-    ) + `\n\n${CODEX_GUARDIAN_OUTPUT_CONTRACT}\n`
-  );
+export function renderGuardianSystemPrompt(policy = CODEX_GUARDIAN_DEFAULT_POLICY): string {
+  return `${CODEX_GUARDIAN_POLICY_TEMPLATE.replace(
+    "{{ tenant_policy_config }}",
+    validateGuardianPolicy(policy),
+  )}\n\n${CODEX_GUARDIAN_OUTPUT_CONTRACT}\n`;
 }
 
 export function guardianRetryDelayMs(attempt: number): number {

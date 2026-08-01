@@ -224,6 +224,14 @@ describe("PiAutoReviewer", () => {
       expect.any(AbortSignal),
     );
     expect(complete).toHaveBeenCalledTimes(2);
+    const firstContext = complete.mock.calls[0]?.[1] as any;
+    expect(firstContext.tools?.map((tool: any) => tool.name)).toEqual([
+      "read",
+      "grep",
+      "find",
+      "ls",
+    ]);
+    expect(firstContext.tools?.some((tool: any) => tool.name === "bash")).toBe(false);
     expect(complete.mock.calls[1]?.[0]).toBe(complete.mock.calls[0]?.[0]);
     expect(complete.mock.calls[1]?.[2]?.sessionId).toBe(complete.mock.calls[0]?.[2]?.sessionId);
     const secondContext = complete.mock.calls[1]?.[1] as any;
@@ -246,7 +254,12 @@ describe("PiAutoReviewer", () => {
         isError: true,
       },
     ]);
-    const reviewer = new PiAutoReviewer(complete as any, sessions, async () => {}, () => runtime);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      sessions,
+      async () => {},
+      () => runtime,
+    );
 
     await expect(reviewer.review(request, context)).resolves.toMatchObject({
       decision: "deny",
@@ -278,7 +291,12 @@ describe("PiAutoReviewer", () => {
         isError: true,
       },
     ]);
-    const reviewer = new PiAutoReviewer(complete as any, sessions, async () => {}, () => runtime);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      sessions,
+      async () => {},
+      () => runtime,
+    );
 
     await expect(reviewer.review(request, context)).rejects.toMatchObject({
       kind: "provider",
@@ -898,7 +916,11 @@ describe("PiAutoReviewer", () => {
   });
 });
 
-function assistantToolUse(id: string, name: string, args: Record<string, unknown>): AssistantMessage {
+function assistantToolUse(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+): AssistantMessage {
   return {
     ...response,
     content: [{ type: "toolCall", id, name, arguments: args }],

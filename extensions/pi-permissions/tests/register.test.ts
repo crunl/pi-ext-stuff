@@ -23,6 +23,14 @@ function globalConfigPath(agentDir: string): string {
   return join(directory, "config.json");
 }
 
+async function createGitDirectory(path: string, contents = ""): Promise<void> {
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, "HEAD"), "ref: refs/heads/main\n");
+  await writeFile(join(path, "config"), contents);
+  await mkdir(join(path, "objects"));
+  await mkdir(join(path, "refs"));
+}
+
 function harness(
   agentDir: string,
   approved = false,
@@ -95,17 +103,20 @@ function harness(
     sendMessage,
     events: { emit: emitBusEvent, on: vi.fn() },
   };
-  registerExtension(pi as any, {
-    agentDir,
-    sandboxManager,
-    bashToolFactory: bashToolFactory as any,
-    localProxyPorts,
-    filteringProxyFactory,
-    sandboxCoordinator,
-    autoReviewer,
-    riskEvaluator,
-    guardianPolicySource,
-  } as any);
+  registerExtension(
+    pi as any,
+    {
+      agentDir,
+      sandboxManager,
+      bashToolFactory: bashToolFactory as any,
+      localProxyPorts,
+      filteringProxyFactory,
+      sandboxCoordinator,
+      autoReviewer,
+      riskEvaluator,
+      guardianPolicySource,
+    } as any,
+  );
   const context = {
     cwd: agentDir,
     hasUI,
@@ -705,6 +716,44 @@ describe("Default mode registration", () => {
     ).resolves.toBeDefined();
   });
 
+  it("keeps Guardian-approved Auto execution out of the YOLO bypass path", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "guardian-approval-before-yolo",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+    await cycleToMode(app, "full bypass");
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).resolves.toBeDefined();
+
+    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(
+      agentDir,
+      expect.objectContaining({ operations: expect.any(Object) }),
+    );
+  });
+
   it("keeps a pending human approval in its active snapshot when entering YOLO", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
@@ -864,10 +913,65 @@ describe("Default mode registration", () => {
     );
     const autoSandbox = autoApp.sandboxManager.initialize.mock.calls.at(-1)?.[0] as any;
 
+    expect(DEFAULT_CONFIG.sandbox.profile).toBe("workspace-write");
+    expect(autoSandbox).toEqual(defaultSandbox);
     expect(autoSandbox.filesystem).toEqual(defaultSandbox.filesystem);
     expect(autoSandbox.network).toEqual(defaultSandbox.network);
     expect(autoSandbox.network.deniedDomains).toEqual(
       expect.arrayContaining(["localhost", "127.0.0.1", "::1", "169.254.169.254"]),
+    );
+  });
+
+  it("sends Auto reviewer the active workspace-write sandbox and network snapshot", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        userAuthorization: "low" as const,
+        rationale: "Snapshot captured.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "auto",
+        sandbox: {
+          network: {
+            allowedDomains: ["api.example"],
+            deniedDomains: ["blocked.example"],
+          },
+        },
+      }),
+    );
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "auto-sandbox-snapshot",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+
+    expect(reviewer.review).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permissionContext: expect.objectContaining({
+          sandboxProfile: "workspace-write",
+          sandboxEnabled: true,
+          allowedNetworkHosts: ["api.example"],
+          deniedNetworkHosts: ["blocked.example"],
+          requestedNetworkHosts: [],
+        }),
+      }),
+      expect.any(Object),
+      expect.any(AbortSignal),
     );
   });
 
@@ -1294,6 +1398,63 @@ describe("Default mode registration", () => {
     expect(app.select).not.toHaveBeenCalled();
   });
 
+  it("reviews custom-tool actions without inventing absent MCP metadata", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        userAuthorization: "low" as const,
+        rationale: "No trusted connector metadata was supplied.",
+      })),
+    };
+    const riskEvaluator = vi.fn(
+      async (): Promise<DefaultDecision> => ({
+        action: "prompt",
+        risk: "REVIEW",
+        reason: "custom tool requires review",
+        summary: "CRM update",
+      }),
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer, riskEvaluator);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "crm.updateRecord",
+          toolCallId: "custom-tool-without-mcp-metadata",
+          input: { recordId: "acct_123", field: "tier", value: "enterprise" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("No trusted connector metadata was supplied."),
+    });
+
+    expect(reviewer.review).toHaveBeenCalledWith(
+      expect.objectContaining({
+        untrustedAction: {
+          kind: "custom_tool_call",
+          toolName: "crm.updateRecord",
+          arguments: { recordId: "acct_123", field: "tier", value: "enterprise" },
+          cwd: agentDir,
+        },
+      }),
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
+    const reviewedAction = (reviewer.review as any).mock.calls[0][0].untrustedAction;
+    expect(JSON.stringify(reviewedAction)).not.toContain("connected_account_email");
+    expect(JSON.stringify(reviewedAction)).not.toContain("connectorId");
+  });
+
   it("captures finalized message_end transcript for Auto reviewer evidence", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
@@ -1593,6 +1754,51 @@ describe("Default mode registration", () => {
     expect(app.select).not.toHaveBeenCalled();
   });
 
+  it("reports Git and private-network hard blocks as outer Pi policy under Auto", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    await createGitDirectory(
+      join(project, ".git"),
+      [
+        '[remote "origin"]',
+        "\turl = git@github.com:openai/codex.git",
+        "\tpushurl = ssh://git@127.1/openai/codex.git",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const reviewer = { invalidateSession: vi.fn(), review: vi.fn() };
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    for (const event of [
+      {
+        toolName: "WebFetch",
+        toolCallId: "outer-private-webfetch",
+        input: { url: "http://127.0.0.1/admin" },
+      },
+      {
+        toolName: "bash",
+        toolCallId: "outer-private-git-pushurl",
+        input: { command: "git push origin main" },
+      },
+    ]) {
+      const result = await app.handlers.get("tool_call")!(event, app.context);
+      expect(result).toMatchObject({
+        block: true,
+        reason: expect.stringMatching(/^pi-permissions: /),
+      });
+      expect(result?.reason).not.toContain("Auto");
+      expect(result?.reason).not.toContain("Guardian");
+    }
+    expect(reviewer.review).not.toHaveBeenCalled();
+    expect(app.select).not.toHaveBeenCalled();
+  });
+
   it("binds automatic approval to one exact execution", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
@@ -1613,6 +1819,84 @@ describe("Default mode registration", () => {
 
     await expect(
       app.tools.get("bash").execute("bound-auto", event.input, undefined, undefined, app.context),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it("binds automatic approval to the exact call input and active config fingerprint", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "approve" as const,
+        risk: "low" as const,
+        userAuthorization: "high" as const,
+        rationale: "Authorized.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const alteredInputEvent = {
+      toolName: "bash",
+      toolCallId: "bound-auto-altered-input",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(
+      app.handlers.get("tool_call")!(alteredInputEvent, app.context),
+    ).resolves.toBeUndefined();
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(
+          alteredInputEvent.toolCallId,
+          { command: "rm -rf dist" },
+          undefined,
+          undefined,
+          app.context,
+        ),
+    ).rejects.toThrow("no longer authorized");
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(
+          alteredInputEvent.toolCallId,
+          alteredInputEvent.input,
+          undefined,
+          undefined,
+          app.context,
+        ),
+    ).rejects.toThrow("no longer authorized");
+
+    const configBoundEvent = {
+      toolName: "bash",
+      toolCallId: "bound-auto-config-fingerprint",
+      input: { command: "rm -rf build" },
+    };
+    await expect(
+      app.handlers.get("tool_call")!(configBoundEvent, app.context),
+    ).resolves.toBeUndefined();
+    await writeFile(
+      globalConfigPath(agentDir),
+      JSON.stringify({
+        defaultMode: "auto",
+        rules: [{ action: "ask", tool: "bash", pattern: "rm *" }],
+      }),
+    );
+    await app.commands.get("permissions")!.handler("", app.context);
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(
+          configBoundEvent.toolCallId,
+          configBoundEvent.input,
+          undefined,
+          undefined,
+          app.context,
+        ),
     ).rejects.toThrow("no longer authorized");
   });
 
@@ -1897,59 +2181,45 @@ describe("Default mode registration", () => {
     },
   );
 
-  it("fails closed with a generic reason on reviewer failure without UI and records no approval", async () => {
-    const rawError = "secret provider endpoint unavailable";
-    const reviewer = {
-      invalidateSession: vi.fn(),
-      review: vi
-        .fn()
-        .mockRejectedValueOnce(
-          new AutoReviewerFailure("provider", "Auto reviewer request failed"),
-        )
-        .mockRejectedValueOnce(new AutoReviewerFailure("provider", rawError)),
-    };
-    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
-    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
-    const app = harness(agentDir, false, false, {}, undefined, reviewer);
-    await app.handlers.get("session_start")?.(
-      { type: "session_start", reason: "startup" },
-      app.context,
-    );
-
-    await expect(
-      app.handlers.get("tool_call")!(
-        {
-          toolName: "bash",
-          toolCallId: "headless-fallback",
-          input: { command: "rm -rf build" },
-        },
+  it.each(["timeout", "provider", "parse"] as const)(
+    "fails closed with a generic reason on Guardian %s failure without UI",
+    async (kind) => {
+      const rawError = `secret ${kind} endpoint unavailable`;
+      const reviewer = {
+        invalidateSession: vi.fn(),
+        review: vi.fn(async () => {
+          throw new AutoReviewerFailure(kind, rawError);
+        }),
+      };
+      const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+      await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+      const app = harness(agentDir, false, false, {}, undefined, reviewer);
+      await app.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
         app.context,
-      ),
-    ).resolves.toMatchObject({
-      block: true,
-      reason: "pi-permissions Auto review failed closed; the action was not run",
-    });
-    await expect(
-      app.tools.get("bash").execute(
-        "headless-fallback",
-        { command: "rm -rf build" },
-        undefined,
-        undefined,
-        app.context,
-      ),
-    ).rejects.toThrow("no longer authorized");
-    const result = await app.handlers.get("tool_call")!(
-      {
+      );
+      const event = {
         toolName: "bash",
-        toolCallId: "headless-fallback-repeat",
+        toolCallId: `headless-fallback-${kind}`,
         input: { command: "rm -rf build" },
-      },
-      app.context,
-    );
-    expect(result?.reason).not.toContain(rawError);
-    expect(app.select).not.toHaveBeenCalled();
-    expect(app.abort).not.toHaveBeenCalled();
-  });
+      };
+
+      const result = await app.handlers.get("tool_call")!(event, app.context);
+
+      expect(result).toEqual({
+        block: true,
+        reason: "pi-permissions Auto review failed closed; the action was not run",
+      });
+      expect(result?.reason).not.toContain(rawError);
+      await expect(
+        app.tools
+          .get("bash")
+          .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+      ).rejects.toThrow("no longer authorized");
+      expect(app.select).not.toHaveBeenCalled();
+      expect(app.abort).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes only trusted RegisterExtensionOptions policy source output to Auto reviewer", async () => {
     const complete = vi.fn(async (_model: unknown, _context: unknown) => ({
@@ -2054,10 +2324,11 @@ describe("Default mode registration", () => {
     await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
 
     expect(reviewer.review).not.toHaveBeenCalled();
-    expect(app.select).toHaveBeenCalledWith(
-      expect.stringContaining("pi-permissions · HARD"),
-      ["Allow Once", "Allow, switch future approvals to Auto", "Deny"],
-    );
+    expect(app.select).toHaveBeenCalledWith(expect.stringContaining("pi-permissions · HARD"), [
+      "Allow Once",
+      "Allow, switch future approvals to Auto",
+      "Deny",
+    ]);
     await expect(
       app.tools
         .get("bash")

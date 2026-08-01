@@ -100,7 +100,11 @@ function createUserMessage(requestPrompt: string): UserMessage {
   };
 }
 
-function createContext(messages: Message[], tools: Tool[] | undefined, systemPrompt: string): Context {
+function createContext(
+  messages: Message[],
+  tools: Tool[] | undefined,
+  systemPrompt: string,
+): Context {
   const frozenMessages = messages.map(cloneMessage).map(freezeMessage);
   Object.freeze(frozenMessages);
   const frozenTools = tools?.map(cloneTool);
@@ -132,7 +136,11 @@ export class GuardianReviewSessionManager {
     tools?: Tool[],
     systemPrompt = AUTO_REVIEW_SYSTEM_PROMPT,
   ): GuardianReviewLease {
-    if (!this.trunk || !keysMatch(this.trunk.key, key) || this.trunk.systemPrompt !== systemPrompt) {
+    if (
+      !this.trunk ||
+      !keysMatch(this.trunk.key, key) ||
+      this.trunk.systemPrompt !== systemPrompt
+    ) {
       this.trunk = {
         key: { ...key },
         systemPrompt,

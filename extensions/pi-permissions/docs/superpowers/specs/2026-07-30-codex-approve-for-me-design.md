@@ -1,6 +1,6 @@
 # Codex-equivalent Approve for Me design
 
-**Status:** approved for planning
+**Status:** P1 implemented and regression-covered
 **Date:** 2026-07-30
 **Scope:** `pi-permissions` only
 
@@ -13,8 +13,10 @@ me** preset:
   boundary.
 - The only mode-level difference is the approval reviewer: user in `Default`,
   Guardian in `Auto`.
-- Guardian is a non-mutating, isolated review session. It can approve or deny
-  a request; it cannot execute tools or grant itself further permissions.
+- Guardian is a non-mutating, isolated review session. It receives bounded
+  role-tagged parent evidence, can perform bounded read-only local checks, and
+  can approve or deny a request; it cannot write, run shell commands, access
+  network, call MCP/custom tools, or grant itself further permissions.
 - A configured custom Guardian model is preferred, but a missing model or
   unavailable Pi credential falls back to Pi's current active model.
 - Guardian policy injection crosses only a trusted extension hook; user
@@ -22,7 +24,12 @@ me** preset:
   replace the system policy.
 
 This is a behavioral alignment, not a copy of Codex's Rust implementation or
-its proprietary model catalog.
+its proprietary model catalog. The implemented P1 baseline was re-audited
+against Codex `main` at
+[`6751b54cae32b23786001e2414d749a9916201e1`](https://github.com/openai/codex/tree/6751b54cae32b23786001e2414d749a9916201e1);
+the runtime drift from the original pinned prompt/policy audit is tracked in
+the GitHub compare
+[`789c72d...6751b54`](https://github.com/openai/codex/compare/789c72dcf62d7439863d4d2846454f05b3d51db6...6751b54cae32b23786001e2414d749a9916201e1).
 
 ## Codex behavior being matched
 
@@ -38,6 +45,13 @@ It runs Guardian in a reusable, read-only review session with
 It retries only transient/parse failures, makes at most three attempts within
 a 90-second overall deadline, and fails closed rather than switching models
 after an attempt has started.
+
+Current-main runtime integration has moved beyond the pinned Guardian
+prompt/policy files. In particular, MCP/app-server approval plumbing now carries
+richer runtime metadata through files such as `mcp_tool_call.rs`,
+`session/handlers.rs`, and the app-server protocol. Pi P1 intentionally aligns
+the Guardian prompt/parser/failure/exact-grant semantics while preserving Pi's
+own host interfaces.
 
 Primary references:
 
@@ -150,7 +164,7 @@ The following are Guardian policy constants, not deployment configuration:
 They are deliberately hard-coded. Exposing them in `config.json` would let a
 local configuration silently diverge from Codex approval semantics.
 
-### Guardian review-session manager
+### Guardian review-session manager and bounded evidence
 
 Introduce a `GuardianReviewSessionManager` owned by each Pi agent session.
 
@@ -158,8 +172,14 @@ Introduce a `GuardianReviewSessionManager` owned by each Pi agent session.
   resolved reviewer model, configuration fingerprint, and working directory.
 - The trunk has a stable Guardian system prompt rendered from the selected
   trusted policy or the Codex-equivalent default policy, bounded prior review
-  context, no tools, no skills, no memories, and no inherited execution
-  permissions.
+  context, no skills, no memories, and no inherited execution permissions.
+- Parent evidence is passed as bounded role-tagged entries (`user`,
+  `assistant`, and `tool` with error state) and remains untrusted evidence, not
+  policy.
+- The Guardian runtime exposes only read-only local tools (`read`, `grep`,
+  `find`, and `ls`) under the aggregate review deadline. These tools cannot
+  write, run shell commands, access network, call MCP/custom tools, or request
+  nested approval.
 - The trunk serializes its own reviews. If it is busy, the new review receives
   an **ephemeral fork** from the latest completed trunk snapshot so approval
   requests cannot interleave or contaminate each other.
@@ -173,9 +193,9 @@ Introduce a `GuardianReviewSessionManager` owned by each Pi agent session.
   comes from the explicitly reconstructed bounded context. This keeps the
   behavior portable across Pi login-backed and custom providers.
 
-Pi's Guardian has no tools at all. This is at least as restrictive as Codex's
-read-only sandboxed Guardian session and avoids an additional filesystem or
-network execution surface for the reviewer.
+If a read-only tool fails and Guardian subsequently allows the action, Pi fails
+closed rather than committing that evidence. If Guardian denies after seeing the
+tool error, the denial can be retained as bounded review history.
 
 ### Sandbox and network alignment
 
@@ -251,6 +271,19 @@ Unit and integration coverage must prove:
 9. Hard filesystem/network blocks remain blocked under `Auto`.
 10. Existing configuration, project restriction, mode-switch, circuit-breaker,
     and exact-call authorization tests continue to pass.
+11. Guardian approval grants only the exact normalized call, current working
+    directory, and active configuration fingerprint.
+12. Guardian deny records a denial; `/approve` is exact-action-only and still
+    requires a fresh Guardian review.
+13. Provider, parse, and timeout failures fail closed in both UI and headless
+    Auto; they do not re-open an interactive approval fallback.
+14. YOLO is the only path that skips the permission evaluator; Guardian-approved
+    Auto calls continue to execute through their captured sandbox snapshot even
+    if the future mode is switched to YOLO.
+15. Extra Pi Git/private-network hard blocks report as outer Pi policy and are
+    never converted into Guardian decisions.
+16. Custom-tool actions without MCP metadata are sent as custom tool calls with
+    no invented connector/account trust fields.
 
 ## Explicit non-goals
 
@@ -260,6 +293,18 @@ Unit and integration coverage must prove:
 - Making `Auto` a full-access mode.
 - Enabling unrestricted public network as part of this feature.
 - Changing existing unrelated in-progress source changes.
+
+## Remaining P2 boundaries
+
+- Codex catalog `auto_review_model_override` and provider preferred review
+  model metadata are not exposed by the current Pi model registry adapter.
+- Pi's retry error taxonomy is behaviorally similar but not identical to
+  Codex's Rust classifier.
+- Current Codex runtime integration in `mcp_tool_call.rs` and
+  `session/handlers.rs` has moved beyond the pinned prompt/policy files.
+- Pi's deterministic pre-Guardian Git, protected-path, and private-network hard
+  blocks remain an intentional extra safety layer.
+- App-server lifecycle and telemetry parity is not part of this P1 change.
 
 ## Delivery sequence
 
