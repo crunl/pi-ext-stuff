@@ -9,19 +9,13 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createEditTool, createWriteTool } from "@earendil-works/pi-coding-agent";
 import {
-  createBashTool,
-  createEditTool,
-  createWriteTool,
-  getLanguageFromPath,
-} from "@earendil-works/pi-coding-agent";
-import {
-  colorizeEditDiffSummary,
-  compactBashStatusSpacing,
+  codexBashToolSpec,
+  codexEditToolSpec,
+  codexWriteToolSpec,
   createCodexToolRendering,
-  createEditDiffBox,
-  summarizeEditDiff,
-} from "../../pi-core/index.ts";
+} from "../../pi-core/standalone.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { reviewAutoPrompt } from "./auto-policy.ts";
 import {
@@ -222,13 +216,6 @@ function nextExecutableMode(mode: ExecutablePermissionMode): ExecutablePermissio
   if (mode === "default") return "auto";
   if (mode === "auto") return "yolo";
   return "default";
-}
-
-function countWrittenLines(content: string): number {
-  if (content.length === 0) return 0;
-  const normalized = content.replace(/\r\n?/g, "\n");
-  const lines = normalized.split("\n").length;
-  return normalized.endsWith("\n") ? lines - 1 : lines;
 }
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
@@ -778,14 +765,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseBash,
-    ...createCodexToolRendering({
-      icon: "",
-      runningVerb: "Running",
-      completedVerb: "Ran",
-      argument: (args) => (typeof args.command === "string" ? args.command : ""),
-      collapsed: "preview",
-      transformOutput: compactBashStatusSpacing,
-    }),
+    ...createCodexToolRendering(codexBashToolSpec),
     label: "bash (sandboxed)",
     description: `${baseBash.description} To write outside the active sandbox, request sandbox_permissions="with_additional_permissions", list the minimum additional_permissions.file_system.write roots, and provide justification.`,
     promptGuidelines: [
@@ -894,17 +874,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseWrite,
-    ...createCodexToolRendering({
-      icon: "",
-      runningVerb: "Writing",
-      completedVerb: "Wrote",
-      argument: (args) => (typeof args.path === "string" ? args.path : ""),
-      collapsed: (_result, args) => {
-        const content = typeof args.content === "string" ? args.content : "";
-        const lineCount = countWrittenLines(content);
-        return lineCount > 0 ? `+${lineCount}` : undefined;
-      },
-    }),
+    ...createCodexToolRendering(codexWriteToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       const activationGeneration = modeMutationGeneration;
@@ -945,21 +915,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseEdit,
-    ...createCodexToolRendering({
-      icon: "",
-      runningVerb: "Editing",
-      completedVerb: "Edited",
-      argument: (args) => (typeof args.path === "string" ? args.path : ""),
-      collapsed: summarizeEditDiff,
-      formatSummary: colorizeEditDiffSummary,
-      renderExpandedResult: (result, args, theme, outputPad) => {
-        const details = result.details as { diff?: unknown } | undefined;
-        return createEditDiffBox(typeof details?.diff === "string" ? details.diff : "", theme, {
-          outputPad,
-          lang: typeof args.path === "string" ? getLanguageFromPath(args.path) : undefined,
-        });
-      },
-    }),
+    ...createCodexToolRendering(codexEditToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       const activationGeneration = modeMutationGeneration;
