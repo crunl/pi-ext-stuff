@@ -74,11 +74,14 @@ export type GuardianPolicySource = (context: {
   configFingerprint: string;
 }) => string | undefined;
 
+export type LocalProxyPortsProvider = () => LocalProxyPorts;
+
 export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
   bashToolFactory?: typeof createBashTool;
   localProxyPorts?: LocalProxyPorts;
+  localProxyPortsProvider?: LocalProxyPortsProvider;
   filteringProxyFactory?: (
     approvedHosts: readonly string[],
     upstream: LocalProxyPorts,
@@ -234,7 +237,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
-  const localProxyPorts = options.localProxyPorts ?? detectLocalProxyPorts();
+  const resolveLocalProxyPorts: LocalProxyPortsProvider =
+    options.localProxyPortsProvider
+    ?? (() => options.localProxyPorts ?? detectLocalProxyPorts());
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
@@ -835,11 +840,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             const allowedDomains = [
               ...new Set([...baseConfig.network.allowedDomains, ...networkHosts]),
             ];
-            const hasLocalProxy = Boolean(localProxyPorts.http || localProxyPorts.socks);
+            const upstreamProxyPorts = resolveLocalProxyPorts();
+            const hasLocalProxy = Boolean(upstreamProxyPorts.http || upstreamProxyPorts.socks);
             if (hasLocalProxy) {
               filteringProxy = await filteringProxyFactory(
                 allowedDomains,
-                localProxyPorts,
+                upstreamProxyPorts,
                 baseConfig.network.deniedDomains,
               );
             }

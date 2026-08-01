@@ -46,6 +46,7 @@ function harness(
     cwd: string;
     configFingerprint: string;
   }) => string | undefined,
+  localProxyPortsProvider?: () => { http?: number; socks?: number },
 ) {
   writeFileSync(
     join(agentDir, "keybindings.json"),
@@ -78,7 +79,13 @@ function harness(
     ports: { http: 45670, socks: 45671 },
     close: vi.fn(async () => undefined),
   };
-  const filteringProxyFactory = vi.fn(async () => filteringProxy);
+  const filteringProxyFactory = vi.fn(
+    async (
+      _approvedHosts: readonly string[],
+      _upstream: { http?: number; socks?: number },
+      _deniedHosts?: readonly string[],
+    ) => filteringProxy,
+  );
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
   const emitBusEvent = vi.fn();
@@ -115,6 +122,7 @@ function harness(
       autoReviewer,
       riskEvaluator,
       guardianPolicySource,
+      localProxyPortsProvider,
     } as any,
   );
   const context = {
@@ -3890,6 +3898,129 @@ describe("Default mode registration", () => {
       network: { allowedDomains: [] },
     });
     expect(app.filteringProxy.close).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes host-provided upstream proxy ports for each approved network execution", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const snapshots = [
+      { http: 7890, socks: 7891 },
+      { http: 8890, socks: 8891 },
+    ];
+    const app = harness(
+      agentDir,
+      true,
+      true,
+      { http: 7890, socks: 7891 },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => snapshots.shift() ?? {},
+    );
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    const first = {
+      toolName: "bash",
+      toolCallId: "network-proxy-first",
+      input: { command: "curl https://example.com" },
+    };
+    await app.handlers.get("tool_call")!(first, app.context);
+    await app.tools.get("bash").execute(
+      first.toolCallId,
+      first.input,
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    const second = {
+      toolName: "bash",
+      toolCallId: "network-proxy-second",
+      input: { command: "curl https://api.github.com/repos/openai/codex" },
+    };
+    await app.handlers.get("tool_call")!(second, app.context);
+    await app.tools.get("bash").execute(
+      second.toolCallId,
+      second.input,
+      undefined,
+      undefined,
+      app.context,
+    );
+
+    expect(app.filteringProxyFactory.mock.calls.map(([, upstream]) => upstream)).toEqual([
+      { http: 7890, socks: 7891 },
+      { http: 8890, socks: 8891 },
+    ]);
+  });
+
+  it("uses the allowed-domain path when a refreshed proxy snapshot is empty", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const snapshots = [{ http: 7890 }, {}];
+    const app = harness(
+      agentDir,
+      true,
+      true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => snapshots.shift() ?? {},
+    );
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    for (const toolCallId of ["network-proxy-present", "network-proxy-removed"]) {
+      const event = {
+        toolName: "bash",
+        toolCallId,
+        input: { command: "curl https://example.com" },
+      };
+      await app.handlers.get("tool_call")!(event, app.context);
+      await app.tools
+        .get("bash")
+        .execute(toolCallId, event.input, undefined, undefined, app.context);
+    }
+
+    expect(app.filteringProxyFactory).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.initialize.mock.calls.at(-2)?.[0]).toMatchObject({
+      network: { allowedDomains: ["example.com"] },
+    });
+  });
+
+  it("restores the base sandbox when host-provided proxy discovery fails", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(
+      agentDir,
+      true,
+      true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        throw new Error("proxy discovery failed");
+      },
+    );
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "network-proxy-discovery-failure",
+      input: { command: "curl https://example.com" },
+    };
+
+    await app.handlers.get("tool_call")!(event, app.context);
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).rejects.toThrow("proxy discovery failed");
+
+    expect(app.bashExecute).not.toHaveBeenCalled();
+    expect(app.sandboxManager.initialize.mock.calls.at(-1)?.[0]).toMatchObject({
+      network: { allowedDomains: [] },
+    });
+    expect(app.filteringProxy.close).not.toHaveBeenCalled();
   });
 
   it("restores the base sandbox when temporary proxy initialization fails", async () => {
