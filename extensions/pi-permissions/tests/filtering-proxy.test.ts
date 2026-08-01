@@ -176,6 +176,56 @@ describe("host filtering proxy", () => {
     expect(targets).toEqual(["93.184.216.34:22"]);
   });
 
+  it("uses the matching upstream protocol when both are configured", async () => {
+    const httpTargets: string[] = [];
+    const socksTargets: string[] = [];
+    const httpUpstream = createServer((socket) => {
+      void (async () => {
+        const request = await readAtLeast(socket, 1);
+        const target = /^CONNECT\s+(\S+)/.exec(request.toString("latin1"))?.[1];
+        if (target) httpTargets.push(target);
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      })();
+    });
+    const socksUpstream = createServer((socket) => {
+      void (async () => {
+        await readAtLeast(socket, 3);
+        socket.write(Buffer.from([0x05, 0x00]));
+        const request = await readAtLeast(socket, 10);
+        if (request[0] === 0x05 && request[1] === 0x01 && request[3] === 0x01) {
+          socksTargets.push(
+            `${request[4]}.${request[5]}.${request[6]}.${request[7]}:${request.readUInt16BE(8)}`,
+          );
+        }
+        socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+      })().catch(() => socket.destroy());
+    });
+    const httpUpstreamPort = await listen(httpUpstream);
+    const socksUpstreamPort = await listen(socksUpstream);
+
+    try {
+      filteringProxy = await startHostFilteringProxy(
+        ["allowed.example"],
+        { http: httpUpstreamPort, socks: socksUpstreamPort },
+        [],
+        publicResolver,
+      );
+
+      await expect(httpConnectStatus(filteringProxy.ports.http, "allowed.example:443"))
+        .resolves.toBe(200);
+      await expect(socksConnectStatus(filteringProxy.ports.socks, "allowed.example", 22))
+        .resolves.toBe(0x00);
+
+      expect(httpTargets).toEqual(["93.184.216.34:443"]);
+      expect(socksTargets).toEqual(["93.184.216.34:22"]);
+    } finally {
+      await filteringProxy?.close();
+      filteringProxy = undefined;
+      await closeServer(httpUpstream);
+      await closeServer(socksUpstream);
+    }
+  });
+
   it("rejects private targets even when they appear in the approved host set", async () => {
     let upstreamConnections = 0;
     upstream = createServer(() => {

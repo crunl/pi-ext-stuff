@@ -132,6 +132,7 @@ function readHttpHeaders(socket: Socket): Promise<string> {
 }
 
 type SocketTracker = (socket: Socket | Duplex) => void;
+type UpstreamProtocol = "http" | "socks";
 
 function connectLoopback(
   port: number,
@@ -243,9 +244,16 @@ function connectThroughUpstream(
   upstream: LocalProxyPorts,
   host: string,
   port: number,
+  preferredProtocol: UpstreamProtocol,
   track?: SocketTracker,
   signal?: AbortSignal,
 ): Promise<Socket> {
+  if (preferredProtocol === "http" && upstream.http) {
+    return connectThroughHttpProxy(upstream.http, host, port, track, signal);
+  }
+  if (preferredProtocol === "socks" && upstream.socks) {
+    return connectThroughSocksProxy(upstream.socks, host, port, track, signal);
+  }
   if (upstream.http) return connectThroughHttpProxy(upstream.http, host, port, track, signal);
   if (upstream.socks) return connectThroughSocksProxy(upstream.socks, host, port, track, signal);
   throw new Error("no supported local upstream proxy is configured");
@@ -273,6 +281,7 @@ async function queryDnsOverHttps(
     upstream,
     "cloudflare-dns.com",
     443,
+    "http",
     track,
     signal,
   );
@@ -478,6 +487,7 @@ export async function startHostFilteringProxy(
   const connectPinned = async (
     addresses: readonly string[],
     port: number,
+    preferredProtocol: UpstreamProtocol,
   ): Promise<Socket> => {
     let lastError: unknown;
     for (const address of addresses) {
@@ -487,6 +497,7 @@ export async function startHostFilteringProxy(
           upstream,
           address,
           port,
+          preferredProtocol,
           track,
           lifecycle.signal,
         );
@@ -515,7 +526,7 @@ export async function startHostFilteringProxy(
         return;
       }
       const port = url.port ? Number(url.port) : 80;
-      const tunnel = await connectPinned(addresses, port);
+      const tunnel = await connectPinned(addresses, port, "http");
       track(tunnel);
       const headers: OutgoingHttpHeaders = { ...request.headers, host: url.host };
       delete headers["proxy-connection"];
@@ -556,7 +567,7 @@ export async function startHostFilteringProxy(
         clientSocket.end("HTTP/1.1 403 Forbidden\r\nX-Proxy-Error: blocked-by-pi-permissions\r\n\r\n");
         return;
       }
-      const tunnel = await connectPinned(addresses, port);
+      const tunnel = await connectPinned(addresses, port, "http");
       track(tunnel);
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       tunnel.pipe(clientSocket);
@@ -580,7 +591,7 @@ export async function startHostFilteringProxy(
           clientSocket.end(Buffer.from([0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
           return;
         }
-        const tunnel = await connectPinned(addresses, port);
+        const tunnel = await connectPinned(addresses, port, "socks");
         track(tunnel);
         clientSocket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
         tunnel.pipe(clientSocket);
