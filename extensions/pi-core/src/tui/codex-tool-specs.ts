@@ -6,11 +6,7 @@ import {
   compactBashStatusSpacing,
   summarizeEditDiff,
 } from "./tool-renderer.ts";
-import {
-  createWritePreview,
-  updateWriteHighlightCache,
-  type WriteHighlightCache,
-} from "./write-preview.ts";
+import { createWritePreviewFromArgs, type WriteHighlightCache } from "./write-preview.ts";
 
 /**
  * Line count for a file write, used as the collapsed summary of the write
@@ -45,20 +41,16 @@ export const codexWriteToolSpec: CodexToolRendererSpec = {
   },
   formatSummary: (summary, theme) => theme.fg("success", summary),
   renderCallPreview(args, theme, context) {
-    const path = typeof args.path === "string" ? args.path : "";
-    const content = typeof args.content === "string" ? args.content : "";
-    const cache = updateWriteHighlightCache(
+    const preview = createWritePreviewFromArgs(
+      args,
       context.state.rendererState as WriteHighlightCache | undefined,
-      path,
-      content,
+      theme,
     );
-    context.state.rendererState = cache;
-    return createWritePreview(cache, theme);
+    context.state.rendererState = preview.cache;
+    return preview;
   },
   renderExpandedResult(_result, args, theme) {
-    const path = typeof args.path === "string" ? args.path : "";
-    const content = typeof args.content === "string" ? args.content : "";
-    return createWritePreview(updateWriteHighlightCache(undefined, path, content), theme);
+    return createWritePreviewFromArgs(args, undefined, theme);
   },
 };
 

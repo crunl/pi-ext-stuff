@@ -116,8 +116,31 @@ export function renderWritePreviewText(
   return lines.join("\n");
 }
 
-export function createWritePreview(cache: WriteHighlightCache | undefined, theme: Theme): Text {
-  const component = new Text("", 0, 0);
-  component.setText(renderWritePreviewText(cache, theme));
-  return component;
+/**
+ * Preview component for the write tool. Carries the highlight cache so the
+ * caller can persist it (e.g. into renderer state) for incremental updates.
+ */
+export class WritePreviewComponent extends Text {
+  cache: WriteHighlightCache | undefined;
+
+  constructor(cache: WriteHighlightCache | undefined, theme: Theme) {
+    super(renderWritePreviewText(cache, theme), 0, 0);
+    this.cache = cache;
+  }
+}
+
+/**
+ * Build the preview for a write call's arguments, updating the highlight
+ * cache incrementally when the content grew by prefix. Shared by the
+ * streamed (renderCallPreview) and settled (renderExpandedResult) paths.
+ */
+export function createWritePreviewFromArgs(
+  args: Record<string, unknown>,
+  cache: WriteHighlightCache | undefined,
+  theme: Theme,
+): WritePreviewComponent {
+  const path = typeof args.path === "string" ? args.path : "";
+  const content = typeof args.content === "string" ? args.content : "";
+  const next = updateWriteHighlightCache(cache, path, content);
+  return new WritePreviewComponent(next, theme);
 }
