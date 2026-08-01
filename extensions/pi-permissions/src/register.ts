@@ -47,6 +47,7 @@ import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import { validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
+import { createSandboxedGuardianToolRuntime } from "./guardian-tools.ts";
 import {
   appendGuardianTranscript,
   boundGuardianTranscript,
@@ -244,7 +245,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
   const autoReviewer =
-    options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
+    options.autoReviewer
+    ?? new PiAutoReviewer(
+      undefined,
+      options.guardianSessionManager,
+      undefined,
+      (cwd) => createSandboxedGuardianToolRuntime(cwd, sandboxManager),
+    );
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let configFailure: Error | undefined;

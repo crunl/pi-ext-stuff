@@ -3,6 +3,13 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+
+const defaultGuardianComplete = vi.hoisted(() => vi.fn());
+
+vi.mock("@earendil-works/pi-ai/compat", () => ({
+  complete: defaultGuardianComplete,
+}));
+
 import { type AutoReviewer, AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
 import type { DefaultDecision } from "../src/default-mode.ts";
@@ -47,6 +54,7 @@ function harness(
     configFingerprint: string;
   }) => string | undefined,
   localProxyPortsProvider?: () => { http?: number; socks?: number },
+  omitAutoReviewer = false,
 ) {
   writeFileSync(
     join(agentDir, "keybindings.json"),
@@ -110,21 +118,19 @@ function harness(
     sendMessage,
     events: { emit: emitBusEvent, on: vi.fn() },
   };
-  registerExtension(
-    pi as any,
-    {
-      agentDir,
-      sandboxManager,
-      bashToolFactory: bashToolFactory as any,
-      localProxyPorts,
-      filteringProxyFactory,
-      sandboxCoordinator,
-      autoReviewer,
-      riskEvaluator,
-      guardianPolicySource,
-      localProxyPortsProvider,
-    } as any,
-  );
+  const registerOptions: any = {
+    agentDir,
+    sandboxManager,
+    bashToolFactory: bashToolFactory as any,
+    localProxyPorts,
+    filteringProxyFactory,
+    sandboxCoordinator,
+    riskEvaluator,
+    guardianPolicySource,
+    localProxyPortsProvider,
+  };
+  if (!omitAutoReviewer) registerOptions.autoReviewer = autoReviewer;
+  registerExtension(pi as any, registerOptions);
   const context = {
     cwd: agentDir,
     hasUI,
@@ -881,6 +887,102 @@ describe("Default mode registration", () => {
     await expectActualHistoryCleared(() =>
       app.handlers.get("session_shutdown")?.({ type: "session_shutdown" }, app.context),
     );
+  });
+
+  it("uses a sandbox-backed Guardian runtime by default and does not reset parent lifecycle during read-only review", async () => {
+    defaultGuardianComplete.mockReset();
+    defaultGuardianComplete
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "guardian-read-1",
+            name: "read",
+            arguments: { path: "guardian-evidence.txt" },
+          },
+        ],
+        stopReason: "toolUse",
+      })
+      .mockResolvedValueOnce({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              risk_level: "low",
+              user_authorization: "high",
+              outcome: "allow",
+              rationale: "Sandboxed read-only evidence confirms the request.",
+            }),
+          },
+        ],
+        stopReason: "stop",
+      });
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    await writeFile(join(agentDir, "guardian-evidence.txt"), "sandbox-backed evidence\n");
+    const app = harness(
+      agentDir,
+      false,
+      true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    app.context.model = { provider: "openai", id: "active-guardian" } as any;
+    app.context.modelRegistry = {
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
+    } as any;
+
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const resetCount = app.sandboxManager.reset.mock.calls.length;
+    const initializeCount = app.sandboxManager.initialize.mock.calls.length;
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "default-guardian-sandbox",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalled();
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetCount);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(initializeCount);
+    expect(defaultGuardianComplete).toHaveBeenCalledTimes(2);
+    const firstOptions = defaultGuardianComplete.mock.calls[0]?.[2] as any;
+    const secondOptions = defaultGuardianComplete.mock.calls[1]?.[2] as any;
+    expect(firstOptions.sessionId).toBeTruthy();
+    expect(secondOptions.sessionId).toBe(firstOptions.sessionId);
+    expect(firstOptions.timeoutMs).toBeGreaterThan(0);
+    expect(secondOptions.timeoutMs).toBeGreaterThan(0);
+    expect(firstOptions.signal).toBeInstanceOf(AbortSignal);
+    expect(secondOptions.signal).toBeInstanceOf(AbortSignal);
+    const secondContext = defaultGuardianComplete.mock.calls[1]?.[1] as any;
+    expect(
+      secondContext.messages
+        .flatMap((message: any) => message.content ?? [])
+        .map((part: any) => part.text ?? "")
+        .join("\n"),
+    ).toContain("sandbox-backed evidence");
+    const guardianSandboxConfig = (app.sandboxManager.wrapWithSandbox.mock.calls as any[]).at(
+      -1,
+    )?.[2];
+    expect(guardianSandboxConfig).toMatchObject({
+      filesystem: { allowWrite: [], denyRead: [], denyWrite: [] },
+      network: { allowedDomains: [], deniedDomains: [] },
+    });
   });
 
   it("loads Default mode and exposes Shift+Tab mode switching", async () => {
