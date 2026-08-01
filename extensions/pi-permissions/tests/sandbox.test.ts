@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -55,21 +55,26 @@ describe("sandbox integration", () => {
     expect(manager.reset).not.toHaveBeenCalled();
   });
 
-  it("runs a read-only command runner with literal arguments and abort cleanup", async () => {
+  it("binds a read-only command runner to a resolved executable and literal arguments", async () => {
     const manager = {
       initialize: vi.fn(async () => undefined),
       reset: vi.fn(async () => undefined),
       wrapWithSandbox: vi.fn(async (command: string) => command),
     };
-    const run = createSandboxedReadOnlyCommandRunner(manager);
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
     const literalArgument = "spaces 'quotes' $(must-not-run)\nnext-line";
 
     const result = await run(
-      process.execPath,
       ["-e", "process.stdout.write(process.argv[1])", literalArgument],
     );
 
     expect(result.stdout.toString()).toBe(literalArgument);
+    expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
+      expect.stringContaining(`'${process.execPath}'`),
+      undefined,
+      createGuardianReadOnlySandboxConfig(),
+      undefined,
+    );
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       expect.stringContaining("'spaces '\\''quotes'\\'' $(must-not-run)\nnext-line'"),
       undefined,
@@ -77,16 +82,73 @@ describe("sandbox integration", () => {
       undefined,
     );
 
+    expect(manager.initialize).not.toHaveBeenCalled();
+    expect(manager.reset).not.toHaveBeenCalled();
+  });
+
+  it("constructs a fresh Guardian config for every read-only command", async () => {
+    const configs: Array<NonNullable<Parameters<SandboxManagerLike["wrapWithSandbox"]>[2]>> = [];
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (
+        ...[command, , config]: Parameters<SandboxManagerLike["wrapWithSandbox"]>
+      ) => {
+        if (!config?.filesystem) throw new Error("missing Guardian config");
+        configs.push(config);
+        if (configs.length === 1) config.filesystem.allowWrite.push("/parent-write-root");
+        return command;
+      }),
+    };
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+
+    await run(["-e", ""]);
+    await run(["-e", ""]);
+
+    expect(configs).toHaveLength(2);
+    expect(configs[0]).not.toBe(configs[1]);
+    expect(configs[1]).toEqual(createGuardianReadOnlySandboxConfig());
+  });
+
+  it("reports sandboxed exists permission failures instead of missing paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-permissions-"));
+    const blockedDirectory = join(directory, "blocked");
+    await mkdir(blockedDirectory);
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+    const operations = createSandboxedGuardianFileOperations(manager);
+
+    await chmod(blockedDirectory, 0o000);
+    try {
+      await expect(operations.ls.exists(join(blockedDirectory, "secret"))).rejects.toThrow(
+        /EACCES|permission denied/i,
+      );
+    } finally {
+      await chmod(blockedDirectory, 0o700);
+    }
+  });
+
+  it("rejects aborted read-only commands after child cleanup", async () => {
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+
     const controller = new AbortController();
     const aborted = run(
-      process.execPath,
       ["-e", "setInterval(() => {}, 1_000)"],
       controller.signal,
     );
+    const abortedExpectation = expect(aborted).rejects.toThrow("aborted");
     await new Promise((resolve) => setTimeout(resolve, 50));
     controller.abort();
 
-    await expect(aborted).rejects.toThrow("aborted");
+    await abortedExpectation;
     expect(manager.initialize).not.toHaveBeenCalled();
     expect(manager.reset).not.toHaveBeenCalled();
   });

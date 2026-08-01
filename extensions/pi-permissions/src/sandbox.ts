@@ -257,20 +257,27 @@ export interface SandboxedCommandResult {
   exitCode: number | null;
 }
 
+export type GuardianReadOnlyExecutable = "node";
+
+function guardianReadOnlyExecutablePath(executable: GuardianReadOnlyExecutable): string {
+  if (executable === "node") return process.execPath;
+  throw new Error(`Unsupported Guardian read-only executable: ${executable}`);
+}
+
 export function createSandboxedReadOnlyCommandRunner(
   manager: SandboxManagerLike,
-  config: SandboxRuntimeConfig = createGuardianReadOnlySandboxConfig(),
+  executable: GuardianReadOnlyExecutable,
 ): (
-  executable: string,
   args: readonly string[],
   signal?: AbortSignal,
 ) => Promise<SandboxedCommandResult> {
-  return async (executable, args, signal) => {
-    const command = [executable, ...args].map(shellQuote).join(" ");
+  const resolvedExecutable = guardianReadOnlyExecutablePath(executable);
+  return async (args, signal) => {
+    const command = [resolvedExecutable, ...args].map(shellQuote).join(" ");
     const wrappedCommand = await manager.wrapWithSandbox(
       command,
       undefined,
-      config,
+      createGuardianReadOnlySandboxConfig(),
       signal,
     );
 
@@ -328,8 +335,10 @@ async function main() {
     try {
       await fs.access(path, constants.F_OK);
       process.stdout.write("true");
-    } catch {
-      process.stdout.write("false");
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") {
+        process.stdout.write("false");
+      } else throw error;
     }
   } else if (operation === "stat") {
     const stat = await fs.stat(path);
@@ -348,19 +357,18 @@ type GuardianFileOperation = "read" | "access" | "exists" | "stat" | "readdir";
 
 export function createSandboxedGuardianFileOperations(
   manager: SandboxManagerLike,
-  config?: SandboxRuntimeConfig,
 ): {
   read: ReadOperations;
   grep: GrepOperations;
   find: Pick<FindOperations, "exists">;
   ls: LsOperations;
 } {
-  const run = createSandboxedReadOnlyCommandRunner(manager, config);
+  const run = createSandboxedReadOnlyCommandRunner(manager, "node");
   const runFileOperation = async (
     operation: GuardianFileOperation,
     path: string,
   ): Promise<Buffer> => {
-    const result = await run(process.execPath, [
+    const result = await run([
       "-e",
       GUARDIAN_FILE_OPERATION_HELPER,
       operation,
