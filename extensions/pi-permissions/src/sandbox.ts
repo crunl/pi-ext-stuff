@@ -31,6 +31,20 @@ export interface LocalProxyPorts {
   socks?: number;
 }
 
+export function createGuardianReadOnlySandboxConfig(): SandboxRuntimeConfig {
+  return {
+    filesystem: {
+      allowWrite: [],
+      denyRead: [],
+      denyWrite: [],
+    },
+    network: {
+      allowedDomains: [],
+      deniedDomains: [],
+    },
+  };
+}
+
 function localProxyPort(value: string | undefined): number | undefined {
   if (!value) return undefined;
   try {

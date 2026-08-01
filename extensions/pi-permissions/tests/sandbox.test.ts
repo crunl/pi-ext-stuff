@@ -7,6 +7,7 @@ import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-polic
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
+  createGuardianReadOnlySandboxConfig,
   createSandboxRuntimeConfig,
   detectLocalProxyPorts,
   withAdditionalWriteRoots,
@@ -14,6 +15,41 @@ import {
 } from "../src/sandbox.ts";
 
 describe("sandbox integration", () => {
+  it("returns an independent Guardian read-only sandbox config", () => {
+    const first = createGuardianReadOnlySandboxConfig();
+    const second = createGuardianReadOnlySandboxConfig();
+
+    expect(first).toEqual({
+      filesystem: {
+        allowWrite: [],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+      },
+    });
+
+    first.filesystem.allowWrite.push("/tmp/example");
+    first.filesystem.denyRead.push("/tmp/secret");
+    first.filesystem.denyWrite.push("/tmp/protected");
+    first.network.allowedDomains.push("example.com");
+    first.network.deniedDomains.push("blocked.example.com");
+
+    expect(second).toEqual({
+      filesystem: {
+        allowWrite: [],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+      },
+    });
+  });
+
   it("resolves workspace-relative paths before initializing the runtime", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
 
