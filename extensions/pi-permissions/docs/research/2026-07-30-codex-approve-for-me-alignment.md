@@ -12,7 +12,7 @@
   该 drift 显示 current-main runtime integration 已在 `mcp_tool_call.rs`、
   `session/handlers.rs` 和 app-server 协议层继续演进；P1 未声明复制这些
   runtime/lifecycle/telemetry 细节。
-- 本地实现基准：Task 1--4 完成后的 `pi-permissions`。本文件记录该实现，而不是把 Pi
+- 本地实现基准：Task 1--4 当前实现快照。本文件记录该实现，而不是把 Pi
   的整套权限执行面宣称为 Codex 的复制品。
 - 核心分层：Guardian parser 只验证结构化响应契约；高风险是否可允许、授权证据的含义仍由 Guardian prompt/policy 决定。Pi 的 shell、Git metadata、受保护路径及网络判断是进入 Guardian 前的确定性本地策略，不属于 Guardian parity。
 
@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | policy、prompt 与输出契约 | `src/auto-review-request.ts` 的模板、默认 policy 和结果字段以固定 commit 的 Guardian 源文件为准；只要求 `outcome`，其余字段使用相应的 allow/deny 默认值。 | 本地命名可以提及 Pi，但不改变 policy 含义。 |
 | parser | 先解析完整 JSON；失败时只尝试首个 `{` 到最后一个 `}` 的单对象恢复。非对象、缺失/非法 `outcome`、非法 enum 和非字符串 rationale 仍会拒绝；额外字段会被忽略。高/critical `allow` 不会被 parser 二次拒绝。 | 这是结构验证，不在 parser 重写 Guardian 的风险或授权 policy。 |
-| bounded evidence / tools | Auto request 向 Guardian 传入 bounded role-tagged transcript（`user`、`assistant`、`tool` 与 tool error state）和 exact planned action。Guardian 可使用 bounded read-only local tools（`read`、`grep`、`find`、`ls`）补充证据；这些工具没有 write、shell、network、MCP/custom tool 或 nested approval 能力。 | Parent transcript、tool result 与 action arguments 均是不可信 evidence，不是 policy。read-only tool error 后的 allow 会 fail closed；deny 可保留为 bounded history。 |
+| bounded evidence / tools | Auto request 向 Guardian 传入 bounded role-tagged transcript（`user`、`assistant`、`tool` 与 tool error state）和 exact planned action。Guardian 可使用 bounded read-only local tools（`read`、`grep`、`find`、`ls`）补充证据；这些工具没有 write、shell、network、MCP/custom tool 或 nested approval 能力。绝对路径保持可读，不额外收紧为 workspace-only；这与 Codex `PermissionProfile::read_only()` 的全盘只读语义一致。 | Parent transcript、tool result 与 action arguments 均是不可信 evidence，不是 policy。parent `filesystemDenyRead` 作为 permission context 供 Guardian 判断待批准 action，不改写 Guardian child 的只读工具 allowlist；真正的 Codex child deny-read/写入边界由 OS sandbox 执行。read-only tool error 后的 allow 会 fail closed；deny 可保留为 bounded history。 |
 | Auto failure block | provider、parse、timeout、cancelled 和未知 reviewer failure 在 Auto 中均 fail closed；UI 和 headless 都不会自动打开人工 approval fallback，也不会创建 exact grant。 | 用户若需要人工判断，必须切回 Default 或提交新的明确 action。 |
 | 拒绝后精确批准 | approval ledger 将批准绑定到原 tool、input、cwd、config 与 action fingerprint；仅可消费一次，并由 Guardian 重新评估。传给可信 developer context 的首行精确为：`The user has manually approved a specific action that was previously \`Rejected\`.` 随后是序列化的 exact action。 | 人工批准不是直接执行，也不会扩大到相似命令或后续 action。 |
 | retry / failure 边界 | Pi 保持 90 秒总 deadline、最多 3 次，且 review 异常不会自动执行 action。 | 具体 provider 错误分类和 UI 人工交接仍是 Pi 产品行为，不是对 Codex 内部实现逐行复刻。 |
@@ -66,29 +66,28 @@
 - 无 MCP metadata 的 custom-tool action 作为 `custom_tool_call` 送审，不会发明
   `connectorId` 或 `connected_account_email`。
 
-## 最终验证证据
+## 最新验证证据
 
-- 六文件 focused suite：6/6 files、387/387 tests 通过。
-- `npm run check`：`tsc --noEmit` 通过；所有本轮触及的 source/test 文件通过
-  `biome check --error-on-warnings`，无 warning。
-- 完整 `npm test` 在外层 sandbox 首次仅因九个 filtering-proxy case 无法
-  `listen 127.0.0.1` 而报 `EPERM`；在获准的本地 loopback 环境重跑同一命令后，
-  20 files / 477 tests 通过，1 file / 1 test（外部 core regression）按设计 skip。
-- `npm run core:check` 验证已安装 `agent-loop.js`，SHA-256 为
-  `e4af3082d8c95203aff6bf7aa590e63d6cd1d0225723db271eeb315ded01dd63`；
-  `npm run core:test` 的 abort-ignorant prepared-tool regression 为 1/1 通过。
-- YOLO targeted suite 为 28 tests 通过、67 tests 因名称筛选 skip；覆盖在 native
-  execution 前不运行 risk evaluator、Guardian、人工 approval 或 sandbox execution。
-- 最终 runtime tree audit 中 `git diff --check` 通过，任务列出的八个
-  runtime/test 文件相对 `HEAD` 无未提交差异。
+- 本轮 P1 review fix 的 focused suite：5 files、199/199 tests 通过；
+  `npm run check`（`tsc --noEmit`）通过。
+- 受限 sandbox 内的完整 `npm test` 首次记录为 9 个
+  `tests/filtering-proxy.test.ts` case 无法 `listen 127.0.0.1`（`EPERM`）；
+  在获准的 loopback 环境重跑后，23 test files、547 tests 通过，1 test file、
+  1 test skip。该结果证明完整 suite 在允许 loopback 的环境中通过。
+- `npm run core:test` 最近一次为 1/1 failed；`npm run core:check` 报告
+  repository patch 支持 `pi-agent-core 0.82.1`，当前安装的是 `0.83.0`。
+  因此 core regression 也不能宣称通过。
+- `git diff --check` 通过；YOLO targeted suite 的历史结果仍为 28 tests 通过、
+  67 tests 因名称筛选 skip。
 
 ## 已知非目标
 
 - 不复刻 Codex 的 Guardian lifecycle events、`GuardianAssessment` telemetry 或 app-server 协议事件。
 - 不实现相同的 review sandbox internals；Pi 的 Guardian 仅暴露本扩展拥有的 bounded
-  read-only local tools，并不声称复制 Codex 的完整 internal child-session runtime、
-  MCP/apps/skills/features 清空或仅继承 approved network hosts 的机制。Pi 仍保留自身
-  sandbox profiles、network allowlist 和 native completion 调用模型。
+  read-only local tools，并不声称复制 Codex 的 OS-level child-session sandbox handoff。
+  因而绝对路径读取不做 workspace containment；也不把 parent `filesystemDenyRead` 伪装成
+  Guardian child 的 deny-list。Pi 仍保留自身 sandbox profiles、network allowlist 和
+  native completion 调用模型。
 
 ## 剩余 P2 边界
 

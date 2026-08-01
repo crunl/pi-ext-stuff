@@ -3,11 +3,13 @@ import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 export type GuardianAction =
   | {
       kind: "shell";
+      toolCallId: string;
       command: string;
       cwd: string;
     }
   | {
       kind: "apply_patch";
+      toolCallId: string;
       files: Array<
         | {
             path: unknown;
@@ -22,12 +24,14 @@ export type GuardianAction =
     }
   | {
       kind: "custom_tool_call";
+      toolCallId: string;
       toolName: string;
       arguments: Record<string, unknown>;
       cwd: string;
     }
   | {
       kind: "mcp_tool_call";
+      toolCallId: string;
       serverName: string;
       toolName: string;
       connectorId?: string;
@@ -95,6 +99,7 @@ export function guardianActionFromToolCall(event: ToolCallEvent, cwd: string): G
   if (event.toolName === "bash") {
     return {
       kind: "shell",
+      toolCallId: event.toolCallId,
       command: typeof input.command === "string" ? input.command : "",
       cwd,
     };
@@ -102,6 +107,7 @@ export function guardianActionFromToolCall(event: ToolCallEvent, cwd: string): G
   if (event.toolName === "write") {
     return {
       kind: "apply_patch",
+      toolCallId: event.toolCallId,
       files: [{ path: input.path, content: input.content }],
       cwd,
     };
@@ -109,6 +115,7 @@ export function guardianActionFromToolCall(event: ToolCallEvent, cwd: string): G
   if (event.toolName === "edit") {
     return {
       kind: "apply_patch",
+      toolCallId: event.toolCallId,
       files: [{ path: input.path, edits: input.edits }],
       cwd,
     };
@@ -117,6 +124,7 @@ export function guardianActionFromToolCall(event: ToolCallEvent, cwd: string): G
   if (explicitMcp) {
     return {
       kind: "mcp_tool_call",
+      toolCallId: event.toolCallId,
       ...explicitMcp,
       arguments: { ...input },
       cwd,
@@ -124,6 +132,7 @@ export function guardianActionFromToolCall(event: ToolCallEvent, cwd: string): G
   }
   return {
     kind: "custom_tool_call",
+    toolCallId: event.toolCallId,
     toolName: event.toolName,
     arguments: { ...input },
     cwd,

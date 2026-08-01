@@ -7,7 +7,12 @@ import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 
 const request = {
   toolCallId: "review-1",
-  untrustedAction: { kind: "shell", command: "npm test", cwd: "/workspace" },
+  untrustedAction: {
+    kind: "shell",
+    toolCallId: "review-1",
+    command: "npm test",
+    cwd: "/workspace",
+  },
   permissionContext: {
     sandboxProfile: "workspace-write",
     sandboxEnabled: true,

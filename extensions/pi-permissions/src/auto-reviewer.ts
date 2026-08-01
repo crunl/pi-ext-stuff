@@ -557,7 +557,9 @@ export class PiAutoReviewer implements AutoReviewer {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) throw timeoutFailure(guardian);
       const deadlineSignal = AbortSignal.timeout(remainingMs);
-      const signal = callerSignal ? AbortSignal.any([callerSignal, deadlineSignal]) : deadlineSignal;
+      const signal = callerSignal
+        ? AbortSignal.any([callerSignal, deadlineSignal])
+        : deadlineSignal;
       try {
         const result = await completeWithAbort(runtime.execute(toolCall, signal), signal);
         results.push(result);

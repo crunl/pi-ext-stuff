@@ -1,14 +1,5 @@
-import type {
-  ConstrainedSamplingConfig,
-  ImageContent,
-  TextContent,
-  ToolCall,
-  Tool as LlmTool,
-  ToolResultMessage,
-  Usage,
-} from "@earendil-works/pi-ai";
+import type { Tool as LlmTool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
-import type { TSchema } from "typebox";
 
 const GUARDIAN_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
 const SENSITIVE_ERROR_PATTERNS: Array<[RegExp, string]> = [
@@ -17,34 +8,16 @@ const SENSITIVE_ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/\bbasic\s+[A-Za-z0-9._~+/=-]+/gi, "Basic [redacted]"],
 ];
 
-export type GuardianToolFactory = (cwd: string) => AgentTool[];
+type PiAgentTool = ReturnType<typeof createReadOnlyTools>[number];
+
+export type GuardianToolFactory = (cwd: string) => PiAgentTool[];
 
 export interface GuardianToolRuntime {
   readonly tools: LlmTool[];
   execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>;
 }
 
-interface AgentToolResult {
-  content: (TextContent | ImageContent)[];
-  details?: unknown;
-  usage?: Usage;
-  isError?: boolean;
-}
-
-interface AgentTool {
-  name: string;
-  description: string;
-  parameters: TSchema;
-  constrainedSampling?: false | ConstrainedSamplingConfig;
-  execute(
-    toolCallId: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: undefined,
-  ): Promise<AgentToolResult>;
-}
-
-function projectTool(tool: AgentTool): LlmTool {
+function projectTool(tool: PiAgentTool): LlmTool {
   return Object.freeze({
     name: tool.name,
     description: tool.description,
@@ -81,7 +54,7 @@ function toolErrorResult(toolCall: ToolCall, error: unknown): ToolResultMessage 
 
 export function createGuardianToolRuntime(
   cwd: string,
-  toolFactory: GuardianToolFactory = createReadOnlyTools as unknown as GuardianToolFactory,
+  toolFactory: GuardianToolFactory = createReadOnlyTools,
 ): GuardianToolRuntime {
   const runtimeTools = toolFactory(cwd).filter((tool) => GUARDIAN_TOOL_NAMES.has(tool.name));
   const toolsByName = new Map(runtimeTools.map((tool) => [tool.name, tool]));
@@ -105,7 +78,7 @@ export function createGuardianToolRuntime(
           content: result.content,
           ...(result.details === undefined ? {} : { details: result.details }),
           ...(result.usage === undefined ? {} : { usage: result.usage }),
-          isError: result.isError === true,
+          isError: "isError" in result && result.isError === true,
           timestamp: Date.now(),
         };
       } catch (error) {

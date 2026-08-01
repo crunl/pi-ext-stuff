@@ -71,7 +71,17 @@ Failed tests: 9 filtering-proxy cases
 Error: listen EPERM: operation not permitted 127.0.0.1
 ```
 
-Limitation: full suite is blocked in this sandbox by loopback listen permission for `tests/filtering-proxy.test.ts`. Per instruction, this failed output was recorded and the command was not repeatedly retried.
+Limitation: full suite is blocked in this sandbox by loopback listen permission for `tests/filtering-proxy.test.ts`.
+
+Authorized loopback rerun after the P1 review fixes:
+
+```text
+Test Files  23 passed | 1 skipped (24)
+    Tests  547 passed | 1 skipped (548)
+```
+
+The sandbox-only failure is environmental; the full suite passes when loopback
+listen is permitted.
 
 ### `rtk npm run check`
 

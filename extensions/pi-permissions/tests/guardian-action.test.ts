@@ -13,7 +13,12 @@ describe("guardian action normalization", () => {
         },
         "/workspace",
       ),
-    ).toEqual({ kind: "shell", command: "npm test", cwd: "/workspace" });
+    ).toEqual({
+      kind: "shell",
+      toolCallId: "call-1",
+      command: "npm test",
+      cwd: "/workspace",
+    });
   });
 
   it("maps write to an apply_patch action with file content", () => {
@@ -29,6 +34,7 @@ describe("guardian action normalization", () => {
       ),
     ).toEqual({
       kind: "apply_patch",
+      toolCallId: "call-2",
       cwd: "/workspace",
       files: [{ path: "src/new.ts", content: "export {};\n" }],
     });
@@ -49,6 +55,7 @@ describe("guardian action normalization", () => {
       ),
     ).toEqual({
       kind: "apply_patch",
+      toolCallId: "call-3",
       cwd: "/workspace",
       files: [{ path: "src/existing.ts", edits }],
     });
@@ -72,6 +79,7 @@ describe("guardian action normalization", () => {
       ),
     ).toEqual({
       kind: "custom_tool_call",
+      toolCallId: "call-4",
       toolName: "notion.create_page",
       arguments: {
         connectorId: "notion",
@@ -103,6 +111,7 @@ describe("guardian action normalization", () => {
       ),
     ).toEqual({
       kind: "mcp_tool_call",
+      toolCallId: "call-5",
       serverName: "notion-server",
       toolName: "create_page",
       connectorId: "notion",

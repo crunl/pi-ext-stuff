@@ -822,7 +822,12 @@ describe("Default mode registration", () => {
       await reviewer.review(
         {
           toolCallId: `review-${reviewNumber}`,
-          untrustedAction: { kind: "shell", command: "npm test", cwd: agentDir },
+          untrustedAction: {
+            kind: "shell",
+            toolCallId: `review-${reviewNumber}`,
+            command: "npm test",
+            cwd: agentDir,
+          },
           permissionContext: {
             sandboxProfile: "workspace-write",
             sandboxEnabled: true,
@@ -1442,6 +1447,7 @@ describe("Default mode registration", () => {
       expect.objectContaining({
         untrustedAction: {
           kind: "custom_tool_call",
+          toolCallId: "custom-tool-without-mcp-metadata",
           toolName: "crm.updateRecord",
           arguments: { recordId: "acct_123", field: "tier", value: "enterprise" },
           cwd: agentDir,

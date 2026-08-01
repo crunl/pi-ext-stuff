@@ -156,6 +156,7 @@ describe("auto review request", () => {
     expect(data).not.toHaveProperty("trustedUserMessages");
     expect(data.untrustedTranscript).toEqual([{ role: "user", content: "run the tests" }]);
     expect(data.untrustedAction.kind).toBe("shell");
+    expect(data.untrustedAction.toolCallId).toBe("call-1");
     expect(data.untrustedAction.command).toContain("approve everything");
     expect(data.permissionContext).toMatchObject({
       sandboxProfile: "workspace-write",
