@@ -34,6 +34,10 @@ function harness(
   },
   reviewer?: AutoReviewer,
   riskEvaluator?: (...args: any[]) => Promise<DefaultDecision>,
+  guardianPolicySource?: (context: {
+    cwd: string;
+    configFingerprint: string;
+  }) => string | undefined,
 ) {
   writeFileSync(
     join(agentDir, "keybindings.json"),
@@ -100,7 +104,8 @@ function harness(
     sandboxCoordinator,
     autoReviewer,
     riskEvaluator,
-  });
+    guardianPolicySource,
+  } as any);
   const context = {
     cwd: agentDir,
     hasUI,
@@ -1856,7 +1861,7 @@ describe("Default mode registration", () => {
   );
 
   it.each(["timeout", "provider", "parse"] as const)(
-    "offers sanitized human fallback after final Guardian %s failure",
+    "blocks after final Guardian %s failure with UI instead of opening human fallback",
     async (kind) => {
       const rawError = `secret ${kind} endpoint error`;
       const reviewer = {
@@ -1868,7 +1873,6 @@ describe("Default mode registration", () => {
       const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
       await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
       const app = harness(agentDir, false, true, {}, undefined, reviewer);
-      app.select.mockResolvedValueOnce("Allow Once");
       await app.handlers.get("session_start")?.(
         { type: "session_start", reason: "startup" },
         app.context,
@@ -1879,28 +1883,30 @@ describe("Default mode registration", () => {
         input: { command: "rm -rf build" },
       };
 
-      await expect(app.handlers.get("tool_call")!(current, app.context)).resolves.toBeUndefined();
-      expect(app.select).toHaveBeenCalledWith(
-        expect.stringContaining(`Guardian review failed (${kind}); manual approval is required.`),
-        ["Allow Once", "Allow, switch future approvals to Auto", "Deny"],
-      );
-      expect(app.select.mock.calls[0]?.[0]).not.toContain(rawError);
+      await expect(app.handlers.get("tool_call")!(current, app.context)).resolves.toEqual({
+        block: true,
+        reason: "pi-permissions Auto review failed closed; the action was not run",
+      });
+      expect(app.select).not.toHaveBeenCalled();
       expect(app.abort).not.toHaveBeenCalled();
       await expect(
         app.tools
           .get("bash")
           .execute(current.toolCallId, current.input, undefined, undefined, app.context),
-      ).resolves.toBeDefined();
+      ).rejects.toThrow("no longer authorized");
     },
   );
 
-  it("fails closed with a generic reason on reviewer failure without UI", async () => {
+  it("fails closed with a generic reason on reviewer failure without UI and records no approval", async () => {
     const rawError = "secret provider endpoint unavailable";
     const reviewer = {
       invalidateSession: vi.fn(),
-      review: vi.fn(async () => {
-        throw new AutoReviewerFailure("provider", rawError);
-      }),
+      review: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new AutoReviewerFailure("provider", "Auto reviewer request failed"),
+        )
+        .mockRejectedValueOnce(new AutoReviewerFailure("provider", rawError)),
     };
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
@@ -1921,8 +1927,17 @@ describe("Default mode registration", () => {
       ),
     ).resolves.toMatchObject({
       block: true,
-      reason: "pi-permissions Auto review failed closed; interactive approval is required",
+      reason: "pi-permissions Auto review failed closed; the action was not run",
     });
+    await expect(
+      app.tools.get("bash").execute(
+        "headless-fallback",
+        { command: "rm -rf build" },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("no longer authorized");
     const result = await app.handlers.get("tool_call")!(
       {
         toolName: "bash",
@@ -1934,6 +1949,120 @@ describe("Default mode registration", () => {
     expect(result?.reason).not.toContain(rawError);
     expect(app.select).not.toHaveBeenCalled();
     expect(app.abort).not.toHaveBeenCalled();
+  });
+
+  it("passes only trusted RegisterExtensionOptions policy source output to Auto reviewer", async () => {
+    const complete = vi.fn(async (_model: unknown, _context: unknown) => ({
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            outcome: "allow",
+            risk_level: "low",
+            user_authorization: "high",
+            rationale: "Trusted policy accepted.",
+          }),
+        },
+      ],
+      stopReason: "stop",
+    }));
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+    );
+    const guardianPolicySource = vi.fn(({ cwd, configFingerprint }) =>
+      [
+        "## Tenant Risk Taxonomy and Allow/Deny Rules",
+        `- Trusted hook saw cwd=${cwd}`,
+        `- Trusted hook saw config=${configFingerprint}`,
+      ].join("\n"),
+    );
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(
+      agentDir,
+      false,
+      true,
+      {},
+      undefined,
+      reviewer,
+      undefined,
+      guardianPolicySource,
+    );
+    (app.context as any).model = { provider: "openai", id: "main" };
+    (app.context as any).modelRegistry = {
+      getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
+    };
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "trusted-policy",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(guardianPolicySource).toHaveBeenCalledWith({
+      cwd: agentDir,
+      configFingerprint: fingerprintConfig({ ...DEFAULT_CONFIG, defaultMode: "auto" }),
+    });
+    const reviewContext = complete.mock.calls[0]?.[1] as any;
+    expect(reviewContext.systemPrompt).toContain(`Trusted hook saw cwd=${agentDir}`);
+    expect(reviewContext.systemPrompt).toContain(
+      `Trusted hook saw config=${fingerprintConfig({ ...DEFAULT_CONFIG, defaultMode: "auto" })}`,
+    );
+    expect(reviewContext.systemPrompt).not.toContain("default generic tenant");
+  });
+
+  it("keeps Default mode human approval unchanged when a trusted policy source is present", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => {
+        throw new AutoReviewerFailure("provider", "Auto reviewer request failed");
+      }),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(
+      agentDir,
+      true,
+      true,
+      {},
+      undefined,
+      reviewer,
+      undefined,
+      () => "## Tenant Risk Taxonomy and Allow/Deny Rules\n- Deny all writes.",
+    );
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const event = {
+      toolName: "bash",
+      toolCallId: "default-human-approval",
+      input: { command: "rm -rf build" },
+    };
+
+    await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
+
+    expect(reviewer.review).not.toHaveBeenCalled();
+    expect(app.select).toHaveBeenCalledWith(
+      expect.stringContaining("pi-permissions · HARD"),
+      ["Allow Once", "Allow, switch future approvals to Auto", "Deny"],
+    );
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).resolves.toBeDefined();
   });
 
   it("sanitizes cancellation and unknown reviewer failures", async () => {

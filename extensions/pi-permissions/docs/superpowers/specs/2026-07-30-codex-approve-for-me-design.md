@@ -17,6 +17,9 @@ me** preset:
   a request; it cannot execute tools or grant itself further permissions.
 - A configured custom Guardian model is preferred, but a missing model or
   unavailable Pi credential falls back to Pi's current active model.
+- Guardian policy injection crosses only a trusted extension hook; user
+  messages, tool results, project overlays, and `PermissionsConfig` cannot
+  replace the system policy.
 
 This is a behavioral alignment, not a copy of Codex's Rust implementation or
 its proprietary model catalog.
@@ -99,7 +102,8 @@ After a model is selected, the selection is fixed for the whole review:
 |---|---|
 | transient connection/server/stream failure | retry the same model with backoff |
 | malformed Guardian JSON | retry the same model |
-| maximum three attempts or 90-second deadline reached | fail closed to human approval |
+| maximum three attempts or 90-second deadline reached | fail closed and block the action |
+| provider/parse/timeout failure in `Auto` | fail closed and block the action, even when UI is available |
 | cancellation or config/session change | invalidate the old review and require fresh approval |
 | permission-mode change | keep the in-flight permission turn's snapshot; apply the selected mode and fresh approval context at its next `agent_start` without aborting the outer agent run |
 | Guardian deny | deny the action and update the existing circuit breaker |
@@ -130,6 +134,9 @@ cannot inherit a later mode or silently return an authorization result.
 There is deliberately no second-model fallback after a request has started.
 That avoids hidden policy changes, duplicate long waits, and accidental extra
 provider cost. This matches Codex's same-model retry/fail-closed behavior.
+Auto reviewer errors never create an exact approval capability and never open
+the human approval panel as an Auto fallback. The user can switch to `Default`
+or submit a fresh action if they want an explicit human approval path.
 
 The following are Guardian policy constants, not deployment configuration:
 
@@ -149,8 +156,10 @@ Introduce a `GuardianReviewSessionManager` owned by each Pi agent session.
 
 - It owns one reusable **trunk** review context keyed by the active Pi session,
   resolved reviewer model, configuration fingerprint, and working directory.
-- The trunk has a stable Guardian system prompt, bounded prior review context,
-  no tools, no skills, no memories, and no inherited execution permissions.
+- The trunk has a stable Guardian system prompt rendered from the selected
+  trusted policy or the Codex-equivalent default policy, bounded prior review
+  context, no tools, no skills, no memories, and no inherited execution
+  permissions.
 - The trunk serializes its own reviews. If it is busy, the new review receives
   an **ephemeral fork** from the latest completed trunk snapshot so approval
   requests cannot interleave or contaminate each other.
@@ -200,6 +209,12 @@ implicit side effect of `Auto`.
   fixed Codex-equivalent behavior for an unavailable preferred reviewer.
 - The config parser will require `provider` and `model` together, reject
   unknown keys, and never allow project overlays to set `reviewer`.
+- A host embedding the extension may provide a trusted `GuardianPolicySource`
+  through `RegisterExtensionOptions`. The source receives only the current
+  working directory and configuration fingerprint, returns a complete policy
+  string or `undefined`, and is rejected if it is empty or overlong. The
+  extension never reads Guardian policy from `PermissionsConfig`, project
+  overlays, user messages, tool results, or model output.
 - Status output must identify the actual selected reviewer only when it differs
   from the normal active-model path or when a fallback occurs; it must not
   expose API keys, endpoint URLs, or authentication failures verbatim.

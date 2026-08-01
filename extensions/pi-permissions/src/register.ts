@@ -44,6 +44,7 @@ import {
 } from "./config.ts";
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
+import { validateGuardianPolicy } from "./guardian-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
@@ -68,6 +69,11 @@ import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
 
+export type GuardianPolicySource = (context: {
+  cwd: string;
+  configFingerprint: string;
+}) => string | undefined;
+
 export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
@@ -81,6 +87,7 @@ export interface RegisterExtensionOptions {
   sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
+  guardianPolicySource?: GuardianPolicySource;
   riskEvaluator?: typeof evaluateDefaultRequest;
 }
 
@@ -1315,9 +1322,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             input: event.input,
           });
           const configFingerprint = fingerprintConfig(executionContext.config);
+          const guardianCwd = resolve(ctx.cwd);
+          const suppliedGuardianPolicy = options.guardianPolicySource?.({
+            cwd: guardianCwd,
+            configFingerprint,
+          });
+          const guardianPolicy =
+            suppliedGuardianPolicy === undefined
+              ? undefined
+              : validateGuardianPolicy(suppliedGuardianPolicy);
           const approvalOverride = autoApprovalLedger.takeOverride({
             actionFingerprint,
-            cwd: resolve(ctx.cwd),
+            cwd: guardianCwd,
             configFingerprint,
           });
           const request = buildAutoReviewRequest(
@@ -1335,8 +1351,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               modelRegistry: ctx.modelRegistry,
               activeModel: ctx.model,
               reviewer: executionContext.config.reviewer,
+              guardianPolicy,
               guardianSession: {
-                cwd: resolve(ctx.cwd),
+                cwd: guardianCwd,
                 configFingerprint,
               },
             },
@@ -1398,7 +1415,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             autoApprovalLedger.recordDenial({
               tool: event.toolName,
               input: event.input as Record<string, unknown>,
-              cwd: resolve(ctx.cwd),
+              cwd: guardianCwd,
               configFingerprint,
               actionFingerprint,
               summary: decision.summary,
@@ -1419,14 +1436,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             };
           }
           runtime.recordAutoNonDenial();
-          if (ctx.hasUI) {
-            return requestHumanApproval(event, decision, executionContext, ctx, {
-              guardianFailure: auto.error.kind,
-            });
-          }
           return {
             block: true,
-            reason: "pi-permissions Auto review failed closed; interactive approval is required",
+            reason: "pi-permissions Auto review failed closed; the action was not run",
           };
         } catch {
           if (reviewSignal.aborted) {

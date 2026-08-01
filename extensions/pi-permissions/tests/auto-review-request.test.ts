@@ -5,6 +5,10 @@ import {
   parseAutoReviewResult,
   renderAutoReviewPrompt,
 } from "../src/auto-review-request.ts";
+import {
+  MAX_GUARDIAN_POLICY_CHARACTERS,
+  renderGuardianSystemPrompt,
+} from "../src/guardian-policy.ts";
 
 describe("auto review result", () => {
   it("maps a full Codex guardian assessment to the internal result", () => {
@@ -250,5 +254,15 @@ describe("auto review request", () => {
     expect(data.untrustedAction).not.toHaveProperty("approvalOverride");
     expect(data.permissionContext).not.toHaveProperty("approvalOverride");
     expect(AUTO_REVIEW_SYSTEM_PROMPT).not.toContain("trustedApprovalOverride");
+  });
+
+  it.each(["", "   "])("rejects an empty supplied Guardian policy", (policy) => {
+    expect(() => renderGuardianSystemPrompt(policy)).toThrow("empty policy");
+  });
+
+  it("rejects an overlong supplied Guardian policy without truncating it", () => {
+    const policy = "x".repeat(MAX_GUARDIAN_POLICY_CHARACTERS + 1);
+
+    expect(() => renderGuardianSystemPrompt(policy)).toThrow("overlong policy");
   });
 });

@@ -22,6 +22,7 @@ import {
   GUARDIAN_REVIEW_MAX_ATTEMPTS,
   GUARDIAN_REVIEW_TIMEOUT_MS,
   guardianRetryDelayMs,
+  renderGuardianSystemPrompt,
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
@@ -30,6 +31,7 @@ export interface AutoReviewerContext {
   modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
   activeModel?: Model<Api>;
   reviewer?: PermissionsConfig["reviewer"];
+  guardianPolicy?: string;
   guardianSession: {
     cwd: string;
     configFingerprint: string;
@@ -292,6 +294,7 @@ export class PiAutoReviewer implements AutoReviewer {
     }
 
     const toolRuntime = this.createTools(context.guardianSession.cwd);
+    const systemPrompt = renderGuardianSystemPrompt(context.guardianPolicy);
     const lease = this.sessions.open(
       {
         cwd: context.guardianSession.cwd,
@@ -301,6 +304,7 @@ export class PiAutoReviewer implements AutoReviewer {
       },
       renderAutoReviewPrompt(request),
       toolRuntime.tools,
+      systemPrompt,
     );
     const deadline = Date.now() + GUARDIAN_REVIEW_TIMEOUT_MS;
     try {

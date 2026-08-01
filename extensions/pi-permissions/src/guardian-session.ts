@@ -22,6 +22,7 @@ export interface GuardianReviewLease {
 
 type Trunk = {
   key: GuardianSessionKey;
+  systemPrompt: string;
   sessionId: string;
   active: boolean;
   turns: Message[][];
@@ -99,31 +100,42 @@ function createUserMessage(requestPrompt: string): UserMessage {
   };
 }
 
-function createContext(messages: Message[], tools?: Tool[]): Context {
+function createContext(messages: Message[], tools: Tool[] | undefined, systemPrompt: string): Context {
   const frozenMessages = messages.map(cloneMessage).map(freezeMessage);
   Object.freeze(frozenMessages);
   const frozenTools = tools?.map(cloneTool);
   if (frozenTools) Object.freeze(frozenTools);
   return Object.freeze({
-    systemPrompt: AUTO_REVIEW_SYSTEM_PROMPT,
+    systemPrompt,
     messages: frozenMessages,
     ...(frozenTools === undefined ? {} : { tools: frozenTools }),
   });
 }
 
-function createLeaseContext(snapshot: Message[], request: UserMessage, tools?: Tool[]): Context {
+function createLeaseContext(
+  snapshot: Message[],
+  request: UserMessage,
+  tools: Tool[] | undefined,
+  systemPrompt: string,
+): Context {
   const messages = [...snapshot, request];
   Object.freeze(messages);
-  return createContext(messages, tools);
+  return createContext(messages, tools, systemPrompt);
 }
 
 export class GuardianReviewSessionManager {
   private trunk?: Trunk;
 
-  open(key: GuardianSessionKey, requestPrompt: string, tools?: Tool[]): GuardianReviewLease {
-    if (!this.trunk || !keysMatch(this.trunk.key, key)) {
+  open(
+    key: GuardianSessionKey,
+    requestPrompt: string,
+    tools?: Tool[],
+    systemPrompt = AUTO_REVIEW_SYSTEM_PROMPT,
+  ): GuardianReviewLease {
+    if (!this.trunk || !keysMatch(this.trunk.key, key) || this.trunk.systemPrompt !== systemPrompt) {
       this.trunk = {
         key: { ...key },
+        systemPrompt,
         sessionId: `pi-permissions-guardian-${randomUUID()}`,
         active: false,
         turns: [],
@@ -136,7 +148,7 @@ export class GuardianReviewSessionManager {
 
     const request = createUserMessage(requestPrompt);
     const snapshot = trimTurns(trunk.turns).flat();
-    const context = createLeaseContext(snapshot, request, tools);
+    const context = createLeaseContext(snapshot, request, tools, trunk.systemPrompt);
     const sessionId = isFork ? `${trunk.sessionId}-fork-${randomUUID()}` : trunk.sessionId;
     let committed = false;
     let released = false;
@@ -145,7 +157,7 @@ export class GuardianReviewSessionManager {
       context,
       sessionId,
       extend: (messages) => {
-        return createContext([...context.messages, ...messages], tools);
+        return createContext([...context.messages, ...messages], tools, trunk.systemPrompt);
       },
       commit: (messages) => {
         if (committed || released) return;
