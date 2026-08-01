@@ -102,7 +102,7 @@ const RETRYABLE_PROVIDER_CODES = new Set([
   "WEBSOCKET_ERROR",
 ]);
 const RETRYABLE_PROVIDER_MESSAGE =
-  /\b(?:500|502|503|504|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENETDOWN|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT)\b|overload|service.?unavailable|upstream.?connect|connection.?(?:error|failed|lost|refused|reset)|fetch failed|other side closed|socket hang up|socket connection was closed|websocket.?(?:closed|error)|WebSocket stream closed before response\.completed|stream ended (?:before|without)|http2 request did not get a response|reset before headers/i;
+  /(?:^|\b)(?:server overloaded|internal server error|response stream connection failed|response stream disconnected|WebSocket stream closed before response\.completed)(?:\b|$)/i;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

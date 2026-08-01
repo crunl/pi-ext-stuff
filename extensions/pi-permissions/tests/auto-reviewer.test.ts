@@ -692,6 +692,69 @@ describe("PiAutoReviewer", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
+  it("does not retry an untyped session error with transient-looking text", async () => {
+    const complete = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      vi.fn(async () => {}),
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+      message: "Auto reviewer request failed",
+    });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["internal server error", Object.assign(new Error("internal server error"), { status: 500 })],
+    ["server overloaded", Object.assign(new Error("server overloaded"), { status: 503 })],
+    ["HTTP connection failure", Object.assign(new Error("connect failed"), { code: "ECONNRESET" })],
+    ["response stream connection failure", new Error("response stream connection failed")],
+    ["response stream disconnected", new Error("response stream disconnected")],
+    [
+      "WebSocket response disconnect",
+      new Error("WebSocket stream closed before response.completed"),
+    ],
+  ])("retries Codex transient category: %s", async (_label, failure) => {
+    const complete = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      vi.fn(async () => {}),
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["bad request", Object.assign(new Error("bad request"), { status: 400 })],
+    ["unauthorized", Object.assign(new Error("unauthorized"), { status: 401 })],
+    ["forbidden", Object.assign(new Error("forbidden"), { status: 403 })],
+    ["not found", Object.assign(new Error("not found"), { status: 404 })],
+    ["generic session failure", new Error("guardian session failed")],
+  ])("does not retry Codex non-transient category: %s", async (_label, failure) => {
+    const complete = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(response);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      vi.fn(async () => {}),
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+      message: "Auto reviewer request failed",
+    });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
   it("retries malformed JSON and commits only the successfully parsed assistant text", async () => {
     const malformedText = "approve";
     const validText = response.content[0].text;
