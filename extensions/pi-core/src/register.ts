@@ -6,9 +6,11 @@ import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
 import { registerStartupHeader } from "./tui/startup-header.ts";
+import { registerBuiltInTools } from "./tools/index.ts";
 
 export function registerExtension(pi: ExtensionAPI): void {
   registerOutputPaddingSync(pi);
+  registerBuiltInTools(pi);
   registerBuiltInToolRendering(pi);
   registerAutocompleteAbove(pi);
   registerSelectorTabNav(pi);
