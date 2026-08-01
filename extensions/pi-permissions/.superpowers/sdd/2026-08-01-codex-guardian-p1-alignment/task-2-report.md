@@ -88,6 +88,51 @@ $ rtk npm run core:check
 pi-permissions core patch supports pi-agent-core 0.82.1; found @earendil-works/pi-agent-core 0.83.0
 ```
 
+### Fix round 1: fail closed on read-only tool errors followed by allow
+
+Fix:
+
+- Added a regression test for a known read-only `read` tool returning `ToolResultMessage.isError: true` followed by Guardian final JSON with `outcome: "allow"`.
+- Updated `PiAutoReviewer.review()` to reject with provider failure before commit/return whenever any read-only Guardian tool result has `isError: true` and the final parsed decision is `approve`.
+- Deny responses after tool errors still preserve the tool error as committed evidence.
+
+RED regression:
+
+```text
+$ rtk npm test -- tests/auto-reviewer.test.ts
+> vitest --run tests/auto-reviewer.test.ts
+Test Files  1 failed (1)
+Tests  1 failed | 29 passed (30)
+Failure:
+fails closed without committing when a read-only tool error is followed by allow
+AssertionError: promise resolved "{ decision: 'approve', …(4) }" instead of rejecting
+```
+
+GREEN regression:
+
+```text
+$ rtk npm test -- tests/auto-reviewer.test.ts
+> vitest --run tests/auto-reviewer.test.ts
+Test Files  1 passed (1)
+Tests  30 passed (30)
+```
+
+Focused tests:
+
+```text
+$ rtk npm test -- tests/guardian-tools.test.ts tests/guardian-session.test.ts tests/auto-reviewer.test.ts
+> vitest --run tests/guardian-tools.test.ts tests/guardian-session.test.ts tests/auto-reviewer.test.ts
+Test Files  3 passed (3)
+Tests  45 passed (45)
+```
+
+Typecheck:
+
+```text
+$ rtk npm run check
+> tsc --noEmit
+```
+
 ### Concerns
 
 - `npm run core:test` is failing against the external Homebrew Pi installation, not files changed in this task. `npm run core:check` reports the installed `/opt/homebrew` core is `@earendil-works/pi-agent-core 0.83.0`, while this repository's core patch/check currently supports `0.82.1`.

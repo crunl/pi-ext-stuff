@@ -214,6 +214,39 @@ describe("PiAutoReviewer", () => {
     next.release();
   });
 
+  it("fails closed without committing when a read-only tool error is followed by allow", async () => {
+    const toolUse = assistantToolUse("read-call-1", "read", { path: "missing.md" });
+    const complete = vi.fn().mockResolvedValueOnce(toolUse).mockResolvedValueOnce(response);
+    const sessions = new GuardianReviewSessionManager();
+    const runtime = fakeGuardianRuntime([
+      {
+        ...toolResult("read-call-1", "read", "Read failed"),
+        isError: true,
+      },
+    ]);
+    const reviewer = new PiAutoReviewer(complete as any, sessions, async () => {}, () => runtime);
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+    });
+
+    const next = sessions.open(
+      {
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
+        provider: context.activeModel.provider,
+        model: context.activeModel.id,
+      },
+      "next review",
+      runtime.tools,
+    );
+    const retainedText = next.context.messages.map(messageText).join("\n");
+    expect(retainedText).toBe("next review");
+    expect(retainedText).not.toContain("Read failed");
+    expect(retainedText).not.toContain("Authorized test command.");
+    next.release();
+  });
+
   it("fails closed when Guardian requests a non-runtime tool", async () => {
     const complete = vi.fn().mockResolvedValueOnce(assistantToolUse("write-call-1", "write", {}));
     const runtime = fakeGuardianRuntime([], new Error("Guardian tool write is not available"));

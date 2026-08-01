@@ -463,12 +463,24 @@ export class PiAutoReviewer implements AutoReviewer {
           const text = assistantText(response);
           try {
             const result = parseAutoReviewResult(text);
+            if (
+              result.decision === "approve" &&
+              toolResults.some((toolResult) => toolResult.isError)
+            ) {
+              throw new AutoReviewerFailure(
+                "provider",
+                "Auto reviewer cannot approve after a read-only Guardian tool error",
+                undefined,
+                guardianIdentity,
+              );
+            }
             lease.commit([toolUseResponse, ...toolResults, response]);
             return {
               ...result,
               guardian: guardianIdentity,
             };
           } catch (error) {
+            if (error instanceof AutoReviewerFailure) throw error;
             const failure = new AutoReviewerFailure(
               "parse",
               `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
