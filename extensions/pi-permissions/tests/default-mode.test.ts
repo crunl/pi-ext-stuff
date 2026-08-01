@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
 import { evaluateDefaultRequest } from "../src/default-mode.ts";
+import { packageRoot } from "../src/filesystem-policy.ts";
 
 function config(overrides: Partial<PermissionsConfig> = {}): PermissionsConfig {
   return {
@@ -35,6 +36,17 @@ describe("Default mode gate", () => {
         "write",
         { path: ".pi/permissions.json", content: "{}" },
         cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+  });
+
+  it("allows ordinary writes in the extension package root", async () => {
+    await expect(
+      evaluateDefaultRequest(
+        "write",
+        { path: "p2-3-package-root.txt", content: "hello" },
+        packageRoot,
         config(),
       ),
     ).resolves.toMatchObject({ action: "allow", risk: "LOW" });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
-import { defaultProtectedWritePaths } from "../src/filesystem-policy.ts";
+import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-policy.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -34,6 +34,12 @@ describe("sandbox integration", () => {
     );
     expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).not.toContain(
       "/workspace/agent/permissions.json",
+    );
+  });
+
+  it("does not protect the extension package root by default", () => {
+    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).not.toContain(
+      packageRoot,
     );
   });
 
