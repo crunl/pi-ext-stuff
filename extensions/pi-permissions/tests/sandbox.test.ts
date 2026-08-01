@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,14 +7,90 @@ import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-polic
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
+  createSandboxedGuardianFileOperations,
+  createSandboxedReadOnlyCommandRunner,
   createGuardianReadOnlySandboxConfig,
   createSandboxRuntimeConfig,
   detectLocalProxyPorts,
+  type SandboxManagerLike,
   withAdditionalWriteRoots,
   withLocalProxy,
 } from "../src/sandbox.ts";
 
 describe("sandbox integration", () => {
+  it("runs sandboxed Guardian read-only file operations without changing the parent manager", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-"));
+    const file = join(directory, "external.txt");
+    await writeFile(file, "Guardian-visible evidence");
+    await chmod(file, 0o444);
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (
+        ...[command]: Parameters<SandboxManagerLike["wrapWithSandbox"]>
+      ) => command),
+    };
+    const operations = createSandboxedGuardianFileOperations(manager);
+
+    await expect(operations.read.readFile(file)).resolves.toEqual(
+      Buffer.from("Guardian-visible evidence"),
+    );
+    await expect(operations.read.access(file)).resolves.toBeUndefined();
+    await expect(operations.grep.isDirectory(directory)).resolves.toBe(true);
+    await expect(operations.grep.readFile(file)).resolves.toBe("Guardian-visible evidence");
+    await expect(operations.find.exists(file)).resolves.toBe(true);
+    await expect(operations.ls.exists(file)).resolves.toBe(true);
+    await expect(operations.ls.exists(join(directory, "missing.txt"))).resolves.toBe(false);
+    const directoryStat = await operations.ls.stat(directory);
+    expect(directoryStat.isDirectory()).toBe(true);
+    await expect(operations.ls.readdir(directory)).resolves.toEqual(["external.txt"]);
+
+    expect(manager.wrapWithSandbox).toHaveBeenCalledTimes(9);
+    for (const [, shell, config, signal] of manager.wrapWithSandbox.mock.calls) {
+      expect(shell).toBeUndefined();
+      expect(signal).toBeUndefined();
+      expect(config).toEqual(createGuardianReadOnlySandboxConfig());
+    }
+    expect(manager.initialize).not.toHaveBeenCalled();
+    expect(manager.reset).not.toHaveBeenCalled();
+  });
+
+  it("runs a read-only command runner with literal arguments and abort cleanup", async () => {
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+    const run = createSandboxedReadOnlyCommandRunner(manager);
+    const literalArgument = "spaces 'quotes' $(must-not-run)\nnext-line";
+
+    const result = await run(
+      process.execPath,
+      ["-e", "process.stdout.write(process.argv[1])", literalArgument],
+    );
+
+    expect(result.stdout.toString()).toBe(literalArgument);
+    expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
+      expect.stringContaining("'spaces '\\''quotes'\\'' $(must-not-run)\nnext-line'"),
+      undefined,
+      createGuardianReadOnlySandboxConfig(),
+      undefined,
+    );
+
+    const controller = new AbortController();
+    const aborted = run(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1_000)"],
+      controller.signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+
+    await expect(aborted).rejects.toThrow("aborted");
+    expect(manager.initialize).not.toHaveBeenCalled();
+    expect(manager.reset).not.toHaveBeenCalled();
+  });
+
   it("returns an independent Guardian read-only sandbox config", () => {
     const first = createGuardianReadOnlySandboxConfig();
     const second = createGuardianReadOnlySandboxConfig();

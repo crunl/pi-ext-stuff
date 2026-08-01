@@ -4,6 +4,10 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type {
   BashOperations,
   EditOperations,
+  FindOperations,
+  GrepOperations,
+  LsOperations,
+  ReadOperations,
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
@@ -245,6 +249,160 @@ main().catch((error) => {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export interface SandboxedCommandResult {
+  stdout: Buffer;
+  stderr: Buffer;
+  exitCode: number | null;
+}
+
+export function createSandboxedReadOnlyCommandRunner(
+  manager: SandboxManagerLike,
+  config: SandboxRuntimeConfig = createGuardianReadOnlySandboxConfig(),
+): (
+  executable: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<SandboxedCommandResult> {
+  return async (executable, args, signal) => {
+    const command = [executable, ...args].map(shellQuote).join(" ");
+    const wrappedCommand = await manager.wrapWithSandbox(
+      command,
+      undefined,
+      config,
+      signal,
+    );
+
+    return new Promise((resolvePromise, reject) => {
+      const child = spawn("/bin/bash", ["-c", wrappedCommand], {
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      let settled = false;
+
+      const cleanup = (): void => {
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = (): void => killProcessTree(child);
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+      child.once("close", (exitCode) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (signal?.aborted) {
+          reject(new Error("aborted"));
+        } else {
+          resolvePromise({
+            stdout: Buffer.concat(stdout),
+            stderr: Buffer.concat(stderr),
+            exitCode,
+          });
+        }
+      });
+    });
+  };
+}
+
+const GUARDIAN_FILE_OPERATION_HELPER = `
+const fs = require("node:fs/promises");
+const { constants } = require("node:fs");
+const [operation, encodedPath] = process.argv.slice(1);
+const path = Buffer.from(encodedPath, "base64").toString("utf8");
+async function main() {
+  if (operation === "read") process.stdout.write(await fs.readFile(path));
+  else if (operation === "access") await fs.access(path, constants.R_OK);
+  else if (operation === "exists") {
+    try {
+      await fs.access(path, constants.F_OK);
+      process.stdout.write("true");
+    } catch {
+      process.stdout.write("false");
+    }
+  } else if (operation === "stat") {
+    const stat = await fs.stat(path);
+    process.stdout.write(JSON.stringify({ isDirectory: stat.isDirectory() }));
+  } else if (operation === "readdir") {
+    process.stdout.write(JSON.stringify(await fs.readdir(path)));
+  } else throw new Error("unsupported Guardian file operation");
+}
+main().catch((error) => {
+  process.stderr.write(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
+`.trim();
+
+type GuardianFileOperation = "read" | "access" | "exists" | "stat" | "readdir";
+
+export function createSandboxedGuardianFileOperations(
+  manager: SandboxManagerLike,
+  config?: SandboxRuntimeConfig,
+): {
+  read: ReadOperations;
+  grep: GrepOperations;
+  find: Pick<FindOperations, "exists">;
+  ls: LsOperations;
+} {
+  const run = createSandboxedReadOnlyCommandRunner(manager, config);
+  const runFileOperation = async (
+    operation: GuardianFileOperation,
+    path: string,
+  ): Promise<Buffer> => {
+    const result = await run(process.execPath, [
+      "-e",
+      GUARDIAN_FILE_OPERATION_HELPER,
+      operation,
+      Buffer.from(path).toString("base64"),
+    ]);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        result.stderr.toString("utf8")
+        || `sandboxed Guardian file operation exited with ${result.exitCode}`,
+      );
+    }
+    return result.stdout;
+  };
+  const exists = async (path: string): Promise<boolean> =>
+    (await runFileOperation("exists", path)).toString("utf8") === "true";
+  const stat = async (path: string): Promise<{ isDirectory: boolean }> =>
+    JSON.parse((await runFileOperation("stat", path)).toString("utf8")) as {
+      isDirectory: boolean;
+    };
+
+  return {
+    read: {
+      readFile: (path) => runFileOperation("read", path),
+      access: async (path) => {
+        await runFileOperation("access", path);
+      },
+    },
+    grep: {
+      isDirectory: async (path) => (await stat(path)).isDirectory,
+      readFile: async (path) => (await runFileOperation("read", path)).toString("utf8"),
+    },
+    find: { exists },
+    ls: {
+      exists,
+      stat: async (path) => {
+        const details = await stat(path);
+        return { isDirectory: () => details.isDirectory };
+      },
+      readdir: async (path) =>
+        JSON.parse((await runFileOperation("readdir", path)).toString("utf8")) as string[],
+    },
+  };
 }
 
 function fileOperationConfig(
