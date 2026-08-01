@@ -4,15 +4,20 @@ import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 
 const request = {
   toolCallId: "review-1",
-  tool: "bash",
-  input: { command: "npm test" },
-  cwd: "/workspace",
-  sandboxProfile: "workspace-write",
-  defaultRisk: "REVIEW",
-  defaultReason: "REVIEW operation",
-  networkHosts: [],
-  filesystemWriteRoots: [],
-  userMessages: ["run the tests"],
+  untrustedAction: { kind: "shell", command: "npm test", cwd: "/workspace" },
+  permissionContext: {
+    sandboxProfile: "workspace-write",
+    sandboxEnabled: true,
+    filesystemWriteRoots: ["/workspace"],
+    filesystemDenyRead: [],
+    filesystemDenyWrite: [],
+    requestedNetworkHosts: [],
+    allowedNetworkHosts: [],
+    deniedNetworkHosts: [],
+    defaultRisk: "REVIEW",
+    defaultReason: "REVIEW operation",
+  },
+  untrustedTranscript: [{ role: "user", content: "run the tests" }],
 } as any;
 
 const response = {

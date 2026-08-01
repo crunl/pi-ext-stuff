@@ -1,5 +1,7 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { DefaultDecision } from "./default-mode.ts";
+import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
+import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
 
 export type AutoReviewRisk = "low" | "medium" | "high" | "critical";
 export type AutoReviewUserAuthorization = "unknown" | "low" | "medium" | "high";
@@ -22,25 +24,30 @@ export interface AutoReviewApprovalOverride {
   actionFingerprint: string;
 }
 
+export interface GuardianPermissionContext {
+  sandboxProfile: "workspace-write" | "read-only";
+  sandboxEnabled: boolean;
+  filesystemWriteRoots: string[];
+  filesystemDenyRead: string[];
+  filesystemDenyWrite: string[];
+  requestedNetworkHosts: string[];
+  allowedNetworkHosts: string[];
+  deniedNetworkHosts: string[];
+  defaultRisk?: "LOW" | "REVIEW" | "HARD";
+  defaultReason?: string;
+  justification?: string;
+}
+
 export interface AutoReviewRequest {
   toolCallId: string;
-  tool: string;
-  input: Record<string, unknown>;
-  cwd: string;
-  sandboxProfile: "workspace-write" | "read-only";
-  defaultRisk: "LOW" | "REVIEW" | "HARD";
-  defaultReason: string;
-  networkHosts: string[];
-  filesystemWriteRoots: string[];
-  justification?: string;
-  userMessages: string[];
+  untrustedTranscript: GuardianTranscriptEntry[];
+  untrustedAction: GuardianAction;
+  permissionContext: GuardianPermissionContext;
   approvalOverride?: AutoReviewApprovalOverride;
 }
 
 type PromptDecision = Extract<DefaultDecision, { action: "prompt" }>;
 
-const MAX_MESSAGE_CHARACTERS = 4_000;
-const MAX_TRANSCRIPT_CHARACTERS = 12_000;
 const MAX_ACTION_CHARACTERS = 16_000;
 
 export const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX =
@@ -175,27 +182,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function boundedTrustedMessages(entries: readonly string[]): string[] {
-  const messages = entries
-    .filter((entry) => entry.length > 0)
-    .map((entry) => entry.slice(0, MAX_MESSAGE_CHARACTERS));
-  const [first, ...newer] = messages;
-  if (!first) return [];
-
-  const selectedNewest: string[] = [];
-  let remaining = MAX_TRANSCRIPT_CHARACTERS - first.length;
-  for (let index = newer.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const message = newer[index];
-    if (!message) continue;
-    const bounded = message.slice(Math.max(0, message.length - remaining));
-    selectedNewest.push(bounded);
-    remaining -= bounded.length;
-  }
-  return [first, ...selectedNewest.reverse()];
-}
-
 function serializeAction(
-  request: Omit<AutoReviewRequest, "userMessages" | "approvalOverride">,
+  request: Pick<AutoReviewRequest, "untrustedAction" | "permissionContext">,
 ): string {
   let serialized: string;
   try {
@@ -213,38 +201,48 @@ export function buildAutoReviewRequest(
   event: ToolCallEvent,
   decision: PromptDecision,
   cwd: string,
-  sandboxProfile: AutoReviewRequest["sandboxProfile"],
-  trustedUserMessages: readonly string[],
+  permissionContext: GuardianPermissionContext,
+  transcript: readonly GuardianTranscriptEntry[],
   approvalOverride?: AutoReviewApprovalOverride,
 ): AutoReviewRequest {
-  const request = {
-    toolCallId: event.toolCallId,
-    tool: event.toolName,
-    input: event.input as Record<string, unknown>,
-    cwd,
-    sandboxProfile,
+  const untrustedAction = guardianActionFromToolCall(event, cwd);
+  const enrichedPermissionContext: GuardianPermissionContext = {
+    ...permissionContext,
+    requestedNetworkHosts: [...permissionContext.requestedNetworkHosts],
+    allowedNetworkHosts: [...permissionContext.allowedNetworkHosts],
+    deniedNetworkHosts: [...permissionContext.deniedNetworkHosts],
+    filesystemWriteRoots: [...permissionContext.filesystemWriteRoots],
+    filesystemDenyRead: [...permissionContext.filesystemDenyRead],
+    filesystemDenyWrite: [...permissionContext.filesystemDenyWrite],
     defaultRisk: decision.risk,
     defaultReason: decision.reason,
-    networkHosts: [...(decision.networkHosts ?? [])],
-    filesystemWriteRoots: [...(decision.filesystemWriteRoots ?? [])],
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
-  serializeAction(request);
+  serializeAction({
+    untrustedAction,
+    permissionContext: enrichedPermissionContext,
+  });
   return {
-    ...request,
-    userMessages: boundedTrustedMessages(trustedUserMessages),
+    toolCallId: event.toolCallId,
+    untrustedTranscript: boundGuardianTranscript(transcript),
+    untrustedAction,
+    permissionContext: enrichedPermissionContext,
     ...(approvalOverride === undefined ? {} : { approvalOverride }),
   };
 }
 
 export function renderAutoReviewPrompt(request: AutoReviewRequest): string {
-  const { userMessages, approvalOverride, ...action } = request;
-  const serializedAction = serializeAction(action);
+  const { approvalOverride } = request;
+  const serializedAction = serializeAction({
+    untrustedAction: request.untrustedAction,
+    permissionContext: request.permissionContext,
+  });
   return JSON.stringify({
-    trustedUserMessages: userMessages,
+    untrustedTranscript: boundGuardianTranscript(request.untrustedTranscript),
+    untrustedAction: request.untrustedAction,
+    permissionContext: request.permissionContext,
     trustedDeveloperMessages:
       approvalOverride === undefined ? [] : [approvedActionContext(serializedAction)],
-    untrustedAction: action,
     outputSchema: {
       risk_level: ["low", "medium", "high", "critical"],
       user_authorization: ["unknown", "low", "medium", "high"],

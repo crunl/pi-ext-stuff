@@ -768,15 +768,20 @@ describe("Default mode registration", () => {
       await reviewer.review(
         {
           toolCallId: `review-${reviewNumber}`,
-          tool: "bash",
-          input: { command: "npm test" },
-          cwd: agentDir,
-          sandboxProfile: "workspace-write",
-          defaultRisk: "REVIEW",
-          defaultReason: "review",
-          networkHosts: [],
-          filesystemWriteRoots: [],
-          userMessages: ["run tests"],
+          untrustedAction: { kind: "shell", command: "npm test", cwd: agentDir },
+          permissionContext: {
+            sandboxProfile: "workspace-write",
+            sandboxEnabled: true,
+            filesystemWriteRoots: [agentDir],
+            filesystemDenyRead: [],
+            filesystemDenyWrite: [],
+            requestedNetworkHosts: [],
+            allowedNetworkHosts: [],
+            deniedNetworkHosts: [],
+            defaultRisk: "REVIEW",
+            defaultReason: "review",
+          },
+          untrustedTranscript: [{ role: "user", content: "run tests" }],
         },
         reviewContext,
       );
@@ -1284,7 +1289,94 @@ describe("Default mode registration", () => {
     expect(app.select).not.toHaveBeenCalled();
   });
 
-  it("trusts only interactive or RPC input as reviewer authorization", async () => {
+  it("captures finalized message_end transcript for Auto reviewer evidence", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => ({
+        decision: "deny" as const,
+        risk: "high" as const,
+        userAuthorization: "low" as const,
+        rationale: "Denied for test.",
+      })),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    app.handlers.get("message_end")?.(
+      {
+        type: "message_end",
+        message: { role: "user", content: "Clean the local build output.", timestamp: 1 },
+      },
+      app.context,
+    );
+    app.handlers.get("message_end")?.(
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-read-package",
+              name: "read",
+              arguments: { path: "package.json" },
+            },
+          ],
+          timestamp: 2,
+        },
+      },
+      app.context,
+    );
+    app.handlers.get("message_end")?.(
+      {
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "tool-read-package",
+          toolName: "read",
+          content: [{ type: "text", text: "<untrusted file content>" }],
+          isError: true,
+          timestamp: 3,
+        },
+      },
+      app.context,
+    );
+
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "message-end-transcript",
+        input: { command: "rm -rf build" },
+      },
+      app.context,
+    );
+
+    expect(reviewer.review).toHaveBeenCalledWith(
+      expect.objectContaining({
+        untrustedTranscript: [
+          { role: "user", content: "Clean the local build output." },
+          {
+            role: "assistant",
+            content: expect.stringContaining('"toolCall":"read"'),
+          },
+          {
+            role: "tool",
+            toolName: "read",
+            content: "<untrusted file content>",
+            isError: true,
+          },
+        ],
+      }),
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("uses interactive or RPC input only as a direct tool-hook fallback", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
@@ -1329,7 +1421,7 @@ describe("Default mode registration", () => {
 
     expect(reviewer.review).toHaveBeenCalledWith(
       expect.objectContaining({
-        userMessages: ["Clean the local build output."],
+        untrustedTranscript: [{ role: "user", content: "Clean the local build output." }],
       }),
       expect.any(Object),
       expect.any(AbortSignal),
@@ -1385,7 +1477,7 @@ describe("Default mode registration", () => {
       app.context,
     );
     expect(reviewer.review).toHaveBeenLastCalledWith(
-      expect.objectContaining({ userMessages: [] }),
+      expect.objectContaining({ untrustedTranscript: [] }),
       expect.any(Object),
       expect.any(AbortSignal),
     );

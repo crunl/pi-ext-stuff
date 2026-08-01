@@ -27,6 +27,7 @@ import { reviewAutoPrompt } from "./auto-policy.ts";
 import {
   AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
   buildAutoReviewRequest,
+  type GuardianPermissionContext,
 } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
@@ -45,6 +46,11 @@ import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts"
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
+import {
+  appendGuardianTranscript,
+  boundGuardianTranscript,
+  type GuardianTranscriptEntry,
+} from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
 import {
   createSandboxedBashOperations,
@@ -135,6 +141,64 @@ const DEFAULT_DENY_CHOICE = "Deny";
 const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
 const guardianFallbackNoticeKeys = new Set<string>();
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function textContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!isRecord(part) || typeof part.type !== "string") return "";
+      if (part.type === "text" && typeof part.text === "string") return part.text;
+      if (part.type === "image") return "[image]";
+      return "";
+    })
+    .filter((part) => part.length > 0)
+    .join("\n");
+}
+
+function assistantContent(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!isRecord(part) || typeof part.type !== "string") return "";
+      if (part.type === "text" && typeof part.text === "string") return part.text;
+      if (part.type === "toolCall") {
+        return JSON.stringify({
+          toolCall: typeof part.name === "string" ? part.name : "",
+          arguments: isRecord(part.arguments) ? part.arguments : {},
+        });
+      }
+      return "";
+    })
+    .filter((part) => part.length > 0)
+    .join("\n");
+}
+
+function guardianTranscriptEntryFromMessage(message: unknown): GuardianTranscriptEntry | undefined {
+  if (!isRecord(message)) return undefined;
+  if (message.role === "user") {
+    const content = textContent(message.content);
+    return content.length > 0 ? { role: "user", content } : undefined;
+  }
+  if (message.role === "assistant") {
+    const content = assistantContent(message.content);
+    return content.length > 0 ? { role: "assistant", content } : undefined;
+  }
+  if (message.role === "toolResult") {
+    const content = textContent(message.content);
+    return {
+      role: "tool",
+      toolName: typeof message.toolName === "string" ? message.toolName : "",
+      content,
+      isError: message.isError === true,
+    };
+  }
+  return undefined;
+}
+
 function executableMode(mode: PermissionMode): ExecutablePermissionMode {
   return mode === "plan" ? "default" : mode;
 }
@@ -175,7 +239,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
-  const trustedUserMessages: string[] = [];
+  let guardianTranscript: GuardianTranscriptEntry[] = [];
+  let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   const autoApprovalLedger = new AutoApprovalLedger();
   const reviewControllers = new Map<string, AbortController>();
   let modeMutationTail: Promise<void> = Promise.resolve();
@@ -266,7 +331,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const resetBranchPermissionContext = (reason: string): void => {
     modeMutationGeneration += 1;
     cancelInFlightModeTransition();
-    trustedUserMessages.length = 0;
+    guardianTranscript = [];
+    inputFallbackTranscript = [];
     permissionTurnPhase = "idle";
     activeTurnId = undefined;
     activeExecutionSnapshot = undefined;
@@ -441,6 +507,42 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (writeRoots.length > 0) {
       approvedWriteRoots.set(event.toolCallId, writeRoots);
     }
+  };
+
+  const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
+    boundGuardianTranscript(
+      guardianTranscript.length > 0 ? guardianTranscript : inputFallbackTranscript,
+    );
+
+  const guardianPermissionContext = (
+    event: ToolCallEvent,
+    decision: Extract<DefaultDecision, { action: "prompt" }>,
+    executionContext: EffectiveExecutionContext,
+    cwd: string,
+  ): GuardianPermissionContext => {
+    const sandboxConfig =
+      executionContext.baseSandboxConfig ??
+      createSandboxRuntimeConfig(
+        executionContext.config.sandbox,
+        cwd,
+        defaultProtectedWritePaths(cwd, agentDir),
+      );
+    return {
+      sandboxProfile: executionContext.config.sandbox.profile,
+      sandboxEnabled: executionContext.config.sandbox.enabled,
+      filesystemWriteRoots: [
+        ...new Set([
+          ...sandboxConfig.filesystem.allowWrite,
+          ...oneCallWriteRoots(event, cwd),
+          ...(decision.filesystemWriteRoots ?? []),
+        ]),
+      ],
+      filesystemDenyRead: [...sandboxConfig.filesystem.denyRead],
+      filesystemDenyWrite: [...sandboxConfig.filesystem.denyWrite],
+      requestedNetworkHosts: [...(decision.networkHosts ?? [])],
+      allowedNetworkHosts: [...sandboxConfig.network.allowedDomains],
+      deniedNetworkHosts: [...sandboxConfig.network.deniedDomains],
+    };
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
@@ -1057,7 +1159,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("input", (event) => {
     if ((event.source === "interactive" || event.source === "rpc") && event.text.length > 0) {
-      trustedUserMessages.push(event.text);
+      inputFallbackTranscript = appendGuardianTranscript(inputFallbackTranscript, {
+        role: "user",
+        content: event.text,
+      });
+    }
+  });
+
+  pi.on("message_end", (event) => {
+    const entry = guardianTranscriptEntryFromMessage(event.message);
+    if (entry) {
+      guardianTranscript = appendGuardianTranscript(guardianTranscript, entry);
     }
   });
 
@@ -1212,8 +1324,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             event,
             decision,
             ctx.cwd,
-            executionContext.config.sandbox.profile,
-            trustedUserMessages,
+            guardianPermissionContext(event, decision, executionContext, ctx.cwd),
+            currentGuardianTranscriptSnapshot(),
             approvalOverride,
           );
           const auto = await reviewAutoPrompt(
