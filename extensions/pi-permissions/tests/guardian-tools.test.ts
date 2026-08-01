@@ -1,7 +1,15 @@
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import { createGuardianToolRuntime, type GuardianToolFactory } from "../src/guardian-tools.ts";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  createGuardianToolRuntime,
+  createSandboxedGuardianToolRuntime,
+  type GuardianToolFactory,
+} from "../src/guardian-tools.ts";
+import type { SandboxManagerLike } from "../src/sandbox.ts";
 
 type PiGuardianToolFactory = (cwd: string) => ReturnType<typeof createReadOnlyTools>;
 
@@ -35,6 +43,39 @@ function fakeTool(
     execute,
   };
 }
+
+const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+async function fakeRg(directory: string, body: string): Promise<string> {
+  const executable = join(directory, "rg");
+  await writeFile(executable, `#!${process.execPath}\n${body}`);
+  await chmod(executable, 0o755);
+  return executable;
+}
+
+function passThroughSandboxManager(): SandboxManagerLike & {
+  wrapWithSandbox: ReturnType<typeof vi.fn<SandboxManagerLike["wrapWithSandbox"]>>;
+} {
+  return {
+    initialize: vi.fn(async () => undefined),
+    reset: vi.fn(async () => undefined),
+    wrapWithSandbox: vi.fn(async (command: string) => command),
+  };
+}
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true })),
+  );
+});
 
 describe("createGuardianToolRuntime", () => {
   it("uses the installed Pi Agent read-only tool factory contract", () => {
@@ -138,4 +179,383 @@ describe("createGuardianToolRuntime", () => {
       ),
     ).rejects.toThrow(/not available/i);
   });
+});
+
+describe("createSandboxedGuardianToolRuntime sandbox boundary", () => {
+  it("executes all four tools through the sandbox and reads an external absolute path", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-cwd-");
+    const external = await temporaryDirectory("pi-guardian-external-");
+    const externalFile = join(external, "evidence.txt");
+    await writeFile(externalFile, "needle evidence\n");
+    await mkdir(join(cwd, "src"));
+    await writeFile(join(cwd, "src", "match.ts"), "export const match = true;\n");
+    const rgPath = await fakeRg(external, `
+const path = require("node:path");
+const args = process.argv.slice(2);
+const searchRoot = args.at(-1);
+if (args.includes("--files")) {
+  process.stdout.write(path.join(searchRoot, "src", "match.ts") + "\\n");
+} else {
+  process.stdout.write(JSON.stringify({
+    type: "match",
+    data: {
+      path: { text: searchRoot },
+      lines: { text: "needle evidence\\n" },
+      line_number: 1,
+    },
+  }) + "\\n");
+}
+`);
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    expect(runtime.tools.map((tool) => tool.name)).toEqual(["read", "grep", "find", "ls"]);
+
+    let calls = manager.wrapWithSandbox.mock.calls.length;
+    const readResult = await runtime.execute({
+      type: "toolCall",
+      id: "read-external",
+      name: "read",
+      arguments: { path: externalFile },
+    });
+    expect(readResult).toMatchObject({ isError: false });
+    expect(readResult.content).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringContaining("needle evidence") }),
+    ]);
+    expect(manager.wrapWithSandbox.mock.calls.length).toBeGreaterThan(calls);
+
+    calls = manager.wrapWithSandbox.mock.calls.length;
+    const grepController = new AbortController();
+    const grepResult = await runtime.execute(
+      {
+        type: "toolCall",
+        id: "grep-external",
+        name: "grep",
+        arguments: { pattern: "needle", path: externalFile },
+      },
+      grepController.signal,
+    );
+    expect(grepResult).toMatchObject({ isError: false });
+    expect(grepResult.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("evidence.txt:1: needle evidence") }),
+    ]);
+    expect(manager.wrapWithSandbox.mock.calls.length).toBeGreaterThan(calls);
+    expect(manager.wrapWithSandbox.mock.calls.at(-1)?.[3]).toBe(grepController.signal);
+
+    calls = manager.wrapWithSandbox.mock.calls.length;
+    const findController = new AbortController();
+    const findResult = await runtime.execute(
+      {
+        type: "toolCall",
+        id: "find-src",
+        name: "find",
+        arguments: { pattern: "*.ts" },
+      },
+      findController.signal,
+    );
+    expect(findResult).toMatchObject({ isError: false });
+    expect(findResult.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("src/match.ts") }),
+    ]);
+    expect(manager.wrapWithSandbox.mock.calls.length).toBeGreaterThan(calls);
+    expect(manager.wrapWithSandbox.mock.calls.at(-1)?.[3]).toBe(findController.signal);
+
+    calls = manager.wrapWithSandbox.mock.calls.length;
+    const lsResult = await runtime.execute({
+      type: "toolCall",
+      id: "ls-src",
+      name: "ls",
+      arguments: { path: cwd },
+    });
+    expect(lsResult).toMatchObject({ isError: false });
+    expect(lsResult.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("src/") }),
+    ]);
+    expect(manager.wrapWithSandbox.mock.calls.length).toBeGreaterThan(calls);
+    expect(manager.initialize).not.toHaveBeenCalled();
+    expect(manager.reset).not.toHaveBeenCalled();
+  });
+
+  it("uses sandboxed rg globbing for find without an fd download", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-find-");
+    await mkdir(join(cwd, "src"));
+    await writeFile(join(cwd, "src", "first.ts"), "first\n");
+    await writeFile(join(cwd, "src", "second.ts"), "second\n");
+    const rgPath = await fakeRg(cwd, `
+const path = require("node:path");
+const args = process.argv.slice(2);
+const required = ["--files", "--hidden", "*.ts", "!**/node_modules/**", "!**/.git/**"];
+if (!required.every((value) => args.includes(value))) {
+  process.stderr.write("missing required rg file-list arguments");
+  process.exit(2);
+}
+const searchRoot = args.at(-1);
+process.stdout.write([
+  path.join(searchRoot, "src", "first.ts"),
+  path.join(searchRoot, "src", "second.ts"),
+].join("\\n") + "\\n");
+`);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "find-no-download",
+      name: "find",
+      arguments: { pattern: "*.ts", limit: 1 },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringMatching(/^src\/first\.ts\n\n\[1 results limit reached\]$/),
+      }),
+    ]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(manager.wrapWithSandbox.mock.calls.at(-1)?.[3]).toBeUndefined();
+  });
+
+  it("returns controlled missing-rg errors without downloading tools", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-missing-rg-");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => undefined,
+    });
+
+    const grepResult = await runtime.execute({
+      type: "toolCall",
+      id: "grep-missing",
+      name: "grep",
+      arguments: { pattern: "needle" },
+    });
+    const findResult = await runtime.execute({
+      type: "toolCall",
+      id: "find-missing",
+      name: "find",
+      arguments: { pattern: "*.ts" },
+    });
+
+    for (const result of [grepResult, findResult]) {
+      expect(result).toMatchObject({ isError: true });
+      expect(result.content).toEqual([
+        expect.objectContaining({ text: expect.stringMatching(/ripgrep \(rg\).*not available/i) }),
+      ]);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-rg executable from the sandbox resolver boundary", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-untrusted-resolver-");
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => process.execPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "grep-untrusted-resolver",
+      name: "grep",
+      arguments: { pattern: "needle" },
+    });
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("ripgrep (rg) is not available") }),
+    ]);
+    expect(manager.wrapWithSandbox).not.toHaveBeenCalled();
+  });
+
+  it("preserves sandboxed grep options, context, limits, and exit semantics", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-grep-");
+    const sourcePath = join(cwd, "source.ts");
+    await writeFile(sourcePath, "before\nneedle\nafter\nsecond needle\n");
+    const rgPath = await fakeRg(cwd, `
+const args = process.argv.slice(2);
+const pattern = args.at(-2);
+const searchRoot = args.at(-1);
+if (pattern === "absent") process.exit(1);
+if (pattern === "provider-error") {
+  process.stderr.write("authorization=guardian-secret");
+  process.exit(2);
+}
+const required = ["--json", "--line-number", "--color=never", "--hidden", "--ignore-case", "--fixed-strings", "--glob", "*.ts"];
+if (!required.every((value) => args.includes(value))) {
+  process.stderr.write("missing required grep arguments");
+  process.exit(2);
+}
+for (const [lineNumber, text] of [[2, "needle\\n"], [4, "second needle\\n"]]) {
+  process.stdout.write(JSON.stringify({
+    type: "match",
+    data: {
+      path: { text: searchRoot },
+      lines: { text },
+      line_number: lineNumber,
+    },
+  }) + "\\n");
+}
+`);
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    const limited = await runtime.execute({
+      type: "toolCall",
+      id: "grep-options",
+      name: "grep",
+      arguments: {
+        pattern: "needle",
+        path: sourcePath,
+        glob: "*.ts",
+        ignoreCase: true,
+        literal: true,
+        context: 1,
+        limit: 1,
+      },
+    });
+    expect(limited).toMatchObject({ isError: false });
+    expect(limited.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining(
+          "source.ts-1- before\nsource.ts:2: needle\nsource.ts-3- after",
+        ),
+      }),
+    ]);
+    expect(limited.content).not.toEqual([
+      expect.objectContaining({ text: expect.stringContaining("source.ts:4") }),
+    ]);
+
+    const noMatches = await runtime.execute({
+      type: "toolCall",
+      id: "grep-no-matches",
+      name: "grep",
+      arguments: { pattern: "absent", path: sourcePath },
+    });
+    expect(noMatches).toMatchObject({ isError: false });
+    expect(noMatches.content).toEqual([
+      expect.objectContaining({ text: "No matches found" }),
+    ]);
+
+    const providerError = await runtime.execute({
+      type: "toolCall",
+      id: "grep-provider-error",
+      name: "grep",
+      arguments: { pattern: "provider-error", path: sourcePath },
+    });
+    expect(providerError).toMatchObject({ isError: true });
+    expect(providerError.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("authorization: [redacted]") }),
+    ]);
+  });
+
+  it("preserves sandboxed grep paths relative to a directory search root", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-grep-relative-");
+    await mkdir(join(cwd, "src"));
+    await writeFile(join(cwd, "src", "source.ts"), "needle\n");
+    const rgPath = await fakeRg(cwd, `
+process.stdout.write(JSON.stringify({
+  type: "match",
+  data: {
+    path: { text: "src/source.ts" },
+    lines: { text: "needle\\n" },
+    line_number: 1,
+  },
+}) + "\\n");
+`);
+    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "grep-relative-path",
+      name: "grep",
+      arguments: { pattern: "needle", path: cwd },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: "src/source.ts:1: needle" }),
+    ]);
+  });
+
+  it("returns a sandbox error for a missing find root before running rg", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-find-root-");
+    const rgPath = await fakeRg(cwd, `
+process.stderr.write("rg should not run for a missing root");
+process.exit(2);
+`);
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "find-missing-root",
+      name: "find",
+      arguments: { pattern: "*.ts", path: join(cwd, "missing") },
+    });
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("Path not found") }),
+    ]);
+    expect(manager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("returns a sandbox tool failure without a direct read-only fallback", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-no-fallback-");
+    const externalFile = join(await temporaryDirectory("pi-guardian-readable-"), "evidence.txt");
+    await writeFile(externalFile, "must not bypass the sandbox\n");
+    const manager = passThroughSandboxManager();
+    manager.wrapWithSandbox.mockImplementation(async () =>
+      "printf 'authorization: guardian-secret' >&2; exit 17");
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => undefined,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "read-failure",
+      name: "read",
+      arguments: { path: externalFile },
+    });
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining("authorization: [redacted]"),
+      }),
+    ]);
+    expect(result.content).not.toEqual([
+      expect.objectContaining({ text: expect.stringContaining("must not bypass") }),
+    ]);
+    expect(manager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it.each(["bash", "write", "edit"])(
+    "rejects unavailable sandbox Guardian tool %s",
+    async (name) => {
+      const cwd = await temporaryDirectory(`pi-guardian-${name}-`);
+      const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
+        resolveRgPath: () => undefined,
+      });
+
+      await expect(
+        runtime.execute({
+          type: "toolCall",
+          id: `call-${name}`,
+          name,
+          arguments: {},
+        }),
+      ).rejects.toThrow(`Guardian tool ${name} is not available`);
+    },
+  );
 });
