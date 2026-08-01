@@ -12,6 +12,18 @@ import {
   type WriteHighlightCache,
 } from "./write-preview.ts";
 
+/**
+ * Line count for a file write, used as the collapsed summary of the write
+ * tool (e.g. "Wrote src/a.ts · +42", green). A trailing newline does not
+ * count as an extra line.
+ */
+export function countWrittenLines(content: string): number {
+  if (content.length === 0) return 0;
+  const normalized = content.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n").length;
+  return normalized.endsWith("\n") ? lines - 1 : lines;
+}
+
 export const codexBashToolSpec: CodexToolRendererSpec = {
   icon: "",
   runningVerb: "Running",
@@ -26,6 +38,12 @@ export const codexWriteToolSpec: CodexToolRendererSpec = {
   runningVerb: "Writing",
   completedVerb: "Wrote",
   argument: (args) => (typeof args.path === "string" ? args.path : ""),
+  collapsed: (_result, args) => {
+    const content = typeof args.content === "string" ? args.content : "";
+    const lineCount = countWrittenLines(content);
+    return lineCount > 0 ? `+${lineCount}` : undefined;
+  },
+  formatSummary: (summary, theme) => theme.fg("success", summary),
   renderCallPreview(args, theme, context) {
     const path = typeof args.path === "string" ? args.path : "";
     const content = typeof args.content === "string" ? args.content : "";

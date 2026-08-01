@@ -64,10 +64,10 @@ describe("codex tool specs", () => {
     expect(text).toContain("+2 -1");
   });
 
-  it("write spec collapses to the header without a summary", () => {
+  it("write spec collapses to the header with a green +N line summary", () => {
     const text = renderHeader(codexWriteToolSpec, { path: "note.txt", content: "a\nb\n" });
     expect(text).toContain("Wrote note.txt");
-    expect(text).not.toMatch(/\+\d/);
+    expect(text).toContain("+2");
   });
 
   it("write spec renders a streamed preview with line numbers when expanded", () => {
