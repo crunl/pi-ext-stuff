@@ -23,7 +23,7 @@ type ExpandedResultRenderer = (
   outputPad: OutputPad,
 ) => Component;
 
-export interface CodexToolRendererSpec {
+export interface CodexToolRendererSpec<TPreviewState = unknown> {
   icon?: string;
   runningVerb: string;
   completedVerb: string;
@@ -34,46 +34,52 @@ export interface CodexToolRendererSpec {
    * Optional component rendered below the header while the call is being
    * streamed (partial args) and the result view is expanded. Lets a tool
    * show a live preview that updates as arguments grow, e.g. the write tool's
-   * syntax-highlighted content preview. Reuses renderExpandedResult's state.
+   * syntax-highlighted content preview. TPreviewState types the shared
+   * rendererState slot so previews can persist state (e.g. a highlight
+   * cache) across calls without casts.
    */
   renderCallPreview?: (
     args: Record<string, unknown>,
     theme: Theme,
-    context: RenderContext,
+    context: RenderContext<TPreviewState>,
   ) => Component | undefined;
   renderExpandedResult?: ExpandedResultRenderer;
   maxOutputRows?: number;
   transformOutput?: (text: string) => string;
 }
 
-interface CodexToolRenderState {
+interface CodexToolRenderState<TPreviewState = unknown> {
   header?: Text;
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
-  /** Renderer-specific state, e.g. incremental highlight caches for previews. */
-  rendererState?: unknown;
+  /** Renderer-specific state for previews (typed via CodexToolRendererSpec). */
+  rendererState?: TPreviewState;
 }
 
-interface RenderContext {
+interface RenderContext<TPreviewState = unknown> {
   args: Record<string, unknown>;
   toolCallId: string;
   invalidate: () => void;
-  state: CodexToolRenderState;
+  state: CodexToolRenderState<TPreviewState>;
   cwd: string;
   isError: boolean;
   /** Whether the result view is expanded (from ToolRenderContext). */
   expanded: boolean;
 }
 
-interface CodexToolRendering {
+interface CodexToolRendering<TPreviewState = unknown> {
   renderShell: "self";
-  renderCall: (args: Record<string, unknown>, theme: Theme, context: RenderContext) => Component;
+  renderCall: (
+    args: Record<string, unknown>,
+    theme: Theme,
+    context: RenderContext<TPreviewState>,
+  ) => Component;
   renderResult: (
     result: AgentToolResult<unknown>,
     options: ToolRenderResultOptions,
     theme: Theme,
-    context: RenderContext,
+    context: RenderContext<TPreviewState>,
   ) => Component;
 }
 
@@ -110,8 +116,13 @@ export function colorizeEditDiffSummary(summary: string, theme: Theme): string {
   return `${theme.fg("success", match[1])} ${theme.fg("error", match[2])}`;
 }
 
-function headerText(
-  spec: CodexToolRendererSpec,
+/** Colorize a collapsed summary that is a single positive count (e.g. write's +N lines). */
+export function colorizeWriteSummary(summary: string, theme: Theme): string {
+  return theme.fg("success", summary);
+}
+
+function headerText<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
   state: CodexToolRenderState,
   args: Record<string, unknown>,
   context: RenderContext,
@@ -151,11 +162,11 @@ class ToolOutputComponent implements Component {
   invalidate(): void {}
 }
 
-function updateHeader(
-  spec: CodexToolRendererSpec,
-  state: CodexToolRenderState,
+function updateHeader<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
+  state: CodexToolRenderState<TPreviewState>,
   args: Record<string, unknown>,
-  context: RenderContext,
+  context: RenderContext<TPreviewState>,
   theme: Theme,
   outputPad: OutputPad,
 ): Text {
@@ -167,10 +178,10 @@ function updateHeader(
   return state.header;
 }
 
-export function createCodexToolRendering(
-  spec: CodexToolRendererSpec,
+export function createCodexToolRendering<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
   paddingSource: OutputPaddingSource = outputPaddingController,
-): CodexToolRendering {
+): CodexToolRendering<TPreviewState> {
   return {
     renderShell: "self",
     renderCall(args, theme, context) {

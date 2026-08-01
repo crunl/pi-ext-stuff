@@ -4,7 +4,7 @@ import {
   codexEditToolSpec,
   codexWriteToolSpec,
 } from "../src/tui/codex-tool-specs.ts";
-import { createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+import { type CodexToolRendererSpec, createCodexToolRendering } from "../src/tui/tool-renderer.ts";
 import { renderWritePreviewText, updateWriteHighlightCache } from "../src/tui/write-preview.ts";
 
 const theme = {
@@ -26,8 +26,11 @@ function context(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderHeader(spec: typeof codexEditToolSpec, args: Record<string, unknown>) {
-  const rendering = createCodexToolRendering(spec);
+function renderHeader<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
+  args: Record<string, unknown>,
+) {
+  const rendering = createCodexToolRendering<TPreviewState>(spec);
   const ctx = context({ args });
   const header = rendering.renderCall(args, theme as never, ctx as never);
   const result = rendering.renderResult(

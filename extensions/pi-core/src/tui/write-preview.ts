@@ -1,6 +1,17 @@
 import { getLanguageFromPath, highlightCode, type Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
+/**
+ * Incremental highlight preview for the write tool.
+ *
+ * The cache update logic (prefix-append incremental highlight, 50-line
+ * prefix re-highlight) mirrors pi's built-in write rendering in
+ * @earendil-works/pi-coding-agent (core/tools/write.ts, WriteCallRenderComponent).
+ * It is duplicated rather than imported because the built-in implementation is
+ * not part of the package's public API. If the built-in renderer ever exports
+ * this machinery, replace this module's internals with that import.
+ */
+
 /** Rows of the preview shown while a write is streamed or expanded. */
 const PREVIEW_LINE_LIMIT = 50;
 
