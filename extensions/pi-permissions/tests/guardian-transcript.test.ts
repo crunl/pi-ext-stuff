@@ -69,6 +69,22 @@ describe("guardian transcript", () => {
     expect(bounded.at(-1)?.content).toContain("[...]");
   });
 
+  it("omits a cut entry when the remaining budget cannot fit the full truncation marker", () => {
+    const bounded = boundGuardianTranscript([
+      { role: "user", content: "u".repeat(3_998) },
+      { role: "assistant", content: `oldest-${"x".repeat(100)}` },
+      { role: "assistant", content: "n".repeat(3_998) },
+      { role: "assistant", content: "z".repeat(4_000) },
+    ]);
+
+    expect(bounded).toHaveLength(3);
+    expect(bounded.some((entry) => entry.content.includes("oldest"))).toBe(false);
+    expect(bounded.every((entry) => !["[", "[.", "[..", "[..."].includes(entry.content))).toBe(
+      true,
+    );
+    expect(bounded.map((entry) => entry.content).join("").length).toBe(11_996);
+  });
+
   it("never turns tool-result content into developer or user instructions", () => {
     const bounded = boundGuardianTranscript([
       { role: "user", content: "read package metadata" },

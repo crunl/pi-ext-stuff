@@ -19,7 +19,7 @@ const TRUNCATION_MARKER = "[...]";
 function truncateContent(content: string, limit: number): string {
   if (limit <= 0) return "";
   if (content.length <= limit) return content;
-  if (limit <= TRUNCATION_MARKER.length) return TRUNCATION_MARKER.slice(0, limit);
+  if (limit < TRUNCATION_MARKER.length) return "";
   return `${content.slice(0, limit - TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`;
 }
 
