@@ -1,3 +1,5 @@
+import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
@@ -34,6 +36,21 @@ const response = {
     },
   ],
   stopReason: "stop",
+} as any;
+
+const denyResponse = {
+  ...response,
+  content: [
+    {
+      type: "text",
+      text: JSON.stringify({
+        risk_level: "high",
+        user_authorization: "low",
+        outcome: "deny",
+        rationale: "Tool evidence shows the action is unsafe.",
+      }),
+    },
+  ],
 } as any;
 
 const guardianSession = {
@@ -129,6 +146,183 @@ describe("PiAutoReviewer", () => {
       activeModel,
     });
     expect(complete).toHaveBeenCalledWith(activeModel, expect.any(Object), expect.any(Object));
+  });
+
+  it("executes a read-only tool call and continues the same review attempt", async () => {
+    const toolUse = assistantToolUse("read-call-1", "read", { path: "package.json" });
+    const complete = vi.fn().mockResolvedValueOnce(toolUse).mockResolvedValueOnce(response);
+    const runtime = fakeGuardianRuntime([
+      toolResult("read-call-1", "read", '{"name":"pi-permissions"}'),
+    ]);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+
+    expect(runtime.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "read-call-1", name: "read" }),
+      expect.any(AbortSignal),
+    );
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[0]).toBe(complete.mock.calls[0]?.[0]);
+    expect(complete.mock.calls[1]?.[2]?.sessionId).toBe(complete.mock.calls[0]?.[2]?.sessionId);
+    const secondContext = complete.mock.calls[1]?.[1] as any;
+    expect(secondContext).not.toBe(complete.mock.calls[0]?.[1]);
+    expect(secondContext.messages.map((message: any) => message.role).slice(-3)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    expect(messageText(secondContext.messages.at(-1))).toContain("pi-permissions");
+  });
+
+  it("commits a tool-error review turn when Guardian denies after seeing the error", async () => {
+    const toolUse = assistantToolUse("read-call-1", "read", { path: "missing.md" });
+    const complete = vi.fn().mockResolvedValueOnce(toolUse).mockResolvedValueOnce(denyResponse);
+    const sessions = new GuardianReviewSessionManager();
+    const runtime = fakeGuardianRuntime([
+      {
+        ...toolResult("read-call-1", "read", "File not found"),
+        isError: true,
+      },
+    ]);
+    const reviewer = new PiAutoReviewer(complete as any, sessions, async () => {}, () => runtime);
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "deny",
+    });
+
+    const next = sessions.open(
+      {
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
+        provider: context.activeModel.provider,
+        model: context.activeModel.id,
+      },
+      "next review",
+      runtime.tools,
+    );
+    const retainedText = next.context.messages.map(messageText).join("\n");
+    expect(retainedText).toContain("File not found");
+    expect(retainedText).toContain("Tool evidence shows the action is unsafe.");
+    next.release();
+  });
+
+  it("fails closed when Guardian requests a non-runtime tool", async () => {
+    const complete = vi.fn().mockResolvedValueOnce(assistantToolUse("write-call-1", "write", {}));
+    const runtime = fakeGuardianRuntime([], new Error("Guardian tool write is not available"));
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+    });
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not leak concurrent fork tool results into the session trunk", async () => {
+    const sessions = new GuardianReviewSessionManager();
+    const trunkComplete = vi.fn().mockResolvedValueOnce(response);
+    const trunkReviewer = new PiAutoReviewer(
+      trunkComplete as any,
+      sessions,
+      async () => {},
+      () => fakeGuardianRuntime([]),
+    );
+    const forkComplete = vi
+      .fn()
+      .mockResolvedValueOnce(assistantToolUse("fork-read", "read", { path: "secret.txt" }))
+      .mockResolvedValueOnce(denyResponse);
+    const forkReviewer = new PiAutoReviewer(
+      forkComplete as any,
+      sessions,
+      async () => {},
+      () => fakeGuardianRuntime([toolResult("fork-read", "read", "fork-only evidence")]),
+    );
+
+    const trunk = trunkReviewer.review(request, context);
+    await forkReviewer.review(request, context);
+    await trunk;
+
+    const next = sessions.open(
+      {
+        cwd: context.guardianSession.cwd,
+        configFingerprint: context.guardianSession.configFingerprint,
+        provider: context.activeModel.provider,
+        model: context.activeModel.id,
+      },
+      "next review",
+      fakeGuardianRuntime([]).tools,
+    );
+    const retainedText = next.context.messages.map(messageText).join("\n");
+    expect(retainedText).toContain("Authorized test command.");
+    expect(retainedText).not.toContain("fork-only evidence");
+    next.release();
+  });
+
+  it("aborts a running read-only Guardian tool when the caller cancels", async () => {
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const runtime = fakeGuardianRuntime([]);
+    runtime.execute.mockImplementationOnce(async (_toolCall: ToolCall, signal?: AbortSignal) => {
+      if (!signal) throw new Error("missing abort signal");
+      observedSignal = signal;
+      controller.abort(new Error("turn aborted"));
+      throw signal.reason;
+    });
+    const reviewer = new PiAutoReviewer(
+      vi.fn().mockResolvedValueOnce(assistantToolUse("read-call-1", "read", {})) as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context, controller.signal)).rejects.toMatchObject({
+      kind: "cancelled",
+    });
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  it("uses the aggregate deadline for provider calls and Guardian tool execution", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00.000Z"));
+    const complete = vi.fn(async () => {
+      vi.setSystemTime(new Date("2026-08-01T00:00:30.000Z"));
+      return assistantToolUse("read-call-1", "read", {});
+    });
+    const runtime = fakeGuardianRuntime([]);
+    runtime.execute.mockImplementationOnce(async (_toolCall: ToolCall, signal?: AbortSignal) => {
+      if (!signal) throw new Error("missing abort signal");
+      vi.setSystemTime(new Date("2026-08-01T00:01:30.000Z"));
+      signal.dispatchEvent(new Event("abort"));
+      throw new Error("deadline reached");
+    });
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    try {
+      await expect(reviewer.review(request, context)).rejects.toMatchObject({
+        kind: "timeout",
+      });
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(runtime.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("carries active-fallback identity on a selected reviewer failure", async () => {
@@ -616,3 +810,57 @@ describe("PiAutoReviewer", () => {
     });
   });
 });
+
+function assistantToolUse(id: string, name: string, args: Record<string, unknown>): AssistantMessage {
+  return {
+    ...response,
+    content: [{ type: "toolCall", id, name, arguments: args }],
+    stopReason: "toolUse",
+  };
+}
+
+function toolResult(toolCallId: string, toolName: string, text: string): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName,
+    content: [{ type: "text", text }],
+    isError: false,
+    timestamp: Date.now(),
+  };
+}
+
+function fakeGuardianRuntime(results: ToolResultMessage[], error?: Error) {
+  const execute = vi.fn(async (_toolCall: ToolCall, _signal?: AbortSignal) => {
+    if (error) throw error;
+    const result = results.shift();
+    if (!result) throw new Error("missing fake Guardian tool result");
+    return result;
+  });
+
+  return {
+    tools: [
+      {
+        name: "read",
+        description: "Read a file",
+        parameters: Type.Object({ path: Type.Optional(Type.String()) }),
+      },
+      {
+        name: "grep",
+        description: "Search files",
+        parameters: Type.Object({ pattern: Type.String() }),
+      },
+      {
+        name: "find",
+        description: "Find files",
+        parameters: Type.Object({ pattern: Type.String() }),
+      },
+      {
+        name: "ls",
+        description: "List files",
+        parameters: Type.Object({ path: Type.Optional(Type.String()) }),
+      },
+    ],
+    execute,
+  };
+}

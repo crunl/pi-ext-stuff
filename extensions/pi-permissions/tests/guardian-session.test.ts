@@ -1,4 +1,5 @@
-import type { Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, ToolResultMessage } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_SYSTEM_PROMPT } from "../src/auto-review-request.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
@@ -9,6 +10,14 @@ const key: GuardianSessionKey = {
   provider: "openai-codex",
   model: "guardian",
 };
+
+const guardianTools = [
+  {
+    name: "read",
+    description: "Read a file",
+    parameters: Type.Object({ path: Type.String() }),
+  },
+];
 
 function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
@@ -25,8 +34,8 @@ function fixedLength(prefix: string, length: number): string {
 describe("GuardianReviewSessionManager", () => {
   it("reuses an idle trunk while isolating a concurrent fork", () => {
     const manager = new GuardianReviewSessionManager();
-    const first = manager.open(key, "first approval");
-    const concurrent = manager.open(key, "second approval");
+    const first = manager.open(key, "first approval", guardianTools);
+    const concurrent = manager.open(key, "second approval", guardianTools);
 
     expect(concurrent.sessionId.replace(/-fork-.+$/, "")).toBe(first.sessionId);
     expect(messageText(first.context.messages.at(-1)!)).toContain("first approval");
@@ -35,17 +44,18 @@ describe("GuardianReviewSessionManager", () => {
       systemPrompt: AUTO_REVIEW_SYSTEM_PROMPT,
       messages: [expect.objectContaining({ role: "user" })],
     });
-    expect(first.context.tools).toBeUndefined();
+    expect(first.context.tools?.map((tool) => tool.name)).toEqual(["read"]);
+    expect(Object.isFrozen(first.context.tools)).toBe(true);
     expect(Object.isFrozen(first.context)).toBe(true);
     expect(Object.isFrozen(first.context.messages)).toBe(true);
 
-    concurrent.commit('{"outcome":"deny"}');
+    concurrent.commit([assistant('{"outcome":"deny"}')]);
     concurrent.release();
 
     const whileTrunkActive = manager.open(key, "third concurrent approval");
     expect(whileTrunkActive.sessionId.replace(/-fork-.+$/, "")).toBe(first.sessionId);
 
-    first.commit('{"outcome":"allow"}');
+    first.commit([assistant('{"outcome":"allow"}')]);
     const latestSnapshotFork = manager.open(key, "latest snapshot approval");
     const forkSnapshotText = latestSnapshotFork.context.messages.map(messageText).join("\n");
     expect(forkSnapshotText).toContain("first approval");
@@ -71,6 +81,43 @@ describe("GuardianReviewSessionManager", () => {
     expect(retainedText).not.toContain("latest snapshot approval");
   });
 
+  it("extends a lease with assistant tool calls and tool results without committing the fork", () => {
+    const manager = new GuardianReviewSessionManager();
+    const first = manager.open(key, "first approval", guardianTools);
+    const firstToolCall = assistantToolCall("tool-call-1", "read");
+    const firstToolResult = toolResult("tool-call-1", "read", "first evidence");
+
+    const extended = first.extend([firstToolCall, firstToolResult]);
+
+    expect(extended).not.toBe(first.context);
+    expect(extended.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    expect(messageText(extended.messages.at(-1)!)).toBe("first evidence");
+    expect(Object.isFrozen(extended)).toBe(true);
+    expect(Object.isFrozen(extended.messages)).toBe(true);
+
+    const concurrent = manager.open(key, "fork approval", guardianTools);
+    concurrent.commit([
+      assistantToolCall("fork-tool-call", "read"),
+      toolResult("fork-tool-call", "read", "fork evidence"),
+      assistant('{"outcome":"deny"}'),
+    ]);
+    concurrent.release();
+
+    first.commit([firstToolCall, firstToolResult, assistant('{"outcome":"allow"}')]);
+    first.release();
+
+    const next = manager.open(key, "next approval", guardianTools);
+    const retainedText = next.context.messages.map(messageText).join("\n");
+    expect(retainedText).toContain("first evidence");
+    expect(retainedText).toContain('{"outcome":"allow"}');
+    expect(retainedText).not.toContain("fork evidence");
+    next.release();
+  });
+
   it.each([
     ["cwd", "/workspace/other"],
     ["configFingerprint", "config-b"],
@@ -81,7 +128,7 @@ describe("GuardianReviewSessionManager", () => {
     (field, value) => {
       const manager = new GuardianReviewSessionManager();
       const first = manager.open(key, "first approval");
-      first.commit('{"outcome":"allow"}');
+      first.commit([assistant('{"outcome":"allow"}')]);
       first.release();
 
       const changed = manager.open({ ...key, [field]: value }, "changed approval");
@@ -94,7 +141,7 @@ describe("GuardianReviewSessionManager", () => {
   it("invalidates committed history", () => {
     const manager = new GuardianReviewSessionManager();
     const first = manager.open(key, "old approval");
-    first.commit('{"outcome":"allow"}');
+    first.commit([assistant('{"outcome":"allow"}')]);
     first.release();
 
     manager.invalidate();
@@ -110,15 +157,15 @@ describe("GuardianReviewSessionManager", () => {
 
     manager.invalidate();
     const replacement = manager.open(key, "replacement approval");
-    stale.commit('{"outcome":"stale"}');
+    stale.commit([assistant('{"outcome":"stale"}')]);
     stale.release();
 
     const concurrent = manager.open(key, "replacement concurrent approval");
     expect(concurrent.sessionId.replace(/-fork-.+$/, "")).toBe(replacement.sessionId);
 
-    replacement.commit('{"outcome":"fresh"}');
+    replacement.commit([assistant('{"outcome":"fresh"}')]);
     replacement.release();
-    concurrent.commit('{"outcome":"fork"}');
+    concurrent.commit([assistant('{"outcome":"fork"}')]);
     concurrent.release();
 
     const next = manager.open(key, "next approval");
@@ -136,17 +183,17 @@ describe("GuardianReviewSessionManager", () => {
     const lease = manager.open(key, "idempotent approval");
     const originalMessages = [...lease.context.messages];
 
-    lease.commit('{"outcome":"first"}');
-    lease.commit('{"outcome":"second"}');
+    lease.commit([assistant('{"outcome":"first"}')]);
+    lease.commit([assistant('{"outcome":"second"}')]);
     lease.release();
     lease.release();
-    lease.commit('{"outcome":"after-release"}');
+    lease.commit([assistant('{"outcome":"after-release"}')]);
 
     expect(lease.context.messages).toEqual(originalMessages);
 
     const releasedBeforeCommit = manager.open(key, "released before commit");
     releasedBeforeCommit.release();
-    releasedBeforeCommit.commit('{"outcome":"late"}');
+    releasedBeforeCommit.commit([assistant('{"outcome":"late"}')]);
 
     const next = manager.open(key, "next approval");
     const retainedText = next.context.messages.map(messageText).join("\n");
@@ -163,7 +210,7 @@ describe("GuardianReviewSessionManager", () => {
 
     for (let index = 0; index < 10; index += 1) {
       const lease = manager.open(key, `request[${index}]`);
-      lease.commit(`response[${index}]`);
+      lease.commit([assistant(`response[${index}]`)]);
       lease.release();
     }
 
@@ -186,7 +233,7 @@ describe("GuardianReviewSessionManager", () => {
 
     for (let index = 0; index < 3; index += 1) {
       const lease = manager.open(key, fixedLength(`request[${index}]`, 6_000));
-      lease.commit(fixedLength(`response[${index}]`, 4_000));
+      lease.commit([assistant(fixedLength(`response[${index}]`, 4_000))]);
       lease.release();
     }
 
@@ -203,7 +250,7 @@ describe("GuardianReviewSessionManager", () => {
   it("drops a completed pair that alone exceeds the character bound", () => {
     const manager = new GuardianReviewSessionManager();
     const oversized = manager.open(key, fixedLength("oversized request", 12_001));
-    oversized.commit(fixedLength("oversized response", 12_000));
+      oversized.commit([assistant(fixedLength("oversized response", 12_000))]);
     oversized.release();
 
     const next = manager.open(key, "current request");
@@ -211,3 +258,48 @@ describe("GuardianReviewSessionManager", () => {
     expect(next.context.messages.map(messageText)).toEqual(["current request"]);
   });
 });
+
+function assistant(text: string): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: key.provider,
+    provider: key.provider,
+    model: key.model,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
+function assistantToolCall(id: string, name: string): AssistantMessage {
+  return {
+    ...assistant(""),
+    content: [{ type: "toolCall", id, name, arguments: { path: "README.md" } }],
+    stopReason: "toolUse",
+  };
+}
+
+function toolResult(toolCallId: string, toolName: string, text: string): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName,
+    content: [{ type: "text", text }],
+    isError: false,
+    timestamp: Date.now(),
+  };
+}

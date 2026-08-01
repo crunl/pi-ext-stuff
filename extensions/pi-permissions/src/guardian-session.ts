@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AssistantMessage, Context, Message, UserMessage } from "@earendil-works/pi-ai";
+import type { Context, Message, Tool, UserMessage } from "@earendil-works/pi-ai";
 import { AUTO_REVIEW_SYSTEM_PROMPT } from "./auto-review-request.ts";
 
 const MAX_HISTORY_PAIRS = 8;
@@ -15,7 +15,8 @@ export interface GuardianSessionKey {
 export interface GuardianReviewLease {
   readonly context: Context;
   readonly sessionId: string;
-  commit(assistantText: string): void;
+  extend(messages: Message[]): Context;
+  commit(messages: Message[]): void;
   release(): void;
 }
 
@@ -23,7 +24,7 @@ type Trunk = {
   key: GuardianSessionKey;
   sessionId: string;
   active: boolean;
-  history: Message[];
+  turns: Message[][];
 };
 
 function keysMatch(left: GuardianSessionKey, right: GuardianSessionKey): boolean {
@@ -44,28 +45,30 @@ function messageCharacters(message: Message): number {
   }, 0);
 }
 
-function trimHistory(history: Message[]): Message[] {
-  let firstRetainedIndex = history.length;
-  let retainedPairs = 0;
+function turnCharacters(turn: Message[]): number {
+  return turn.reduce((total, message) => total + messageCharacters(message), 0);
+}
+
+function trimTurns(turns: Message[][]): Message[][] {
+  let firstRetainedIndex = turns.length;
+  let retainedTurns = 0;
   let retainedCharacters = 0;
 
-  for (let index = history.length - 2; index >= 0; index -= 2) {
-    const request = history[index];
-    const response = history[index + 1];
-    if (!request || !response) break;
-    const pairCharacters = messageCharacters(request) + messageCharacters(response);
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const characters = turnCharacters(turn);
     if (
-      retainedPairs >= MAX_HISTORY_PAIRS ||
-      retainedCharacters + pairCharacters > MAX_HISTORY_CHARACTERS
+      retainedTurns >= MAX_HISTORY_PAIRS ||
+      retainedCharacters + characters > MAX_HISTORY_CHARACTERS
     ) {
       break;
     }
     firstRetainedIndex = index;
-    retainedPairs += 1;
-    retainedCharacters += pairCharacters;
+    retainedTurns += 1;
+    retainedCharacters += characters;
   }
 
-  return history.slice(firstRetainedIndex);
+  return turns.slice(firstRetainedIndex).map((turn) => turn.map(cloneMessage));
 }
 
 function cloneMessage(message: Message): Message {
@@ -77,11 +80,15 @@ function freezeMessage(message: Message): Message {
     for (const part of message.content) Object.freeze(part);
     Object.freeze(message.content);
   }
-  if (message.role === "assistant") {
+  if (message.role === "assistant" && message.usage) {
     Object.freeze(message.usage.cost);
     Object.freeze(message.usage);
   }
   return Object.freeze(message);
+}
+
+function cloneTool(tool: Tool): Tool {
+  return Object.freeze({ ...tool });
 }
 
 function createUserMessage(requestPrompt: string): UserMessage {
@@ -92,51 +99,34 @@ function createUserMessage(requestPrompt: string): UserMessage {
   };
 }
 
-function createAssistantMessage(key: GuardianSessionKey, assistantText: string): AssistantMessage {
-  return {
-    role: "assistant",
-    content: [{ type: "text", text: assistantText }],
-    api: key.provider,
-    provider: key.provider,
-    model: key.model,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
-    },
-    stopReason: "stop",
-    timestamp: Date.now(),
-  };
-}
-
-function createContext(snapshot: Message[], request: UserMessage): Context {
-  const messages = [...snapshot.map(cloneMessage), request].map(freezeMessage);
-  Object.freeze(messages);
+function createContext(messages: Message[], tools?: Tool[]): Context {
+  const frozenMessages = messages.map(cloneMessage).map(freezeMessage);
+  Object.freeze(frozenMessages);
+  const frozenTools = tools?.map(cloneTool);
+  if (frozenTools) Object.freeze(frozenTools);
   return Object.freeze({
     systemPrompt: AUTO_REVIEW_SYSTEM_PROMPT,
-    messages,
+    messages: frozenMessages,
+    ...(frozenTools === undefined ? {} : { tools: frozenTools }),
   });
+}
+
+function createLeaseContext(snapshot: Message[], request: UserMessage, tools?: Tool[]): Context {
+  const messages = [...snapshot, request];
+  Object.freeze(messages);
+  return createContext(messages, tools);
 }
 
 export class GuardianReviewSessionManager {
   private trunk?: Trunk;
 
-  open(key: GuardianSessionKey, requestPrompt: string): GuardianReviewLease {
+  open(key: GuardianSessionKey, requestPrompt: string, tools?: Tool[]): GuardianReviewLease {
     if (!this.trunk || !keysMatch(this.trunk.key, key)) {
       this.trunk = {
         key: { ...key },
         sessionId: `pi-permissions-guardian-${randomUUID()}`,
         active: false,
-        history: [],
+        turns: [],
       };
     }
 
@@ -145,7 +135,8 @@ export class GuardianReviewSessionManager {
     if (!isFork) trunk.active = true;
 
     const request = createUserMessage(requestPrompt);
-    const context = createContext(trunk.history, request);
+    const snapshot = trimTurns(trunk.turns).flat();
+    const context = createLeaseContext(snapshot, request, tools);
     const sessionId = isFork ? `${trunk.sessionId}-fork-${randomUUID()}` : trunk.sessionId;
     let committed = false;
     let released = false;
@@ -153,15 +144,14 @@ export class GuardianReviewSessionManager {
     return {
       context,
       sessionId,
-      commit: (assistantText) => {
+      extend: (messages) => {
+        return createContext([...context.messages, ...messages], tools);
+      },
+      commit: (messages) => {
         if (committed || released) return;
         committed = true;
         if (isFork || this.trunk !== trunk) return;
-        trunk.history = trimHistory([
-          ...trunk.history,
-          request,
-          createAssistantMessage(trunk.key, assistantText),
-        ]);
+        trunk.turns = trimTurns([...trunk.turns, [request, ...messages]]);
       },
       release: () => {
         if (released) return;
