@@ -259,6 +259,12 @@ export interface SandboxedCommandResult {
 
 export type GuardianReadOnlyExecutable = "node";
 
+const GUARDIAN_COMMAND_MAX_STDOUT_BYTES = 5 * 1024 * 1024;
+const GUARDIAN_COMMAND_MAX_STDERR_BYTES = 64 * 1024;
+const GUARDIAN_FILE_MAX_BYTES = 4 * 1024 * 1024;
+const GUARDIAN_DIRECTORY_MAX_ENTRIES = 1_000;
+const GUARDIAN_DIRECTORY_MAX_BYTES = 512 * 1024;
+
 function guardianReadOnlyExecutablePath(executable: GuardianReadOnlyExecutable): string {
   if (executable === "node") return process.execPath;
   throw new Error(`Unsupported Guardian read-only executable: ${executable}`);
@@ -273,6 +279,7 @@ export function createSandboxedReadOnlyCommandRunner(
 ) => Promise<SandboxedCommandResult> {
   const resolvedExecutable = guardianReadOnlyExecutablePath(executable);
   return async (args, signal) => {
+    if (signal?.aborted) throw new Error("aborted");
     const command = [resolvedExecutable, ...args].map(shellQuote).join(" ");
     const wrappedCommand = await manager.wrapWithSandbox(
       command,
@@ -280,6 +287,7 @@ export function createSandboxedReadOnlyCommandRunner(
       createGuardianReadOnlySandboxConfig(),
       signal,
     );
+    if (signal?.aborted) throw new Error("aborted");
 
     return new Promise((resolvePromise, reject) => {
       const child = spawn("/bin/bash", ["-c", wrappedCommand], {
@@ -288,6 +296,9 @@ export function createSandboxedReadOnlyCommandRunner(
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let outputError: Error | undefined;
       let settled = false;
 
       const cleanup = (): void => {
@@ -295,15 +306,49 @@ export function createSandboxedReadOnlyCommandRunner(
       };
       const onAbort = (): void => killProcessTree(child);
 
+      const collect = (
+        chunks: Buffer[],
+        chunk: Buffer,
+        currentBytes: number,
+        maximumBytes: number,
+        streamName: "stdout" | "stderr",
+      ): number => {
+        if (outputError) return currentBytes;
+        const remaining = maximumBytes - currentBytes;
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        const nextBytes = currentBytes + chunk.length;
+        if (nextBytes > maximumBytes) {
+          outputError = new Error(`${streamName} exceeded the Guardian bound`);
+          killProcessTree(child);
+        }
+        return Math.min(nextBytes, maximumBytes);
+      };
+
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
-      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdoutBytes = collect(
+          stdout,
+          chunk,
+          stdoutBytes,
+          GUARDIAN_COMMAND_MAX_STDOUT_BYTES,
+          "stdout",
+        );
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes = collect(
+          stderr,
+          chunk,
+          stderrBytes,
+          GUARDIAN_COMMAND_MAX_STDERR_BYTES,
+          "stderr",
+        );
+      });
       child.once("error", (error) => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(error);
+        reject(outputError ?? error);
       });
       child.once("close", (exitCode) => {
         if (settled) return;
@@ -311,6 +356,8 @@ export function createSandboxedReadOnlyCommandRunner(
         cleanup();
         if (signal?.aborted) {
           reject(new Error("aborted"));
+        } else if (outputError) {
+          reject(outputError);
         } else {
           resolvePromise({
             stdout: Buffer.concat(stdout),
@@ -325,12 +372,252 @@ export function createSandboxedReadOnlyCommandRunner(
 
 const GUARDIAN_FILE_OPERATION_HELPER = `
 const fs = require("node:fs/promises");
-const { constants } = require("node:fs");
-const [operation, encodedPath] = process.argv.slice(1);
+const { constants, createReadStream } = require("node:fs");
+const os = require("node:os");
+const nodePath = require("node:path");
+const [operation, encodedPath, ...operationArgs] = process.argv.slice(1);
 const path = Buffer.from(encodedPath, "base64").toString("utf8");
+const maxFileBytes = ${GUARDIAN_FILE_MAX_BYTES};
+const maxDirectoryEntries = ${GUARDIAN_DIRECTORY_MAX_ENTRIES};
+const maxDirectoryBytes = ${GUARDIAN_DIRECTORY_MAX_BYTES};
+
+async function readBounded(filePath) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of createReadStream(filePath)) {
+    bytes += chunk.length;
+    if (bytes > maxFileBytes) {
+      throw new Error("file exceeds the Guardian byte bound");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, bytes);
+}
+
+async function readPrefix(filePath, requestedBytes) {
+  const maximumBytes = Math.min(64, Math.max(1, requestedBytes));
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(maximumBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maximumBytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readTextWindow(
+  filePath,
+  requestedOffset,
+  requestedLimit,
+  requestedMaxLines,
+  requestedMaxBytes,
+) {
+  const startLine = Number.isFinite(requestedOffset)
+    ? Math.max(1, Math.floor(requestedOffset))
+    : 1;
+  const userLimit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.floor(requestedLimit))
+    : undefined;
+  const maxLines = Math.max(1, Math.floor(requestedMaxLines));
+  const maxBytes = Math.max(1, Math.floor(requestedMaxBytes));
+  const lineLimit = Math.min(maxLines, userLimit ?? maxLines);
+  const outputLines = [];
+  let outputBytes = 0;
+  let currentLine = 1;
+  let currentLineChunks = [];
+  let currentLineBytes = 0;
+  let truncatedBy = null;
+  let firstLineExceedsLimit = false;
+  let userLimitReached = false;
+  let hasMore = false;
+  let reachedEnd = false;
+  let stopped = false;
+
+  function stopAtLineLimit() {
+    hasMore = true;
+    stopped = true;
+    if (userLimit !== undefined && userLimit <= maxLines) userLimitReached = true;
+    else truncatedBy = "lines";
+  }
+
+  function finishCurrentLine() {
+    if (currentLine < startLine) return;
+    if (outputLines.length >= lineLimit) {
+      stopAtLineLimit();
+      return;
+    }
+    let line = Buffer.concat(currentLineChunks, currentLineBytes);
+    if (line.at(-1) === 0x0d) line = line.subarray(0, line.length - 1);
+    const separatorBytes = outputLines.length > 0 ? 1 : 0;
+    if (outputBytes + separatorBytes + line.length > maxBytes) {
+      firstLineExceedsLimit = outputLines.length === 0;
+      truncatedBy = "bytes";
+      hasMore = true;
+      stopped = true;
+      return;
+    }
+    outputLines.push(line);
+    outputBytes += separatorBytes + line.length;
+  }
+
+  const handle = await fs.open(filePath, "r");
+  const readBuffer = Buffer.alloc(64 * 1024);
+  try {
+    while (!stopped) {
+      const { bytesRead } = await handle.read(readBuffer, 0, readBuffer.length, null);
+      if (bytesRead === 0) {
+        reachedEnd = true;
+        break;
+      }
+      let cursor = 0;
+      while (cursor < bytesRead && !stopped) {
+        const newline = readBuffer.indexOf(0x0a, cursor);
+        const end = newline < 0 || newline >= bytesRead ? bytesRead : newline;
+        if (currentLine >= startLine) {
+          if (outputLines.length >= lineLimit) {
+            stopAtLineLimit();
+            break;
+          }
+          const segment = readBuffer.subarray(cursor, end);
+          currentLineBytes += segment.length;
+          const separatorBytes = outputLines.length > 0 ? 1 : 0;
+          if (outputBytes + separatorBytes + currentLineBytes > maxBytes) {
+            firstLineExceedsLimit = outputLines.length === 0;
+            truncatedBy = "bytes";
+            hasMore = true;
+            stopped = true;
+            break;
+          }
+          if (segment.length > 0) currentLineChunks.push(Buffer.from(segment));
+        }
+        if (newline < 0 || newline >= bytesRead) break;
+        finishCurrentLine();
+        currentLine += 1;
+        currentLineChunks = [];
+        currentLineBytes = 0;
+        cursor = newline + 1;
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+
+  if (reachedEnd && !stopped) finishCurrentLine();
+  return {
+    content: Buffer.concat(outputLines).length === 0
+      ? ""
+      : outputLines.map((line) => line.toString("utf8")).join("\\n"),
+    outputLines: outputLines.length,
+    outputBytes,
+    truncatedBy,
+    firstLineExceedsLimit,
+    userLimitReached,
+    hasMore,
+    offsetBeyondEnd: reachedEnd && startLine > currentLine,
+    totalLines: reachedEnd ? currentLine : undefined,
+  };
+}
+
+async function readDirectoryEntries(directoryPath) {
+  const entries = [];
+  let bytes = 0;
+  const directory = await fs.opendir(directoryPath);
+  try {
+    for await (const entry of directory) {
+      const entryBytes = Buffer.byteLength(entry.name) + 1;
+      if (entries.length >= maxDirectoryEntries || bytes + entryBytes > maxDirectoryBytes) break;
+      entries.push(entry.name);
+      bytes += entryBytes;
+    }
+  } finally {
+    await directory.close().catch(() => undefined);
+  }
+  return entries;
+}
+
+function resolveToCwd(rawPath, cwd) {
+  let normalized = rawPath.replace(/^@/, "").replace(/\u00a0/g, " ");
+  if (normalized === "~") normalized = os.homedir();
+  else if (normalized.startsWith("~/")) normalized = nodePath.join(os.homedir(), normalized.slice(2));
+  return nodePath.resolve(cwd, normalized);
+}
+
+async function resolveReadPath(rawPath, cwd) {
+  const resolved = resolveToCwd(rawPath, cwd);
+  const variants = [
+    resolved,
+    resolved.replace(/ (AM|PM)\./gi, "\u202f$1."),
+    resolved.normalize("NFD"),
+    resolved.replace(/'/g, "\u2019"),
+    resolved.normalize("NFD").replace(/'/g, "\u2019"),
+  ];
+  for (const candidate of [...new Set(variants)]) {
+    try {
+      await fs.access(candidate, constants.F_OK);
+      return candidate;
+    } catch (error) {
+      if (!error || typeof error !== "object" || error.code !== "ENOENT") throw error;
+    }
+  }
+  return resolved;
+}
+
+async function listDirectory(directoryPath, requestedLimit) {
+  const effectiveLimit = Math.min(
+    maxDirectoryEntries,
+    Math.max(1, Number.isInteger(requestedLimit) ? requestedLimit : 500),
+  );
+  const entries = [];
+  let bytes = 0;
+  let entryLimitReached = false;
+  const directory = await fs.opendir(directoryPath);
+  try {
+    for await (const entry of directory) {
+      if (entries.length >= effectiveLimit) {
+        entryLimitReached = true;
+        break;
+      }
+      let isDirectory;
+      try {
+        isDirectory = (await fs.stat(nodePath.join(directoryPath, entry.name))).isDirectory();
+      } catch {
+        continue;
+      }
+      const rendered = entry.name + (isDirectory ? "/" : "");
+      const entryBytes = Buffer.byteLength(rendered) + 1;
+      if (bytes + entryBytes > maxDirectoryBytes) {
+        entryLimitReached = true;
+        break;
+      }
+      entries.push(rendered);
+      bytes += entryBytes;
+    }
+  } finally {
+    await directory.close().catch(() => undefined);
+  }
+  return { entries, entryLimitReached };
+}
+
 async function main() {
-  if (operation === "read") process.stdout.write(await fs.readFile(path));
+  if (operation === "read") process.stdout.write(await readBounded(path));
+  else if (operation === "readPrefix") {
+    process.stdout.write(await readPrefix(path, Number(operationArgs[0])));
+  }
+  else if (operation === "readText") {
+    process.stdout.write(JSON.stringify(await readTextWindow(
+      path,
+      Number(operationArgs[0]),
+      operationArgs[1] === "" ? undefined : Number(operationArgs[1]),
+      Number(operationArgs[2]),
+      Number(operationArgs[3]),
+    )));
+  }
   else if (operation === "access") await fs.access(path, constants.R_OK);
+  else if (operation === "resolveReadPath") {
+    const cwd = Buffer.from(operationArgs[0], "base64").toString("utf8");
+    process.stdout.write(await resolveReadPath(path, cwd));
+  }
   else if (operation === "exists") {
     try {
       await fs.access(path, constants.F_OK);
@@ -344,41 +631,99 @@ async function main() {
     const stat = await fs.stat(path);
     process.stdout.write(JSON.stringify({ isDirectory: stat.isDirectory() }));
   } else if (operation === "readdir") {
-    process.stdout.write(JSON.stringify(await fs.readdir(path)));
+    process.stdout.write(JSON.stringify(await readDirectoryEntries(path)));
+  } else if (operation === "list") {
+    process.stdout.write(JSON.stringify(await listDirectory(path, Number(operationArgs[0]))));
   } else throw new Error("unsupported Guardian file operation");
 }
 main().catch((error) => {
-  process.stderr.write(error instanceof Error ? error.message : String(error));
+  process.stderr.write(JSON.stringify({
+    code: error && typeof error === "object" ? error.code : undefined,
+    message: error instanceof Error ? error.message : String(error),
+  }));
   process.exitCode = 1;
 });
 `.trim();
 
-type GuardianFileOperation = "read" | "access" | "exists" | "stat" | "readdir";
+type GuardianFileOperation =
+  | "read"
+  | "readPrefix"
+  | "readText"
+  | "access"
+  | "resolveReadPath"
+  | "exists"
+  | "stat"
+  | "readdir"
+  | "list";
 
-export function createSandboxedGuardianFileOperations(
-  manager: SandboxManagerLike,
-): {
+export interface SandboxedGuardianDirectoryListing {
+  entries: string[];
+  entryLimitReached: boolean;
+}
+
+export interface SandboxedGuardianTextRead {
+  content: string;
+  outputLines: number;
+  outputBytes: number;
+  truncatedBy: "lines" | "bytes" | null;
+  firstLineExceedsLimit: boolean;
+  userLimitReached: boolean;
+  hasMore: boolean;
+  offsetBeyondEnd: boolean;
+  totalLines?: number;
+}
+
+export interface SandboxedGuardianFileOperations {
   read: ReadOperations;
   grep: GrepOperations;
   find: Pick<FindOperations, "exists">;
   ls: LsOperations;
-} {
+  resolveReadPath(path: string, cwd: string): Promise<string>;
+  readPrefix(path: string, bytes: number): Promise<Buffer>;
+  readText(
+    path: string,
+    offset: number | undefined,
+    limit: number | undefined,
+    maxLines: number,
+    maxBytes: number,
+  ): Promise<SandboxedGuardianTextRead>;
+  listDirectory(path: string, limit: number): Promise<SandboxedGuardianDirectoryListing>;
+}
+
+export function createSandboxedGuardianFileOperations(
+  manager: SandboxManagerLike,
+  signal?: AbortSignal,
+): SandboxedGuardianFileOperations {
   const run = createSandboxedReadOnlyCommandRunner(manager, "node");
   const runFileOperation = async (
     operation: GuardianFileOperation,
     path: string,
+    operationArgs: readonly string[] = [],
   ): Promise<Buffer> => {
-    const result = await run([
-      "-e",
-      GUARDIAN_FILE_OPERATION_HELPER,
-      operation,
-      Buffer.from(path).toString("base64"),
-    ]);
+    const result = await run(
+      [
+        "-e",
+        GUARDIAN_FILE_OPERATION_HELPER,
+        operation,
+        Buffer.from(path).toString("base64"),
+        ...operationArgs,
+      ],
+      signal,
+    );
     if (result.exitCode !== 0) {
-      throw new Error(
-        result.stderr.toString("utf8")
-        || `sandboxed Guardian file operation exited with ${result.exitCode}`,
-      );
+      const stderr = result.stderr.toString("utf8");
+      let message = stderr || `sandboxed Guardian file operation exited with ${result.exitCode}`;
+      let code: string | undefined;
+      try {
+        const diagnostic = JSON.parse(stderr) as { code?: unknown; message?: unknown };
+        if (typeof diagnostic.message === "string") message = diagnostic.message;
+        if (typeof diagnostic.code === "string") code = diagnostic.code;
+      } catch {
+        // Preserve non-helper sandbox diagnostics as-is.
+      }
+      const error = new Error(message) as NodeJS.ErrnoException;
+      if (code) error.code = code;
+      throw error;
     }
     return result.stdout;
   };
@@ -410,6 +755,20 @@ export function createSandboxedGuardianFileOperations(
       readdir: async (path) =>
         JSON.parse((await runFileOperation("readdir", path)).toString("utf8")) as string[],
     },
+    resolveReadPath: (path, cwd) =>
+      runFileOperation("resolveReadPath", path, [Buffer.from(cwd).toString("base64")])
+        .then((output) => output.toString("utf8")),
+    readPrefix: (path, bytes) => runFileOperation("readPrefix", path, [String(bytes)]),
+    readText: (path, offset, limit, maxLines, maxBytes) =>
+      runFileOperation("readText", path, [
+        String(offset ?? 1),
+        limit === undefined ? "" : String(limit),
+        String(maxLines),
+        String(maxBytes),
+      ]).then((output) => JSON.parse(output.toString("utf8")) as SandboxedGuardianTextRead),
+    listDirectory: (path, limit) =>
+      runFileOperation("list", path, [String(limit)])
+        .then((output) => JSON.parse(output.toString("utf8")) as SandboxedGuardianDirectoryListing),
   };
 }
 

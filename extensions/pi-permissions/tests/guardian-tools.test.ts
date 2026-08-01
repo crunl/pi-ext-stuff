@@ -69,6 +69,68 @@ function passThroughSandboxManager(): SandboxManagerLike & {
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function hangingSandboxManager(markerPath: string): SandboxManagerLike {
+  const script = [
+    'const { writeFileSync } = require("node:fs");',
+    "writeFileSync(process.argv[1], String(process.pid));",
+    "setInterval(() => {}, 1_000);",
+  ].join("");
+  return {
+    initialize: vi.fn(async () => undefined),
+    reset: vi.fn(async () => undefined),
+    wrapWithSandbox: vi.fn(async () =>
+      [process.execPath, "-e", script, markerPath].map(shellQuote).join(" ")),
+  };
+}
+
+async function waitForPid(markerPath: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      const value = await import("node:fs/promises").then(({ readFile }) =>
+        readFile(markerPath, "utf8"));
+      const pid = Number(value);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    } catch {
+      // The child has not written its marker yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for child marker ${markerPath}`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!processIsAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return !processIsAlive(pid);
+}
+
+function forceKillProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // The process already exited.
+    }
+  }
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(
@@ -182,6 +244,95 @@ describe("createGuardianToolRuntime", () => {
 });
 
 describe("createSandboxedGuardianToolRuntime sandbox boundary", () => {
+  it("sends unresolved read paths into the sandbox before filesystem probing", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-parent-read-probe-");
+    const requestedPath = join(cwd, "Capture 1 PM.txt");
+    const parentVisibleVariant = join(cwd, "Capture 1\u202fPM.txt");
+    await writeFile(parentVisibleVariant, "sandbox-only evidence\n");
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => undefined,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "read-without-parent-probe",
+      name: "read",
+      arguments: { path: requestedPath },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    const firstSandboxedCommand = manager.wrapWithSandbox.mock.calls[0]?.[0] ?? "";
+    expect(firstSandboxedCommand).toContain(Buffer.from(requestedPath).toString("base64"));
+    expect(firstSandboxedCommand).not.toContain(
+      Buffer.from(parentVisibleVariant).toString("base64"),
+    );
+  });
+
+  it("reads a bounded line window beyond the Guardian binary byte cap", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-large-read-offset-");
+    const file = join(cwd, "large.txt");
+    const precedingLines = 1_100_000;
+    await writeFile(file, `${"skip\n".repeat(precedingLines)}target\n`);
+    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
+      resolveRgPath: () => undefined,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "read-large-offset",
+      name: "read",
+      arguments: { path: file, offset: precedingLines + 1, limit: 1 },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringMatching(/^target/) }),
+    ]);
+  });
+
+  it.each([
+    ["read", { path: "evidence.txt" }],
+    ["ls", { path: "." }],
+    ["find", { pattern: "*.ts" }],
+    ["grep", { pattern: "needle", path: "." }],
+  ])("terminates the underlying %s child when Guardian aborts", async (name, arguments_) => {
+    const cwd = await temporaryDirectory(`pi-guardian-${name}-abort-`);
+    const markerPath = join(cwd, `${name}.pid`);
+    const rgPath = await fakeRg(cwd, "setInterval(() => {}, 1_000);\n");
+    const runtime = createSandboxedGuardianToolRuntime(
+      cwd,
+      hangingSandboxManager(markerPath),
+      { resolveRgPath: () => rgPath },
+    );
+    const controller = new AbortController();
+    const execution = runtime.execute(
+      {
+        type: "toolCall",
+        id: `${name}-abort-child`,
+        name,
+        arguments: arguments_,
+      },
+      controller.signal,
+    );
+    const pid = await waitForPid(markerPath);
+
+    controller.abort();
+    const outcome = await Promise.race([
+      execution,
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 500)),
+    ]);
+    const exited = await waitForProcessExit(pid);
+    if (!exited) forceKillProcessGroup(pid);
+    await Promise.race([
+      execution.catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 500)),
+    ]);
+
+    expect(outcome).not.toBe("pending");
+    expect(exited).toBe(true);
+  });
+
   it("executes all four tools through the sandbox and reads an external absolute path", async () => {
     const cwd = await temporaryDirectory("pi-guardian-cwd-");
     const external = await temporaryDirectory("pi-guardian-external-");
@@ -625,6 +776,33 @@ process.exit(2);
       expect.objectContaining({ text: expect.stringContaining("Path not found") }),
     ]);
     expect(manager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("preserves non-not-found grep preflight diagnostics", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-grep-preflight-error-");
+    const rgPath = await fakeRg(cwd, "process.exit(0);\n");
+    const manager = passThroughSandboxManager();
+    manager.wrapWithSandbox.mockResolvedValueOnce(
+      "printf 'sandbox permission denied' >&2; exit 13",
+    );
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "grep-preflight-permission",
+      name: "grep",
+      arguments: { pattern: "needle", path: cwd },
+    });
+
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("sandbox permission denied") }),
+    ]);
+    expect(result.content).not.toEqual([
+      expect.objectContaining({ text: expect.stringContaining("Path not found") }),
+    ]);
   });
 
   it("returns a sandbox tool failure without a direct read-only fallback", async () => {

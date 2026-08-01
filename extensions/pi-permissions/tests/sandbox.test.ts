@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -151,6 +151,69 @@ describe("sandbox integration", () => {
     await abortedExpectation;
     expect(manager.initialize).not.toHaveBeenCalled();
     expect(manager.reset).not.toHaveBeenCalled();
+  });
+
+  it("terminates a read-only command before stdout can exceed the Guardian bound", async () => {
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+
+    const outcome = await run([
+      "-e",
+      "process.stdout.write('x'.repeat(6 * 1024 * 1024))",
+    ]).catch((error: unknown) => error);
+
+    expect(outcome instanceof Error).toBe(true);
+    if (outcome instanceof Error) {
+      expect(outcome.message).toMatch(/stdout.*Guardian bound/i);
+    }
+  });
+
+  it("bounds Guardian file reads before the helper writes stdout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-read-bound-"));
+    const file = join(directory, "large.txt");
+    await writeFile(file, Buffer.alloc(5 * 1024 * 1024, 0x78));
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+
+    try {
+      const operations = createSandboxedGuardianFileOperations(manager);
+      const outcome = await operations.read.readFile(file).catch((error: unknown) => error);
+      expect(outcome instanceof Error).toBe(true);
+      if (outcome instanceof Error) {
+        expect(outcome.message).toMatch(/file.*Guardian byte bound/i);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds Guardian directory entries inside the helper", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-entry-bound-"));
+    const entryCount = 1_001;
+    await Promise.all(
+      Array.from({ length: entryCount }, (_, index) =>
+        writeFile(join(directory, `${String(index).padStart(4, "0")}.txt`), "")),
+    );
+    const manager = {
+      initialize: vi.fn(async () => undefined),
+      reset: vi.fn(async () => undefined),
+      wrapWithSandbox: vi.fn(async (command: string) => command),
+    };
+
+    try {
+      const operations = createSandboxedGuardianFileOperations(manager);
+      const entries = await operations.ls.readdir(directory);
+      expect(entries.length).toBeLessThan(entryCount);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("returns an independent Guardian read-only sandbox config", () => {

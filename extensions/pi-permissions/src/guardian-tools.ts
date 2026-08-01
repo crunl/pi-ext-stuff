@@ -1,4 +1,3 @@
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import {
   basename,
   delimiter,
@@ -13,8 +12,11 @@ import type { Tool as LlmTool, ToolCall, ToolResultMessage } from "@earendil-wor
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
   createReadOnlyTools,
   DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   formatSize,
   getAgentDir,
   truncateHead,
@@ -22,6 +24,10 @@ import {
   type FindToolInput,
   type GrepToolDetails,
   type GrepToolInput,
+  type LsToolDetails,
+  type LsToolInput,
+  type ReadToolDetails,
+  type ReadToolInput,
 } from "@earendil-works/pi-coding-agent";
 import {
   createSandboxedGuardianFileOperations,
@@ -43,6 +49,8 @@ const DEFAULT_GREP_LIMIT = 100;
 const MAX_GREP_LIMIT = 1_000;
 const DEFAULT_FIND_LIMIT = 1_000;
 const MAX_FIND_LIMIT = 5_000;
+const DEFAULT_LS_LIMIT = 500;
+const MAX_LS_LIMIT = 1_000;
 const MAX_GREP_CONTEXT = 20;
 const MAX_RG_ARGUMENT_LENGTH = 16_384;
 const RG_UNAVAILABLE_MESSAGE =
@@ -51,8 +59,10 @@ const RG_UNAVAILABLE_MESSAGE =
 const RUN_RESOLVED_RG_HELPER = `
 const { execFile } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
-const [encodedExecutable, encodedArgs, mode, recordLimitText, contextLineCountText] = process.argv.slice(1);
-const executable = Buffer.from(encodedExecutable, "base64").toString("utf8");
+const fs = require("node:fs");
+const nodePath = require("node:path");
+const [encodedExecutables, encodedArgs, mode, recordLimitText, contextLineCountText] = process.argv.slice(1);
+const executableCandidates = JSON.parse(Buffer.from(encodedExecutables, "base64").toString("utf8"));
 const args = JSON.parse(Buffer.from(encodedArgs, "base64").toString("utf8"));
 const recordLimit = Number(recordLimitText);
 const contextLineCount = Number(contextLineCountText);
@@ -71,7 +81,12 @@ let matchCount = 0;
 let trailingContextPath;
 let trailingContextThrough = 0;
 
-if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) {
+if (
+  !Array.isArray(executableCandidates)
+  || !executableCandidates.every((candidate) => typeof candidate === "string")
+  || !Array.isArray(args)
+  || !args.every((arg) => typeof arg === "string")
+) {
   throw new Error("invalid rg arguments");
 }
 if (
@@ -82,6 +97,28 @@ if (
   || contextLineCount < 0
 ) {
   throw new Error("invalid rg record limit");
+}
+
+let executable;
+for (const candidate of executableCandidates) {
+  if (!nodePath.isAbsolute(candidate) || !/^rg(?:\.exe)?$/i.test(nodePath.basename(candidate))) {
+    continue;
+  }
+  try {
+    const resolved = fs.realpathSync(candidate);
+    if (!/^rg(?:\.exe)?$/i.test(nodePath.basename(resolved)) || !fs.statSync(resolved).isFile()) {
+      continue;
+    }
+    fs.accessSync(resolved, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+    executable = resolved;
+    break;
+  } catch {
+    // Try the next fixed candidate inside the Guardian sandbox.
+  }
+}
+if (!executable) {
+  process.stderr.write("${RG_UNAVAILABLE_MESSAGE}");
+  process.exit(127);
 }
 
 const child = execFile(executable, args, {
@@ -247,43 +284,33 @@ export interface GuardianToolRuntime {
 
 function executableRgPath(candidate: string | undefined): string | undefined {
   if (!candidate || !isAbsolute(candidate)) return undefined;
-  try {
-    const resolved = realpathSync(candidate);
-    if (!/^rg(?:\.exe)?$/i.test(basename(resolved)) || !statSync(resolved).isFile()) {
-      return undefined;
-    }
-    accessSync(resolved, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-    return resolved;
-  } catch {
-    return undefined;
-  }
+  return /^rg(?:\.exe)?$/i.test(basename(candidate)) ? candidate : undefined;
 }
 
-function resolveExistingRgPath(): string | undefined {
+function resolveExistingRgPaths(): string[] {
   const binaryName = process.platform === "win32" ? "rg.exe" : "rg";
   const candidates = [join(getAgentDir(), "bin", binaryName)];
   for (const entry of process.env.PATH?.split(delimiter) ?? []) {
     if (entry) candidates.push(join(entry, binaryName));
   }
-  for (const candidate of candidates) {
-    const resolved = executableRgPath(candidate);
-    if (resolved) return resolved;
-  }
-  return undefined;
+  return candidates.flatMap((candidate) => {
+    const trusted = executableRgPath(candidate);
+    return trusted ? [trusted] : [];
+  });
 }
 
 function createSandboxedRgRunner(
   manager: SandboxManagerLike,
-  resolvedRgPath: string,
+  resolvedRgPaths: readonly string[],
 ): SandboxedRgRunner {
   const runNode = createSandboxedReadOnlyCommandRunner(manager, "node");
-  const encodedExecutable = Buffer.from(resolvedRgPath).toString("base64");
+  const encodedExecutables = Buffer.from(JSON.stringify(resolvedRgPaths)).toString("base64");
   return (args, mode, recordLimit, contextLineCount, signal) =>
     runNode(
       [
         "-e",
         RUN_RESOLVED_RG_HELPER,
-        encodedExecutable,
+        encodedExecutables,
         Buffer.from(JSON.stringify(args)).toString("base64"),
         mode,
         String(recordLimit),
@@ -329,8 +356,14 @@ function displayMatchPath(filePath: string, searchPath: string, searchIsDirector
   return basename(absolutePath);
 }
 
+type PublicGuardianToolDefinition =
+  | ReturnType<typeof createReadToolDefinition>
+  | ReturnType<typeof createGrepToolDefinition>
+  | ReturnType<typeof createFindToolDefinition>
+  | ReturnType<typeof createLsToolDefinition>;
+
 function publicToolFromDefinition(
-  definition: ReturnType<typeof createGrepToolDefinition> | ReturnType<typeof createFindToolDefinition>,
+  definition: PublicGuardianToolDefinition,
   execute: PiAgentTool["execute"],
 ): PiAgentTool {
   return {
@@ -343,6 +376,132 @@ function publicToolFromDefinition(
       : { constrainedSampling: definition.constrainedSampling }),
     execute,
   } as PiAgentTool;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return error instanceof Error
+    && ((error as NodeJS.ErrnoException).code === "ENOENT"
+      || /\bENOENT\b|no such file or directory/i.test(error.message));
+}
+
+function supportedImageMimeType(buffer: Buffer): string | undefined {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  )) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  const header = buffer.subarray(0, 12).toString("ascii");
+  if (header.startsWith("GIF87a") || header.startsWith("GIF89a")) return "image/gif";
+  if (header.startsWith("RIFF") && header.slice(8, 12) === "WEBP") return "image/webp";
+  if (header.startsWith("BM")) return "image/bmp";
+  return undefined;
+}
+
+async function executeSandboxedRead(
+  cwd: string,
+  input: ReadToolInput,
+  operations: ReturnType<typeof createSandboxedGuardianFileOperations>,
+) {
+  const absolutePath = await operations.resolveReadPath(input.path, cwd);
+  await operations.read.access(absolutePath);
+  const mimeType = supportedImageMimeType(await operations.readPrefix(absolutePath, 16));
+  if (mimeType) {
+    const buffer = await operations.read.readFile(absolutePath);
+    return {
+      content: [
+        { type: "text" as const, text: `Read image file [${mimeType}]` },
+        { type: "image" as const, data: buffer.toString("base64"), mimeType },
+      ],
+      details: undefined,
+    };
+  }
+
+  const startLine = input.offset ? Math.max(1, Math.floor(input.offset)) : 1;
+  const window = await operations.readText(
+    absolutePath,
+    startLine,
+    input.limit,
+    DEFAULT_MAX_LINES,
+    DEFAULT_MAX_BYTES,
+  );
+  if (window.offsetBeyondEnd) {
+    throw new Error(
+      `Offset ${input.offset} is beyond end of file (${window.totalLines ?? 0} lines total)`,
+    );
+  }
+
+  let outputText = window.content;
+  if (window.firstLineExceedsLimit) {
+    outputText = `[Line ${startLine} exceeds the ${formatSize(DEFAULT_MAX_BYTES)} Guardian read limit]`;
+  } else if (window.truncatedBy) {
+    const endLineDisplay = startLine + window.outputLines - 1;
+    const nextOffset = endLineDisplay + 1;
+    outputText += `\n\n[Showing lines ${startLine}-${endLineDisplay} (${window.truncatedBy === "bytes" ? `${formatSize(DEFAULT_MAX_BYTES)} byte` : `${DEFAULT_MAX_LINES} line`} limit). Use offset=${nextOffset} to continue.]`;
+  } else if (window.userLimitReached || (input.limit !== undefined && window.hasMore)) {
+    const nextOffset = startLine + window.outputLines;
+    const remaining = window.totalLines === undefined
+      ? "More lines"
+      : `${Math.max(0, window.totalLines - nextOffset + 1)} more lines`;
+    outputText += `\n\n[${remaining} in file. Use offset=${nextOffset} to continue.]`;
+  }
+
+  return {
+    content: [{ type: "text" as const, text: outputText }],
+    details: undefined as ReadToolDetails | undefined,
+  };
+}
+
+async function executeSandboxedLs(
+  cwd: string,
+  input: LsToolInput,
+  operations: ReturnType<typeof createSandboxedGuardianFileOperations>,
+) {
+  const requestedPath = input.path || ".";
+  const directoryPath = await operations.resolveReadPath(requestedPath, cwd);
+  const effectiveLimit = boundedLimit(input.limit, DEFAULT_LS_LIMIT, MAX_LS_LIMIT);
+  let listing: Awaited<ReturnType<typeof operations.listDirectory>>;
+  try {
+    listing = await operations.listDirectory(directoryPath, effectiveLimit);
+  } catch (error) {
+    if (isNotFoundError(error)) throw new Error(`Path not found: ${directoryPath}`);
+    if (
+      error instanceof Error
+      && ((error as NodeJS.ErrnoException).code === "ENOTDIR" || /not a directory/i.test(error.message))
+    ) {
+      throw new Error(`Not a directory: ${directoryPath}`);
+    }
+    throw error;
+  }
+
+  listing.entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  if (listing.entries.length === 0) {
+    return {
+      content: [{ type: "text" as const, text: "(empty directory)" }],
+      details: undefined,
+    };
+  }
+
+  const truncation = truncateHead(listing.entries.join("\n"), {
+    maxLines: Number.MAX_SAFE_INTEGER,
+  });
+  let output = truncation.content;
+  const details: LsToolDetails = {};
+  const notices: string[] = [];
+  if (listing.entryLimitReached) {
+    details.entryLimitReached = effectiveLimit;
+    notices.push(`${effectiveLimit} entries limit reached`);
+  }
+  if (truncation.truncated) {
+    details.truncation = truncation;
+    notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+  }
+  if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+
+  return {
+    content: [{ type: "text" as const, text: output }],
+    details: Object.keys(details).length > 0 ? details : undefined,
+  };
 }
 
 interface RgGrepRecord {
@@ -388,8 +547,9 @@ async function executeSandboxedGrep(
   let searchIsDirectory: boolean;
   try {
     searchIsDirectory = await operations.grep.isDirectory(searchPath);
-  } catch {
-    throw new Error(`Path not found: ${searchPath}`);
+  } catch (error) {
+    if (isNotFoundError(error)) throw new Error(`Path not found: ${searchPath}`);
+    throw error;
   }
 
   const effectiveLimit = boundedLimit(input.limit, DEFAULT_GREP_LIMIT, MAX_GREP_LIMIT);
@@ -583,23 +743,23 @@ export function createSandboxedGuardianToolRuntime(
   manager: SandboxManagerLike,
   options: SandboxedGuardianToolRuntimeOptions = {},
 ): GuardianToolRuntime {
-  const operations = createSandboxedGuardianFileOperations(manager);
-  const resolvedRgPath = executableRgPath(
-    options.resolveRgPath ? options.resolveRgPath() : resolveExistingRgPath(),
-  );
-  const runRg = resolvedRgPath
-    ? createSandboxedRgRunner(manager, resolvedRgPath)
+  const resolvedRgPaths = options.resolveRgPath
+    ? [executableRgPath(options.resolveRgPath())].filter((path): path is string => Boolean(path))
+    : resolveExistingRgPaths();
+  const runRg = resolvedRgPaths.length > 0
+    ? createSandboxedRgRunner(manager, resolvedRgPaths)
     : undefined;
 
-  const publicTools = createReadOnlyTools(cwd, {
-    read: { operations: operations.read },
-    ls: { operations: operations.ls },
-  });
-  const readTool = publicTools.find((tool) => tool.name === "read");
-  const lsTool = publicTools.find((tool) => tool.name === "ls");
-  if (!readTool || !lsTool) {
-    throw new Error("Pi Agent read-only tool definitions are unavailable");
-  }
+  const readDefinition = createReadToolDefinition(cwd);
+  const readTool = publicToolFromDefinition(
+    readDefinition,
+    async (_toolCallId, params, signal) =>
+      executeSandboxedRead(
+        cwd,
+        params as ReadToolInput,
+        createSandboxedGuardianFileOperations(manager, signal),
+      ),
+  );
 
   const grepDefinition = createGrepToolDefinition(cwd);
   const grepTool = publicToolFromDefinition(
@@ -608,7 +768,7 @@ export function createSandboxedGuardianToolRuntime(
       executeSandboxedGrep(
         cwd,
         params as GrepToolInput,
-        operations,
+        createSandboxedGuardianFileOperations(manager, signal),
         runRg,
         signal,
       ),
@@ -620,6 +780,7 @@ export function createSandboxedGuardianToolRuntime(
     async (toolCallId, params, signal, onUpdate) => {
       const input = params as FindToolInput;
       const effectiveLimit = boundedLimit(input.limit, DEFAULT_FIND_LIMIT, MAX_FIND_LIMIT);
+      const operations = createSandboxedGuardianFileOperations(manager, signal);
       const sandboxedDefinition = createFindToolDefinition(cwd, {
         operations: {
           exists: operations.find.exists,
@@ -665,6 +826,17 @@ export function createSandboxedGuardianToolRuntime(
         undefined as never,
       );
     },
+  );
+
+  const lsDefinition = createLsToolDefinition(cwd);
+  const lsTool = publicToolFromDefinition(
+    lsDefinition,
+    async (_toolCallId, params, signal) =>
+      executeSandboxedLs(
+        cwd,
+        params as LsToolInput,
+        createSandboxedGuardianFileOperations(manager, signal),
+      ),
   );
 
   return createGuardianToolRuntime(cwd, () => [readTool, grepTool, findTool, lsTool]);
