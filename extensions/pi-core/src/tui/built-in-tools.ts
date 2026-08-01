@@ -31,6 +31,10 @@ function readArgument(args: Record<string, unknown>): string {
 }
 
 export function registerBuiltInToolRendering(pi: ExtensionAPI): void {
+  // write / edit / bash are intentionally NOT registered here: pi-permissions
+  // registers them because their execute needs the permission gate, and tool
+  // registration is first-wins. Their Codex rendering specs (icon, verbs,
+  // collapsed summaries) live in codex-tool-specs.ts and are applied there.
   const initialCwd = process.cwd();
 
   const initialRead = createReadTool(initialCwd);

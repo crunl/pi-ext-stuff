@@ -13,6 +13,11 @@
  */
 
 export { applyAutocompleteAbove } from "./src/tui/autocomplete-above.ts";
+export {
+  codexBashToolSpec,
+  codexEditToolSpec,
+  codexWriteToolSpec,
+} from "./src/tui/codex-tool-specs.ts";
 export { createEditDiffBox } from "./src/tui/edit-diff.ts";
 export {
   colorizeEditDiffSummary,

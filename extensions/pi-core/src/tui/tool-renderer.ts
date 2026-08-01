@@ -23,7 +23,7 @@ type ExpandedResultRenderer = (
   outputPad: OutputPad,
 ) => Component;
 
-interface CodexToolRendererSpec {
+export interface CodexToolRendererSpec {
   icon?: string;
   runningVerb: string;
   completedVerb: string;
