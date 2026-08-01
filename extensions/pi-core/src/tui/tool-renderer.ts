@@ -3,7 +3,7 @@ import type {
   Theme,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import {
   type OutputPad,
   type OutputPaddingSource,
@@ -28,8 +28,19 @@ export interface CodexToolRendererSpec {
   runningVerb: string;
   completedVerb: string;
   argument: (args: Record<string, unknown>, cwd: string) => string;
-  collapsed: CollapsedResult;
+  collapsed?: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
+  /**
+   * Optional component rendered below the header while the call is being
+   * streamed (partial args) and the result view is expanded. Lets a tool
+   * show a live preview that updates as arguments grow, e.g. the write tool's
+   * syntax-highlighted content preview. Reuses renderExpandedResult's state.
+   */
+  renderCallPreview?: (
+    args: Record<string, unknown>,
+    theme: Theme,
+    context: RenderContext,
+  ) => Component | undefined;
   renderExpandedResult?: ExpandedResultRenderer;
   maxOutputRows?: number;
   transformOutput?: (text: string) => string;
@@ -40,6 +51,8 @@ interface CodexToolRenderState {
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
+  /** Renderer-specific state, e.g. incremental highlight caches for previews. */
+  rendererState?: unknown;
 }
 
 interface RenderContext {
@@ -49,6 +62,8 @@ interface RenderContext {
   state: CodexToolRenderState;
   cwd: string;
   isError: boolean;
+  /** Whether the result view is expanded (from ToolRenderContext). */
+  expanded: boolean;
 }
 
 interface CodexToolRendering {
@@ -162,7 +177,17 @@ export function createCodexToolRendering(
       const state = context.state;
       paddingSource.track(context.toolCallId, context.invalidate);
       state.status ??= "running";
-      return updateHeader(spec, state, args, context, theme, paddingSource.getOutputPad());
+      const header = updateHeader(spec, state, args, context, theme, paddingSource.getOutputPad());
+      const preview =
+        context.expanded && !context.isError
+          ? spec.renderCallPreview?.(args, theme, context)
+          : undefined;
+      if (!preview) return header;
+      const container = new Container();
+      container.addChild(header);
+      container.addChild(new Spacer(1));
+      container.addChild(preview);
+      return container;
     },
     renderResult(result, options, theme, context) {
       const state = context.state;
