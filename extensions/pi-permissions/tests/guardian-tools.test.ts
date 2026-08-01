@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
@@ -320,6 +320,71 @@ process.stdout.write([
     expect(manager.wrapWithSandbox.mock.calls.at(-1)?.[3]).toBeUndefined();
   });
 
+  it("accepts sandboxed output above the execFile default and below the Guardian bound", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-large-rg-output-");
+    const rgPath = await fakeRg(cwd, `
+const path = require("node:path");
+const searchRoot = process.argv.at(-1);
+const suffix = "x".repeat(300) + ".ts";
+for (let index = 0; index < 4_000; index++) {
+  process.stdout.write(path.join(searchRoot, String(index).padStart(4, "0") + "-" + suffix) + "\\n");
+}
+`);
+    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "find-large-bounded-output",
+      name: "find",
+      arguments: { pattern: "*.ts", limit: 5_000 },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringMatching(/^0000-x+\.ts/),
+      }),
+    ]);
+  });
+
+  it("preserves split UTF-8 and consumes complete lines before bounding the residual", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-split-output-");
+    const rgPath = await fakeRg(cwd, `
+const path = require("node:path");
+const searchRoot = process.argv.at(-1);
+const first = Buffer.from(path.join(searchRoot, "目录", "文件.ts") + "\\n");
+const splitAt = first.indexOf(Buffer.from("目")) + 1;
+process.stdout.write(first.subarray(0, splitAt));
+setTimeout(() => {
+  const lines = [];
+  for (let index = 0; index < 700; index++) {
+    lines.push(path.join(searchRoot, "bulk", String(index).padStart(4, "0") + "-" + "y".repeat(160) + ".ts"));
+  }
+  process.stdout.write(Buffer.concat([
+    first.subarray(splitAt),
+    Buffer.from(lines.join("\\n") + "\\n"),
+  ]));
+}, 20);
+`);
+    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "find-split-output",
+      name: "find",
+      arguments: { pattern: "*.ts", limit: 1_000 },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({ text: expect.stringMatching(/^目录\/文件\.ts\n/) }),
+    ]);
+  });
+
   it("returns controlled missing-rg errors without downloading tools", async () => {
     const cwd = await temporaryDirectory("pi-guardian-missing-rg-");
     const fetchSpy = vi.spyOn(globalThis, "fetch");
@@ -384,14 +449,19 @@ if (pattern === "provider-error") {
   process.stderr.write("authorization=guardian-secret");
   process.exit(2);
 }
-const required = ["--json", "--line-number", "--color=never", "--hidden", "--ignore-case", "--fixed-strings", "--glob", "*.ts"];
+const required = ["--json", "--line-number", "--color=never", "--hidden", "--ignore-case", "--fixed-strings", "--glob", "*.ts", "--context", "1"];
 if (!required.every((value) => args.includes(value))) {
   process.stderr.write("missing required grep arguments");
   process.exit(2);
 }
-for (const [lineNumber, text] of [[2, "needle\\n"], [4, "second needle\\n"]]) {
+for (const [type, lineNumber, text] of [
+  ["context", 1, "before\\n"],
+  ["match", 2, "needle\\n"],
+  ["context", 3, "after\\n"],
+  ["match", 4, "second needle\\n"],
+]) {
   process.stdout.write(JSON.stringify({
-    type: "match",
+    type,
     data: {
       path: { text: searchRoot },
       lines: { text },
@@ -452,6 +522,53 @@ for (const [lineNumber, text] of [[2, "needle\\n"], [4, "second needle\\n"]]) {
     expect(providerError.content).toEqual([
       expect.objectContaining({ text: expect.stringContaining("authorization: [redacted]") }),
     ]);
+  });
+
+  it("uses bounded rg context events without reading a large matched file", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-large-context-");
+    const sourcePath = join(cwd, "large.ts");
+    await writeFile(sourcePath, "before\nneedle\nafter\n");
+    await truncate(sourcePath, 256 * 1024 * 1024);
+    const rgPath = await fakeRg(cwd, `
+const searchRoot = process.argv.at(-1);
+for (const [type, lineNumber, text] of [
+  ["context", 1, "before\\n"],
+  ["match", 2, "needle\\n"],
+  ["context", 3, "after\\n"],
+]) {
+  process.stdout.write(JSON.stringify({
+    type,
+    data: {
+      path: { text: searchRoot },
+      lines: { text },
+      line_number: lineNumber,
+    },
+  }) + "\\n");
+}
+`);
+    const manager = passThroughSandboxManager();
+    manager.wrapWithSandbox.mockImplementation(async (command: string) =>
+      manager.wrapWithSandbox.mock.calls.length > 2
+        ? "printf 'large context file read blocked' >&2; exit 2"
+        : command);
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => rgPath,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "grep-large-context",
+      name: "grep",
+      arguments: { pattern: "needle", path: sourcePath, context: 1 },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    expect(result.content).toEqual([
+      expect.objectContaining({
+        text: "large.ts-1- before\nlarge.ts:2: needle\nlarge.ts-3- after",
+      }),
+    ]);
+    expect(manager.wrapWithSandbox).toHaveBeenCalledTimes(2);
   });
 
   it("preserves sandboxed grep paths relative to a directory search root", async () => {

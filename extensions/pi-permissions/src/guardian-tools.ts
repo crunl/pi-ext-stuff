@@ -50,45 +50,50 @@ const RG_UNAVAILABLE_MESSAGE =
 
 const RUN_RESOLVED_RG_HELPER = `
 const { execFile } = require("node:child_process");
-const [encodedExecutable, encodedArgs, mode, recordLimitText] = process.argv.slice(1);
+const { StringDecoder } = require("node:string_decoder");
+const [encodedExecutable, encodedArgs, mode, recordLimitText, contextLineCountText] = process.argv.slice(1);
 const executable = Buffer.from(encodedExecutable, "base64").toString("utf8");
 const args = JSON.parse(Buffer.from(encodedArgs, "base64").toString("utf8"));
 const recordLimit = Number(recordLimitText);
+const contextLineCount = Number(contextLineCountText);
 const maxRecordBytes = 64 * 1024;
 const maxOutputBytes = 4 * 1024 * 1024;
 const maxStderrBytes = 8 * 1024;
 const records = [];
+const stdoutDecoder = new StringDecoder("utf8");
 let outputBytes = 0;
 let stderr = "";
 let pending = "";
 let limited = false;
 let outputExceeded = false;
 let settled = false;
+let matchCount = 0;
+let trailingContextPath;
+let trailingContextThrough = 0;
 
 if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) {
   throw new Error("invalid rg arguments");
 }
-if ((mode !== "grep" && mode !== "find") || !Number.isInteger(recordLimit) || recordLimit < 1) {
+if (
+  (mode !== "grep" && mode !== "find")
+  || !Number.isInteger(recordLimit)
+  || recordLimit < 1
+  || !Number.isInteger(contextLineCount)
+  || contextLineCount < 0
+) {
   throw new Error("invalid rg record limit");
 }
 
-const child = execFile(executable, args, { windowsHide: true });
+const child = execFile(executable, args, {
+  windowsHide: true,
+  maxBuffer: maxOutputBytes + maxRecordBytes,
+});
 
 function stopChild() {
   if (!child.killed) child.kill("SIGTERM");
 }
 
-function acceptRecord(line) {
-  if (mode === "grep") {
-    try {
-      if (JSON.parse(line).type !== "match") return;
-    } catch {
-      return;
-    }
-  } else if (line.length === 0) {
-    return;
-  }
-
+function storeRecord(line) {
   const bytes = Buffer.byteLength(line);
   if (bytes > maxRecordBytes || outputBytes + bytes + 1 > maxOutputBytes) {
     outputExceeded = true;
@@ -97,7 +102,72 @@ function acceptRecord(line) {
   }
   records.push(line);
   outputBytes += bytes + 1;
-  if (records.length >= recordLimit) {
+}
+
+function finishLimit() {
+  limited = true;
+  stopChild();
+}
+
+function acceptGrepRecord(line) {
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return;
+  }
+
+  if (event.type === "end" && matchCount >= recordLimit) {
+    finishLimit();
+    return;
+  }
+  if (event.type !== "match" && event.type !== "context") return;
+  const path = event.data?.path?.text;
+  const lineNumber = event.data?.line_number;
+  if (typeof path !== "string" || typeof lineNumber !== "number") return;
+
+  if (event.type === "match") {
+    if (matchCount < recordLimit) {
+      matchCount++;
+      storeRecord(line);
+      if (outputExceeded) return;
+      if (matchCount >= recordLimit) {
+        trailingContextPath = path;
+        trailingContextThrough = lineNumber + contextLineCount;
+        if (contextLineCount === 0) finishLimit();
+      }
+      return;
+    }
+    if (path === trailingContextPath && lineNumber <= trailingContextThrough) {
+      storeRecord(JSON.stringify({ ...event, type: "context" }));
+      if (lineNumber >= trailingContextThrough && !outputExceeded) finishLimit();
+      return;
+    }
+    finishLimit();
+    return;
+  }
+
+  if (contextLineCount === 0) return;
+  if (matchCount < recordLimit) {
+    storeRecord(line);
+    return;
+  }
+  if (path === trailingContextPath && lineNumber <= trailingContextThrough) {
+    storeRecord(line);
+    if (lineNumber >= trailingContextThrough && !outputExceeded) finishLimit();
+    return;
+  }
+  finishLimit();
+}
+
+function acceptRecord(line) {
+  if (mode === "grep") {
+    acceptGrepRecord(line);
+    return;
+  }
+  if (line.length === 0) return;
+  storeRecord(line);
+  if (!outputExceeded && records.length >= recordLimit) {
     limited = true;
     stopChild();
   }
@@ -115,13 +185,12 @@ function consumeLines() {
 
 child.stdout.on("data", (chunk) => {
   if (limited || outputExceeded) return;
-  pending += chunk.toString("utf8");
+  pending += stdoutDecoder.write(chunk);
+  consumeLines();
   if (Buffer.byteLength(pending) > maxRecordBytes) {
     outputExceeded = true;
     stopChild();
-    return;
   }
-  consumeLines();
 });
 child.stderr.on("data", (chunk) => {
   if (Buffer.byteLength(stderr) >= maxStderrBytes) return;
@@ -136,7 +205,13 @@ child.once("error", (error) => {
 child.once("close", (code) => {
   if (settled) return;
   settled = true;
-  if (!limited && !outputExceeded && pending.length > 0) acceptRecord(pending.replace(/\\r$/, ""));
+  if (!limited && !outputExceeded) {
+    pending += stdoutDecoder.end();
+    consumeLines();
+    if (!limited && !outputExceeded && pending.length > 0) {
+      acceptRecord(pending.replace(/\\r$/, ""));
+    }
+  }
   if (records.length > 0) process.stdout.write(records.join("\\n") + "\\n");
   if (outputExceeded) {
     process.stderr.write("ripgrep output exceeded the Guardian bound");
@@ -155,6 +230,7 @@ type SandboxedRgRunner = (
   args: readonly string[],
   mode: SandboxedRgMode,
   recordLimit: number,
+  contextLineCount: number,
   signal?: AbortSignal,
 ) => Promise<SandboxedCommandResult>;
 
@@ -202,7 +278,7 @@ function createSandboxedRgRunner(
 ): SandboxedRgRunner {
   const runNode = createSandboxedReadOnlyCommandRunner(manager, "node");
   const encodedExecutable = Buffer.from(resolvedRgPath).toString("base64");
-  return (args, mode, recordLimit, signal) =>
+  return (args, mode, recordLimit, contextLineCount, signal) =>
     runNode(
       [
         "-e",
@@ -211,6 +287,7 @@ function createSandboxedRgRunner(
         Buffer.from(JSON.stringify(args)).toString("base64"),
         mode,
         String(recordLimit),
+        String(contextLineCount),
       ],
       signal,
     );
@@ -268,8 +345,8 @@ function publicToolFromDefinition(
   } as PiAgentTool;
 }
 
-interface RgMatchRecord {
-  type: "match";
+interface RgGrepRecord {
+  type: "match" | "context";
   data?: {
     path?: { text?: string };
     lines?: { text?: string };
@@ -277,24 +354,24 @@ interface RgMatchRecord {
   };
 }
 
-function parseMatchRecords(stdout: Buffer, limit: number): RgMatchRecord[] {
-  const matches: RgMatchRecord[] = [];
+function parseGrepRecords(stdout: Buffer): RgGrepRecord[] {
+  const records: RgGrepRecord[] = [];
   for (const line of stdout.toString("utf8").split("\n")) {
-    if (!line || matches.length >= limit) break;
+    if (!line) continue;
     try {
-      const event = JSON.parse(line) as RgMatchRecord;
+      const event = JSON.parse(line) as RgGrepRecord;
       if (
-        event.type === "match"
+        (event.type === "match" || event.type === "context")
         && typeof event.data?.path?.text === "string"
         && typeof event.data.line_number === "number"
       ) {
-        matches.push(event);
+        records.push(event);
       }
     } catch {
-      // Ignore malformed or non-match records from rg.
+      // Ignore malformed or non-evidence records from rg.
     }
   }
-  return matches;
+  return records;
 }
 
 async function executeSandboxedGrep(
@@ -331,13 +408,14 @@ async function executeSandboxedGrep(
   if (input.ignoreCase) args.push("--ignore-case");
   if (input.literal) args.push("--fixed-strings");
   if (input.glob) args.push("--glob", boundedArgument(input.glob, "grep glob"));
+  if (context > 0) args.push("--context", String(context));
   args.push(
     "--",
     boundedArgument(input.pattern, "grep pattern"),
     boundedArgument(searchPath, "grep path"),
   );
 
-  const result = await runRg(args, "grep", effectiveLimit, signal);
+  const result = await runRg(args, "grep", effectiveLimit, context, signal);
   if (result.exitCode !== 0 && result.exitCode !== 1) {
     throw new Error(
       result.stderr.toString("utf8").trim()
@@ -345,19 +423,32 @@ async function executeSandboxedGrep(
     );
   }
 
-  const matches = parseMatchRecords(result.stdout, effectiveLimit);
+  const records = parseGrepRecords(result.stdout);
+  const matches = records
+    .filter((record) => record.type === "match")
+    .slice(0, effectiveLimit);
   if (matches.length === 0) {
     return { content: [{ type: "text" as const, text: "No matches found" }], details: undefined };
   }
 
   const outputLines: string[] = [];
-  const fileCache = new Map<string, string[]>();
+  const recordsByPath = new Map<string, Map<number, RgGrepRecord>>();
+  for (const record of records) {
+    const path = record.data?.path?.text;
+    const lineNumber = record.data?.line_number;
+    if (!path || lineNumber === undefined) continue;
+    let recordsByLine = recordsByPath.get(path);
+    if (!recordsByLine) {
+      recordsByLine = new Map();
+      recordsByPath.set(path, recordsByLine);
+    }
+    recordsByLine.set(lineNumber, record);
+  }
   let linesTruncated = false;
   for (const match of matches) {
     const rawPath = match.data?.path?.text;
     const lineNumber = match.data?.line_number;
     if (!rawPath || lineNumber === undefined) continue;
-    const absolutePath = resolvedMatchPath(rawPath, searchPath, searchIsDirectory);
     const displayedPath = displayMatchPath(rawPath, searchPath, searchIsDirectory);
     if (context === 0) {
       const lineText = (match.data?.lines?.text ?? "")
@@ -370,26 +461,17 @@ async function executeSandboxedGrep(
       continue;
     }
 
-    let fileLines = fileCache.get(absolutePath);
-    if (!fileLines) {
-      try {
-        fileLines = (await operations.grep.readFile(absolutePath))
-          .replace(/\r\n/g, "\n")
-          .replace(/\r/g, "\n")
-          .split("\n");
-      } catch {
-        fileLines = [];
-      }
-      fileCache.set(absolutePath, fileLines);
-    }
-    if (fileLines.length === 0) {
-      outputLines.push(`${displayedPath}:${lineNumber}: (unable to read file)`);
-      continue;
-    }
+    const recordsByLine = recordsByPath.get(rawPath);
     const start = Math.max(1, lineNumber - context);
-    const end = Math.min(fileLines.length, lineNumber + context);
+    const end = lineNumber + context;
     for (let current = start; current <= end; current++) {
-      const truncated = truncateLine(fileLines[current - 1] ?? "");
+      const evidence = recordsByLine?.get(current);
+      if (!evidence) continue;
+      const lineText = (evidence.data?.lines?.text ?? "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "")
+        .replace(/\n$/, "");
+      const truncated = truncateLine(lineText);
       if (truncated.wasTruncated) linesTruncated = true;
       outputLines.push(
         current === lineNumber
@@ -557,6 +639,7 @@ export function createSandboxedGuardianToolRuntime(
               args,
               "find",
               boundedLimit(limit, effectiveLimit, MAX_FIND_LIMIT),
+              0,
               signal,
             );
             if (result.exitCode !== 0 && result.exitCode !== 1) {
