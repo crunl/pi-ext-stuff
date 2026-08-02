@@ -3,8 +3,8 @@ import test from "node:test";
 import {
 	formatModelStatus,
 	isPermissionsModeEvent,
-	partitionExtensionStatuses,
 	PermissionsModeState,
+	partitionExtensionStatuses,
 	syncPermissionsMode,
 } from "../src/status-mode.ts";
 
@@ -26,22 +26,35 @@ test("omits the effort segment when effort is absent", () => {
 });
 
 test("partition splits pi-permissions from unrelated statuses", () => {
-	const result = partitionExtensionStatuses(new Map([
-		["other", "Indexing"],
-		["pi-permissions", "default"],
-	]));
+	const result = partitionExtensionStatuses(
+		new Map([
+			["other", "Indexing"],
+			["pi-permissions", "default"],
+		]),
+	);
 	assert.equal(result.mode, "default");
 	assert.deepEqual(result.remaining, [["other", "Indexing"]]);
 });
 
 test("validates structured mode events", () => {
 	assert.equal(
-		isPermissionsModeEvent({ mode: "yolo", label: "full bypass", severity: "error" }),
+		isPermissionsModeEvent({
+			mode: "yolo",
+			label: "Full bypass",
+			severity: "error",
+		}),
 		true,
 	);
-	assert.equal(isPermissionsModeEvent({ mode: "yolo", label: "full bypass" }), false);
 	assert.equal(
-		isPermissionsModeEvent({ mode: "yolo", label: "full bypass", severity: "fatal" }),
+		isPermissionsModeEvent({ mode: "yolo", label: "Full bypass" }),
+		false,
+	);
+	assert.equal(
+		isPermissionsModeEvent({
+			mode: "yolo",
+			label: "Full bypass",
+			severity: "fatal",
+		}),
 		false,
 	);
 	assert.equal(isPermissionsModeEvent(undefined), false);
@@ -57,15 +70,19 @@ test("event severity drives badge visibility and color", () => {
 	assert.equal(state.get(), undefined);
 
 	assert.equal(
-		state.applyEvent({ mode: "yolo", label: "full bypass", severity: "error" }),
+		state.applyEvent({ mode: "yolo", label: "Full bypass", severity: "error" }),
 		true,
 	);
-	assert.equal(state.get(), "full bypass");
+	assert.equal(state.get(), "Full bypass");
 	assert.equal(state.severity(), "error");
 
 	// Renamed label with same severity still renders — no string coupling.
 	assert.equal(
-		state.applyEvent({ mode: "yolo", label: "renamed later", severity: "error" }),
+		state.applyEvent({
+			mode: "yolo",
+			label: "renamed later",
+			severity: "error",
+		}),
 		true,
 	);
 	assert.equal(state.get(), "renamed later");
@@ -77,22 +94,26 @@ test("legacy labels map to severities until the first event arrives", () => {
 	assert.equal(state.applyLegacyLabel("default"), false);
 	assert.equal(state.get(), undefined);
 
-	assert.equal(state.applyLegacyLabel("approve for me"), true);
-	assert.equal(state.get(), "approve for me");
+	assert.equal(state.applyLegacyLabel("Approve for me"), true);
+	assert.equal(state.get(), "Approve for me");
 	assert.equal(state.severity(), "warning");
 
-	assert.equal(state.applyLegacyLabel("full bypass"), true);
+	assert.equal(state.applyLegacyLabel("Full bypass"), true);
 	assert.equal(state.severity(), "error");
 
 	// Once events flow, legacy strings are ignored.
 	state.applyEvent({ mode: "default", label: "default", severity: "none" });
-	assert.equal(state.applyLegacyLabel("full bypass"), false);
+	assert.equal(state.applyLegacyLabel("Full bypass"), false);
 	assert.equal(state.get(), undefined);
 });
 
 test("mode state reports only distinct changes", () => {
 	const state = new PermissionsModeState();
-	const event = { mode: "auto", label: "approve for me", severity: "warning" } as const;
+	const event = {
+		mode: "auto",
+		label: "approve for me",
+		severity: "warning",
+	} as const;
 	assert.equal(state.applyEvent(event), true);
 	assert.equal(state.applyEvent(event), false);
 	assert.equal(state.reset(), true);
@@ -116,12 +137,12 @@ test("sync requests one render per distinct legacy mode and returns other status
 	assert.equal(renders, 0);
 
 	syncPermissionsMode(
-		new Map([["pi-permissions", "approve for me"]]),
+		new Map([["pi-permissions", "Approve for me"]]),
 		state,
 		() => renders++,
 	);
 	assert.equal(renders, 1);
-	assert.equal(state.get(), "approve for me");
+	assert.equal(state.get(), "Approve for me");
 
 	syncPermissionsMode(statuses, state, () => renders++);
 	assert.equal(renders, 2);

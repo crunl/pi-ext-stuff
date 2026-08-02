@@ -19,13 +19,17 @@ export interface PermissionsModeEvent {
 	severity: ModeSeverity;
 }
 
-export function isPermissionsModeEvent(data: unknown): data is PermissionsModeEvent {
+export function isPermissionsModeEvent(
+	data: unknown,
+): data is PermissionsModeEvent {
 	if (typeof data !== "object" || data === null) return false;
 	const record = data as Record<string, unknown>;
 	return (
 		typeof record.mode === "string" &&
 		typeof record.label === "string" &&
-		(record.severity === "none" || record.severity === "warning" || record.severity === "error")
+		(record.severity === "none" ||
+			record.severity === "warning" ||
+			record.severity === "error")
 	);
 }
 
@@ -36,7 +40,7 @@ export function isPermissionsModeEvent(data: unknown): data is PermissionsModeEv
  */
 function legacySeverityFor(label: string): ModeSeverity {
 	if (label === "default") return "none";
-	if (label === "full bypass") return "error";
+	if (label === "Full bypass") return "error";
 	return "warning";
 }
 
@@ -46,7 +50,9 @@ export function partitionExtensionStatuses(
 	const publishedMode = statuses.get("pi-permissions");
 	return {
 		mode: publishedMode,
-		remaining: [...statuses.entries()].filter(([key]) => key !== "pi-permissions"),
+		remaining: [...statuses.entries()].filter(
+			([key]) => key !== "pi-permissions",
+		),
 	};
 }
 
@@ -92,7 +98,8 @@ export class PermissionsModeState {
 		// A hidden badge has no visible label: normalize so default→default
 		// label churn never reports a spurious render.
 		const effectiveLabel = severity === "none" ? undefined : label;
-		if (this.#label === effectiveLabel && this.#severity === severity) return false;
+		if (this.#label === effectiveLabel && this.#severity === severity)
+			return false;
 		this.#label = effectiveLabel;
 		this.#severity = severity;
 		return true;

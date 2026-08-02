@@ -10,8 +10,17 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { alignLine, formatCwd, formatTokens, ICONS, meterCells } from "./format.ts";
-import { PermissionsModeState, syncPermissionsMode } from "./status-mode.ts";
+import {
+	alignLine,
+	formatCwd,
+	formatTokens,
+	ICONS,
+	meterCells,
+} from "./format.ts";
+import {
+	type PermissionsModeState,
+	syncPermissionsMode,
+} from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
 
 const METER_CELLS = 10;
@@ -19,17 +28,11 @@ const METER_CELLS = 10;
 export function installFooter(
 	ctx: ExtensionContext,
 	permissionsMode: PermissionsModeState,
-	onTheme?: (theme: { getFgAnsi(color: string): string }) => void,
 	onRequestRender?: (requestRender: () => void) => void,
 ): void {
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
-		try {
-			onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
-		} catch {
-			// theme without getFgAnsi: badge falls back to inverse video
-		}
 		onRequestRender?.(() => queueMicrotask(() => tui.requestRender()));
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 
@@ -37,14 +40,6 @@ export function installFooter(
 			dispose: unsubBranch,
 			invalidate() {},
 			render(width: number): string[] {
-				// Live-read the theme on every render: the theme object is a live
-				// proxy, so hot theme switches (file watch or /theme) refresh the
-				// badge colors without a reinstall.
-				try {
-					onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
-				} catch {
-					// theme without getFgAnsi: badge falls back to inverse video
-				}
 				// ---- left: 📁 pwd  branch • session-name ----
 				const pwd = formatCwd(
 					ctx.sessionManager.getCwd(),
@@ -54,11 +49,14 @@ export function installFooter(
 				const sessionName = ctx.sessionManager.getSessionName();
 
 				let leftPlain = `${ICONS.folder} ${pwd}`;
-				let leftColored = theme.fg("accent", ICONS.folder) + theme.fg("dim", ` ${pwd}`);
+				let leftColored =
+					theme.fg("accent", ICONS.folder) + theme.fg("dim", ` ${pwd}`);
 				if (branch) {
 					leftPlain += ` ${ICONS.branch} ${branch}`;
 					leftColored +=
-						" " + theme.fg("accent", ICONS.branch) + theme.fg("dim", ` ${branch}`);
+						" " +
+						theme.fg("accent", ICONS.branch) +
+						theme.fg("dim", ` ${branch}`);
 				}
 				if (sessionName) {
 					leftPlain += ` • ${sessionName}`;
@@ -88,10 +86,13 @@ export function installFooter(
 						pctValue >= 75 ? "error" : pctValue >= 50 ? "warning" : "success";
 
 					const filled = meterCells(pctValue, METER_CELLS);
-					const meterPlain = "█".repeat(filled) + "░".repeat(METER_CELLS - filled);
+					const meterPlain =
+						"█".repeat(filled) + "░".repeat(METER_CELLS - filled);
 					const meterColored =
 						(filled > 0 ? theme.fg(meterColor, "█".repeat(filled)) : "") +
-						(filled < METER_CELLS ? theme.fg("dim", "░".repeat(METER_CELLS - filled)) : "");
+						(filled < METER_CELLS
+							? theme.fg("dim", "░".repeat(METER_CELLS - filled))
+							: "");
 
 					const tokText =
 						usage.tokens !== null

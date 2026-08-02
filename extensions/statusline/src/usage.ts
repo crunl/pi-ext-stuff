@@ -44,9 +44,12 @@ export function computeUsageTotals(ctx: ExtensionContext): UsageTotals {
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			const usage = (entry.message as { usage: UsageLike }).usage;
 			add(usage);
-			const latestPrompt = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+			const latestPrompt =
+				(usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 			totals.latestCacheHitRate =
-				latestPrompt > 0 ? ((usage.cacheRead ?? 0) / latestPrompt) * 100 : undefined;
+				latestPrompt > 0
+					? ((usage.cacheRead ?? 0) / latestPrompt) * 100
+					: undefined;
 		} else if (
 			entry.type === "message" &&
 			entry.message.role === "toolResult" &&

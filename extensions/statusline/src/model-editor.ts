@@ -17,20 +17,18 @@
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { badgeColorFor, makeModeBadgeDecorator } from "./badge.ts";
+import { makeModeBadgeDecorator } from "./badge.ts";
 import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
 
-export interface ModelInfoProvider {
-	(): { provider: string; modelId: string; effort: string | undefined } | undefined;
-}
+export type ModelInfoProvider = () =>
+	| { provider: string; modelId: string; effort: string | undefined }
+	| undefined;
 
-export interface StatsProvider {
-	(): { input: number; output: number } | undefined;
-}
+export type StatsProvider = () => { input: number; output: number } | undefined;
 
-export interface PermissionsModeProvider {
-	(): { label: string; severity: "warning" | "error" } | undefined;
-}
+export type PermissionsModeProvider = () =>
+	| { label: string; severity: "warning" | "error" }
+	| undefined;
 
 export class ModelLineEditor extends CustomEditor {
 	/** Injected callback returning current model info (reads live ctx). */
@@ -39,9 +37,6 @@ export class ModelLineEditor extends CustomEditor {
 	getStats: StatsProvider = () => undefined;
 	/** Injected callback returning the mode published by pi-permissions. */
 	getPermissionsMode: PermissionsModeProvider = () => undefined;
-	/** Badge-color ANSI provider (captured lazily from the footer theme). */
-	getBadgeFgAnsi: (color: "warning" | "error") => string | undefined = () => undefined;
-
 	render(width: number): string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) return lines;
@@ -68,10 +63,10 @@ export class ModelLineEditor extends CustomEditor {
 			if (top !== undefined) {
 				// Builders guarantee pre+mode+post is exactly `width` (tested),
 				// so no re-truncation is needed here.
-				const decorate = makeModeBadgeDecorator(
-					mode ? this.getBadgeFgAnsi(badgeColorFor(mode.severity)) : undefined,
-				);
-				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
+				const decorate = mode
+					? makeModeBadgeDecorator(mode.severity)
+					: undefined;
+				const badge = decorate && top.mode.length > 0 ? decorate(top.mode) : "";
 				lines[topIdx] =
 					this.borderColor(top.pre) + badge + this.borderColor(top.post);
 			}
@@ -90,7 +85,7 @@ export class ModelLineEditor extends CustomEditor {
 	}
 }
 
-const ANSI_RE = new RegExp(String.raw`\x1b\[[0-9;]*m`, "g");
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
 function stripAnsi(s: string): string {
 	return s.replace(ANSI_RE, "");
 }

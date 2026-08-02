@@ -46,7 +46,10 @@ test("top border: drops stats when both sides cannot fit", () => {
 
 test("top border: untouched with no mode and no stats", () => {
 	assert.equal(buildTopBorder(WIDTH, undefined, undefined), undefined);
-	assert.equal(buildTopBorder(WIDTH, undefined, { input: 0, output: 0 }), undefined);
+	assert.equal(
+		buildTopBorder(WIDTH, undefined, { input: 0, output: 0 }),
+		undefined,
+	);
 });
 
 test("bottom border: model info without the mode", () => {
