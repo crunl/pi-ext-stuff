@@ -13,11 +13,19 @@ import {
 } from "./codex-tool-specs.ts";
 import { createCodexToolRendering } from "./tool-renderer.ts";
 
-export function registerBuiltInToolRendering(pi: ExtensionAPI): void {
-  // write / edit / bash are intentionally NOT registered here: pi-permissions
-  // registers them because their execute needs the permission gate, and tool
-  // registration is first-wins. Their Codex rendering specs (icon, verbs,
-  // collapsed summaries) live in codex-tool-specs.ts and are applied there.
+/**
+ * Register the Codex-style rendering for the built-in read-only tools.
+ *
+ * write / edit / bash are intentionally NOT registered here: pi-permissions
+ * registers them because their execute needs the permission gate, and tool
+ * registration is first-wins. Their Codex rendering specs (icon, verbs,
+ * collapsed summaries) live in codex-tool-specs.ts and are applied there.
+ *
+ * The four blocks below look like table-fodder, but registerTool infers the
+ * tool's schema from the spread argument, so each tool needs its own call
+ * site (an `as const` union over factories still fails assignability).
+ */
+export function registerCodexToolRendering(pi: ExtensionAPI): void {
   const initialCwd = process.cwd();
 
   const initialRead = createReadTool(initialCwd);
