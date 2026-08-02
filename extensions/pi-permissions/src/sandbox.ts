@@ -13,6 +13,7 @@ import type {
 import type { PermissionsConfig } from "./config.ts";
 import {
   createFilesystemPolicy,
+  expandSymlinkAliases,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
 
@@ -109,7 +110,7 @@ export function withAdditionalWriteRoots(
   config: SandboxRuntimeConfig,
   writeRoots: readonly string[],
 ): SandboxRuntimeConfig {
-  const roots = [...new Set(writeRoots)];
+  const roots = [...new Set(writeRoots.flatMap(expandSymlinkAliases))];
   return {
     ...config,
     filesystem: {
@@ -134,10 +135,12 @@ export function createSandboxRuntimeConfig(
   return {
     filesystem: {
       allowWrite: filesystem.allowWrite,
-      denyRead: filesystem.denyRead.map((pattern) =>
-        resolveSandboxDenyPattern(pattern, cwd)),
-      denyWrite: filesystem.denyWrite.map((pattern) =>
-        resolveSandboxDenyPattern(pattern, cwd)),
+      denyRead: filesystem.denyRead.flatMap((pattern) =>
+        expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
+      ),
+      denyWrite: filesystem.denyWrite.flatMap((pattern) =>
+        expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
+      ),
     },
     network: {
       allowedDomains: [...config.network.allowedDomains],

@@ -265,6 +265,33 @@ describe("sandbox integration", () => {
     expect(runtime.network.allowedDomains).toEqual([]);
   });
 
+  it("expands macOS symlink aliases so /tmp rules apply to /private/tmp", () => {
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
+    // Default allowWrite contains "." and "/tmp"; the resolved policy must cover
+    // both spellings because sandbox-exec resolves /tmp to /private/tmp.
+    expect(runtime.filesystem.allowWrite).toContain("/tmp");
+    expect(runtime.filesystem.allowWrite).toContain("/private/tmp");
+
+    const expanded = withAdditionalWriteRoots(runtime, ["/tmp", "/private/var/run"]);
+    expect(expanded.filesystem.allowWrite).toContain("/private/tmp");
+    expect(expanded.filesystem.allowWrite).toContain("/var/run");
+    expect(expanded.filesystem.allowWrite).toContain("/private/var/run");
+
+    const denyRuntime = createSandboxRuntimeConfig(
+      {
+        ...DEFAULT_CONFIG.sandbox,
+        filesystem: {
+          ...DEFAULT_CONFIG.sandbox.filesystem,
+          denyRead: ["/tmp/secrets"],
+          denyWrite: ["/var/spool/x"],
+        },
+      },
+      "/workspace/project",
+    );
+    expect(denyRuntime.filesystem.denyRead).toContain("/private/tmp/secrets");
+    expect(denyRuntime.filesystem.denyWrite).toContain("/private/var/spool/x");
+  });
+
   it("protects the plugin-local global configuration path", () => {
     expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).toContain(
       "/workspace/agent/extensions/pi-permissions/config.json",

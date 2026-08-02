@@ -12,6 +12,27 @@ export interface ResolvedFilesystemPolicy {
 
 export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+// macOS aliases that sandbox-exec resolves to their real paths. A profile rule
+// like (subpath "/tmp") does not match /private/tmp/... because the kernel
+// operates on the resolved path, so allow/deny rules must cover both spellings.
+const SYMLINK_ALIASES: Array<[string, string]> = [
+  ["/private/tmp", "/tmp"],
+  ["/private/var", "/var"],
+];
+
+export function expandSymlinkAliases(path: string): string[] {
+  for (const [real, alias] of SYMLINK_ALIASES) {
+    if (path === real || path === alias) return [path, path === real ? alias : real];
+    if (path.startsWith(`${real}/`)) {
+      return [path, `${alias}${path.slice(real.length)}`];
+    }
+    if (path.startsWith(`${alias}/`)) {
+      return [path, `${real}${path.slice(alias.length)}`];
+    }
+  }
+  return [path];
+}
+
 export function resolvePolicyPath(path: string, cwd: string): string {
   if (path === "~") return homedir();
   if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
@@ -46,7 +67,9 @@ export function createFilesystemPolicy(
     allowWrite:
       config.profile === "read-only"
         ? []
-        : config.filesystem.allowWrite.map((path) => resolvePolicyPath(path, cwd)),
+        : config.filesystem.allowWrite.flatMap((path) =>
+            expandSymlinkAliases(resolvePolicyPath(path, cwd)),
+          ),
     denyRead: [...config.filesystem.denyRead],
     denyWrite: [...config.filesystem.denyWrite, ...protectedWritePaths],
     protectedWritePaths: [...protectedWritePaths],
