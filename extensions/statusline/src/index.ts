@@ -5,7 +5,7 @@
  *   [ messages ... ]
  *   ─────────────────── ↑284k ↓37.3k ──       <- editor top border (right)
  *    > input…
- *   ── Default•(provider) model•effort ──          <- editor bottom border (left)
+ *   ── Default•model•effort ──                     <- editor bottom border (left)
  *   ~/path (branch) • name    ↑↓RW$ ctx%           <- footer.ts (setFooter, line 1)
  *   [other extensions' statuses]                   <- footer.ts (optional line 2)
  *
@@ -43,7 +43,6 @@ export default function statusline(pi: ExtensionAPI) {
 		const model = ctx?.model;
 		if (!model) return undefined;
 		return {
-			provider: model.provider,
 			modelId: model.id,
 			effort: model.reasoning ? (ctx?.thinkingLevel ?? "off") : undefined,
 		};

@@ -65,7 +65,7 @@ export function buildTopBorder(
 /**
  * Bottom border: model identity on the left.
  *
- *   ── (provider) model • effort ───────────
+ *   ── model • effort ─────────────────────
  *
  * Returns undefined when the label does not fit.
  */

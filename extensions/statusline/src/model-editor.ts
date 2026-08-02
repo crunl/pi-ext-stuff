@@ -3,7 +3,7 @@
  *
  *   ──▐Auto▌───────────── ↑284k ↓37.3k ──  <- top: mode badge left, stats right
  *    > user input here…
- *   ── (provider) model•effort ───────────────  <- bottom border, left side
+ *   ── model•effort ───────────────────────────  <- bottom border, left side
  *
  * The mode badge uses a mode-dependent theme color as background: warning
  * (yellow — "attention, not alarm") for Auto, error (red — alarm) for YOLO.
@@ -21,7 +21,7 @@ import { badgeColorFor, makeModeBadgeDecorator } from "./badge.ts";
 import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
 
 export interface ModelInfoProvider {
-	(): { provider: string; modelId: string; effort: string | undefined } | undefined;
+	(): { modelId: string; effort: string | undefined } | undefined;
 }
 
 export interface StatsProvider {
@@ -77,7 +77,7 @@ export class ModelLineEditor extends CustomEditor {
 			}
 		}
 
-		// Bottom border: model info  ── (provider) model•effort ──
+		// Bottom border: model info  ── model•effort ──
 		const info = this.getModelInfo();
 		if (info && bottomIdx !== -1 && bottomIdx !== topIdx) {
 			const bottom = buildBottomBorder(width, info);

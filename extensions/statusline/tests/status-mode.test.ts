@@ -9,19 +9,18 @@ import {
 } from "../src/status-mode.ts";
 
 const info = {
-	provider: "tuzi",
 	modelId: "gpt-5.6-sol-fast",
 	effort: "xhigh",
 };
 
-test("formats provider, model, and effort for the bottom border", () => {
-	assert.equal(formatModelStatus(info), "(tuzi) gpt-5.6-sol-fast • xhigh");
+test("formats model and effort for the bottom border", () => {
+	assert.equal(formatModelStatus(info), "gpt-5.6-sol-fast • xhigh");
 });
 
 test("omits the effort segment when effort is absent", () => {
 	assert.equal(
 		formatModelStatus({ ...info, effort: undefined }),
-		"(tuzi) gpt-5.6-sol-fast",
+		"gpt-5.6-sol-fast",
 	);
 });
 

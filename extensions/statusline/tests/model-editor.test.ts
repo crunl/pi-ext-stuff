@@ -54,17 +54,15 @@ test("top border: untouched with no mode and no stats", () => {
 
 test("bottom border: model info without the mode", () => {
 	const bottom = buildBottomBorder(WIDTH, {
-		provider: "tuzi",
 		modelId: "gpt-5.6",
 		effort: "high",
 	});
-	assert.match(bottom!, /^── \(tuzi\) gpt-5\.6 • high ─+$/);
+	assert.match(bottom!, /^── gpt-5\.6 • high ─+$/);
 	assert.equal(bottom!.length, WIDTH);
 });
 
 test("bottom border: undefined when the label does not fit", () => {
 	const bottom = buildBottomBorder(10, {
-		provider: "tuzi",
 		modelId: "gpt-5.6-sol-fast",
 		effort: "xhigh",
 	});

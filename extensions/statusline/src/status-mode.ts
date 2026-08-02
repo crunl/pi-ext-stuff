@@ -1,12 +1,11 @@
 export interface ModelStatusInfo {
-	provider: string;
 	modelId: string;
 	effort: string | undefined;
 }
 
 /** Bottom-border label: model identity only (mode lives in the top border). */
 export function formatModelStatus(info: ModelStatusInfo): string {
-	return `(${info.provider}) ${info.modelId}${info.effort ? ` • ${info.effort}` : ""}`;
+	return `${info.modelId}${info.effort ? ` • ${info.effort}` : ""}`;
 }
 
 /** Badge severity published by pi-permissions ("none" hides the badge). */
