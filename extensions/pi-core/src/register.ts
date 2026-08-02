@@ -7,6 +7,7 @@ import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
 import { registerStartupHeader } from "./tui/startup-header.ts";
+import { registerWorkingTokenRate } from "./tui/working-token-rate.ts";
 
 export function registerExtension(pi: ExtensionAPI): void {
   registerOutputPaddingSync(pi);
@@ -16,5 +17,6 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerSelectorTabNav(pi);
   registerStartupHeader(pi);
   registerEffortCommand(pi);
+  registerWorkingTokenRate(pi);
   applyMarkdownCodeFrame();
 }

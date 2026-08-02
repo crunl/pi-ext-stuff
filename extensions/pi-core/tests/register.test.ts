@@ -18,6 +18,25 @@ describe("pi-core registration", () => {
     expect(vi.isMockFunction(tools.get("read")?.execute)).toBe(false);
   });
 
+  it("registers the five token-rate lifecycle handlers", () => {
+    const events = new Set<string>();
+    registerExtension({
+      on: (event: string) => events.add(event),
+      registerCommand: vi.fn(),
+      registerTool: vi.fn(),
+    } as any);
+
+    for (const event of [
+      "agent_start",
+      "message_start",
+      "message_update",
+      "tool_execution_start",
+      "agent_end",
+    ]) {
+      expect(events.has(event)).toBe(true);
+    }
+  });
+
   it("keeps completed read and search calls on one collapsed line", () => {
     const tools = new Map<string, any>();
     registerExtension({
