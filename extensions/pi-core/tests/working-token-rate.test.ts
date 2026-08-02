@@ -60,11 +60,11 @@ describe("working token rate adapter", () => {
     vi.useRealTimers();
   });
 
-  it("shows the estimated rate in the status key and clears on lifecycle boundaries", () => {
+  it("shows the estimated rate in the working line and the status area", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setStatus } = registerForTest();
+    const { handlers, context, setStatus, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
@@ -73,28 +73,15 @@ describe("working token rate adapter", () => {
     handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
 
     expect(setStatus).toHaveBeenCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
+    expect(setWorkingMessage).toHaveBeenCalledWith("Working... (≈2 tokens/s)");
     expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, "≈2 tokens/s");
-
-    // A tool call resets the tracker and clears the status.
-    handlers.get("tool_execution_start")?.({}, context);
-    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
-
-    // The next assistant message restarts from a fresh baseline.
-    vi.setSystemTime(3000);
-    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
-    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
-    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
-
-    // agent_end clears the status again.
-    handlers.get("agent_end")?.({}, context);
-    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
   });
 
   it("formats reported usage without the estimate marker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setStatus } = registerForTest();
+    const { handlers, context, setStatus, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
@@ -105,10 +92,49 @@ describe("working token rate adapter", () => {
       context,
     );
 
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working... (30 tokens/s)");
     expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, "30 tokens/s");
   });
 
-  it("does not touch any UI in non-TUI modes and never calls setWorkingMessage", () => {
+  it("keeps the last rate visible after agent_end and resets on the next stream", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setStatus, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
+    vi.setSystemTime(1000);
+    handlers.get("message_update")?.(
+      messageUpdate(assistantMessage("1234"), "1234"),
+      context,
+    );
+    vi.setSystemTime(2000);
+    handlers.get("message_update")?.(
+      messageUpdate(assistantMessage("12345678"), "5678"),
+      context,
+    );
+
+    // agent_end keeps the status (persistent idle display)...
+    handlers.get("agent_end")?.({}, context);
+    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, "≈2 tokens/s");
+
+    // ...until the next agent run clears it.
+    handlers.get("agent_start")?.({}, context);
+    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith();
+  });
+
+  it("clears the rate when a tool starts", () => {
+    const { handlers, context, setStatus, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
+    handlers.get("tool_execution_start")?.({}, context);
+
+    expect(setStatus).toHaveBeenLastCalledWith(TOKEN_RATE_STATUS_KEY, undefined);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith();
+  });
+
+  it("does not touch any UI in non-TUI modes", () => {
     const { handlers, context, setStatus, setWorkingMessage } = registerForTest({
       hasUI: false,
       mode: "print",
