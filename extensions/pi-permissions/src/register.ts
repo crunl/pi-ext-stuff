@@ -101,7 +101,6 @@ export interface RegisterExtensionOptions {
 
 interface ApprovedCall {
   authority: "user" | "auto-review";
-  mode: "default" | "auto" | "user-transition";
   configFingerprint: string;
   cwd: string;
   requestFingerprint: string;
@@ -509,13 +508,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionContext: EffectiveExecutionContext,
     cwd: string,
     authority: "user" | "auto-review",
-    mode: ApprovedCall["mode"],
     rememberSession = false,
   ): void => {
     if (!event.toolCallId) return;
     approvedCalls.set(event.toolCallId, {
       authority,
-      mode,
       configFingerprint: fingerprintConfig(executionContext.config),
       cwd: resolve(cwd),
       requestFingerprint: fingerprintValue({
@@ -1153,7 +1150,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           };
         }
         if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-          grantApprovedCall(event, decision, executionContext, ctx.cwd, "user", "user-transition");
+          grantApprovedCall(event, decision, executionContext, ctx.cwd, "user");
           transitionGrantCreated = true;
           runtime.activate("auto", {
             preserveAutoTransientState: permissionTurnPhase === "active",
@@ -1165,14 +1162,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           ctx.ui.notify("pi-permissions: approve for me mode 已启用", "info");
           return;
         }
-        const approvalMode = liveMode(executionContext) === "auto" ? "auto" : "default";
         grantApprovedCall(
           event,
           decision,
           executionContext,
           ctx.cwd,
           "user",
-          approvalMode,
           choice === DEFAULT_ALLOW_AND_REMEMBER_CHOICE,
         );
         return;
@@ -1525,7 +1520,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               executionContext,
               ctx.cwd,
               "auto-review",
-              effectiveMode,
             );
             return;
           }
