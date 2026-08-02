@@ -37,6 +37,14 @@ export function installFooter(
 			dispose: unsubBranch,
 			invalidate() {},
 			render(width: number): string[] {
+				// Live-read the theme on every render: the theme object is a live
+				// proxy, so hot theme switches (file watch or /theme) refresh the
+				// badge colors without a reinstall.
+				try {
+					onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
+				} catch {
+					// theme without getFgAnsi: badge falls back to inverse video
+				}
 				// ---- left: 📁 pwd  branch • session-name ----
 				const pwd = formatCwd(
 					ctx.sessionManager.getCwd(),
