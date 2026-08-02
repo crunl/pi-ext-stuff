@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { badgeColorFor, makeModeBadgeDecorator, parseTruecolor } from "../src/badge.ts";
+import {
+	badgeColorFor,
+	contrastTextFor,
+	makeModeBadgeDecorator,
+	parseTruecolor,
+} from "../src/badge.ts";
 
 test("parses truecolor foreground sequences", () => {
 	assert.deepEqual(parseTruecolor("\x1b[38;2;229;200;144m"), [229, 200, 144]);
@@ -13,7 +18,17 @@ test("returns null for non-truecolor sequences", () => {
 	assert.equal(parseTruecolor(""), null);
 });
 
-test("decorates with warning background and black text", () => {
+test("uses black text on light backgrounds and white on dark", () => {
+	// Catppuccin mocha red (light) -> black text
+	assert.equal(contrastTextFor([231, 130, 132]), "\x1b[30m");
+	// Catppuccin latte red (dark) -> white text
+	assert.equal(contrastTextFor([210, 15, 57]), "\x1b[97m");
+	// Threshold boundary
+	assert.equal(contrastTextFor([128, 128, 128]), "\x1b[30m");
+	assert.equal(contrastTextFor([127, 127, 127]), "\x1b[97m");
+});
+
+test("decorates with warning background and contrast-aware text", () => {
 	const decorate = makeModeBadgeDecorator("\x1b[38;2;229;200;144m");
 	assert.equal(
 		decorate(" Auto "),
@@ -21,6 +36,13 @@ test("decorates with warning background and black text", () => {
 	);
 });
 
+test("decorates dark backgrounds with white text", () => {
+	const decorate = makeModeBadgeDecorator("\x1b[38;2;210;15;57m");
+	assert.equal(
+		decorate(" Auto "),
+		"\x1b[48;2;210;15;57m\x1b[97m Auto \x1b[39m\x1b[49m",
+	);
+});
 test("falls back to inverse video without truecolor data", () => {
 	for (const ansi of [undefined, "\x1b[33m", "\x1b[38;5;220m"]) {
 		const decorate = makeModeBadgeDecorator(ansi);
