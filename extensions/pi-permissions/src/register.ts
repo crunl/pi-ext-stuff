@@ -48,6 +48,7 @@ import {
   type GuardianTranscriptEntry,
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
+import { parseCommandSegments } from "./permissions/risk.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -141,6 +142,7 @@ function isActivationSupersededError(error: unknown): error is ActivationSuperse
 }
 
 const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
+const DEFAULT_ALLOW_AND_REMEMBER_CHOICE = "Allow and Remember";
 const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
 const DEFAULT_DENY_CHOICE = "Deny";
 const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
@@ -226,18 +228,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
   const resolveLocalProxyPorts: LocalProxyPortsProvider =
-    options.localProxyPortsProvider
-    ?? (() => options.localProxyPorts ?? detectLocalProxyPorts());
+    options.localProxyPortsProvider ?? (() => options.localProxyPorts ?? detectLocalProxyPorts());
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
   const autoReviewer =
-    options.autoReviewer
-    ?? new PiAutoReviewer(
-      undefined,
-      options.guardianSessionManager,
-      undefined,
-      (cwd) => createSandboxedGuardianToolRuntime(cwd, sandboxManager),
+    options.autoReviewer ??
+    new PiAutoReviewer(undefined, options.guardianSessionManager, undefined, (cwd) =>
+      createSandboxedGuardianToolRuntime(cwd, sandboxManager),
     );
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
@@ -261,6 +259,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const approvedCalls = new Map<string, ApprovedCall>();
   const approvedNetworkHosts = new Map<string, string[]>();
   const approvedWriteRoots = new Map<string, string[]>();
+  // Session-scoped approval memory (codex ExecpolicyAmendment/ApprovedForSession/
+  // NetworkPolicyAmendment equivalents). Cleared on extension reload (a new
+  // session), never persisted.
+  const approvedCommandPrefixes: string[][] = [];
+  const approvedNetworkHostsSession = new Set<string>();
   let permissionContextEpoch = 0;
   let permissionTurnPhase: PermissionTurnPhase = "idle";
   let permissionTurnId = 0;
@@ -492,6 +495,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cwd: string,
     authority: "user" | "auto-review",
     mode: ApprovedCall["mode"],
+    rememberSession = false,
   ): void => {
     if (!event.toolCallId) return;
     approvedCalls.set(event.toolCallId, {
@@ -506,6 +510,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
     if (decision.networkHosts?.length) {
       approvedNetworkHosts.set(event.toolCallId, [...decision.networkHosts]);
+    }
+    if (rememberSession) {
+      // Remember user-approved commands and hosts for the rest of the session
+      // (mirrors codex execpolicy amendments and network rules, exposed as the
+      // "Allow and Remember" approval choice). Auto-review and one-off
+      // approvals are not remembered.
+      const command = (event.input as Record<string, unknown>).command;
+      if (typeof command === "string") {
+        for (const segment of parseCommandSegments(command)) {
+          approvedCommandPrefixes.push([segment.executable, ...segment.args]);
+        }
+      }
+      for (const host of decision.networkHosts ?? []) {
+        approvedNetworkHostsSession.add(host);
+      }
     }
     const writeRoots = [
       ...new Set([...oneCallWriteRoots(event, cwd), ...(decision.filesystemWriteRoots ?? [])]),
@@ -723,6 +742,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ctx.cwd,
       activeConfig,
       defaultProtectedWritePaths(ctx.cwd, agentDir),
+      {
+        commandPrefixes: approvedCommandPrefixes,
+        networkHosts: approvedNetworkHostsSession,
+      },
     );
     if (
       permissionContextEpoch !== executionEpoch ||
@@ -1003,10 +1026,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }${decision.justification ? `\n\nJustification: ${decision.justification}` : ""}`;
       const choice = await ctx.ui.select(prompt, [
         DEFAULT_ALLOW_ONCE_CHOICE,
+        DEFAULT_ALLOW_AND_REMEMBER_CHOICE,
         DEFAULT_ALLOW_AND_AUTO_CHOICE,
         DEFAULT_DENY_CHOICE,
       ]);
-      if (choice === DEFAULT_ALLOW_ONCE_CHOICE || choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
+      if (
+        choice === DEFAULT_ALLOW_ONCE_CHOICE ||
+        choice === DEFAULT_ALLOW_AND_REMEMBER_CHOICE ||
+        choice === DEFAULT_ALLOW_AND_AUTO_CHOICE
+      ) {
         if (
           permissionContextEpoch !== approvalEpoch ||
           !getEffectiveExecutionContext(executionContext.snapshot)
@@ -1028,7 +1056,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return;
         }
         const approvalMode = executionContext.mode === "auto" ? "auto" : "default";
-        grantApprovedCall(event, decision, executionContext, ctx.cwd, "user", approvalMode);
+        grantApprovedCall(
+          event,
+          decision,
+          executionContext,
+          ctx.cwd,
+          "user",
+          approvalMode,
+          choice === DEFAULT_ALLOW_AND_REMEMBER_CHOICE,
+        );
         return;
       }
       return {
@@ -1233,6 +1269,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           ctx.cwd,
           executionContext.config,
           defaultProtectedWritePaths(ctx.cwd, agentDir),
+          {
+            commandPrefixes: approvedCommandPrefixes,
+            networkHosts: approvedNetworkHostsSession,
+          },
         );
       } catch (error: unknown) {
         if (

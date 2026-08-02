@@ -1348,6 +1348,7 @@ describe("Default mode registration", () => {
     await expect(app.handlers.get("tool_call")!(current, app.context)).resolves.toBeUndefined();
     expect(app.select).toHaveBeenCalledWith(expect.stringContaining("rm -rf build"), [
       "Allow Once",
+      "Allow and Remember",
       "Allow, switch future approvals to Auto",
       "Deny",
     ]);
@@ -2442,6 +2443,7 @@ describe("Default mode registration", () => {
     expect(reviewer.review).not.toHaveBeenCalled();
     expect(app.select).toHaveBeenCalledWith(expect.stringContaining("pi-permissions · HARD"), [
       "Allow Once",
+      "Allow and Remember",
       "Allow, switch future approvals to Auto",
       "Deny",
     ]);
@@ -4027,13 +4029,9 @@ describe("Default mode registration", () => {
       input: { command: "curl https://example.com" },
     };
     await app.handlers.get("tool_call")!(first, app.context);
-    await app.tools.get("bash").execute(
-      first.toolCallId,
-      first.input,
-      undefined,
-      undefined,
-      app.context,
-    );
+    await app.tools
+      .get("bash")
+      .execute(first.toolCallId, first.input, undefined, undefined, app.context);
 
     const second = {
       toolName: "bash",
@@ -4041,13 +4039,9 @@ describe("Default mode registration", () => {
       input: { command: "curl https://api.github.com/repos/openai/codex" },
     };
     await app.handlers.get("tool_call")!(second, app.context);
-    await app.tools.get("bash").execute(
-      second.toolCallId,
-      second.input,
-      undefined,
-      undefined,
-      app.context,
-    );
+    await app.tools
+      .get("bash")
+      .execute(second.toolCallId, second.input, undefined, undefined, app.context);
 
     expect(app.filteringProxyFactory.mock.calls.map(([, upstream]) => upstream)).toEqual([
       { http: 7890, socks: 7891 },
@@ -5122,5 +5116,53 @@ describe("Default mode registration", () => {
     ).resolves.toBeUndefined();
     expect(app.autoReviewer.review).toHaveBeenCalledOnce();
     idle = true;
+  });
+});
+
+describe("session approval memory", () => {
+  it("remembers user-approved command prefixes for the session", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir);
+    app.select.mockResolvedValueOnce("Allow and Remember");
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+
+    // First call: user approves "npm install" with session memory.
+    const first = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "remember-first",
+        input: { command: "npm install" },
+      },
+      app.context,
+    );
+    expect(first).toBeUndefined();
+    expect(app.select).toHaveBeenCalledTimes(1);
+    expect(app.select).toHaveBeenCalledWith(
+      expect.stringContaining("npm install"),
+      expect.arrayContaining(["Allow and Remember"]),
+    );
+
+    // Same-prefix command later in the session: auto-approved, no prompt.
+    const second = await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "remember-second",
+        input: { command: "npm install lodash" },
+      },
+      app.context,
+    );
+    expect(second).toBeUndefined();
+    expect(app.select).toHaveBeenCalledTimes(1);
+
+    // Unrelated command still prompts.
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "bash",
+        toolCallId: "remember-third",
+        input: { command: "rm -rf other-dir" },
+      },
+      app.context,
+    );
+    expect(app.select).toHaveBeenCalledTimes(2);
   });
 });

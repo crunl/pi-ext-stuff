@@ -952,3 +952,126 @@ describe("deletion sandbox boundary (stage 3)", () => {
     ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 });
+
+describe("session approval memory (stage 5)", () => {
+  it("skips the prompt for user-approved command prefixes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
+    const approvals = {
+      commandPrefixes: [
+        ["npm", "install"],
+        ["rm", "-r", "build"],
+      ],
+    };
+
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "npm install lodash" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm -r build extra" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm ../outside.txt" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "prompt" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm -rf other" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "prompt" });
+  });
+
+  it("never lets approval memory bypass the deletion sandbox boundary", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
+    const approvals = { commandPrefixes: [["rm", "-r", "build"]] };
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm -r build extra/../../etc" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "prompt" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm -r build .git/objects" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "prompt" });
+  });
+
+  it("drops session-approved network hosts before escalating", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
+    const approvals = { networkHosts: new Set(["registry.npmjs.org"]) };
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "curl https://registry.npmjs.org/x" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "curl https://evil.example.com" },
+        cwd,
+        config(),
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+  });
+
+  it("honors approval memory under never and untrusted modes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
+    const approvals = { commandPrefixes: [["npm", "test"]] };
+    const never = config({ approvalMode: "never" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "npm test -- --watch" },
+        cwd,
+        never,
+        undefined,
+        approvals,
+      ),
+    ).resolves.toMatchObject({ action: "allow" });
+    const untrusted = config({ approvalMode: "untrusted" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, untrusted, undefined, approvals),
+    ).resolves.toMatchObject({ action: "allow" });
+  });
+});

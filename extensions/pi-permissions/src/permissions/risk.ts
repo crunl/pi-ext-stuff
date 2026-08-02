@@ -1116,7 +1116,7 @@ function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
   return new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]).has(segment.executable);
 }
 
-export function classifyRisk(request: PermissionRequest): Risk {
+export function classifyRisk(request: PermissionRequest, networkApproved = false): Risk {
   const lowerTool = request.tool.toLowerCase();
   if (lowerTool === "websearch") return "LOW";
   if (lowerTool === "webfetch") return webFetchRisk(request);
@@ -1125,12 +1125,12 @@ export function classifyRisk(request: PermissionRequest): Risk {
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";
   const segments = request.commandSegments ?? parseCommandSegments(command);
-  if (request.networkTargets?.length) return "HARD";
+  if (!networkApproved && request.networkTargets?.length) return "HARD";
   if (
     segments.some(
       (segment) =>
         isDangerousSegment(segment) ||
-        invocationUsesNetwork(segment) ||
+        (!networkApproved && invocationUsesNetwork(segment)) ||
         invocationHasExternalSideEffect(segment),
     )
   )

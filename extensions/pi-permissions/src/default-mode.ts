@@ -37,6 +37,33 @@ export type DefaultDecision =
     }
   | { action: "block"; risk: Risk; reason: string };
 
+/**
+ * Session-scoped approvals (codex ExecpolicyAmendment/ApprovedForSession/
+ * NetworkPolicyAmendment equivalents). Populated when the user approves a
+ * call; matching later calls skip the prompt but never bypass hard blocks
+ * (protected paths, private networks, git single-command constraint).
+ */
+export interface SessionApprovals {
+  /** Whole-segment token prefixes of user-approved commands. */
+  commandPrefixes?: string[][];
+  /** Network hosts the user approved this session. */
+  networkHosts?: ReadonlySet<string>;
+}
+
+/** True when every segment of `command` starts with an approved prefix. */
+function isApprovedCommand(command: string, prefixes: string[][]): boolean {
+  if (prefixes.length === 0) return false;
+  const segments = parseCommandSegments(command);
+  if (segments.length === 0) return false;
+  return segments.every((segment) => {
+    const tokens = [segment.executable, ...segment.args];
+    return prefixes.some((prefix) => {
+      if (prefix.length > tokens.length) return false;
+      return prefix.every((token, index) => token === tokens[index]);
+    });
+  });
+}
+
 function summarize(tool: string, input: Record<string, unknown>): string {
   const limit = (value: string) => value.replace(/[\r\n\t]+/g, " ").slice(0, 500);
   if (typeof input.command === "string") return limit(input.command);
@@ -62,8 +89,19 @@ export async function evaluateDefaultRequest(
   cwd: string,
   config: PermissionsConfig,
   protectedWritePaths?: readonly string[],
+  approved: SessionApprovals = {},
 ): Promise<DefaultDecision> {
   const request = normalizeToolCall(tool, input, cwd);
+  // Drop session-approved hosts from the network targets so they no longer
+  // escalate; anything still pending keeps the existing checks.
+  const approvedHosts = approved.networkHosts;
+  const networkTargets = request.networkTargets ?? [];
+  const hadNetworkTargets = networkTargets.length > 0;
+  if (approvedHosts && approvedHosts.size > 0 && hadNetworkTargets) {
+    const pending = networkTargets.filter((host) => !approvedHosts.has(host));
+    request.networkTargets = pending.length > 0 ? pending : undefined;
+  }
+  const networkFullyApproved = hadNetworkTargets && (request.networkTargets?.length ?? 0) === 0;
   const command = typeof input.command === "string" ? input.command : undefined;
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
@@ -141,13 +179,14 @@ export async function evaluateDefaultRequest(
     };
   }
 
-  let risk = classifyRisk(request);
+  let risk = classifyRisk(request, networkFullyApproved);
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
 
   // Stage 3 (codex sandbox boundary): deletion commands auto-approve only
   // when every target sits inside the sandbox write roots (and outside
   // denyWrite/protected paths). Anything else escalates to REVIEW; `rm -f`
   // is already HARD via classifyRisk.
+  let deletionBoundaryViolation = false;
   if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
     const segments = request.commandSegments ?? parseCommandSegments(command);
     const filesystem = createFilesystemPolicy(
@@ -177,6 +216,7 @@ export async function evaluateDefaultRequest(
       }
       if (!allAllowed) {
         risk = "REVIEW";
+        deletionBoundaryViolation = true;
         break;
       }
     }
@@ -213,7 +253,19 @@ export async function evaluateDefaultRequest(
   const promptedByRule = rule?.action === "ask";
   const wouldPrompt = promptedByRule || risk !== "LOW";
 
+  // Session-approved commands skip the prompt (but never hard blocks or the
+  // deletion sandbox boundary).
+  const commandApproved =
+    !deletionBoundaryViolation &&
+    approved.commandPrefixes !== undefined &&
+    approved.commandPrefixes.length > 0 &&
+    command !== undefined &&
+    isApprovedCommand(command, approved.commandPrefixes);
+
   // ── approval-mode adjustments (mirrors codex AskForApproval) ──────────
+  if (commandApproved) {
+    return { action: "allow", risk, reason: "Approved command prefix (session)" };
+  }
   if (config.approvalMode === "never" && wouldPrompt) {
     // Never ask: escalation is forbidden, failures return to the model.
     return { action: "block", risk, reason: `Blocked by approvalMode=never (${risk} operation)` };
