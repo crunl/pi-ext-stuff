@@ -902,3 +902,53 @@ describe("approval modes (codex-aligned)", () => {
     ).resolves.toMatchObject({ action: "allow" });
   });
 });
+
+describe("deletion sandbox boundary (stage 3)", () => {
+  it("auto-approves deletions inside the workspace", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
+    await writeFile(join(cwd, "build", "a.ts"), "x").catch(() => {});
+    for (const command of [
+      "rm build/a.ts",
+      "rm -r build",
+      "rmdir cache",
+      "unlink build/a.ts",
+      "shred build/a.ts",
+      "truncate -s 0 build/a.ts",
+    ]) {
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    }
+  });
+
+  it("escalates deletions that touch anything outside the sandbox roots", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
+    for (const command of [
+      "rm ../outside.txt",
+      "rm /etc/passwd",
+      "rm ~/.aws/credentials",
+      "truncate -s 0 /etc/passwd",
+    ]) {
+      await expect(
+        evaluateDefaultRequest("bash", { command }, cwd, config()),
+      ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    }
+  });
+
+  it("escalates deletions of protected metadata paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm .git/HEAD" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm .env" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+  });
+
+  it("keeps forced rm at HARD even inside the workspace", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+  });
+});

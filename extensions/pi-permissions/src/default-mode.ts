@@ -9,13 +9,17 @@ import { isPathAllowed } from "./permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
   classifyRisk,
+  deletionExecutables,
+  deletionTargets,
   isPublicNetworkHost,
   normalizeToolCall,
+  parseCommandSegments,
   type Risk,
   shellCommandCanGrantGitMetadata,
   shellCommandInitializesCurrentDirectory,
   shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
+import { rmArgsIncludeForce } from "./permissions/dangerous-commands.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { isKnownSafeCommand } from "./permissions/safe-commands.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
@@ -139,6 +143,44 @@ export async function evaluateDefaultRequest(
 
   let risk = classifyRisk(request);
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
+
+  // Stage 3 (codex sandbox boundary): deletion commands auto-approve only
+  // when every target sits inside the sandbox write roots (and outside
+  // denyWrite/protected paths). Anything else escalates to REVIEW; `rm -f`
+  // is already HARD via classifyRisk.
+  if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
+    const segments = request.commandSegments ?? parseCommandSegments(command);
+    const filesystem = createFilesystemPolicy(
+      config.sandbox,
+      cwd,
+      protectedWritePaths ? [...protectedWritePaths] : undefined,
+    );
+    for (const segment of segments) {
+      if (!deletionExecutables.has(segment.executable)) continue;
+      if (segment.executable === "rm" && rmArgsIncludeForce(segment.args)) continue;
+      const targets = deletionTargets(segment);
+      if (targets.length === 0) continue;
+      let allAllowed = true;
+      for (const target of targets) {
+        const decision = await isPathAllowed(target, {
+          cwd,
+          allowWrite: filesystem.allowWrite,
+          denyRead: [],
+          denyWrite: filesystem.denyWrite,
+          protectedWritePaths: filesystem.protectedWritePaths,
+          operation: "write",
+        });
+        if (!decision.allowed) {
+          allAllowed = false;
+          break;
+        }
+      }
+      if (!allAllowed) {
+        risk = "REVIEW";
+        break;
+      }
+    }
+  }
   const operation = pathOperation(request.operation);
   if (operation) {
     const filesystem = createFilesystemPolicy(

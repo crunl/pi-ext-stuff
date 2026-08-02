@@ -1080,6 +1080,27 @@ function isDangerousSegment(segment: CommandSegment): boolean {
   return isDangerousWords([segment.executable, ...segment.args]);
 }
 
+/** Deletion commands whose targets are checked against the sandbox write roots. */
+export const deletionExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
+
+/**
+ * Positional targets of a deletion command, honoring `--` (everything after
+ * it is a target, even if it looks like an option).
+ */
+export function deletionTargets(segment: CommandSegment): string[] {
+  const targets: string[] = [];
+  let afterDashDash = false;
+  for (const arg of segment.args) {
+    if (arg === "--") {
+      afterDashDash = true;
+      continue;
+    }
+    if (!afterDashDash && arg.startsWith("-")) continue;
+    targets.push(arg);
+  }
+  return targets;
+}
+
 function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (segment.executable === "kubectl") {
