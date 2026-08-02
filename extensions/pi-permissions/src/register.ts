@@ -726,6 +726,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
 
+  const MODE_RANK: Record<string, number> = {
+    default: 0,
+    auto: 1,
+    yolo: 2,
+  };
+
+  // Privilege-max mode: upgrades (default->auto, *->yolo) take effect for the
+  // next call immediately; downgrades stay on the turn-snapshot mode until the
+  // idle boundary. One formula expresses both semantics, so review branches,
+  // approval records, and execute gating all read the same value.
+  const liveMode = (executionContext: EffectiveExecutionContext): string => {
+    const runtimeMode = modeRuntime ? executableMode(modeRuntime.mode) : "default";
+    return MODE_RANK[runtimeMode] >= MODE_RANK[executionContext.mode]
+      ? runtimeMode
+      : executionContext.mode;
+  };
+
   const assertExecutionAuthorized = async (
     tool: string,
     id: string,
@@ -737,7 +754,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
     const activeConfig = executionContext.config;
-    const activeMode = executionContext.mode;
     const executionEpoch = permissionContextEpoch;
     const approval = approvedCalls.get(id);
     approvedCalls.delete(id);
@@ -745,7 +761,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       approval !== undefined &&
       approval.cwd === resolve(ctx.cwd) &&
       approval.configFingerprint === fingerprintConfig(activeConfig) &&
-      (approval.mode === "user-transition" || approval.mode === activeMode) &&
       approval.requestFingerprint ===
         fingerprintValue({
           tool: tool.toLowerCase(),
@@ -823,7 +838,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (executionContext.mode === "yolo") {
+      if (liveMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -938,7 +953,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (executionContext.mode === "yolo") {
+      if (liveMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -979,7 +994,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (executionContext.mode === "yolo") {
+      if (liveMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -1143,12 +1158,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.activate("auto", {
             preserveAutoTransientState: permissionTurnPhase === "active",
           });
-          scheduleModeTransition();
+          // liveMode() makes the next review branch auto immediately; no queued
+          // idle-boundary activation is needed (default and auto share the
+          // same sandbox config).
           setDefaultStatus(ctx);
           ctx.ui.notify("pi-permissions: approve for me mode 已启用", "info");
           return;
         }
-        const approvalMode = executionContext.mode === "auto" ? "auto" : "default";
+        const approvalMode = liveMode(executionContext) === "auto" ? "auto" : "default";
         grantApprovedCall(
           event,
           decision,
@@ -1351,7 +1368,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: "pi-permissions: active permission turn snapshot is unavailable",
         };
       }
-      if (executionContext.mode === "yolo") return;
+      if (liveMode(executionContext) === "yolo") return;
 
       const evaluationEpoch = permissionContextEpoch;
       let decision: DefaultDecision;
@@ -1394,7 +1411,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const effectiveMode = executionContext.mode === "auto" ? "auto" : "default";
+      const effectiveMode = liveMode(executionContext) === "auto" ? "auto" : "default";
       if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
           block: true,
@@ -1654,7 +1671,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // first asynchronous continuation.
     const transitionBarrier = createModeTransitionBarrier();
     const pendingBeforeTransition = pendingModeTransition;
-    const transition = beganDuringActiveTurn ? scheduleModeTransition() : undefined;
+    const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : "default";
+    const targetMode = nextExecutableMode(previousMode);
+    // Upgrades (default->auto, *->yolo) take effect immediately: liveMode()
+    // privilege-max routes the next call to the new review branch while the
+    // turn snapshot (and its already-granted approvals) stay intact. Downgrades
+    // (->default) stay queued to the idle boundary to avoid mid-turn sandbox
+    // teardown races.
+    const isUpgrade = MODE_RANK[targetMode] > MODE_RANK[previousMode];
+    const transition = beganDuringActiveTurn && !isUpgrade ? scheduleModeTransition() : undefined;
     const transitionOwnsPendingState =
       transition !== undefined && transition !== pendingBeforeTransition;
 
@@ -1669,9 +1694,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             settleModeTransitionBarrier(transitionBarrier, true);
             return;
           }
-          if (!transition) {
+          if (!transition && !beganDuringActiveTurn) {
             // Between turns and while idle there is no snapshot to preserve. Revoke any
-            // approval context before the async activation work begins.
+            // approval context before the async activation work begins. Immediate
+            // upgrades during an active turn keep the snapshot and its approvals.
             invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           }
           let runtime = modeRuntime;
@@ -1683,6 +1709,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             }
             runtime = ensureModeRuntime(initial.config);
           }
+          // Recompute from the latest runtime state: runModeMutation serializes
+          // mutations, so a rapid double Shift+Tab lands on the correct final
+          // mode (default -> auto -> yolo) instead of both reading the same
+          // starting mode.
           const previousMode = executableMode(runtime.mode);
           const targetMode = nextExecutableMode(previousMode);
           const result = await activateConfig(

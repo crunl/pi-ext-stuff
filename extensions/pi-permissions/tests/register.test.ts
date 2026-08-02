@@ -730,7 +730,7 @@ describe("Default mode registration", () => {
     ).resolves.toBeDefined();
   });
 
-  it("keeps Guardian-approved Auto execution out of the YOLO bypass path", async () => {
+  it("moves a Guardian-approved Auto call to the YOLO native path after an active-turn switch", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
@@ -762,10 +762,7 @@ describe("Default mode registration", () => {
     ).resolves.toBeDefined();
 
     expect(reviewer.review).toHaveBeenCalledOnce();
-    expect(app.bashToolFactory).toHaveBeenLastCalledWith(
-      agentDir,
-      expect.objectContaining({ operations: expect.any(Object) }),
-    );
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
   });
 
   it("keeps a pending human approval in its active snapshot when entering YOLO", async () => {
@@ -3178,7 +3175,7 @@ describe("Default mode registration", () => {
     expect(app.abort).not.toHaveBeenCalled();
   });
 
-  it("keeps Default for the active run and adopts Auto on the next run", async () => {
+  it("adopts Auto immediately for the next call in the active run", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(
       join(agentDir, "keybindings.json"),
@@ -3211,9 +3208,9 @@ describe("Default mode registration", () => {
       app.context,
     );
 
-    expect(currentApproval).toMatchObject({ block: true });
-    expect(app.select).toHaveBeenCalledOnce();
-    expect(reviewer.review).not.toHaveBeenCalled();
+    expect(currentApproval).toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(reviewer.review).toHaveBeenCalledOnce();
 
     await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
@@ -3227,7 +3224,7 @@ describe("Default mode registration", () => {
     );
 
     expect(nextApproval).toBeUndefined();
-    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(reviewer.review).toHaveBeenCalledTimes(2);
   });
 
   it("cycles a working transition to YOLO immediately when Shift+Tab is pressed again", async () => {
@@ -3359,7 +3356,7 @@ describe("Default mode registration", () => {
     );
     expect(nextApproval).toBeUndefined();
     expect(app.select).not.toHaveBeenCalled();
-    expect(reviewer.review).toHaveBeenCalledTimes(2);
+    expect(reviewer.review).toHaveBeenCalledTimes(1);
 
     idle = true;
     await app.handlers.get("agent_settled")?.({ type: "agent_settled" }, app.context);
@@ -3374,7 +3371,7 @@ describe("Default mode registration", () => {
         app.context,
       ),
     ).resolves.toBeUndefined();
-    expect(reviewer.review).toHaveBeenCalledTimes(2);
+    expect(reviewer.review).toHaveBeenCalledTimes(1);
   });
 
   it("does not let an aborted review clear a newer review with the same tool-call ID", async () => {
@@ -3882,17 +3879,9 @@ describe("Default mode registration", () => {
     // Approved bare `git init` bypasses the sandbox wrapper (sandbox-runtime
     // hard-denies .git/hooks writes), but still goes through the permission
     // gate and the approval check.
-    expect(app.select).toHaveBeenCalledWith(
-      expect.stringContaining("git init"),
-      expect.any(Array),
-    );
+    expect(app.select).toHaveBeenCalledWith(expect.stringContaining("git init"), expect.any(Array));
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
-    expect(app.bashExecute).toHaveBeenCalledWith(
-      "git-init-1",
-      event.input,
-      undefined,
-      undefined,
-    );
+    expect(app.bashExecute).toHaveBeenCalledWith("git-init-1", event.input, undefined, undefined);
   });
 
   it("keeps an approved git commit inside the sandbox", async () => {
@@ -4300,7 +4289,7 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenCalledWith("pi-permissions", "default");
   });
 
-  it("keeps the active permission turn snapshot through Shift+Tab and gives the next turn the new mode", async () => {
+  it("applies an active-turn upgrade to Auto immediately while keeping the snapshot", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
@@ -4330,9 +4319,9 @@ describe("Default mode registration", () => {
         },
         app.context,
       ),
-    ).resolves.toMatchObject({ block: true });
-    expect(app.select).toHaveBeenCalledOnce();
-    expect(reviewer.review).not.toHaveBeenCalled();
+    ).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(reviewer.review).toHaveBeenCalledOnce();
 
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
@@ -4349,7 +4338,7 @@ describe("Default mode registration", () => {
         app.context,
       ),
     ).resolves.toBeUndefined();
-    expect(reviewer.review).toHaveBeenCalledOnce();
+    expect(reviewer.review).toHaveBeenCalledTimes(2);
   });
 
   it("keeps Auto denials paused through active-turn Shift+Tab cycling and resets them next turn", async () => {
@@ -4514,7 +4503,7 @@ describe("Default mode registration", () => {
     },
   );
 
-  it("keeps one transition owner when Shift+Tab is pressed repeatedly in one active turn", async () => {
+  it("applies a double Shift+Tab upgrade to YOLO immediately in one active turn", async () => {
     const reviewer = {
       invalidateSession: vi.fn(),
       review: vi.fn(async () => ({
@@ -4542,8 +4531,8 @@ describe("Default mode registration", () => {
         },
         app.context,
       ),
-    ).resolves.toMatchObject({ block: true });
-    expect(app.select).toHaveBeenCalledOnce();
+    ).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
     expect(reviewer.review).not.toHaveBeenCalled();
 
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
@@ -4558,7 +4547,7 @@ describe("Default mode registration", () => {
         app.context,
       ),
     ).resolves.toBeUndefined();
-    expect(app.select).toHaveBeenCalledOnce();
+    expect(app.select).not.toHaveBeenCalled();
     expect(reviewer.review).not.toHaveBeenCalled();
   });
 
@@ -4589,9 +4578,9 @@ describe("Default mode registration", () => {
         },
         app.context,
       ),
-    ).resolves.toMatchObject({ block: true });
-    expect(app.select).toHaveBeenCalledOnce();
-    expect(reviewer.review).not.toHaveBeenCalled();
+    ).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+    expect(reviewer.review).toHaveBeenCalledOnce();
   });
 
   it("does not recreate an ended snapshot before an immediately queued agent_start", async () => {
@@ -5326,5 +5315,74 @@ describe("request_permissions tool", () => {
         app.context,
       ),
     ).rejects.toThrow("User denied");
+  });
+
+  it("keeps a dialog approval valid when the user switches to YOLO before it executes", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, true);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "dialog-before-yolo",
+      input: { command: "rm -rf build" },
+    };
+
+    // Dialog opens (select pending), user switches to YOLO, then approves.
+    const pendingCall = app.handlers.get("tool_call")!(event, app.context);
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    await pendingCall;
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(event.toolCallId, event.input, undefined, undefined, app.context),
+    ).resolves.toBeDefined();
+
+    // Approved call runs natively (live mode is YOLO).
+    expect(app.bashToolFactory).toHaveBeenLastCalledWith(agentDir);
+  });
+
+  it("queues an active-turn downgrade to Default until the idle boundary", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "yolo" }));
+    const app = harness(agentDir);
+    app.context.isIdle = () => false;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+
+    // yolo -> default is a downgrade: the status label updates at once, but
+    // liveMode() privilege-max keeps the current turn on the snapshot mode
+    // (yolo) with no gates until the idle boundary.
+    await app.shortcuts.get("shift+tab")!.handler(app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "queued-downgrade-turn",
+          input: { command: "rm -rf build" },
+        },
+        app.context,
+      ),
+    ).resolves.toBeUndefined();
+    expect(app.select).not.toHaveBeenCalled();
+
+    // At the idle boundary the queued downgrade applies: the next turn asks.
+    await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
+    await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
+    await expect(
+      app.handlers.get("tool_call")!(
+        {
+          toolName: "bash",
+          toolCallId: "next-default-turn",
+          input: { command: "rm -rf dist" },
+        },
+        app.context,
+      ),
+    ).resolves.toMatchObject({ block: true });
+    expect(app.select).toHaveBeenCalledOnce();
   });
 });
