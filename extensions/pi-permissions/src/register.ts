@@ -29,8 +29,8 @@ import {
   type GuardianPermissionContext,
 } from "./auto-review-request.ts";
 import {
-  AutoReviewerFailure,
   type AutoReviewer,
+  AutoReviewerFailure,
   type AutoReviewerFailureKind,
   type GuardianReviewIdentity,
   PiAutoReviewer,
@@ -54,7 +54,10 @@ import {
   type GuardianTranscriptEntry,
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
-import { parseCommandSegments } from "./permissions/risk.ts";
+import {
+  parseCommandSegments,
+  shellCommandInitializesCurrentDirectory,
+} from "./permissions/risk.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -847,6 +850,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const reason =
             sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
           throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
+        }
+
+        const command = (params as Record<string, unknown>).command;
+        const isBareGitInit =
+          typeof command === "string" && shellCommandInitializesCurrentDirectory(command);
+        if (isBareGitInit) {
+          // sandbox-runtime hard-denies .git/hooks writes with no config
+          // switch, which makes `git init` structurally impossible inside the
+          // sandbox (it must create the hooks directory). A pure, approved
+          // `git init` only writes sample hooks and never executes them, so it
+          // runs unsandboxed; all other git mutations stay sandboxed.
+          return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
         }
 
         let commandConfig =

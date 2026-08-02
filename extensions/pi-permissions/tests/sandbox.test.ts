@@ -396,10 +396,12 @@ describe("sandbox integration", () => {
 
     const broad = withAdditionalWriteRoots(runtime, ["/workspace"]);
     expect(broad.filesystem.denyWrite).toContain(gitRoot);
+    expect(broad.filesystem.allowGitConfig).toBe(true);
 
     const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
     expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
     expect(exact.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(exact.filesystem.denyWrite).toContain("/workspace/project/.codex");
+    expect(exact.filesystem.allowGitConfig).toBe(true);
   });
 });

@@ -118,6 +118,9 @@ export function withAdditionalWriteRoots(
       allowWrite: [...new Set([...config.filesystem.allowWrite, ...roots])],
       denyWrite: config.filesystem.denyWrite.filter((path) =>
         !roots.includes(path)),
+      // sandbox-runtime additionally hard-denies .git/config unless opted in;
+      // approved git write roots imply the command needs git metadata access.
+      allowGitConfig: true,
     },
   };
 }

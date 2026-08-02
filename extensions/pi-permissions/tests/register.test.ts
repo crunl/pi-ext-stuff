@@ -3855,9 +3855,85 @@ describe("Default mode registration", () => {
     expect(temporary.network.allowedDomains).toContain("api.github.com");
     expect(temporary.filesystem.allowWrite).toContain(gitDirectory);
     expect(temporary.filesystem.denyWrite).not.toContain(gitDirectory);
+    expect(temporary.filesystem.allowGitConfig).toBe(true);
     expect(app.select).toHaveBeenCalledWith(
       expect.stringContaining(`Filesystem for this command: ${gitDirectory}`),
       expect.any(Array),
+    );
+  });
+
+  it("runs an approved bare git init outside the sandbox", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    const app = harness(agentDir, true);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "git-init-1",
+      input: { command: "git init" },
+    };
+
+    await app.handlers.get("tool_call")!(event, app.context);
+    await app.tools
+      .get("bash")
+      .execute("git-init-1", event.input, undefined, undefined, app.context);
+
+    // Approved bare `git init` bypasses the sandbox wrapper (sandbox-runtime
+    // hard-denies .git/hooks writes), but still goes through the permission
+    // gate and the approval check.
+    expect(app.select).toHaveBeenCalledWith(
+      expect.stringContaining("git init"),
+      expect.any(Array),
+    );
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+    expect(app.bashExecute).toHaveBeenCalledWith(
+      "git-init-1",
+      event.input,
+      undefined,
+      undefined,
+    );
+  });
+
+  it("keeps an approved git commit inside the sandbox", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const project = await mkdtemp(join(tmpdir(), "pi-permissions-project-"));
+    await mkdir(join(project, ".git"));
+    await writeFile(join(project, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(project, ".git", "config"), "");
+    await mkdir(join(project, ".git", "objects"));
+    await mkdir(join(project, ".git", "refs"));
+    const app = harness(agentDir, true);
+    app.context.cwd = project;
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const event = {
+      toolName: "bash",
+      toolCallId: "git-commit-1",
+      input: { command: "git commit -m init" },
+    };
+
+    await app.handlers.get("tool_call")!(event, app.context);
+    await app.tools
+      .get("bash")
+      .execute("git-commit-1", event.input, undefined, undefined, app.context);
+
+    // git commit stays sandboxed: the wrapper receives the git write root and
+    // allowGitConfig so .git metadata writes are permitted.
+    const options = app.bashToolFactory.mock.calls.at(-1)?.[1] as any;
+    expect(options?.operations).toBeDefined();
+    await options.operations.exec("git commit -m init", project, {
+      onData: () => undefined,
+    });
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledWith(
+      "git commit -m init",
+      undefined,
+      expect.objectContaining({
+        filesystem: expect.objectContaining({
+          allowGitConfig: true,
+          allowWrite: expect.arrayContaining([await realpath(join(project, ".git"))]),
+        }),
+      }),
+      undefined,
     );
   });
 
