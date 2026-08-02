@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
@@ -9,7 +8,12 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { createBashTool, createEditTool, createWriteTool } from "@earendil-works/pi-coding-agent";
+import {
+  createBashTool,
+  createEditTool,
+  createWriteTool,
+  getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   codexBashToolSpec,
@@ -223,7 +227,7 @@ function nextExecutableMode(mode: ExecutablePermissionMode): ExecutablePermissio
 }
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
-  const agentDir = options.agentDir ?? process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  const agentDir = options.agentDir ?? getAgentDir();
   const sandboxManager = options.sandboxManager ?? SandboxManager;
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
   const baseBash = bashToolFactory(process.cwd());
