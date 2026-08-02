@@ -56,13 +56,23 @@ function deltaText(event: MessageUpdateEvent["assistantMessageEvent"]): string {
  * blindly would under-estimate Chinese output by ~4x. The approximation is
  * only used until the provider reports real usage.
  */
-const CJK_RE = /[\u2e80-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/;
+const CJK_RE = /[\u2e80-\u9fff\uf900-\ufaff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/;
+
+/**
+ * CJK unified ideographs extension B-G (supplementary planes) count as one
+ * token each; `for...of` iterates code points, so a surrogate pair is seen
+ * as a single character here.
+ */
+const isCjkSupplementary = (ch: string): boolean => {
+  const cp = ch.codePointAt(0);
+  return cp !== undefined && cp >= 0x20000 && cp <= 0x3ffff;
+};
 
 export function estimateTokensFromChars(chars: string): number {
   let cjk = 0;
   let other = 0;
   for (const ch of chars) {
-    if (CJK_RE.test(ch)) cjk += 1;
+    if (isCjkSupplementary(ch) || CJK_RE.test(ch)) cjk += 1;
     else other += 1;
   }
   return Math.ceil(cjk + other / 4);
@@ -88,9 +98,12 @@ export function createTokenRateTracker(
     let tokens: number;
     let source: TokenRateSource;
     if (reported !== undefined && reported > 0) {
-      tokens = reported;
+      // usage.output is cumulative and should be monotonic, but guard against
+      // providers that report a re-computed lower value (it would otherwise
+      // break the token monotonicity the window rate relies on).
+      state.reportedOutput = Math.max(state.reportedOutput ?? 0, reported);
+      tokens = state.reportedOutput;
       source = "reported";
-      state.reportedOutput = reported;
     } else if (state.reportedOutput !== undefined) {
       tokens = state.reportedOutput;
       source = "reported";
@@ -116,7 +129,9 @@ export function createTokenRateTracker(
     }
     // Drop refresh points that fell out of the window, keeping the oldest as
     // the rate baseline. Samples are pushed only on displayed refreshes, so
-    // the ring is sparse by design and bounded by windowMs / throttleMs.
+    // the ring is sparse by design and bounded by windowMs / throttleMs;
+    // with long pauses the base ages toward the whole-run average — the
+    // window is only as fresh as the latest refresh point.
     while (state.samples.length > 1) {
       const second = state.samples[1];
       if (second === undefined || now - second.at <= windowMs) break;
@@ -134,7 +149,7 @@ export function createTokenRateTracker(
       const dtMs = now - base.at;
       tokensPerSecond =
         dtMs > 0
-          ? Math.round(((tokens - base.tokens) * 1000) / dtMs)
+          ? Math.max(0, Math.round(((tokens - base.tokens) * 1000) / dtMs))
           : Math.round((tokens * 1000) / elapsedMs);
     }
     state.samples.push({ at: now, tokens });

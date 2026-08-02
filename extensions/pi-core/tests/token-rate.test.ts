@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTokenRateTracker } from "../src/tui/token-rate.ts";
+import { createTokenRateTracker, estimateTokensFromChars } from "../src/tui/token-rate.ts";
 import { assistantMessage } from "./helpers/token-rate-fixtures.ts";
 
 function textDelta(delta: string) {
@@ -296,6 +296,36 @@ describe("token rate tracker", () => {
       6000,
     );
     expect(later).toEqual({ outputTokens: 202, source: "estimated", tokensPerSecond: 67 });
+  });
+
+  it("keeps reported output monotonic against lower re-reports", () => {
+    const tracker = createTokenRateTracker();
+    tracker.update(
+      {
+        type: "message_update",
+        message: assistantMessage("", 50),
+        assistantMessageEvent: textDelta("ab"),
+      },
+      1000,
+    );
+    // Provider re-reports a lower cumulative value: the rate must not go
+    // negative or step backwards.
+    const later = tracker.update(
+      {
+        type: "message_update",
+        message: assistantMessage("", 30),
+        assistantMessageEvent: textDelta("cd"),
+      },
+      2000,
+    );
+    expect(later).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 50 });
+  });
+
+  it("counts hangul and supplementary CJK ideographs as one token each", () => {
+    // Hangul syllable block; 4 supplementary-plane ideographs (U+20000+)
+    // used to fall into the latin bucket (4 chars -> 1 token).
+    expect(estimateTokensFromChars("한글")).toBe(2);
+    expect(estimateTokensFromChars("𠀀𠀁𠀂𠀃")).toBe(4);
   });
 
   it("re-baselines to the warm-up average when the source flips", () => {
