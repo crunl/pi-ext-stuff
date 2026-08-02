@@ -2,9 +2,23 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+export type ApprovalMode = "untrusted" | "on-request" | "granular" | "never";
+
+/** Per-category switches for approvalMode "granular" (mirrors codex GranularApprovalConfig). */
+export interface GranularApprovalConfig {
+  /** Shell/sandbox command approval prompts. */
+  sandboxApproval: boolean;
+  /** Approval prompts triggered by permission rules. */
+  rules: boolean;
+  /** Approval prompts from a future request_permissions tool. */
+  requestPermissions: boolean;
+}
+
 export interface PermissionsConfig {
   version: 1;
   defaultMode: "default" | "plan" | "auto" | "yolo";
+  approvalMode: ApprovalMode;
+  granularApproval: GranularApprovalConfig;
   reviewer?: {
     provider: string;
     model: string;
@@ -30,6 +44,8 @@ export interface LoadedPermissionsConfig {
 export type PermissionsConfigOverlay = {
   version?: 1;
   defaultMode?: PermissionsConfig["defaultMode"];
+  approvalMode?: ApprovalMode;
+  granularApproval?: Partial<GranularApprovalConfig>;
   reviewer?: PermissionsConfig["reviewer"];
   sandbox?: {
     enabled?: boolean;
@@ -57,6 +73,12 @@ export class ConfigError extends Error {
 export const DEFAULT_CONFIG: PermissionsConfig = {
   version: 1,
   defaultMode: "default",
+  approvalMode: "on-request",
+  granularApproval: {
+    sandboxApproval: true,
+    rules: true,
+    requestPermissions: true,
+  },
   sandbox: {
     enabled: true,
     profile: "workspace-write",
@@ -74,6 +96,7 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
 };
 
 const modes = new Set<PermissionsConfig["defaultMode"]>(["default", "plan", "auto", "yolo"]);
+const approvalModes = new Set<ApprovalMode>(["untrusted", "on-request", "granular", "never"]);
 const profiles = new Set<PermissionsConfig["sandbox"]["profile"]>(["workspace-write", "read-only"]);
 const efforts = new Set<NonNullable<PermissionsConfig["reviewer"]>["reasoningEffort"]>([
   "minimal",
@@ -120,7 +143,11 @@ function cloneConfig(config: PermissionsConfig): PermissionsConfig {
 
 function parseOverlay(input: unknown): PermissionsConfigOverlay {
   if (!isRecord(input)) throw new ConfigError("config must be an object");
-  rejectUnknownKeys(input, ["version", "defaultMode", "reviewer", "sandbox", "rules"], "");
+  rejectUnknownKeys(
+    input,
+    ["version", "defaultMode", "approvalMode", "granularApproval", "reviewer", "sandbox", "rules"],
+    "",
+  );
   const overlay: PermissionsConfigOverlay = {};
 
   if ("version" in input && input.version !== undefined) {
@@ -135,6 +162,50 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
       throw new ConfigError("defaultMode must be one of default, plan, auto, or yolo");
     }
     overlay.defaultMode = input.defaultMode as PermissionsConfig["defaultMode"];
+  }
+  if ("approvalMode" in input && input.approvalMode !== undefined) {
+    if (
+      typeof input.approvalMode !== "string" ||
+      !approvalModes.has(input.approvalMode as ApprovalMode)
+    ) {
+      throw new ConfigError(
+        "approvalMode must be one of untrusted, on-request, granular, or never",
+      );
+    }
+    overlay.approvalMode = input.approvalMode as ApprovalMode;
+  }
+  if ("granularApproval" in input && input.granularApproval !== undefined) {
+    if (!isRecord(input.granularApproval)) {
+      throw new ConfigError("granularApproval must be an object");
+    }
+    rejectUnknownKeys(
+      input.granularApproval,
+      ["sandboxApproval", "rules", "requestPermissions"],
+      "granularApproval",
+    );
+    const granular: Partial<GranularApprovalConfig> = {};
+    if (
+      "sandboxApproval" in input.granularApproval &&
+      input.granularApproval.sandboxApproval !== undefined
+    ) {
+      granular.sandboxApproval = expectBoolean(
+        input.granularApproval.sandboxApproval,
+        "granularApproval.sandboxApproval",
+      );
+    }
+    if ("rules" in input.granularApproval && input.granularApproval.rules !== undefined) {
+      granular.rules = expectBoolean(input.granularApproval.rules, "granularApproval.rules");
+    }
+    if (
+      "requestPermissions" in input.granularApproval &&
+      input.granularApproval.requestPermissions !== undefined
+    ) {
+      granular.requestPermissions = expectBoolean(
+        input.granularApproval.requestPermissions,
+        "granularApproval.requestPermissions",
+      );
+    }
+    overlay.granularApproval = granular;
   }
   if ("reviewer" in input && input.reviewer !== undefined) {
     if (!isRecord(input.reviewer)) throw new ConfigError("reviewer must be an object");
@@ -271,6 +342,15 @@ function applyOverlay(
   const config = cloneConfig(base);
   if (overlay.version !== undefined) config.version = overlay.version;
   if (overlay.defaultMode !== undefined) config.defaultMode = overlay.defaultMode;
+  if (overlay.approvalMode !== undefined) config.approvalMode = overlay.approvalMode;
+  if (overlay.granularApproval !== undefined) {
+    if (overlay.granularApproval.sandboxApproval !== undefined)
+      config.granularApproval.sandboxApproval = overlay.granularApproval.sandboxApproval;
+    if (overlay.granularApproval.rules !== undefined)
+      config.granularApproval.rules = overlay.granularApproval.rules;
+    if (overlay.granularApproval.requestPermissions !== undefined)
+      config.granularApproval.requestPermissions = overlay.granularApproval.requestPermissions;
+  }
   if (overlay.reviewer !== undefined) config.reviewer = structuredClone(overlay.reviewer);
   if (overlay.sandbox !== undefined) {
     if (overlay.sandbox.enabled !== undefined) config.sandbox.enabled = overlay.sandbox.enabled;

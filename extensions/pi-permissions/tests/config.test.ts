@@ -59,6 +59,45 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).not.toThrow();
   });
 
+  it("defaults approval mode to on-request with all granular switches on", () => {
+    expect(DEFAULT_CONFIG.approvalMode).toBe("on-request");
+    expect(DEFAULT_CONFIG.granularApproval).toEqual({
+      sandboxApproval: true,
+      rules: true,
+      requestPermissions: true,
+    });
+  });
+
+  it("accepts and merges approval-mode configuration", () => {
+    const never = validatePermissionsConfig({ version: 1, approvalMode: "never" });
+    expect(never.approvalMode).toBe("never");
+    expect(never.granularApproval).toEqual(DEFAULT_CONFIG.granularApproval);
+
+    const granular = validatePermissionsConfig({
+      version: 1,
+      approvalMode: "granular",
+      granularApproval: { rules: false },
+    });
+    expect(granular.approvalMode).toBe("granular");
+    expect(granular.granularApproval).toEqual({
+      sandboxApproval: true,
+      rules: false,
+      requestPermissions: true,
+    });
+  });
+
+  it("rejects invalid approval-mode values and granular keys", () => {
+    expect(() => validatePermissionsConfig({ approvalMode: "sometimes" })).toThrow(
+      /approvalMode/,
+    );
+    expect(() => validatePermissionsConfig({ granularApproval: { unknown: true } })).toThrow(
+      /unknown/,
+    );
+    expect(() =>
+      validatePermissionsConfig({ granularApproval: { rules: "yes" } }),
+    ).toThrow(/boolean/);
+  });
+
   it("produces stable fingerprints", () => {
     expect(fingerprintConfig(DEFAULT_CONFIG)).toBe(
       fingerprintConfig(structuredClone(DEFAULT_CONFIG)),

@@ -17,6 +17,7 @@ import {
   shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
+import { isKnownSafeCommand } from "./permissions/safe-commands.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 
 export type DefaultDecision =
@@ -167,12 +168,28 @@ export async function evaluateDefaultRequest(
     return { action: "allow", risk, reason: "Allowed by permissions rule" };
   }
 
-  if (rule?.action === "ask" || risk !== "LOW") {
+  const promptedByRule = rule?.action === "ask";
+  const wouldPrompt = promptedByRule || risk !== "LOW";
+
+  // ── approval-mode adjustments (mirrors codex AskForApproval) ──────────
+  if (config.approvalMode === "never" && wouldPrompt) {
+    // Never ask: escalation is forbidden, failures return to the model.
+    return { action: "block", risk, reason: `Blocked by approvalMode=never (${risk} operation)` };
+  }
+  if (config.approvalMode === "granular" && wouldPrompt) {
+    if (promptedByRule && !config.granularApproval.rules) {
+      return { action: "block", risk, reason: "Blocked by granularApproval.rules=false" };
+    }
+    if (!promptedByRule && !config.granularApproval.sandboxApproval) {
+      return { action: "block", risk, reason: "Blocked by granularApproval.sandboxApproval=false" };
+    }
+  }
+
+  if (wouldPrompt) {
     return {
       action: "prompt",
       risk,
-      reason:
-        rule?.action === "ask" ? "Approval required by permissions rule" : `${risk} operation`,
+      reason: promptedByRule ? "Approval required by permissions rule" : `${risk} operation`,
       summary: summarize(tool, input),
       networkHosts:
         request.operation === "execute" && request.networkTargets?.length
@@ -180,6 +197,22 @@ export async function evaluateDefaultRequest(
           : undefined,
       filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
       justification: additionalWriteRoots.justification,
+    };
+  }
+
+  // untrusted: only read-only whitelisted commands auto-approve; any other
+  // command prompts even when it is otherwise low-risk.
+  if (
+    config.approvalMode === "untrusted" &&
+    request.operation === "execute" &&
+    command !== undefined &&
+    !isKnownSafeCommand(command)
+  ) {
+    return {
+      action: "prompt",
+      risk: "REVIEW",
+      reason: "Command is not in the read-only whitelist (untrusted mode)",
+      summary: summarize(tool, input),
     };
   }
 

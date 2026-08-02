@@ -366,7 +366,7 @@ function parseCommandSegment(source: string): CommandSegment {
   };
 }
 
-function parseCommandSegments(command: string): CommandSegment[] {
+export function parseCommandSegments(command: string): CommandSegment[] {
   const segments = splitShellSegments(command).map(parseCommandSegment);
   const nested = segments.flatMap((segment) => {
     if (!shellExecutables.has(segment.executable)) return [];
