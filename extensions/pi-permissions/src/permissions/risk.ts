@@ -6,6 +6,7 @@ import {
   normalizeNetworkHost,
   parseGitRemoteTarget,
 } from "../network-host.ts";
+import { isDangerousWords } from "./dangerous-commands.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 
 export type Risk = "LOW" | "REVIEW" | "HARD";
@@ -25,7 +26,6 @@ const directNetworkExecutables = new Set([
   "pnpx",
   "bunx",
 ]);
-const deleteExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 const gitNetworkSubcommands = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
 const gitMutationSubcommands = new Set([
@@ -1063,6 +1063,23 @@ function writeRisk(request: PermissionRequest): Risk {
     : "REVIEW";
 }
 
+/**
+ * Codex-aligned dangerous-command check for one parsed segment. `trap`
+ * actions are shell code, so they are expanded and checked recursively;
+ * `bash -lc` bodies are already expanded into their own segments by
+ * parseCommandSegments, so nested `rm -f` is caught at the top level.
+ */
+function isDangerousSegment(segment: CommandSegment): boolean {
+  if (segment.executable === "trap") {
+    let actionIndex = 0;
+    if ((segment.args[0] ?? "") === "--") actionIndex += 1;
+    const action = segment.args[actionIndex];
+    if (action === undefined || action.startsWith("-")) return false;
+    return parseCommandSegments(action).some(isDangerousSegment);
+  }
+  return isDangerousWords([segment.executable, ...segment.args]);
+}
+
 function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (segment.executable === "kubectl") {
@@ -1091,7 +1108,7 @@ export function classifyRisk(request: PermissionRequest): Risk {
   if (
     segments.some(
       (segment) =>
-        deleteExecutables.has(segment.executable) ||
+        isDangerousSegment(segment) ||
         invocationUsesNetwork(segment) ||
         invocationHasExternalSideEffect(segment),
     )
