@@ -1,28 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createTokenRateTracker } from "../src/tui/token-rate.ts";
-
-function assistantMessage(output = 0) {
-  return {
-    role: "assistant" as const,
-    content: [{ type: "text" as const, text: "sample" }],
-    usage: {
-      input: 0,
-      output,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: output,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    api: "openai-completions" as const,
-    provider: "test",
-    model: "test-model",
-    stopReason: "stop" as const,
-    timestamp: 0,
-  };
-}
+import { assistantMessage } from "./helpers/token-rate-fixtures.ts";
 
 function textDelta(delta: string) {
-  return { type: "text_delta" as const, contentIndex: 0, delta, partial: assistantMessage() };
+  return { type: "text_delta" as const, contentIndex: 0, delta, partial: assistantMessage("") };
 }
 
 function thinkingDelta(delta: string) {
@@ -30,7 +11,7 @@ function thinkingDelta(delta: string) {
     type: "thinking_delta" as const,
     contentIndex: 0,
     delta,
-    partial: assistantMessage(),
+    partial: assistantMessage(""),
   };
 }
 
@@ -39,7 +20,7 @@ function toolcallDelta(delta: string) {
     type: "toolcall_delta" as const,
     contentIndex: 0,
     delta,
-    partial: assistantMessage(),
+    partial: assistantMessage(""),
   };
 }
 
@@ -49,7 +30,7 @@ describe("token rate tracker", () => {
     const first = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(0),
+        message: assistantMessage("", 0),
         assistantMessageEvent: textDelta("ab"),
       },
       1000,
@@ -59,7 +40,7 @@ describe("token rate tracker", () => {
     const second = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(40),
+        message: assistantMessage("", 40),
         assistantMessageEvent: textDelta("cd"),
       },
       2000,
@@ -72,7 +53,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("1234"),
       },
       1000,
@@ -80,7 +61,7 @@ describe("token rate tracker", () => {
     const second = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("5678"),
       },
       2000,
@@ -94,7 +75,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: thinkingDelta("abcd"),
       },
       1000,
@@ -102,7 +83,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: toolcallDelta("efgh"),
       },
       1000,
@@ -110,7 +91,7 @@ describe("token rate tracker", () => {
     const third = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("ijkl"),
       },
       2000,
@@ -125,7 +106,7 @@ describe("token rate tracker", () => {
       tracker.update(
         {
           type: "message_update",
-          message: assistantMessage(),
+          message: assistantMessage(""),
           assistantMessageEvent: textDelta(""),
         },
         1000,
@@ -136,7 +117,7 @@ describe("token rate tracker", () => {
     const afterReset = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("abcd"),
       },
       5000,
@@ -145,7 +126,7 @@ describe("token rate tracker", () => {
     const later = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("efgh"),
       },
       6000,
@@ -158,7 +139,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("abcd"),
       },
       1000,
@@ -168,7 +149,7 @@ describe("token rate tracker", () => {
     const firstShown = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("ef"),
       },
       1050,
@@ -179,7 +160,7 @@ describe("token rate tracker", () => {
       tracker.update(
         {
           type: "message_update",
-          message: assistantMessage(),
+          message: assistantMessage(""),
           assistantMessageEvent: textDelta("gh"),
         },
         1100,
@@ -189,7 +170,7 @@ describe("token rate tracker", () => {
     const third = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("ij"),
       },
       1150,
@@ -203,7 +184,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("abcd"),
       },
       1000,
@@ -212,7 +193,7 @@ describe("token rate tracker", () => {
     const reported = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(50),
+        message: assistantMessage("", 50),
         assistantMessageEvent: textDelta("ef"),
       },
       1010,
@@ -225,7 +206,7 @@ describe("token rate tracker", () => {
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(40),
+        message: assistantMessage("", 40),
         assistantMessageEvent: textDelta("ab"),
       },
       1000,
@@ -233,7 +214,7 @@ describe("token rate tracker", () => {
     const later = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage(),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("cdef"),
       },
       2000,

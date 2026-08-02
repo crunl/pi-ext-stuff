@@ -10,6 +10,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, type SelectListTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import { markFloatableSelector } from "./selector-float.ts";
+import { isInteractiveTui } from "./ui-guard.ts";
 
 /** Same copy as settings-selector / ThinkingSelectorComponent (0.82.1). */
 export const THINKING_DESCRIPTIONS: Record<string, string> = {
@@ -128,7 +129,7 @@ export function registerEffortCommand(pi: ExtensionAPI): void {
   pi.registerCommand("effort", {
     description: "Choose thinking level",
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI || ctx.mode !== "tui") return;
+      if (!isInteractiveTui(ctx)) return;
 
       const model = ctx.model as EffortModelInfo | undefined;
       if (!model?.reasoning) {

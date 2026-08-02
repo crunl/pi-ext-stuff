@@ -1,21 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createTokenRateTracker, type TokenRateSnapshot } from "./token-rate.ts";
+import { isInteractiveTui } from "./ui-guard.ts";
 
-export const TOKEN_RATE_STATUS_KEY = "pi-core:working-token-rate";
-
-const WORKING_PREFIX = "Working...";
+export const TOKEN_RATE_WIDGET_KEY = "pi-core:working-token-rate";
 
 interface UiContext {
   hasUI: boolean;
   mode: string;
-  ui: {
-    setStatus(key: string, text?: string): void;
-    setWorkingMessage(message?: string): void;
-  };
-}
-
-function isInteractiveTui(context: UiContext): boolean {
-  return context.hasUI && context.mode === "tui";
+  ui: { setWidget(key: string, content: string[] | undefined): void };
 }
 
 function formatSnapshot(snapshot: TokenRateSnapshot): string {
@@ -24,45 +16,46 @@ function formatSnapshot(snapshot: TokenRateSnapshot): string {
 }
 
 /** Adapter layer: tracks assistant streaming output and shows the token rate
- * both in the working line while streaming (`Working... (≈42 tokens/s)`) and
- * persistently in the footer status area so the last rate stays visible when
- * idle. Non-TUI modes never touch the UI. */
+ * in a persistent widget above the editor (`setWidget`, default placement).
+ * The widget appears while working (streaming and tool phases keep the last
+ * rate visible) and is removed only when the agent goes idle. Non-TUI modes
+ * never touch the UI. */
 export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = Date.now): void {
   const tracker = createTokenRateTracker();
 
-  const resetRate = (context: UiContext): void => {
+  const clearRate = (context: UiContext): void => {
     tracker.reset();
-    if (!isInteractiveTui(context)) return;
-    context.ui.setWorkingMessage();
-    context.ui.setStatus(TOKEN_RATE_STATUS_KEY, undefined);
+    if (isInteractiveTui(context)) {
+      context.ui.setWidget(TOKEN_RATE_WIDGET_KEY, undefined);
+    }
   };
 
   pi.on("agent_start", (_event, context) => {
-    resetRate(context);
+    clearRate(context);
   });
 
-  pi.on("message_start", (event, context) => {
+  pi.on("message_start", (event) => {
     if (event.message.role !== "assistant") return;
-    resetRate(context);
+    // New stream: recompute from a fresh baseline, but keep the widget
+    // content until the first snapshot replaces it.
+    tracker.reset();
   });
 
   pi.on("message_update", (event, context) => {
     if (event.message.role !== "assistant") return;
     const snapshot = tracker.update(event, now());
     if (snapshot === undefined || !isInteractiveTui(context)) return;
-    const formatted = formatSnapshot(snapshot);
-    context.ui.setWorkingMessage(`${WORKING_PREFIX} (${formatted})`);
-    context.ui.setStatus(TOKEN_RATE_STATUS_KEY, formatted);
+    context.ui.setWidget(TOKEN_RATE_WIDGET_KEY, [formatSnapshot(snapshot)]);
   });
 
-  pi.on("tool_execution_start", (_event, context) => {
-    resetRate(context);
-  });
-
-  // agent_end resets tracker state but intentionally does NOT clear the
-  // status: the last rate stays visible while idle (the working line itself
-  // disappears with streaming).
-  pi.on("agent_end", () => {
+  pi.on("tool_execution_start", () => {
+    // Tools produce no output tokens; restart the counter but keep the last
+    // rate visible so the widget never blanks during working.
     tracker.reset();
+  });
+
+  pi.on("agent_end", (_event, context) => {
+    // Idle: the widget disappears until the next agent run.
+    clearRate(context);
   });
 }

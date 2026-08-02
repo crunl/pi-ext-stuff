@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { isInteractiveTui } from "./ui-guard.ts";
 
 const SHOW_REASONS = new Set(["startup", "new", "reload"]);
 
@@ -156,7 +157,7 @@ export function buildStartupHeaderLines(
 /** Install the header on session_start. */
 export function registerStartupHeader(pi: ExtensionAPI): void {
   pi.on("session_start", (event, ctx) => {
-    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    if (!isInteractiveTui(ctx)) return;
 
     if (!shouldShowStartupHeader(event.reason)) {
       ctx.ui.setHeader(undefined);
