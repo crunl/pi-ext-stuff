@@ -62,7 +62,7 @@ describe("codex tool specs", () => {
       ctx as never,
     );
     const completed = rendering.renderCall({ path: "src/a.ts" }, theme as never, ctx as never);
-    const text = completed.render(100).join("\n") + "\n" + result.render(100).join("\n");
+    const text = `${completed.render(100).join("\n")}\n${result.render(100).join("\n")}`;
     expect(text).toContain("Edited src/a.ts");
     expect(text).toContain("+2 -1");
   });
