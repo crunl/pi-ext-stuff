@@ -1168,7 +1168,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           // idle-boundary activation is needed (default and auto share the
           // same sandbox config).
           setDefaultStatus(ctx);
-          ctx.ui.notify("pi-permissions: approve for me mode 已启用", "info");
+          ctx.ui.notify("pi-permissions: Approve for me mode 已启用", "info");
           return;
         }
         grantApprovedCall(
@@ -1523,13 +1523,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           if (auto.action === "approve") {
             runtime.recordAutoReview("approve");
-            grantApprovedCall(
-              event,
-              decision,
-              executionContext,
-              ctx.cwd,
-              "auto-review",
-            );
+            grantApprovedCall(event, decision, executionContext, ctx.cwd, "auto-review");
             return;
           }
           if (auto.action === "deny") {

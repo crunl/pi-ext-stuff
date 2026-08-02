@@ -54,10 +54,10 @@ export class PermissionModeRuntime {
     return this.activeHumanApproval !== undefined || this.activeReviewIds.size > 0;
   }
 
-  get statusLabel(): "default" | "approve for me" | "full bypass" {
+  get statusLabel(): "default" | "Approve for me" | "Full bypass" {
     if (this.mode === "default") return "default";
-    if (this.mode === "auto") return "approve for me";
-    if (this.mode === "yolo") return "full bypass";
+    if (this.mode === "auto") return "Approve for me";
+    if (this.mode === "yolo") return "Full bypass";
     throw new Error("Plan mode is not implemented");
   }
 

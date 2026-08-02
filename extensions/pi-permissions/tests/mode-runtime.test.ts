@@ -13,7 +13,7 @@ describe("PermissionModeRuntime", () => {
       consecutiveDenials: 0,
       paused: false,
     });
-    expect(runtime.statusLabel).toBe("approve for me");
+    expect(runtime.statusLabel).toBe("Approve for me");
     expect(appendEntry).toHaveBeenCalledWith(
       "pi-permissions-state",
       expect.objectContaining({ mode: "auto" }),
@@ -202,7 +202,7 @@ describe("PermissionModeRuntime", () => {
     runtime.applyAutoState({ consecutiveDenials: 2, paused: true });
 
     expect(runtime.activate("yolo")).toBe("yolo");
-    expect(runtime.statusLabel).toBe("full bypass");
+    expect(runtime.statusLabel).toBe("Full bypass");
     expect(runtime.autoState).toEqual({ consecutiveDenials: 2, paused: true });
   });
 });

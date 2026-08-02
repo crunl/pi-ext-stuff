@@ -169,9 +169,9 @@ function harness(
 
 async function cycleToMode(
   app: ReturnType<typeof harness>,
-  target: "default" | "approve for me" | "full bypass",
+  target: "default" | "Approve for me" | "Full bypass",
 ): Promise<void> {
-  const modes = ["default", "approve for me", "full bypass"] as const;
+  const modes = ["default", "Approve for me", "Full bypass"] as const;
   const current = app.setStatus.mock.calls.at(-1)?.[1] as (typeof modes)[number] | undefined;
   const currentIndex = current ? modes.indexOf(current) : 0;
   const targetIndex = modes.indexOf(target);
@@ -191,7 +191,7 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     await expect(
       app.handlers.get("tool_call")!(
         { toolName: "read", toolCallId: "yolo-without-gate", input: { path: ".env" } },
@@ -206,18 +206,18 @@ describe("Default mode registration", () => {
     const app = harness(agentDir);
 
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     expect(app.emitBusEvent).toHaveBeenLastCalledWith("pi-permissions:mode", {
       mode: "auto",
-      label: "approve for me",
+      label: "Approve for me",
       severity: "warning",
     });
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     expect(app.emitBusEvent).toHaveBeenLastCalledWith("pi-permissions:mode", {
       mode: "yolo",
-      label: "full bypass",
+      label: "Full bypass",
       severity: "error",
     });
     expect(app.abort).not.toHaveBeenCalled();
@@ -303,7 +303,7 @@ describe("Default mode registration", () => {
     );
 
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     await expect(
       app.tools
         .get("bash")
@@ -323,7 +323,7 @@ describe("Default mode registration", () => {
 
     await cycleToMode(app, "default");
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     expect(app.notify).toHaveBeenLastCalledWith(
       expect.stringContaining("sandbox unavailable"),
       "error",
@@ -368,7 +368,7 @@ describe("Default mode registration", () => {
     );
 
     expect(app.sandboxManager.initialize).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
   });
 
   it("enters YOLO without waiting for a sandbox lease while working", async () => {
@@ -387,10 +387,10 @@ describe("Default mode registration", () => {
     );
     const callsBeforeSwitch = exclusive.mock.calls.length;
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
 
     expect(exclusive).toHaveBeenCalledTimes(callsBeforeSwitch);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
   });
 
   it("does not unsandbox an operation that started before entering YOLO", async () => {
@@ -418,11 +418,11 @@ describe("Default mode registration", () => {
       expect.objectContaining({ operations: expect.any(Object) }),
     );
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     release.resolve();
     await running;
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
   });
 
   it("does not sandbox a native operation that started before leaving YOLO", async () => {
@@ -508,7 +508,7 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     evaluation.resolve({
       action: "block",
       risk: "HARD",
@@ -542,7 +542,7 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(riskEvaluator).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     evaluationStarted.resolve();
 
     await expect(pending).resolves.toMatchObject({ block: true });
@@ -712,9 +712,9 @@ describe("Default mode registration", () => {
     );
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "full bypass");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
+    await cycleToMode(app, "Approve for me");
     review.resolve({
       decision: "approve",
       risk: "low",
@@ -754,7 +754,7 @@ describe("Default mode registration", () => {
     };
 
     await expect(app.handlers.get("tool_call")!(event, app.context)).resolves.toBeUndefined();
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     await expect(
       app.tools
         .get("bash")
@@ -782,7 +782,7 @@ describe("Default mode registration", () => {
     const pending = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     choice.resolve("Allow Once");
 
     await expect(pending).resolves.toBeUndefined();
@@ -873,7 +873,7 @@ describe("Default mode registration", () => {
         app.context,
       ),
     );
-    await expectActualHistoryCleared(() => cycleToMode(app, "approve for me"));
+    await expectActualHistoryCleared(() => cycleToMode(app, "Approve for me"));
     await expectActualHistoryCleared(() =>
       app.commands.get("permissions")?.handler("", app.context),
     );
@@ -1349,9 +1349,9 @@ describe("Default mode registration", () => {
       "Allow, switch future approvals to Auto",
       "Deny",
     ]);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     expect(app.notify).toHaveBeenLastCalledWith(
-      "pi-permissions: approve for me mode 已启用",
+      "pi-permissions: Approve for me mode 已启用",
       "info",
     );
     expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetCount);
@@ -1394,7 +1394,7 @@ describe("Default mode registration", () => {
         .get("bash")
         .execute(current.toolCallId, current.input, undefined, undefined, app.context),
     ).rejects.toThrow("no longer authorized");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
   });
 
   it("revokes the transition approval when the Auto status update throws", async () => {
@@ -2919,10 +2919,10 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    await cycleToMode(app, "approve for me");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
-    await cycleToMode(app, "full bypass");
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    await cycleToMode(app, "Approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
+    await cycleToMode(app, "Full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     await app.commands.get("permissions")!.handler("", app.context);
     expect(app.notify).toHaveBeenLastCalledWith(
       "YOLO · Full Access · sandbox off · approvals never",
@@ -2939,7 +2939,7 @@ describe("Default mode registration", () => {
       { type: "session_start", reason: "startup" },
       app.context,
     );
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     await writeFile(
       globalConfigPath(agentDir),
       JSON.stringify({ sandbox: { network: { allowedDomains: ["candidate.example"] } } }),
@@ -2952,7 +2952,7 @@ describe("Default mode registration", () => {
 
     await app.commands.get("permissions")!.handler("", app.context);
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     expect(app.notify).toHaveBeenLastCalledWith(
       expect.stringContaining("candidate rejected"),
       "error",
@@ -2978,9 +2978,9 @@ describe("Default mode registration", () => {
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     await app.shortcuts.get("shift+tab")!.handler(app.context);
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "default");
   });
@@ -3041,9 +3041,9 @@ describe("Default mode registration", () => {
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await writeFile(globalConfigPath(agentDir), "{");
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     expect(app.notify).toHaveBeenLastCalledWith(expect.stringContaining("mode 切换失败"), "error");
   });
 
@@ -3143,7 +3143,7 @@ describe("Default mode registration", () => {
 
     await app.handlers.get("session_tree")?.({ type: "session_tree" }, app.context);
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     await expect(
       app.handlers.get("tool_call")!(
         { toolName: "read", toolCallId: "still-yolo", input: { path: ".env" } },
@@ -3166,12 +3166,12 @@ describe("Default mode registration", () => {
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("approve for me mode 已启用"),
+      expect.stringContaining("Approve for me mode 已启用"),
       "info",
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "approve for me");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
     expect(app.abort).not.toHaveBeenCalled();
   });
 
@@ -3244,10 +3244,10 @@ describe("Default mode registration", () => {
     const secondCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
     await Promise.all([firstCycle, secondCycle]);
     expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("full bypass mode 已启用"),
+      expect.stringContaining("Full bypass mode 已启用"),
       "info",
     );
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
   });
 
   it("discards a restored legacy pending transition", async () => {
@@ -3330,7 +3330,7 @@ describe("Default mode registration", () => {
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledOnce());
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "full bypass");
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     expect(reviewSignal?.aborted).toBe(false);
     expect(app.abort).not.toHaveBeenCalled();
     resolveReview({
@@ -4306,7 +4306,7 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     expect(app.handlers.has("agent_end")).toBe(true);
 
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
     expect(app.abort).not.toHaveBeenCalled();
     expect(app.context.isIdle()).toBe(false);
 
@@ -4354,7 +4354,7 @@ describe("Default mode registration", () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir, false, true, {}, undefined, reviewer);
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
     app.context.isIdle = () => false;
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -4369,9 +4369,9 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledTimes(3);
     app.abort.mockClear();
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     await cycleToMode(app, "default");
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
     expect(app.abort).not.toHaveBeenCalled();
 
     await expect(
@@ -4442,7 +4442,7 @@ describe("Default mode registration", () => {
     );
   });
 
-  it.each(["default", "full bypass"] as const)(
+  it.each(["default", "Full bypass"] as const)(
     "clears Auto denials before a new turn that starts in %s and returns to Auto",
     async (nextMode) => {
       const reviewer = {
@@ -4457,7 +4457,7 @@ describe("Default mode registration", () => {
       const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
       const app = harness(agentDir, false, true, {}, undefined, reviewer);
       await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
-      await cycleToMode(app, "approve for me");
+      await cycleToMode(app, "Approve for me");
       app.context.isIdle = () => false;
       await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -4473,7 +4473,7 @@ describe("Default mode registration", () => {
       app.abort.mockClear();
       await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
       await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
-      await cycleToMode(app, "approve for me");
+      await cycleToMode(app, "Approve for me");
 
       expect(app.abort).not.toHaveBeenCalled();
       expect(app.appendEntry).toHaveBeenLastCalledWith(
@@ -4519,8 +4519,8 @@ describe("Default mode registration", () => {
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
-    await cycleToMode(app, "approve for me");
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Approve for me");
+    await cycleToMode(app, "Full bypass");
     expect(app.abort).not.toHaveBeenCalled();
     await expect(
       app.handlers.get("tool_call")!(
@@ -4566,7 +4566,7 @@ describe("Default mode registration", () => {
     app.context.isIdle = () => false;
     await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
 
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     await expect(
@@ -4600,11 +4600,11 @@ describe("Default mode registration", () => {
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
     expect(app.handlers.has("agent_end")).toBe(true);
 
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
 
-    await cycleToMode(app, "full bypass");
+    await cycleToMode(app, "Full bypass");
     expect(app.abort).not.toHaveBeenCalled();
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
@@ -5187,7 +5187,7 @@ describe("Default mode registration", () => {
 
     const pending = app.handlers.get("tool_call")!(event, app.context);
     await vi.waitFor(() => expect(app.select).toHaveBeenCalledOnce());
-    await cycleToMode(app, "approve for me");
+    await cycleToMode(app, "Approve for me");
     await app.handlers.get("agent_end")?.({ type: "agent_end" }, app.context);
     expect(app.context.isIdle()).toBe(false);
     expect(app.abort).not.toHaveBeenCalled();
