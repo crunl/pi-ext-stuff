@@ -429,6 +429,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     };
   };
 
+  // The pending token never defers activation: the mode switch runs immediately
+  // inside runModeMutation (activateConfig + runtime.activate). The token only
+  // stops the mutation's invalidatePermissionContext from tearing down the
+  // turn snapshot (and its approvals) mid-switch; agent_end/agent_settled
+  // clears it, letting the next turn start on the new mode.
   const scheduleModeTransition = (): PendingModeTransition | undefined => {
     if (permissionTurnPhase !== "active" || activeTurnId === undefined) return undefined;
     if (pendingModeTransition) {
@@ -723,21 +728,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
 
-  const MODE_RANK: Record<string, number> = {
+  const MODE_RANK: Record<ExecutablePermissionMode, number> = {
     default: 0,
     auto: 1,
     yolo: 2,
   };
 
-  // Privilege-max mode: upgrades (default->auto, *->yolo) take effect for the
-  // next call immediately; downgrades stay on the turn-snapshot mode until the
-  // idle boundary. One formula expresses both semantics, so review branches,
-  // approval records, and execute gating all read the same value.
-  const liveMode = (executionContext: EffectiveExecutionContext): string => {
-    const runtimeMode = modeRuntime ? executableMode(modeRuntime.mode) : "default";
-    return MODE_RANK[runtimeMode] >= MODE_RANK[executionContext.mode]
-      ? runtimeMode
-      : executionContext.mode;
+  // Privilege-max mode: the runtime mode applies when it is not a downgrade
+  // relative to the turn-snapshot mode; otherwise the snapshot mode keeps
+  // routing until agent_end invalidates it. So upgrades (default->auto,
+  // *->yolo) take effect for the next call immediately, while downgrades only
+  // land at the idle boundary. One formula expresses both semantics, so review
+  // branches, approval records, and execute gating all read the same value.
+  const privilegeMaxMode = (
+    executionContext: EffectiveExecutionContext,
+  ): ExecutablePermissionMode => {
+    const runtimeMode = executableMode(modeRuntime?.mode ?? "default");
+    return MODE_RANK[executionContext.mode] > MODE_RANK[runtimeMode]
+      ? executionContext.mode
+      : runtimeMode;
   };
 
   const assertExecutionAuthorized = async (
@@ -835,7 +844,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (liveMode(executionContext) === "yolo") {
+      if (privilegeMaxMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -950,7 +959,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (liveMode(executionContext) === "yolo") {
+      if (privilegeMaxMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -991,7 +1000,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: call is no longer authorized; request approval again");
       }
-      if (liveMode(executionContext) === "yolo") {
+      if (privilegeMaxMode(executionContext) === "yolo") {
         revokeApprovedCall(id);
         return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
@@ -1155,7 +1164,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.activate("auto", {
             preserveAutoTransientState: permissionTurnPhase === "active",
           });
-          // liveMode() makes the next review branch auto immediately; no queued
+          // privilegeMaxMode() makes the next review branch auto immediately; no queued
           // idle-boundary activation is needed (default and auto share the
           // same sandbox config).
           setDefaultStatus(ctx);
@@ -1363,7 +1372,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: "pi-permissions: active permission turn snapshot is unavailable",
         };
       }
-      if (liveMode(executionContext) === "yolo") return;
+      if (privilegeMaxMode(executionContext) === "yolo") return;
 
       const evaluationEpoch = permissionContextEpoch;
       let decision: DefaultDecision;
@@ -1406,7 +1415,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const effectiveMode = liveMode(executionContext) === "auto" ? "auto" : "default";
+      const effectiveMode = privilegeMaxMode(executionContext) === "auto" ? "auto" : "default";
       if (effectiveMode === "auto" && runtime.autoState.paused) {
         return {
           block: true,
@@ -1665,14 +1674,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // first asynchronous continuation.
     const transitionBarrier = createModeTransitionBarrier();
     const pendingBeforeTransition = pendingModeTransition;
-    const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : "default";
-    const targetMode = nextExecutableMode(previousMode);
-    // Upgrades (default->auto, *->yolo) take effect immediately: liveMode()
-    // privilege-max routes the next call to the new review branch while the
-    // turn snapshot (and its already-granted approvals) stay intact. Downgrades
-    // (->default) stay queued to the idle boundary to avoid mid-turn sandbox
-    // teardown races.
-    const isUpgrade = MODE_RANK[targetMode] > MODE_RANK[previousMode];
+    const modeBeforeCycle = modeRuntime ? executableMode(modeRuntime.mode) : "default";
+    // The switch itself runs immediately either way. For upgrades
+    // (default->auto, *->yolo) that is the whole story: privilegeMaxMode routes
+    // the next call to the new review branch while the turn snapshot (and its
+    // already-granted approvals) stay intact. For downgrades (->default) the
+    // pending token keeps that snapshot valid, so privilegeMaxMode keeps
+    // routing on the old mode until agent_end invalidates it — no mid-turn
+    // sandbox teardown race.
+    const isUpgrade = MODE_RANK[nextExecutableMode(modeBeforeCycle)] > MODE_RANK[modeBeforeCycle];
     const transition = beganDuringActiveTurn && !isUpgrade ? scheduleModeTransition() : undefined;
     const transitionOwnsPendingState =
       transition !== undefined && transition !== pendingBeforeTransition;
