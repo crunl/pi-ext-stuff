@@ -1,3 +1,5 @@
+import { ICONS } from "./format.ts";
+
 export interface ModelStatusInfo {
 	modelId: string;
 	effort: string | undefined;
@@ -5,7 +7,7 @@ export interface ModelStatusInfo {
 
 /** Bottom-border label: model identity only (mode lives in the top border). */
 export function formatModelStatus(info: ModelStatusInfo): string {
-	return `${info.modelId}${info.effort ? ` • ${info.effort}` : ""}`;
+	return `${ICONS.model} ${info.modelId}${info.effort ? ` ${ICONS.effort} ${info.effort}` : ""}`;
 }
 
 /** Badge severity published by pi-permissions ("none" hides the badge). */
