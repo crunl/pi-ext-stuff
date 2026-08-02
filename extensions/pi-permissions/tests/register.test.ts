@@ -2261,7 +2261,7 @@ describe("Default mode registration", () => {
     },
   );
 
-  it.each(["timeout", "provider", "parse"] as const)(
+  it.each(["provider", "parse"] as const)(
     "blocks after final Guardian %s failure with UI instead of opening human fallback",
     async (kind) => {
       const rawError = `secret ${kind} endpoint error`;
@@ -2298,7 +2298,42 @@ describe("Default mode registration", () => {
     },
   );
 
-  it.each(["timeout", "provider", "parse"] as const)(
+  it("reports Guardian timeout distinctly with guidance, without leaking details", async () => {
+    const reviewer = {
+      invalidateSession: vi.fn(),
+      review: vi.fn(async () => {
+        throw new AutoReviewerFailure("timeout", "secret timeout endpoint error");
+      }),
+    };
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
+    const app = harness(agentDir, false, true, {}, undefined, reviewer);
+    await app.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      app.context,
+    );
+    const current = {
+      toolName: "bash",
+      toolCallId: "timeout-guidance",
+      input: { command: "rm -rf build" },
+    };
+
+    const result = await app.handlers.get("tool_call")!(current, app.context);
+    expect(result).toEqual({
+      block: true,
+      reason:
+        "pi-permissions Auto review timed out; the action was not run. Ask the user to approve, or take a different approach.",
+    });
+    expect(result?.reason).not.toContain("secret timeout endpoint error");
+    expect(app.select).not.toHaveBeenCalled();
+    await expect(
+      app.tools
+        .get("bash")
+        .execute(current.toolCallId, current.input, undefined, undefined, app.context),
+    ).rejects.toThrow("no longer authorized");
+  });
+
+  it.each(["provider", "parse"] as const)(
     "fails closed with a generic reason on Guardian %s failure without UI",
     async (kind) => {
       const rawError = `secret ${kind} endpoint unavailable`;
@@ -5164,5 +5199,56 @@ describe("session approval memory", () => {
       app.context,
     );
     expect(app.select).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("request_permissions tool", () => {
+  it("grants turn-scoped permissions after user confirmation", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, true);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("tool_call")!(
+      {
+        toolName: "request_permissions",
+        toolCallId: "rp-grant",
+        input: {
+          reason: "need network",
+          permissions: { network: { hosts: ["api.example.com"] } },
+          scope: "turn",
+        },
+      },
+      app.context,
+    );
+    const tool = app.tools.get("request_permissions");
+    expect(tool).toBeDefined();
+    const result = await tool.execute(
+      "rp-grant",
+      {
+        reason: "need network",
+        permissions: { network: { hosts: ["api.example.com"] } },
+        scope: "turn",
+      },
+      undefined,
+      undefined,
+      app.context,
+    );
+    expect(result.content[0]?.text).toContain("Granted turn permissions");
+    expect(app.confirm).toHaveBeenCalled();
+  });
+
+  it("denies when the user declines", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
+    const app = harness(agentDir, false);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    const tool = app.tools.get("request_permissions");
+    await expect(
+      tool.execute(
+        "rp-deny",
+        { permissions: { filesystem: { write: ["/etc"] } } },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toThrow("User denied");
   });
 });

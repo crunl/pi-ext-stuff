@@ -924,7 +924,7 @@ describe("deletion sandbox boundary (stage 3)", () => {
   it("escalates deletions that touch anything outside the sandbox roots", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
     for (const command of [
-      "rm ../outside.txt",
+      "rm /etc/pi-permissions-outside.txt",
       "rm /etc/passwd",
       "rm ~/.aws/credentials",
       "truncate -s 0 /etc/passwd",
@@ -986,7 +986,7 @@ describe("session approval memory (stage 5)", () => {
     await expect(
       evaluateDefaultRequest(
         "bash",
-        { command: "rm ../outside.txt" },
+        { command: "rm /etc/pi-permissions-outside.txt" },
         cwd,
         config(),
         undefined,
@@ -1011,7 +1011,7 @@ describe("session approval memory (stage 5)", () => {
     await expect(
       evaluateDefaultRequest(
         "bash",
-        { command: "rm -r build extra/../../etc" },
+        { command: "rm -r build /etc/pi-permissions-outside.txt" },
         cwd,
         config(),
         undefined,
@@ -1072,6 +1072,58 @@ describe("session approval memory (stage 5)", () => {
     const untrusted = config({ approvalMode: "untrusted" });
     await expect(
       evaluateDefaultRequest("bash", { command: "npm test" }, cwd, untrusted, undefined, approvals),
+    ).resolves.toMatchObject({ action: "allow" });
+  });
+});
+
+describe("request_permissions write-root grants (stage 6)", () => {
+  it("expands the deletion sandbox boundary with granted roots", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-"));
+    const approved = { filesystemWriteRoots: ["/etc/pi-permissions-granted"] };
+    // Without the grant the deletion escalates…
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm /etc/pi-permissions-granted/x" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    // …with the grant it auto-approves (still guarded by denyWrite/protected).
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm /etc/pi-permissions-granted/x" },
+        cwd,
+        config(),
+        undefined,
+        approved,
+      ),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    await expect(
+      evaluateDefaultRequest(
+        "bash",
+        { command: "rm /etc/pi-permissions-granted/.env" },
+        cwd,
+        config(),
+        undefined,
+        approved,
+      ),
+    ).resolves.toMatchObject({ action: "prompt" });
+  });
+
+  it("expands write-tool checks with granted roots", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-"));
+    const approved = { filesystemWriteRoots: ["/etc/pi-permissions-granted"] };
+    await expect(
+      evaluateDefaultRequest(
+        "write",
+        { path: "/etc/pi-permissions-granted/out.txt", content: "x" },
+        cwd,
+        config(),
+        undefined,
+        approved,
+      ),
     ).resolves.toMatchObject({ action: "allow" });
   });
 });

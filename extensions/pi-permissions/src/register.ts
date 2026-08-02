@@ -10,6 +10,7 @@ import type {
   ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { createBashTool, createEditTool, createWriteTool } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
@@ -24,6 +25,7 @@ import {
   type GuardianPermissionContext,
 } from "./auto-review-request.ts";
 import {
+  AutoReviewerFailure,
   type AutoReviewer,
   type AutoReviewerFailureKind,
   type GuardianReviewIdentity,
@@ -264,6 +266,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // session), never persisted.
   const approvedCommandPrefixes: string[][] = [];
   const approvedNetworkHostsSession = new Set<string>();
+  const sessionApprovedWriteRoots: string[] = [];
+  // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
+  const turnApprovedWriteRoots: string[] = [];
+  const turnApprovedNetworkHosts = new Set<string>();
   let permissionContextEpoch = 0;
   let permissionTurnPhase: PermissionTurnPhase = "idle";
   let permissionTurnId = 0;
@@ -485,6 +491,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     activeTurnId = undefined;
     permissionTurnPhase = "between";
     if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
+    turnApprovedWriteRoots.length = 0;
+    turnApprovedNetworkHosts.clear();
     invalidatePermissionContext(reason, { preserveAutoDenials: true });
   };
 
@@ -977,6 +985,72 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     },
   });
 
+  pi.registerTool({
+    name: "request_permissions",
+    label: "request_permissions",
+    description:
+      "Explicitly request one-off (turn) or session-scoped filesystem write or network permissions from the user. Each request is approved or denied by the user; approved hosts/roots are honored without further prompts within the granted scope.",
+    promptSnippet: "Request explicit filesystem/network permissions",
+    parameters: Type.Object({
+      reason: Type.Optional(Type.String()),
+      permissions: Type.Object({
+        filesystem: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
+        network: Type.Optional(Type.Object({ hosts: Type.Array(Type.String()) })),
+      }),
+      scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
+    }),
+    async execute(id, params, signal, onUpdate, ctx) {
+      const activationGeneration = modeMutationGeneration;
+      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+      assertActivationCurrent(activationGeneration);
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        throw new Error("pi-permissions: request_permissions requires an active permission turn");
+      }
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        throw new Error("pi-permissions: request_permissions requires an active permission turn");
+      }
+      if (
+        executionContext.config.approvalMode === "granular" &&
+        !executionContext.config.granularApproval.requestPermissions
+      ) {
+        throw new Error(
+          "request_permissions is disabled by granularApproval.requestPermissions=false",
+        );
+      }
+      const scope = params.scope ?? "turn";
+      const hosts = params.permissions?.network?.hosts ?? [];
+      const roots = params.permissions?.filesystem?.write ?? [];
+      const detail = [
+        `pi-permissions · request_permissions (${scope})`,
+        params.reason ? `\nReason: ${params.reason}` : "",
+        roots.length > 0 ? `\nFilesystem write: ${roots.join(", ")}` : "",
+        hosts.length > 0 ? `\nNetwork hosts: ${hosts.join(", ")}` : "",
+      ].join("");
+      const confirmed = await ctx.ui.confirm("pi-permissions", detail);
+      if (!confirmed) throw new Error("User denied request_permissions");
+      if (scope === "session") {
+        for (const host of hosts) approvedNetworkHostsSession.add(host);
+        sessionApprovedWriteRoots.push(...roots);
+      } else {
+        for (const host of hosts) turnApprovedNetworkHosts.add(host);
+        turnApprovedWriteRoots.push(...roots);
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Granted ${scope} permissions${
+              hosts.length > 0 ? `; hosts: ${hosts.join(", ")}` : ""
+            }${roots.length > 0 ? `; write roots: ${roots.join(", ")}` : ""}`,
+          },
+        ],
+        details: undefined,
+      };
+    },
+  });
+
   const reportConfigError = (ctx: ExtensionContext, error: unknown): ToolCallEventResult => {
     const message = error instanceof Error ? error.message : String(error);
     setDefaultStatus(ctx);
@@ -1445,11 +1519,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             };
           }
           runtime.recordAutoNonDenial();
+          if (auto.action === "error" && auto.error.kind === "timeout") {
+            // codex TimedOut is an explicit decision: keep failing closed (no
+            // human fallback in auto mode), but say so with guidance.
+            return {
+              block: true,
+              reason:
+                "pi-permissions Auto review timed out; the action was not run. Ask the user to approve, or take a different approach.",
+            };
+          }
           return {
             block: true,
             reason: "pi-permissions Auto review failed closed; the action was not run",
           };
-        } catch {
+        } catch (error) {
           if (reviewSignal.aborted) {
             return {
               block: true,
@@ -1457,6 +1540,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             };
           }
           runtime.recordAutoNonDenial();
+          if (error instanceof AutoReviewerFailure && error.kind === "timeout") {
+            return {
+              block: true,
+              reason:
+                "pi-permissions Auto review timed out; the action was not run. Ask the user to approve, or take a different approach.",
+            };
+          }
           return {
             block: true,
             reason: "pi-permissions Auto review failed closed; the action was not run",

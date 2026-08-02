@@ -48,6 +48,8 @@ export interface SessionApprovals {
   commandPrefixes?: string[][];
   /** Network hosts the user approved this session. */
   networkHosts?: ReadonlySet<string>;
+  /** Extra write roots granted via request_permissions. */
+  filesystemWriteRoots?: string[];
 }
 
 /** True when every segment of `command` starts with an approved prefix. */
@@ -179,21 +181,22 @@ export async function evaluateDefaultRequest(
     };
   }
 
-  let risk = classifyRisk(request, networkFullyApproved);
+  let risk = classifyRisk(request, networkFullyApproved, approved.filesystemWriteRoots ?? []);
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
 
   // Stage 3 (codex sandbox boundary): deletion commands auto-approve only
   // when every target sits inside the sandbox write roots (and outside
   // denyWrite/protected paths). Anything else escalates to REVIEW; `rm -f`
   // is already HARD via classifyRisk.
+  const filesystem = createFilesystemPolicy(
+    config.sandbox,
+    cwd,
+    protectedWritePaths ? [...protectedWritePaths] : undefined,
+  );
+  const allowWrite = [...filesystem.allowWrite, ...(approved.filesystemWriteRoots ?? [])];
   let deletionBoundaryViolation = false;
   if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
     const segments = request.commandSegments ?? parseCommandSegments(command);
-    const filesystem = createFilesystemPolicy(
-      config.sandbox,
-      cwd,
-      protectedWritePaths ? [...protectedWritePaths] : undefined,
-    );
     for (const segment of segments) {
       if (!deletionExecutables.has(segment.executable)) continue;
       if (segment.executable === "rm" && rmArgsIncludeForce(segment.args)) continue;
@@ -203,7 +206,7 @@ export async function evaluateDefaultRequest(
       for (const target of targets) {
         const decision = await isPathAllowed(target, {
           cwd,
-          allowWrite: filesystem.allowWrite,
+          allowWrite,
           denyRead: [],
           denyWrite: filesystem.denyWrite,
           protectedWritePaths: filesystem.protectedWritePaths,
@@ -223,15 +226,10 @@ export async function evaluateDefaultRequest(
   }
   const operation = pathOperation(request.operation);
   if (operation) {
-    const filesystem = createFilesystemPolicy(
-      config.sandbox,
-      cwd,
-      protectedWritePaths ? [...protectedWritePaths] : undefined,
-    );
     for (const path of request.resolvedPaths) {
       const decision = await isPathAllowed(path, {
         cwd,
-        allowWrite: filesystem.allowWrite,
+        allowWrite,
         denyRead: filesystem.denyRead,
         denyWrite: filesystem.denyWrite,
         protectedWritePaths: filesystem.protectedWritePaths,

@@ -1054,11 +1054,12 @@ function isWithin(path: string, root: string): boolean {
   return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
 }
 
-function writeRisk(request: PermissionRequest): Risk {
+function writeRisk(request: PermissionRequest, approvedWriteRoots: string[]): Risk {
   const globalConfig = resolve(homedir(), ".pi/agent/extensions/pi-permissions/config.json");
   if (request.resolvedPaths.some((path) => path === globalConfig)) return "HARD";
+  const roots = [request.cwd, ...approvedWriteRoots];
   return request.resolvedPaths.length > 0 &&
-    request.resolvedPaths.every((path) => isWithin(path, request.cwd))
+    request.resolvedPaths.every((path) => roots.some((root) => isWithin(path, root)))
     ? "LOW"
     : "REVIEW";
 }
@@ -1116,11 +1117,15 @@ function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
   return new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]).has(segment.executable);
 }
 
-export function classifyRisk(request: PermissionRequest, networkApproved = false): Risk {
+export function classifyRisk(
+  request: PermissionRequest,
+  networkApproved = false,
+  approvedWriteRoots: string[] = [],
+): Risk {
   const lowerTool = request.tool.toLowerCase();
   if (lowerTool === "websearch") return "LOW";
   if (lowerTool === "webfetch") return webFetchRisk(request);
-  if (request.operation === "write") return writeRisk(request);
+  if (request.operation === "write") return writeRisk(request, approvedWriteRoots);
   if (request.operation === "read") return "LOW";
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";
