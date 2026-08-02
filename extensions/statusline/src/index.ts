@@ -13,10 +13,7 @@
  *   /statusline  — toggle between this statusline and the built-in layout
  */
 
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 // standalone.ts is pi-core's side-effect-free surface: no register graph
 // gets pulled into this jiti instance.
 import { applyAutocompleteAbove } from "../../pi-core/standalone.ts";
@@ -61,9 +58,19 @@ export default function statusline(pi: ExtensionAPI) {
 	const install = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		currentCtx = ctx;
-		installFooter(ctx, permissionsMode, (fn) => {
-			requestRender = fn;
-		});
+		// Captured from the footer factory's theme (full Theme, not EditorTheme).
+		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
+		installFooter(
+			ctx,
+			permissionsMode,
+			(theme) => {
+				badgeFgAnsi.warning = theme.getFgAnsi("warning");
+				badgeFgAnsi.error = theme.getFgAnsi("error");
+			},
+			(fn) => {
+				requestRender = fn;
+			},
+		);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			const editor = new ModelLineEditor(tui, theme, keybindings);
 			editor.getModelInfo = modelInfo;
@@ -74,10 +81,8 @@ export default function statusline(pi: ExtensionAPI) {
 				if (severity === "none" || label === undefined) return undefined;
 				return { label, severity };
 			};
-			return applyAutocompleteAbove(
-				editor,
-				tui as Parameters<typeof applyAutocompleteAbove>[1],
-			);
+			editor.getBadgeFgAnsi = (color) => badgeFgAnsi[color];
+			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
 	};
 
