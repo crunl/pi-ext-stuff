@@ -1127,3 +1127,48 @@ describe("request_permissions write-root grants (stage 6)", () => {
     ).resolves.toMatchObject({ action: "allow" });
   });
 });
+
+describe("custom/MCP tool approvals (codex-aligned)", () => {
+  it("reviews external tools by default", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-mcp-"));
+    for (const [tool, input] of [
+      ["gitee__create_issue", { title: "x" }],
+      ["mcp__github__get_issue", { owner: "a", repo: "b", number: 1 }],
+      ["my_custom_tool", { query: "hello" }],
+    ] as const) {
+      await expect(
+        evaluateDefaultRequest(tool, input, cwd, config()),
+      ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    }
+  });
+
+  it("allows external tools via exact-name or glob rules", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-mcp-"));
+    const exact = config({ rules: [{ action: "allow", tool: "gitee__create_issue" }] });
+    await expect(
+      evaluateDefaultRequest("gitee__create_issue", { title: "x" }, cwd, exact),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest("gitee__create_pr", { title: "y" }, cwd, exact),
+    ).resolves.toMatchObject({ action: "prompt" });
+
+    const globbed = config({ rules: [{ action: "allow", tool: "mcp__*" }] });
+    await expect(
+      evaluateDefaultRequest("mcp__github__get_issue", { owner: "a" }, cwd, globbed),
+    ).resolves.toMatchObject({ action: "allow" });
+    await expect(
+      evaluateDefaultRequest("gitee__create_issue", { title: "x" }, cwd, globbed),
+    ).resolves.toMatchObject({ action: "prompt" });
+  });
+
+  it("keeps exact-name rules for built-in tools intact", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-mcp-"));
+    const configured = config({ rules: [{ action: "deny", tool: "bash", pattern: "rm *" }] });
+    await expect(
+      evaluateDefaultRequest("bash", { command: "rm build/a.ts" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "block" });
+    await expect(
+      evaluateDefaultRequest("read", { path: "README.md" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "allow" });
+  });
+});

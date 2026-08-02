@@ -51,8 +51,12 @@ export function matchRules(
   rules: PermissionRule[],
 ): RuleMatch | undefined {
   const text = requestText(request);
+  // tool matches by exact name or glob (e.g. "mcp__*" to cover MCP tools);
+  // pattern, when present, matches the command text / input serialization.
   const matches = rules.filter(
-    (rule) => rule.tool === request.tool && (!rule.pattern || globMatches(text, rule.pattern)),
+    (rule) =>
+      (rule.tool === request.tool || globMatches(request.tool, rule.tool)) &&
+      (!rule.pattern || globMatches(text, rule.pattern)),
   );
   return matches.reduce<RuleMatch | undefined>((best, rule) => {
     if (!best || actionRank[rule.action] > actionRank[best.action])
