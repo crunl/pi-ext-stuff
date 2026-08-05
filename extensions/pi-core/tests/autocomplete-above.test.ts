@@ -51,6 +51,12 @@ function activateAutocomplete(editor: any, items: string[]) {
   };
 }
 
+/** Panel open with a selected item (upstream SelectList always has one). */
+function activateSelectedAutocomplete(editor: any, items: string[]) {
+  activateAutocomplete(editor, items);
+  editor.autocompleteList.getSelectedItem = () => ({ value: items[0], label: items[0] });
+}
+
 describe("frameLines", () => {
   it("adds a rounded top border and side verticals at exact frame width", () => {
     const inner = "item-a".padEnd(16); // frameWidth 20 - overhead 4
@@ -216,10 +222,42 @@ describe("applyAutocompleteAbove - tab navigation", () => {
     activateAutocomplete(editor, ["a"]);
 
     editor.handleInput("x");
-    editor.handleInput("\r"); // enter still confirms via original chain
 
-    expect(editor.__received).toEqual(["x", "\r"]);
+    expect(editor.__received).toEqual(["x"]);
     expect(editor.autocompleteList.__received).toEqual([]);
+  });
+
+  it("enter falls through when no item is selected", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateAutocomplete(editor, ["a"]); // list without getSelectedItem
+
+    editor.handleInput("\r");
+
+    expect(editor.__received).toEqual(["\r"]); // original chain reached
+  });
+});
+
+describe("applyAutocompleteAbove - enter completion", () => {
+  it("enter forwards a synthetic tab to the original handler", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateSelectedAutocomplete(editor, ["effort"]);
+
+    editor.handleInput("\r");
+
+    // The upstream editor's tab branch (panel open) applies the official
+    // applyCompletion and returns without submitting — including for "/".
+    expect(editor.__received).toEqual(["\t"]);
+    expect(editor.autocompleteList.__received).toEqual([]); // no navigation
+  });
+
+  it("enter forwards a synthetic tab for any prefix", () => {
+    const editor = applyAutocompleteAbove(fakeEditor());
+    activateSelectedAutocomplete(editor, ["file-a"]);
+
+    editor.handleInput("\r");
+
+    expect(editor.__received).toEqual(["\t"]);
+    expect(editor.__received).not.toContain("\r"); // never reaches submit
   });
 });
 

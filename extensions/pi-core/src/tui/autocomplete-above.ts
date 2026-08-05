@@ -5,8 +5,19 @@ import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
 import { installSelectorFloat } from "./selector-float.ts";
 import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
 
+/** Mirror of pi-tui AutocompleteItem (official contract). */
+interface CompletionItem {
+  value: string;
+  label: string;
+  description?: string;
+}
+
 interface EditorInternals {
-  autocompleteList?: { render(width: number): string[]; handleInput?(data: string): void };
+  autocompleteList?: {
+    render(width: number): string[];
+    handleInput?(data: string): void;
+    getSelectedItem?(): CompletionItem | null;
+  };
   autocompleteState?: unknown;
   /** Fallback only: used when the caller cannot pass the factory's tui. */
   tui?: FloatingTui;
@@ -120,6 +131,16 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   // fully transparent when it is closed. Navigation is forwarded to the
   // SelectList as arrow-key sequences (its own up/down bindings, with
   // wrap-around).
+  //
+  // Enter completes the selected item into the input box and stops there
+  // (never submits). This reuses the upstream editor's own tab branch: it
+  // applies the official AutocompleteProvider.applyCompletion for any
+  // prefix, writes state, closes the panel and returns. Upstream only
+  // submits on tui.select.confirm, where "/" prefixes deliberately fall
+  // through to submit — forwarding a synthetic tab sidesteps that path
+  // entirely, giving uniform complete-without-sending. When nothing is
+  // selected the guard falls through to the raw Enter (the upstream tab
+  // branch would otherwise swallow it).
   const SELECT_UP = "\x1b[A";
   const SELECT_DOWN = "\x1b[B";
   const originalHandleInput = editor.handleInput?.bind(editor);
@@ -132,6 +153,10 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
       }
       if (matchesKey(data, "shift+tab")) {
         list.handleInput(SELECT_UP);
+        return;
+      }
+      if (matchesKey(data, "enter") && list.getSelectedItem?.()) {
+        originalHandleInput?.("\t");
         return;
       }
     }
