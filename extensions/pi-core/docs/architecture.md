@@ -6,7 +6,7 @@ layout or cross-extension contract changes.
 ## Entry points
 
 | File | Role |
-|---|---|
+| --- | --- |
 | `index.ts` | Package entry (`package.json` `pi.extensions`). Loads the register graph. |
 | `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-permissions, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
 | `src/register.ts` | Pure orchestration facade: calls every `register*` once, in order. |
@@ -43,9 +43,11 @@ Adding an export here is the only supported way to widen the contract.
   autocomplete provider and the editor float panel
   (`editor-float-panel.ts`); `selector-float.ts` marks floatable selectors and
   `selector-tab-nav.ts` anchors Shift+Tab navigation into them.
-- `token-rate.ts` (pure tracker) / `working-token-rate.ts` (widget adapter):
-  the widget is `setWidget("pi-core:working-token-rate")`, shown while working,
-  cleared at `agent_end`.
+- `token-rate.ts` (pure tracker) / `working-token-rate.ts` (indicator adapter):
+  the rate is shown after the working spinner in the footer
+  (`setWorkingIndicator` frames), restored to pi's default at `agent_end`;
+  the legacy `setWidget("pi-core:working-token-rate")` above the editor is
+  only cleared, never populated.
 - `ui-guard.ts` — `isInteractiveTui()` shared by three modules.
 - `startup-header.ts`, `effort-command.ts`, `output-padding.ts`,
   `markdown-code-frame.ts` — smaller, single-purpose patches.
