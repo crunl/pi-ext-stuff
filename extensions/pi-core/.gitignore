@@ -4,3 +4,6 @@ dist/
 work/
 graphify-out/
 *.log
+
+# Subagent run artifacts
+.pi-subagents/
