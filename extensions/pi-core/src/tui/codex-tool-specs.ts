@@ -89,6 +89,7 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   completedVerb: "Ran",
   argument: (args) => (typeof args.command === "string" ? args.command : ""),
   collapsed: "preview",
+  maxOutputRows: 4,
   transformOutput: compactBashStatusSpacing,
 };
 

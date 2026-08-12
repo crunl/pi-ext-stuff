@@ -3,7 +3,7 @@ import type {
   Theme,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, TruncatedText } from "@earendil-works/pi-tui";
 import {
   type OutputPad,
   type OutputPaddingSource,
@@ -49,12 +49,73 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
 }
 
 interface CodexToolRenderState<TPreviewState = unknown> {
-  header?: Text;
+  header?: ToolHeaderComponent;
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
   /** Renderer-specific state for previews (typed via CodexToolRendererSpec). */
   rendererState?: TPreviewState;
+}
+
+const HEADER_WHITESPACE = /\s/u;
+
+/** Collapse whitespace runs containing CR/LF without backtracking. */
+function collapseHeaderBreaks(text: string): string {
+  let chunks: string[] | undefined;
+  let chunkStart = 0;
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const code = text.charCodeAt(cursor);
+    if (code !== 10 && code !== 13) {
+      cursor += 1;
+      continue;
+    }
+
+    chunks ??= [];
+    let whitespaceStart = cursor;
+    while (
+      whitespaceStart > chunkStart &&
+      HEADER_WHITESPACE.test(text.charAt(whitespaceStart - 1))
+    ) {
+      whitespaceStart -= 1;
+    }
+    chunks.push(text.slice(chunkStart, whitespaceStart), " ");
+
+    cursor += 1;
+    while (cursor < text.length && HEADER_WHITESPACE.test(text.charAt(cursor))) {
+      cursor += 1;
+    }
+    chunkStart = cursor;
+  }
+
+  if (!chunks) return text;
+  chunks.push(text.slice(chunkStart));
+  return chunks.join("");
+}
+
+/** Mutable single-row header that delegates width-safe truncation to Pi TUI. */
+class ToolHeaderComponent implements Component {
+  private sourceText: string | undefined;
+  private text: TruncatedText;
+
+  constructor(private readonly outputPad: OutputPad) {
+    this.text = new TruncatedText("", outputPad, 0);
+  }
+
+  setText(text: string): void {
+    if (text === this.sourceText) return;
+    this.sourceText = text;
+    this.text = new TruncatedText(collapseHeaderBreaks(text), this.outputPad, 0);
+  }
+
+  render(width: number): string[] {
+    return this.text.render(width);
+  }
+
+  invalidate(): void {
+    this.text.invalidate();
+  }
 }
 
 interface RenderContext<TPreviewState = unknown> {
@@ -169,9 +230,9 @@ function updateHeader<TPreviewState = unknown>(
   context: RenderContext<TPreviewState>,
   theme: Theme,
   outputPad: OutputPad,
-): Text {
+): ToolHeaderComponent {
   if (!state.header || state.outputPad !== outputPad) {
-    state.header = new Text("", outputPad, 0);
+    state.header = new ToolHeaderComponent(outputPad);
     state.outputPad = outputPad;
   }
   state.header.setText(headerText(spec, state, args, context, theme));

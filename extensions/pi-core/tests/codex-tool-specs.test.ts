@@ -1,3 +1,4 @@
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
   codexBashToolSpec,
@@ -105,6 +106,61 @@ describe("codex tool specs", () => {
   it("bash spec renders Ran header with the command", () => {
     const text = renderHeader(codexBashToolSpec, { command: "npm test" });
     expect(text).toContain("Ran npm test");
+  });
+
+  it("keeps a long multiline bash header on one visual row", () => {
+    const rendering = createCodexToolRendering(codexBashToolSpec, {
+      getOutputPad: () => 0,
+      track() {},
+    });
+    const args = {
+      command:
+        "git status --short && git add README.md\nsrc/tui/tool-renderer.ts && git commit -m test",
+    };
+    const ctx = context({ args });
+    const header = rendering.renderCall(args, theme as never, ctx as never);
+    rendering.renderResult(
+      { content: [{ type: "text", text: "ok" }] } as never,
+      { expanded: false, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+
+    const lines = header.render(48);
+    expect(lines).toHaveLength(1);
+    expect(visibleWidth(lines[0])).toBe(48);
+    expect(stripTerminalSequences(lines[0]).trimEnd()).toMatch(
+      /^ Ran git status --short && git add README\.md.*\.\.\.$/,
+    );
+  });
+
+  it("limits collapsed bash previews to four rows", () => {
+    const rendering = createCodexToolRendering(codexBashToolSpec, {
+      getOutputPad: () => 0,
+      track() {},
+    });
+    const ctx = context({ args: { command: "seq 1 8" } });
+    rendering.renderCall({ command: "seq 1 8" }, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      {
+        content: [
+          {
+            type: "text",
+            text: Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"),
+          },
+        ],
+      } as never,
+      { expanded: false, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+
+    expect(result.render(100)).toEqual([
+      "  └ line 1",
+      "    line 2",
+      "    … +5 lines",
+      "    line 8",
+    ]);
   });
 
   it("truncates previews at 50 lines with a trailing hint", () => {

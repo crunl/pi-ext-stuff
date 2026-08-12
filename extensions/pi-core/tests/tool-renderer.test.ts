@@ -1,4 +1,4 @@
-import { Text } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import {
   compactBashStatusSpacing,
@@ -30,6 +30,82 @@ function context(state: Record<string, unknown>, overrides: Record<string, unkno
 }
 
 describe("createCodexToolRendering", () => {
+  it("keeps whitespace-heavy headers within an interactive rendering budget", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const whitespace = " ".repeat(20_000);
+    const commands = [whitespace, `echo ok\nfinished${whitespace}`];
+
+    const startedAt = performance.now();
+    const headers = commands.map((command) =>
+      rendering.renderCall!({ command } as any, theme, context({})),
+    );
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(250);
+    for (const header of headers) expect(header.render(40)).toHaveLength(1);
+  });
+
+  it.each([
+    ["LF", "alpha \t\n  beta"],
+    ["CRLF", "alpha\t\r\n \tbeta"],
+    ["bare CR", "alpha \r\t beta"],
+  ])("folds %s and its adjacent whitespace into one space", (_name, command) => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!({ command } as any, theme, context({}));
+
+    expect(header.render(80)[0].trimEnd()).toBe("• Running alpha beta");
+  });
+
+  it("keeps ANSI-styled CJK and emoji headers width-safe after folding a line break", () => {
+    const ansiTheme = {
+      fg: (_color: string, text: string) => `\u001b[36m${text}\u001b[0m`,
+      bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
+    } as any;
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!(
+      { command: "编译🙂\n下一步" } as any,
+      ansiTheme,
+      context({}),
+    );
+    const [line] = header.render(32);
+
+    expect(visibleWidth(line)).toBe(32);
+    expect(stripTerminalSequences(line).trimEnd()).toBe("• Running 编译🙂 下一步");
+  });
+
   it("updates the shared header from Running to Ran when a result arrives", () => {
     const rendering = createCodexToolRendering({
       runningVerb: "Running",
@@ -41,6 +117,19 @@ describe("createCodexToolRendering", () => {
     const header = rendering.renderCall!({ command: "npm test" } as any, theme, context(state));
 
     expect(header.render(80).join("\n")).toContain("• Running npm test");
+
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "still running" }] } as any,
+      { expanded: false, isPartial: true },
+      theme,
+      context(state, { lastComponent: undefined }),
+    );
+    const repeatedHeader = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context(state),
+    );
+    expect(repeatedHeader).toBe(header);
 
     rendering.renderResult!(
       { content: [{ type: "text", text: "ok" }] } as any,
