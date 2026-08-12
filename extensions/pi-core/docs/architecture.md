@@ -49,8 +49,9 @@ Adding an export here is the only supported way to widen the contract.
   the legacy `setWidget("pi-core:working-token-rate")` above the editor is
   only cleared, never populated.
 - `ui-guard.ts` — `isInteractiveTui()` shared by three modules.
-- `startup-header.ts`, `effort-command.ts`, `output-padding.ts`,
-  `markdown-code-frame.ts` — smaller, single-purpose patches.
+- `effort-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
+  single-purpose patches. (`startup-header.ts` was removed — it rendered a
+  logo via the external `chafa` binary.)
 
 ## Testing
 

@@ -6,7 +6,6 @@ import { registerEffortCommand } from "./tui/effort-command.ts";
 import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
-import { registerStartupHeader } from "./tui/startup-header.ts";
 import { registerWorkingTokenRate } from "./tui/working-token-rate.ts";
 
 export function registerExtension(pi: ExtensionAPI): void {
@@ -15,7 +14,6 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerCodexToolRendering(pi);
   registerAutocompleteAbove(pi);
   registerSelectorTabNav(pi);
-  registerStartupHeader(pi);
   registerEffortCommand(pi);
   registerWorkingTokenRate(pi);
   applyMarkdownCodeFrame();

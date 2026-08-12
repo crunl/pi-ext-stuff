@@ -11,9 +11,7 @@
       "!node_modules",
       "!graphify-out",
       "!docs",
-      "!work",
-      "!assets/**/*.png",
-      "!assets/**/*.svg"
+      "!work"
     ]
   },
   "formatter": {
@@ -68,7 +66,9 @@
   },
   "overrides": [
     {
-      "includes": ["tests/**"],
+      "includes": [
+        "tests/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {
