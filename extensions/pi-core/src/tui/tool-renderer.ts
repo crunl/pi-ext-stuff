@@ -3,7 +3,7 @@ import type {
   Theme,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, TruncatedText } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text, TruncatedText } from "@earendil-works/pi-tui";
 import {
   type OutputPad,
   type OutputPaddingSource,
@@ -28,6 +28,8 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   runningVerb: string;
   completedVerb: string;
   argument: (args: Record<string, unknown>, cwd: string) => string;
+  /** Truncate the header to one row and expose embedded line breaks as `↵`. */
+  singleLineHeader?: boolean;
   collapsed?: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
   /**
@@ -48,8 +50,12 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   transformOutput?: (text: string) => string;
 }
 
+interface MutableToolHeader extends Component {
+  setText(text: string): void;
+}
+
 interface CodexToolRenderState<TPreviewState = unknown> {
-  header?: ToolHeaderComponent;
+  header?: MutableToolHeader;
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
@@ -59,7 +65,7 @@ interface CodexToolRenderState<TPreviewState = unknown> {
 
 const HEADER_WHITESPACE = /\s/u;
 
-/** Collapse whitespace runs containing CR/LF without backtracking. */
+/** Replace whitespace runs containing CR/LF with a visible break marker. */
 function collapseHeaderBreaks(text: string): string {
   let chunks: string[] | undefined;
   let chunkStart = 0;
@@ -80,7 +86,7 @@ function collapseHeaderBreaks(text: string): string {
     ) {
       whitespaceStart -= 1;
     }
-    chunks.push(text.slice(chunkStart, whitespaceStart), " ");
+    chunks.push(text.slice(chunkStart, whitespaceStart), " ↵ ");
 
     cursor += 1;
     while (cursor < text.length && HEADER_WHITESPACE.test(text.charAt(cursor))) {
@@ -95,7 +101,7 @@ function collapseHeaderBreaks(text: string): string {
 }
 
 /** Mutable single-row header that delegates width-safe truncation to Pi TUI. */
-class ToolHeaderComponent implements Component {
+class SingleLineToolHeader implements MutableToolHeader {
   private sourceText: string | undefined;
   private text: TruncatedText;
 
@@ -230,9 +236,11 @@ function updateHeader<TPreviewState = unknown>(
   context: RenderContext<TPreviewState>,
   theme: Theme,
   outputPad: OutputPad,
-): ToolHeaderComponent {
+): MutableToolHeader {
   if (!state.header || state.outputPad !== outputPad) {
-    state.header = new ToolHeaderComponent(outputPad);
+    state.header = spec.singleLineHeader
+      ? new SingleLineToolHeader(outputPad)
+      : new Text("", outputPad, 0);
     state.outputPad = outputPad;
   }
   state.header.setText(headerText(spec, state, args, context, theme));

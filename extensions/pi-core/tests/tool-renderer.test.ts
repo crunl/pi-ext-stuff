@@ -37,6 +37,7 @@ describe("createCodexToolRendering", () => {
         completedVerb: "Ran",
         argument: (args) => String(args.command),
         collapsed: "hidden",
+        singleLineHeader: true,
       },
       {
         getOutputPad: () => 0,
@@ -60,7 +61,26 @@ describe("createCodexToolRendering", () => {
     ["LF", "alpha \t\n  beta"],
     ["CRLF", "alpha\t\r\n \tbeta"],
     ["bare CR", "alpha \r\t beta"],
-  ])("folds %s and its adjacent whitespace into one space", (_name, command) => {
+  ])("renders %s and its adjacent whitespace as a visible break", (_name, command) => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+        singleLineHeader: true,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!({ command } as any, theme, context({}));
+
+    expect(header.render(80)[0].trimEnd()).toBe("• Running alpha ↵ beta");
+  });
+
+  it("preserves multiline headers unless the tool opts into a single line", () => {
     const rendering = createCodexToolRendering(
       {
         runningVerb: "Running",
@@ -73,9 +93,9 @@ describe("createCodexToolRendering", () => {
         track() {},
       },
     );
-    const header = rendering.renderCall!({ command } as any, theme, context({}));
+    const header = rendering.renderCall!({ command: "alpha\nbeta" } as any, theme, context({}));
 
-    expect(header.render(80)[0].trimEnd()).toBe("• Running alpha beta");
+    expect(header.render(80).map((line) => line.trimEnd())).toEqual(["• Running alpha", "beta"]);
   });
 
   it("keeps ANSI-styled CJK and emoji headers width-safe after folding a line break", () => {
@@ -89,6 +109,7 @@ describe("createCodexToolRendering", () => {
         completedVerb: "Ran",
         argument: (args) => String(args.command),
         collapsed: "hidden",
+        singleLineHeader: true,
       },
       {
         getOutputPad: () => 0,
@@ -103,7 +124,7 @@ describe("createCodexToolRendering", () => {
     const [line] = header.render(32);
 
     expect(visibleWidth(line)).toBe(32);
-    expect(stripTerminalSequences(line).trimEnd()).toBe("• Running 编译🙂 下一步");
+    expect(stripTerminalSequences(line).trimEnd()).toBe("• Running 编译🙂 ↵ 下一步");
   });
 
   it("updates the shared header from Running to Ran when a result arrives", () => {

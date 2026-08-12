@@ -126,11 +126,11 @@ describe("codex tool specs", () => {
       ctx as never,
     );
 
-    const lines = header.render(48);
+    const lines = header.render(120);
     expect(lines).toHaveLength(1);
-    expect(visibleWidth(lines[0])).toBe(48);
-    expect(stripTerminalSequences(lines[0]).trimEnd()).toMatch(
-      /^ Ran git status --short && git add README\.md.*\.\.\.$/,
+    expect(visibleWidth(lines[0])).toBe(120);
+    expect(stripTerminalSequences(lines[0]).trimEnd()).toBe(
+      " Ran git status --short && git add README.md ↵ src/tui/tool-renderer.ts && git commit -m test",
     );
   });
 
