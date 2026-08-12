@@ -17,13 +17,16 @@ layout or cross-extension contract changes.
 
 | Tool | Registered by | Why |
 |---|---|---|
-| read / grep / find / ls | pi-core `src/tui/built-in-tools.ts` (`registerCodexToolRendering`) | Wraps the built-in tools with Codex-style rendering. `write`/`edit`/`bash` are intentionally absent: pi-permissions registers them because their `execute` needs the permission gate; their rendering specs are applied there from pi-core's `standalone` exports. |
+| read / grep / find / ls | pi-core `src/tui/built-in-tools.ts` (`registerCodexToolRendering`) | Wraps the built-in tools with Codex-style rendering. |
+| bash / write / edit (canonical builtin owner) | pi-core `src/tui/canonical-tool-fallback.ts` (`registerCanonicalBuiltinFallback`) | In interactive TUI only, when the complete public metadata and synthetic builtin source match Pi's canonical definitions. The `core-builtin-presentation` flag supports `auto` (default) or `off`. |
+| bash / write / edit (extension owner) | pi-permissions | Permission extensions retain execution ownership and may apply pi-core's side-effect-free presentation decorator. First registration per name remains authoritative. |
 
 ## standalone.ts surface
 
 Exports (no side effects on import):
 
 - `applyAutocompleteAbove` — statusline
+- `withCodexToolPresentation` — pi-permissions; decorates a complete tool definition while preserving its execution and metadata
 - `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` — pi-permissions
 - `createEditDiffBox` — pi-permissions
 - `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `createCodexToolRendering` / `summarizeEditDiff` — pi-permissions
@@ -33,11 +36,28 @@ Adding an export here is the only supported way to widen the contract.
 
 ## TUI module map
 
+- `codex-tool-presentation.ts` — side-effect-free decorator seam. It maps the
+  complete seven-tool definition to an internal spec and replaces only
+  `renderShell`/`renderCall`/`renderResult`; unsupported names fail fast.
 - `built-in-tools.ts` — registers Codex rendering on read/grep/find/ls. It wraps
   Pi's public `create*ToolDefinition` factories so prompt metadata and the full
   execution context are preserved. The four per-tool blocks cannot be
   table-driven: `registerTool` infers the schema from the spread argument, so
   each tool needs its own call site.
+- `canonical-tool-fallback.ts` — TUI-only adapter for canonical bash/write/edit.
+  It snapshots `getAllTools()` before registering anything, skips extension/SDK
+  owners, reconstructs definitions with Pi's public factories, and never calls
+  `setActiveTools`. Pi 0.84.1 cannot expose the actual definition or host
+  `SettingsManager` through the extension context, so an SDK
+  `baseToolsOverride`, custom/non-file-backed shell settings, and a later
+  dynamic same-name registration cannot be distinguished safely. Those SDK
+  configurations should use the `off` flag; these remain documented
+  compatibility boundaries rather than private-registry patch points.
+- Pi 0.84.1 has no public renderer-only registration API: execution and
+  rendering are combined in `ToolDefinition`. If a future Pi release exposes
+  an API such as `registerToolRenderer(name, renderer)`, replace this Adapter
+  with that host integration while keeping `withCodexToolPresentation` as the
+  compatibility Seam for permission-owned definitions.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary).
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)`.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its

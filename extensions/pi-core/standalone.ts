@@ -4,7 +4,7 @@
  * Import from here (not index.ts, not src/tui/* deep paths) when another
  * extension needs pi-core components without pulling the register graph
  * into its own jiti instance:
- *   - pi-permissions → createCodexToolRendering / createEditDiffBox / …
+ *   - pi-permissions → withCodexToolPresentation / createCodexToolRendering / …
  *   - statusline     → applyAutocompleteAbove
  *
  * Contract: importing this module (and anything it re-exports) runs no
@@ -13,6 +13,7 @@
  */
 
 export { applyAutocompleteAbove } from "./src/tui/autocomplete-above.ts";
+export { withCodexToolPresentation } from "./src/tui/codex-tool-presentation.ts";
 export {
   codexBashToolSpec,
   codexEditToolSpec,

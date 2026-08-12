@@ -1,14 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import registerExtension from "../index.ts";
 
+function createPiMock(overrides: Record<string, unknown> = {}) {
+  return {
+    on: vi.fn(),
+    registerCommand: vi.fn(),
+    registerTool: vi.fn(),
+    registerFlag: vi.fn(),
+    getFlag: vi.fn(() => "off"),
+    getAllTools: vi.fn(() => []),
+    ...overrides,
+  } as any;
+}
+
 describe("pi-core registration", () => {
   it("owns only non-permission built-in tools and gives them self-rendered shells", () => {
     const tools = new Map<string, any>();
-    registerExtension({
-      on: vi.fn(),
-      registerCommand: vi.fn(),
-      registerTool: (tool: any) => tools.set(tool.name, tool),
-    } as any);
+    registerExtension(createPiMock({ registerTool: (tool: any) => tools.set(tool.name, tool) }));
 
     expect([...tools.keys()]).toEqual(["read", "grep", "find", "ls"]);
     expect([...tools.values()].every((tool) => tool.renderShell === "self")).toBe(true);
@@ -24,11 +32,7 @@ describe("pi-core registration", () => {
 
   it("registers the five token-rate lifecycle handlers", () => {
     const events = new Set<string>();
-    registerExtension({
-      on: (event: string) => events.add(event),
-      registerCommand: vi.fn(),
-      registerTool: vi.fn(),
-    } as any);
+    registerExtension(createPiMock({ on: (event: string) => events.add(event) }));
 
     for (const event of [
       "agent_start",
@@ -43,11 +47,7 @@ describe("pi-core registration", () => {
 
   it("keeps completed read and search calls on one collapsed line", () => {
     const tools = new Map<string, any>();
-    registerExtension({
-      on: vi.fn(),
-      registerCommand: vi.fn(),
-      registerTool: (tool: any) => tools.set(tool.name, tool),
-    } as any);
+    registerExtension(createPiMock({ registerTool: (tool: any) => tools.set(tool.name, tool) }));
     const theme = {
       fg: (_color: string, text: string) => text,
       bold: (text: string) => text,

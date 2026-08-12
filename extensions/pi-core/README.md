@@ -9,7 +9,10 @@ pi loads extensions directly, so there is **no build step**.
 
 - **Codex-style tool presentation** — `read` / `grep` / `find` / `ls` /
   `write` / `edit` / `bash` calls render with icons, verbs, and collapsed
-  summaries, including a live diff box for file edits.
+  summaries, including a live diff box for file edits. In core-only interactive
+  TUI sessions, pi-core decorates canonical `bash` / `write` / `edit` only when
+  their public metadata and builtin owner marker match. Permission extensions
+  retain execution ownership when installed.
 - **Working token rate** — the streaming spinner in the footer shows the
   current output speed (`⠋ Working  50 tok/s`). Uses the provider's
   reported usage when available; falls back to a CJK-aware character
@@ -56,6 +59,23 @@ npm run test     # vitest --run
 Tests are flat `tests/*.test.ts` files mirroring `src/tui/*` by basename.
 `tests/pi-api-compat.test.ts` pins the few runtime seams for which Pi does not
 yet expose an equivalent extension API.
+
+The canonical mutating-tool fallback is controlled by the string flag
+`core-builtin-presentation` (`auto` by default, or `off`). Pi 0.84.1 does not
+provide a public renderer-only tool API; `ToolDefinition` combines execution
+and rendering. It also does not expose the effective `ToolDefinition` through
+`getAllTools()`, so SDK hosts that inject `baseToolsOverride`, a custom
+`SettingsManager`, or other non-file-backed shell configuration cannot be
+proven equivalent to the canonical CLI definitions. A later dynamic same-name
+registration is likewise indistinguishable after the fallback is installed.
+Those SDK configurations should set the flag to `off`. pi-core therefore skips
+all observable non-builtin owners and documents these cases as compatibility
+boundaries rather than patching Pi's private registry.
+
+If Pi eventually exposes a public API such as
+`registerToolRenderer(name, renderer)`, the canonical fallback Adapter should
+be replaced by that host integration. The `withCodexToolPresentation` decorator
+Seam remains the compatibility path for permission-owned definitions.
 
 ## Architecture
 
