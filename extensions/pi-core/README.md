@@ -1,9 +1,9 @@
 # pi-core
 
-A pi coding-agent extension pack: Codex-style tool rendering, a live token
-rate in the working indicator, edit-diff previews, and assorted TUI
-polish. Distributed as `.ts` sources — pi loads extensions directly, so
-there is **no build step**.
+An opinionated personal core extension pack for the pi coding agent:
+Codex-style tool rendering, a live token rate in the working indicator,
+edit-diff previews, and assorted TUI polish. Distributed as `.ts` sources —
+pi loads extensions directly, so there is **no build step**.
 
 ## Features
 
@@ -35,7 +35,7 @@ there is **no build step**.
 From a git repository:
 
 ```bash
-pi install git:github.com/<you>/pi-core@main
+pi install git:github.com/crunl/pi-core@main
 ```
 
 Or from a local checkout:

@@ -2,7 +2,17 @@
   "name": "pi-core",
   "version": "0.1.0",
   "private": true,
+  "description": "An opinionated personal core extension pack for the Pi coding agent.",
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crunl/pi-core.git"
+  },
+  "homepage": "https://github.com/crunl/pi-core#readme",
+  "bugs": {
+    "url": "https://github.com/crunl/pi-core/issues"
+  },
   "keywords": [
     "pi-package"
   ],
