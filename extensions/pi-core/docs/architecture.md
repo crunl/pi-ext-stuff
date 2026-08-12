@@ -44,10 +44,10 @@ Adding an export here is the only supported way to widen the contract.
   (`editor-float-panel.ts`); `selector-float.ts` marks floatable selectors and
   `selector-tab-nav.ts` anchors Shift+Tab navigation into them.
 - `token-rate.ts` (pure tracker) / `working-token-rate.ts` (indicator adapter):
-  the rate is shown after the working spinner in the footer
-  (`setWorkingIndicator` frames), restored to pi's default at `agent_end`;
-  the legacy `setWidget("pi-core:working-token-rate")` above the editor is
-  only cleared, never populated.
+  the rate is shown as part of the footer working line
+  (`setWorkingMessage`, `⠋ Working  50 tok/s`), restored to pi's default at
+  `agent_end`; the legacy `setWidget("pi-core:working-token-rate")` above the
+  editor is only cleared, never populated.
 - `ui-guard.ts` — `isInteractiveTui()` shared by three modules.
 - `effort-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
   single-purpose patches. (`startup-header.ts` was removed — it rendered a

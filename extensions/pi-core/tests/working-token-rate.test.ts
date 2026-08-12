@@ -45,7 +45,7 @@ describe("working token rate adapter", () => {
     expect(setWidget).toHaveBeenCalledTimes(1);
     expect(setWidget).toHaveBeenCalledWith(TOKEN_RATE_WIDGET_KEY, undefined);
     // The rate lives in the working line message now.
-    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working ≈002 tok/s");
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
   });
 
   it("formats reported usage without the estimate marker", () => {
@@ -63,7 +63,7 @@ describe("working token rate adapter", () => {
       context,
     );
 
-    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working 030 tok/s");
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  30 tok/s");
   });
 
   it("keeps the rate visible across tool calls and restores the default when idle", () => {
@@ -105,6 +105,41 @@ describe("working token rate adapter", () => {
     // re-applied with custom frames, so its animation is never restarted.
     expect(setWorkingIndicator).toHaveBeenCalledTimes(1);
     expect(setWorkingIndicator).toHaveBeenCalledWith();
+  });
+
+  it("resets the measurement on model switch (usage not clamped across models)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
+    // Model A: reported usage climbs to 60.
+    vi.setSystemTime(1000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd", 30), "abcd"), context);
+    vi.setSystemTime(2000);
+    handlers.get("message_update")?.(
+      messageUpdate(assistantMessage("abcdefgh", 60), "efgh"),
+      context,
+    );
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  60 tok/s");
+
+    // Mid-turn switch (no new message_start): the tracker must not keep
+    // model A's cumulative usage as the new floor.
+    handlers.get("model_select")?.(
+      { model: { id: "model-b" }, previousModel: { id: "model-a" } },
+      context,
+    );
+    vi.setSystemTime(2500);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd", 20), "abcd"), context);
+    // Without the reset, usage would be clamped to 60 and the window rate
+    // would read 0 tok/s; a reset re-baselines to model B's 25 tokens.
+    vi.setSystemTime(3000);
+    handlers.get("message_update")?.(
+      messageUpdate(assistantMessage("abcdefgh", 25), "efgh"),
+      context,
+    );
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  50 tok/s");
   });
 
   it("does not re-apply an identical working message", () => {

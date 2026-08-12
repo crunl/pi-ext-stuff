@@ -11,7 +11,7 @@ there is **no build step**.
   `write` / `edit` / `bash` calls render with icons, verbs, and collapsed
   summaries, including a live diff box for file edits.
 - **Working token rate** — the streaming spinner in the footer shows the
-  current output speed (`⠋ ≈42 tokens/s Working...`). Uses the provider's
+  current output speed (`⠋ Working  50 tok/s`). Uses the provider's
   reported usage when available; falls back to a CJK-aware character
   estimate (marked with `≈`) otherwise.
 - **Autocomplete above the editor** — completion list floats above the input

@@ -14,16 +14,17 @@ interface UiContext {
   };
 }
 
-/** "Working 042 tok/s" — fixed-width rate so the line doesn't jitter; the
- * estimate marker (≈) stays when the provider has not reported usage yet. */
+/** "Working 111 tok/s" / "Working  50 tok/s" — a 3-wide, space-right-
+ * aligned rate column so 2- and 3-digit rates don't make the line jitter;
+ * the estimate marker (≈) counts toward the column width. */
 function formatWorkingMessage(snapshot: TokenRateSnapshot): string {
-  const rate = String(snapshot.tokensPerSecond).padStart(3, "0");
   const marker = snapshot.source === "estimated" ? "≈" : "";
-  return `Working ${marker}${rate} tok/s`;
+  const rate = `${marker}${snapshot.tokensPerSecond}`.padStart(3, " ");
+  return `Working ${rate} tok/s`;
 }
 
 /** Adapter layer: tracks assistant streaming output and shows the token rate
- * as part of the footer working line (`⠋ Working 042 tok/s`) via
+ * as part of the footer working line (`⠋ Working  50 tok/s`) via
  * `setWorkingMessage` — which only updates the text and never restarts the
  * spinner animation. The last rate stays visible across tool phases; the
  * default message/spinner are restored when the agent goes idle. Non-TUI
@@ -72,6 +73,15 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
   pi.on("tool_execution_start", () => {
     // Tools produce no output tokens; restart the counter but keep the last
     // rate visible so the working line never blanks during working.
+    tracker.reset();
+  });
+
+  pi.on("model_select", () => {
+    // A model switch changes the measurement baseline (tokenizer estimate
+    // ratio, usage reporting semantics — reported usage must not be clamped
+    // to the previous model's cumulative value). Reset the measurement; the
+    // working line keeps the last rate until the next stream replaces it,
+    // same behaviour as message_start.
     tracker.reset();
   });
 
