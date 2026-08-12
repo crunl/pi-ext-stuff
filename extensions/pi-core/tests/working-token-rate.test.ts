@@ -13,19 +13,15 @@ function registerForTest(options: { hasUI?: boolean; mode?: string } = {}) {
   } as any);
 
   const setWidget = vi.fn();
+  const setWorkingMessage = vi.fn();
   const setWorkingIndicator = vi.fn();
   const context = {
     hasUI: options.hasUI ?? true,
     mode: options.mode ?? "tui",
-    ui: {
-      setWidget,
-      setWorkingIndicator,
-      // Identity fg so frame text stays plain in assertions.
-      theme: { fg: (_color: string, text: string) => text },
-    },
+    ui: { setWidget, setWorkingMessage, setWorkingIndicator },
   };
 
-  return { handlers, context, setWidget, setWorkingIndicator };
+  return { handlers, context, setWidget, setWorkingMessage, setWorkingIndicator };
 }
 
 describe("working token rate adapter", () => {
@@ -33,11 +29,11 @@ describe("working token rate adapter", () => {
     vi.useRealTimers();
   });
 
-  it("shows the estimated rate in the working indicator", () => {
+  it("shows the estimated rate in the working line", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setWidget, setWorkingIndicator } = registerForTest();
+    const { handlers, context, setWidget, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
@@ -48,16 +44,15 @@ describe("working token rate adapter", () => {
     // The widget is only ever cleared (legacy cleanup), never populated.
     expect(setWidget).toHaveBeenCalledTimes(1);
     expect(setWidget).toHaveBeenCalledWith(TOKEN_RATE_WIDGET_KEY, undefined);
-    // The rate lives in the working indicator frames now.
-    const options = setWorkingIndicator.mock.lastCall?.[0];
-    expect(options.frames[0]).toBe("⠋ ≈2 tokens/s");
+    // The rate lives in the working line message now.
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working ≈002 tok/s");
   });
 
   it("formats reported usage without the estimate marker", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setWorkingIndicator } = registerForTest();
+    const { handlers, context, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
@@ -68,15 +63,14 @@ describe("working token rate adapter", () => {
       context,
     );
 
-    const options = setWorkingIndicator.mock.lastCall?.[0];
-    expect(options.frames[0]).toBe("⠋ 30 tokens/s");
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working 030 tok/s");
   });
 
   it("keeps the rate visible across tool calls and restores the default when idle", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setWorkingIndicator } = registerForTest();
+    const { handlers, context, setWorkingMessage, setWorkingIndicator } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
@@ -84,16 +78,18 @@ describe("working token rate adapter", () => {
     vi.setSystemTime(2000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
 
-    // Tool execution keeps the last rate applied (working phase): no new call.
+    // agent_start restore + first rate change = 2 calls so far; tool
+    // execution keeps the last rate applied (working phase): no new call.
     handlers.get("tool_execution_start")?.({}, context);
-    expect(setWorkingIndicator).toHaveBeenCalledTimes(2);
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
 
-    // Idle (agent_end) restores pi's default working indicator.
+    // Idle (agent_end) restores pi's default working message and spinner.
     handlers.get("agent_end")?.({}, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
     expect(setWorkingIndicator).toHaveBeenLastCalledWith();
   });
 
-  it("embeds the rate into every spinner frame", () => {
+  it("keeps pi's default spinner frames (only the message text changes)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -105,26 +101,24 @@ describe("working token rate adapter", () => {
     vi.setSystemTime(2000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
 
-    // agent_start restores the default indicator once; the update applies the frames.
-    expect(setWorkingIndicator).toHaveBeenCalledTimes(2);
-    const options = setWorkingIndicator.mock.calls[1]?.[0];
-    expect(options.frames).toHaveLength(10);
-    expect(options.frames[0]).toBe("⠋ ≈2 tokens/s");
-    expect(options.intervalMs).toBe(80);
+    // The spinner is only ever touched to restore the default — never
+    // re-applied with custom frames, so its animation is never restarted.
+    expect(setWorkingIndicator).toHaveBeenCalledTimes(1);
+    expect(setWorkingIndicator).toHaveBeenCalledWith();
   });
 
-  it("does not re-apply identical indicator frames (keeps the spinner animating)", () => {
+  it("does not re-apply an identical working message", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
-    const { handlers, context, setWorkingIndicator } = registerForTest();
+    const { handlers, context, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
     vi.setSystemTime(1000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
     vi.setSystemTime(2000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
-    // Same rate text again: the indicator frames are not re-set.
+    // Same rate text again: the working line is not re-set.
     vi.setSystemTime(2500);
     handlers.get("message_update")?.(
       messageUpdate(assistantMessage("123456789012"), "9012"),
@@ -132,19 +126,7 @@ describe("working token rate adapter", () => {
     );
 
     // agent_start restore + the first rate change only.
-    expect(setWorkingIndicator).toHaveBeenCalledTimes(2);
-  });
-
-  it("restores the default working indicator when idle", () => {
-    const { handlers, context, setWidget, setWorkingIndicator } = registerForTest();
-    handlers.get("agent_start")?.({}, context);
-    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
-    handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
-
-    handlers.get("agent_end")?.({}, context);
-    expect(setWidget).toHaveBeenLastCalledWith(TOKEN_RATE_WIDGET_KEY, undefined);
-    // Called with no arguments -> restore pi's default spinner.
-    expect(setWorkingIndicator).toHaveBeenLastCalledWith();
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
   });
 
   it("starts a new agent run with the legacy widget cleared", () => {
@@ -154,7 +136,7 @@ describe("working token rate adapter", () => {
   });
 
   it("does not touch any UI in non-TUI modes", () => {
-    const { handlers, context, setWidget, setWorkingIndicator } = registerForTest({
+    const { handlers, context, setWidget, setWorkingMessage } = registerForTest({
       hasUI: false,
       mode: "print",
     });
@@ -164,7 +146,7 @@ describe("working token rate adapter", () => {
     handlers.get("agent_end")?.({}, context);
 
     expect(setWidget).not.toHaveBeenCalled();
-    expect(setWorkingIndicator).not.toHaveBeenCalled();
+    expect(setWorkingMessage).not.toHaveBeenCalled();
   });
 
   it("ignores non-assistant message events", () => {
