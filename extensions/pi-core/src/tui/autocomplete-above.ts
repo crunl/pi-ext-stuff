@@ -4,6 +4,7 @@ import { EditorFloatPanel, type FloatingTui } from "./editor-float-panel.ts";
 import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
 import { installSelectorFloat } from "./selector-float.ts";
 import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
+import { isInteractiveTui } from "./ui-guard.ts";
 
 /** Mirror of pi-tui AutocompleteItem (official contract). */
 interface CompletionItem {
@@ -18,9 +19,8 @@ interface EditorInternals {
     handleInput?(data: string): void;
     getSelectedItem?(): CompletionItem | null;
   };
-  autocompleteState?: unknown;
-  /** Fallback only: used when the caller cannot pass the factory's tui. */
-  tui?: FloatingTui;
+  /** Public on pi-tui Editor >= 0.84.1. */
+  isShowingAutocomplete?(): boolean;
   /** Public on pi-tui Editor; kept dynamic by the host (thinking/bash mode). */
   borderColor?: (text: string) => string;
   __autocompleteAbove?: boolean;
@@ -32,13 +32,26 @@ interface PatchableEditor {
   getPaddingX?(): number;
 }
 
+function isAutocompleteOpen(editor: EditorInternals): boolean {
+  return typeof editor.isShowingAutocomplete === "function"
+    ? editor.isShowingAutocomplete()
+    : editor.autocompleteList !== undefined;
+}
+
 /**
- * Panel owned by the previously patched editor. Disposed when a new editor
- * is patched: a swapped-out editor's concealed panel can no longer self-heal
- * (hidden overlays are skipped by the compositor, so its render() never
- * runs), and would otherwise leak one overlay entry per editor swap.
+ * Panel owned by the previously patched editor. Pi gives each extension its
+ * own jiti module cache, so keep it on a shared symbol: statusline replacing
+ * pi-core's editor must still be able to dispose the previous hidden overlay.
  */
-let activePanel: EditorFloatPanel | undefined;
+const ACTIVE_PANEL_KEY = Symbol.for("@x1a2h1/pi-core:autocomplete-active-panel");
+
+function getActivePanel(): EditorFloatPanel | undefined {
+  return (globalThis as Record<symbol, EditorFloatPanel | undefined>)[ACTIVE_PANEL_KEY];
+}
+
+function setActivePanel(panel: EditorFloatPanel | undefined): void {
+  (globalThis as Record<symbol, EditorFloatPanel | undefined>)[ACTIVE_PANEL_KEY] = panel;
+}
 
 /**
  * Patch an editor instance so its autocomplete panel appears ABOVE the input
@@ -47,17 +60,15 @@ let activePanel: EditorFloatPanel | undefined;
  * prepended above the editor. Also remaps tab/shift+tab to panel navigation
  * while the panel is open. Idempotent.
  *
- * Pass the TUI from the editor factory when available (official parameter);
- * reading the editor's private tui field is only a fallback for callers
- * that do not have it.
+ * Pass the TUI from the editor factory to enable zero-shift floating. When it
+ * is omitted, placement safely degrades to inline rendering.
  */
 export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui?: FloatingTui): T {
   const internals = editor as unknown as EditorInternals;
-  // Resolve lazily: the private-field fallback may be assigned after patching.
-  const resolveTui = () => tui ?? internals.tui;
+  const resolveTui = () => tui;
   setSelectorNavAnchor(resolveTui, editor);
-  activePanel?.dispose();
-  activePanel = undefined;
+  getActivePanel()?.dispose();
+  setActivePanel(undefined);
   if (internals.__autocompleteAbove) return editor;
   internals.__autocompleteAbove = true;
 
@@ -78,7 +89,7 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
     }
 
     const list = internals.autocompleteList;
-    if (!internals.autocompleteState || !list) {
+    if (!isAutocompleteOpen(internals) || !list) {
       panel?.hide();
       return originalRender(width);
     }
@@ -110,8 +121,8 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
     // anchor is this editor instance.
     if (!panel) {
       panel = new EditorFloatPanel(resolveTui(), editor);
-      activePanel = panel;
     }
+    setActivePanel(panel);
     const floated = panel.show(listLines, {
       editorHeight: editorLines.length,
       col: paddingX,
@@ -146,7 +157,7 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   const originalHandleInput = editor.handleInput?.bind(editor);
   patched.handleInput = (data: string): void => {
     const list = internals.autocompleteList;
-    if (internals.autocompleteState && list && typeof list.handleInput === "function") {
+    if (isAutocompleteOpen(internals) && list && typeof list.handleInput === "function") {
       if (matchesKey(data, "tab")) {
         list.handleInput(SELECT_DOWN);
         return;
@@ -173,6 +184,7 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
  */
 export function registerAutocompleteAbove(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
+    if (!isInteractiveTui(ctx)) return;
     const previous = ctx.ui.getEditorComponent();
     // The host resets the editor factory before re-emitting session_start,
     // but guard anyway: never wrap our own factory (would grow the closure
@@ -184,11 +196,8 @@ export function registerAutocompleteAbove(pi: ExtensionAPI): void {
       keybindings: Parameters<NonNullable<typeof previous>>[2],
     ) =>
       previous
-        ? applyAutocompleteAbove(previous(tui, theme, keybindings), tui as unknown as FloatingTui)
-        : applyAutocompleteAbove(
-            new CustomEditor(tui, theme, keybindings),
-            tui as unknown as FloatingTui,
-          );
+        ? applyAutocompleteAbove(previous(tui, theme, keybindings), tui)
+        : applyAutocompleteAbove(new CustomEditor(tui, theme, keybindings), tui);
     (factory as { __autocompleteAbove?: boolean }).__autocompleteAbove = true;
     ctx.ui.setEditorComponent(factory);
   });

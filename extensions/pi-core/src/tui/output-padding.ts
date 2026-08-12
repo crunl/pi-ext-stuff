@@ -1,6 +1,7 @@
 import { readFileSync, type Stats, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { isInteractiveTui } from "./ui-guard.ts";
 
 export type OutputPad = 0 | 1;
 
@@ -16,6 +17,8 @@ interface OutputPadSetting {
 
 /** Upper bound on retained per-tool-call invalidate callbacks. */
 const MAX_TRACKED_INVALIDATORS = 200;
+/** Settings are human-edited; sub-second polling avoids needless background stat churn. */
+const SETTINGS_POLL_INTERVAL_MS = 500;
 
 function readOutputPad(settingsPath: string): OutputPadSetting {
   try {
@@ -108,15 +111,35 @@ export class OutputPaddingController implements OutputPaddingSource {
 
   private watch(settingsPath: string): void {
     const listener = (_current: Stats, _previous: Stats) => this.refresh();
-    watchFile(settingsPath, { interval: 100, persistent: false }, listener);
+    watchFile(settingsPath, { interval: SETTINGS_POLL_INTERVAL_MS, persistent: false }, listener);
     this.watchedPaths.set(settingsPath, listener);
   }
 }
 
-export const outputPaddingController = new OutputPaddingController(getAgentDir());
+/**
+ * Cross-jiti singleton. Pi loads extensions with isolated module caches, while
+ * pi-permissions imports createCodexToolRendering from standalone.ts. Both
+ * copies must observe the controller started by pi-core's register graph.
+ */
+const OUTPUT_PADDING_CONTROLLER_KEY = Symbol.for("@x1a2h1/pi-core:output-padding-controller");
+const sharedControllers = globalThis as Record<symbol, OutputPaddingController | undefined>;
+
+function getSharedOutputPaddingController(): OutputPaddingController {
+  const existing = sharedControllers[OUTPUT_PADDING_CONTROLLER_KEY];
+  if (existing) return existing;
+  const created = new OutputPaddingController(getAgentDir());
+  sharedControllers[OUTPUT_PADDING_CONTROLLER_KEY] = created;
+  return created;
+}
+
+export const outputPaddingController = getSharedOutputPaddingController();
 
 export function registerOutputPaddingSync(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, context) => {
+    if (!isInteractiveTui(context)) {
+      outputPaddingController.stop();
+      return;
+    }
     outputPaddingController.start(context.cwd, context.isProjectTrusted());
   });
   pi.on("session_shutdown", () => {

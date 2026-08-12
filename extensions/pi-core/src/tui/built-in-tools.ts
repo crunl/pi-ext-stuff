@@ -1,8 +1,8 @@
 import {
-  createFindTool,
-  createGrepTool,
-  createLsTool,
-  createReadTool,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -28,39 +28,39 @@ import { createCodexToolRendering } from "./tool-renderer.ts";
 export function registerCodexToolRendering(pi: ExtensionAPI): void {
   const initialCwd = process.cwd();
 
-  const initialRead = createReadTool(initialCwd);
+  const initialRead = createReadToolDefinition(initialCwd);
   pi.registerTool({
     ...initialRead,
     ...createCodexToolRendering(codexReadToolSpec),
     execute(id, params, signal, onUpdate, ctx) {
-      return createReadTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      return createReadToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
     },
   });
 
-  const initialGrep = createGrepTool(initialCwd);
+  const initialGrep = createGrepToolDefinition(initialCwd);
   pi.registerTool({
     ...initialGrep,
     ...createCodexToolRendering(codexGrepToolSpec),
     execute(id, params, signal, onUpdate, ctx) {
-      return createGrepTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      return createGrepToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
     },
   });
 
-  const initialFind = createFindTool(initialCwd);
+  const initialFind = createFindToolDefinition(initialCwd);
   pi.registerTool({
     ...initialFind,
     ...createCodexToolRendering(codexFindToolSpec),
     execute(id, params, signal, onUpdate, ctx) {
-      return createFindTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      return createFindToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
     },
   });
 
-  const initialLs = createLsTool(initialCwd);
+  const initialLs = createLsToolDefinition(initialCwd);
   pi.registerTool({
     ...initialLs,
     ...createCodexToolRendering(codexLsToolSpec),
     execute(id, params, signal, onUpdate, ctx) {
-      return createLsTool(ctx.cwd).execute(id, params, signal, onUpdate);
+      return createLsToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
     },
   });
 }

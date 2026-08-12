@@ -12,7 +12,7 @@ import { Container, SelectList, type SelectListTheme, Spacer, Text } from "@eare
 import { markFloatableSelector } from "./selector-float.ts";
 import { isInteractiveTui } from "./ui-guard.ts";
 
-/** Same copy as settings-selector / ThinkingSelectorComponent (0.82.1). */
+/** Same copy as settings-selector / ThinkingSelectorComponent (0.84.1). */
 export const THINKING_DESCRIPTIONS: Record<string, string> = {
   off: "No reasoning",
   minimal: "Very brief reasoning (~1k tokens)",
@@ -72,8 +72,8 @@ export class EffortSelectorComponent extends Container {
   constructor(
     theme: Theme,
     currentLevel: string,
-    levels: readonly string[],
-    onSelect: (level: string) => void,
+    levels: readonly EffortLevel[],
+    onSelect: (level: EffortLevel) => void,
     onCancel: () => void,
     /** Test seam: avoid pi theme singleton when provided. */
     selectListTheme?: SelectListTheme,
@@ -108,7 +108,9 @@ export class EffortSelectorComponent extends Container {
     }
 
     this.selectList.onSelect = (item) => {
-      onSelect(item.value);
+      // SelectList's public value type is string; this list was built solely
+      // from the EffortLevel array above, so narrow at the library boundary.
+      onSelect(item.value as EffortLevel);
     };
     this.selectList.onCancel = () => {
       onCancel();
@@ -140,7 +142,7 @@ export function registerEffortCommand(pi: ExtensionAPI): void {
       const levels = availableThinkingLevels(model);
       const current = pi.getThinkingLevel();
 
-      const chosen = await ctx.ui.custom<string | undefined>((_tui, theme, _kb, done) => {
+      const chosen = await ctx.ui.custom<EffortLevel | undefined>((_tui, theme, _kb, done) => {
         return new EffortSelectorComponent(
           theme,
           current,
@@ -152,7 +154,7 @@ export function registerEffortCommand(pi: ExtensionAPI): void {
 
       if (chosen === undefined) return;
 
-      pi.setThinkingLevel(chosen as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+      pi.setThinkingLevel(chosen);
       ctx.ui.notify(`Thinking level: ${chosen}`, "info");
     },
   });

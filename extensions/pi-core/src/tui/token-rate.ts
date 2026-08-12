@@ -90,11 +90,15 @@ export function createTokenRateTracker(
 
   const update = (event: MessageUpdateEvent, now: number): TokenRateSnapshot | undefined => {
     state ??= { accumulatedTokens: 0, samples: [] };
-    state.accumulatedTokens += estimateTokensFromChars(deltaText(event.assistantMessageEvent));
 
     // MessageUpdateEvent.message is the AgentMessage union; only assistant
     // messages carry usage.
     const reported = event.message.role === "assistant" ? event.message.usage?.output : undefined;
+    // Estimation is only a fallback. Once real cumulative usage is available,
+    // walking every subsequent text delta provides no value.
+    if (state.reportedOutput === undefined && !(reported !== undefined && reported > 0)) {
+      state.accumulatedTokens += estimateTokensFromChars(deltaText(event.assistantMessageEvent));
+    }
     let tokens: number;
     let source: TokenRateSource;
     if (reported !== undefined && reported > 0) {

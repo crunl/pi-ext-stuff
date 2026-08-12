@@ -127,6 +127,15 @@ describe("codex tool specs", () => {
     expect(second?.highlightedLines).toHaveLength(2);
   });
 
+  it("normalizes carriage returns and tabs like Pi 0.84's write renderer", () => {
+    const cache = updateWriteHighlightCache(undefined, "src/a.ts", "a\r\nb\rc\tend");
+    expect(cache?.normalizedLines).toEqual(["a", "bc   end"]);
+
+    const appended = updateWriteHighlightCache(cache, "src/a.ts", "a\r\nb\rc\tend\r\n\tmore");
+    expect(appended).toBe(cache);
+    expect(appended?.normalizedLines).toEqual(["a", "bc   end", "   more"]);
+  });
+
   it("rebuilds the highlight cache when path or prefix changes", () => {
     const first = updateWriteHighlightCache(undefined, "src/a.ts", "const a = 1;");
     const changedPath = updateWriteHighlightCache(first, "src/b.ts", "const a = 1;");

@@ -23,9 +23,9 @@ there is **no build step**.
 
 ## Requirements
 
-- Node.js ≥ 16.9 (uses `Object.hasOwn`).
-- A recent pi build (uses `setWorkingIndicator`, `setWidget`, `setEditorComponent`,
-  `custom` extension APIs).
+- Node.js ≥ 22.19.0 (the minimum required by Pi 0.84.1).
+- Pi 0.84.1. The host supplies the peer packages; development dependencies are
+  pinned to 0.84.1 so API checks are reproducible.
 - **No third-party runtime dependencies** — only the pi core packages
   (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, provided by
   the host) and Node built-ins. No external executables are invoked.
@@ -54,6 +54,8 @@ npm run test     # vitest --run
 ```
 
 Tests are flat `tests/*.test.ts` files mirroring `src/tui/*` by basename.
+`tests/pi-api-compat.test.ts` pins the few runtime seams for which Pi does not
+yet expose an equivalent extension API.
 
 ## Architecture
 

@@ -21,6 +21,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { type FloatingTui, locateEditor } from "./editor-float-panel.ts";
+import { isInteractiveTui } from "./ui-guard.ts";
 
 const SELECT_UP = "\x1b[A";
 const SELECT_DOWN = "\x1b[B";
@@ -101,7 +102,7 @@ export function rewriteSelectorNavInput(data: string): { data: string } | undefi
  */
 export function registerSelectorTabNav(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    if (!isInteractiveTui(ctx)) return;
     ctx.ui.onTerminalInput(rewriteSelectorNavInput);
   });
 }

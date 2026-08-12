@@ -7,52 +7,46 @@
  * Consumers decide WHAT to show (and any framing/colors); this class only
  * solves WHERE and HOW LONG to show it.
  */
+import type {
+  Component,
+  OverlayHandle,
+  OverlayOptions,
+  TUI,
+  TuiMainScreenRenderState,
+} from "@earendil-works/pi-tui";
 
-/** Minimal structural view of the pi-tui Component contract. */
-interface FloatingComponent {
-  render(width: number): string[];
-  invalidate(): void;
-}
-
-interface FloatingOverlayHandle {
-  hide(): void;
-  /** Present on pi-tui >= 0.x; toggles visibility without removing the entry. */
-  setHidden?(hidden: boolean): void;
-  isHidden?(): boolean;
-}
-
-interface FloatingOverlayOptions {
+interface FloatingOverlayOptions extends OverlayOptions {
   row: number;
   col: number;
   width: number;
   nonCapturing: true;
 }
 
-/** Minimal structural view of the pi-tui TUI surface we rely on. */
+/**
+ * Public pi-tui surface used by the panel. `captureRenderState` belongs to
+ * TuiMainScreen (not the common TUI interface), so it remains optional for
+ * fullscreen renderers and structural test doubles.
+ */
 export interface FloatingTui {
-  terminal?: { rows: number; columns: number };
+  mode?: TUI["mode"];
+  terminal?: Pick<TUI["terminal"], "rows" | "columns">;
   children?: unknown[];
-  showOverlay?(
-    component: FloatingComponent,
-    options: FloatingOverlayOptions,
-  ): FloatingOverlayHandle;
-  /** Private in pi-tui: logical end-of-content row from the previous frame. */
-  cursorRow?: number;
-  /** Private in pi-tui: active overlay entries ({ component, ... }). */
-  overlayStack?: { component?: unknown }[];
+  showOverlay?: TUI["showOverlay"];
+  captureRenderState?: () => Pick<TuiMainScreenRenderState, "cursorRow">;
 }
 
 /**
  * Single seam for "where is the editor in the TUI": searches the root
- * children (and one nesting level, e.g. editorContainer) plus the overlay
- * stack. Placement math and the panel's liveness check share this so their
- * verdicts can never diverge. If a future pi hosts the editor elsewhere,
- * only this function needs to learn the new location.
+ * children (and one nesting level, e.g. editorContainer). Placement math and
+ * the panel's liveness check share this so their verdicts cannot diverge. An
+ * overlay-hosted editor is deliberately unsupported: it cannot be positioned
+ * from the public root layout. If Pi hosts the editor elsewhere, only this
+ * function needs to learn the new location.
  */
 export function locateEditor(
   tui: FloatingTui | undefined,
   editor: unknown,
-): { childIndex: number } | { overlay: true } | null {
+): { childIndex: number } | null {
   const children = tui?.children;
   if (Array.isArray(children)) {
     for (let i = 0; i < children.length; i++) {
@@ -61,10 +55,6 @@ export function locateEditor(
         return { childIndex: i };
       }
     }
-  }
-  const overlays = tui?.overlayStack;
-  if (Array.isArray(overlays) && overlays.some((entry) => entry?.component === editor)) {
-    return { overlay: true };
   }
   return null;
 }
@@ -89,7 +79,6 @@ function resolveLayout(tui: FloatingTui | undefined, editor: unknown): PanelLayo
 
   const location = locateEditor(tui, editor);
   if (!location) return null;
-  if (!("childIndex" in location)) return null; // overlay-hosted editor: not supported yet
 
   const children = tui?.children as { render?(width: number): string[] }[];
   let suffixHeight = 0;
@@ -99,10 +88,12 @@ function resolveLayout(tui: FloatingTui | undefined, editor: unknown): PanelLayo
     suffixHeight += sibling.render(termWidth).length;
   }
 
-  // Content shorter than one screen renders top-aligned (cursorRow is the
-  // previous frame's end-of-content row).
-  const cursorRow = tui?.cursorRow;
-  const bottomAnchored = typeof cursorRow === "number" && cursorRow + 1 >= termHeight;
+  // Fullscreen always has a bottom dock. On the regular main screen, use its
+  // public render-state snapshot: shorter content is top-aligned, while a
+  // cursor at the last row means the editor is anchored to the viewport foot.
+  const cursorRow = tui?.captureRenderState?.().cursorRow;
+  const bottomAnchored =
+    tui?.mode === "fullscreen" || (typeof cursorRow === "number" && cursorRow + 1 >= termHeight);
   return { suffixHeight, bottomAnchored };
 }
 
@@ -119,16 +110,24 @@ export function computePanelRow(
   panelHeight: number,
 ): number | null {
   const layout = resolveLayout(tui, editor);
-  if (!layout?.bottomAnchored) return null;
-
   const termHeight = tui?.terminal?.rows;
-  if (!termHeight) return null;
+  if (!layout || !termHeight) return null;
+  return computeRowFromLayout(layout, termHeight, editorHeight, panelHeight);
+}
+
+function computeRowFromLayout(
+  layout: PanelLayout,
+  termHeight: number,
+  editorHeight: number,
+  panelHeight: number,
+): number | null {
+  if (!layout.bottomAnchored) return null;
   const row = termHeight - layout.suffixHeight - editorHeight - panelHeight;
   return row >= 0 ? row : null;
 }
 
 /** Overlay component that replays the panel lines and self-heals. */
-class PanelComponent implements FloatingComponent {
+class PanelComponent implements Component {
   private lines: string[] = [];
   isAlive?: () => boolean;
   onDead?: () => void;
@@ -173,15 +172,15 @@ interface EditorFloatPanelShowOptions {
  * hide() conceals the panel. The panel self-heals if the anchor editor
  * disappears: it renders empty and removes its overlay on the next frame.
  *
- * The overlay entry is mounted once and toggled via the handle's
- * setHidden() (public OverlayHandle API), keeping the overlay stack stable
- * across rapid show/hide cycles while typing; dispose() (or self-healing)
- * removes the entry for good.
+ * The overlay entry is toggled via the public OverlayHandle API while its
+ * geometry is stable, and re-mounted through showOverlay when geometry
+ * changes. dispose() (or self-healing) removes the entry for good.
  */
 export class EditorFloatPanel {
   private readonly component = new PanelComponent();
-  private handle: FloatingOverlayHandle | undefined;
+  private handle: OverlayHandle | undefined;
   private options: FloatingOverlayOptions | undefined;
+  private layoutCache: { termHeight: number; termWidth: number; layout: PanelLayout } | undefined;
   private readonly tui: FloatingTui | undefined;
   private readonly anchor: unknown;
 
@@ -193,35 +192,44 @@ export class EditorFloatPanel {
   }
 
   get visible(): boolean {
-    return this.handle !== undefined && !(this.handle.isHidden?.() ?? false);
+    return this.handle !== undefined && !this.handle.isHidden();
   }
 
   show(lines: string[], opts: EditorFloatPanelShowOptions): boolean {
     const tui = this.tui;
     let row: number | null = null;
     try {
-      row = computePanelRow(tui, this.anchor, opts.editorHeight, lines.length);
+      const termHeight = tui?.terminal?.rows;
+      const layout = this.getLayout();
+      row = termHeight
+        ? computeRowFromLayout(layout, termHeight, opts.editorHeight, lines.length)
+        : null;
     } catch {
       row = null;
     }
     if (row === null || !tui || typeof tui.showOverlay !== "function") {
-      this.hide();
+      this.conceal();
       return false;
     }
 
     this.component.setLines(lines);
-    if (this.handle && this.options) {
-      // Live-update: compositeOverlays re-reads options by reference each frame.
-      this.options.row = row;
-      this.options.col = opts.col;
-      this.options.width = opts.width;
-      this.handle.setHidden?.(false);
+    const nextOptions: FloatingOverlayOptions = {
+      row,
+      col: opts.col,
+      width: opts.width,
+      nonCapturing: true,
+    };
+    if (this.handle && this.options && hasSameGeometry(this.options, nextOptions)) {
+      this.handle.setHidden(false);
     } else {
+      // OverlayOptions has no public mutation API. Re-mount only when geometry
+      // changes instead of relying on pi-tui retaining this object by reference.
+      this.handle?.hide();
       this.component.isAlive = () => locateEditor(this.tui, this.anchor) !== null;
       // Self-healing removes the entry permanently: a dead anchor never
       // comes back, so the orphaned overlay must not linger in the stack.
       this.component.onDead = () => this.dispose();
-      this.options = { row, col: opts.col, width: opts.width, nonCapturing: true };
+      this.options = nextOptions;
       this.handle = tui.showOverlay(this.component, this.options);
     }
     return true;
@@ -229,11 +237,16 @@ export class EditorFloatPanel {
 
   /** Conceal the panel, keeping the overlay entry mounted for reuse. */
   hide(): void {
+    this.layoutCache = undefined;
+    this.conceal();
+  }
+
+  private conceal(): void {
     if (!this.handle) return;
     // Hidden entries are skipped by the compositor, so render()-based
     // self-healing cannot fire while concealed. If the anchor is already
     // gone, remove the entry now instead of leaving it in the stack.
-    if (!this.handle.setHidden || locateEditor(this.tui, this.anchor) === null) {
+    if (locateEditor(this.tui, this.anchor) === null) {
       this.dispose();
       return;
     }
@@ -247,6 +260,33 @@ export class EditorFloatPanel {
     } finally {
       this.handle = undefined;
       this.options = undefined;
+      this.layoutCache = undefined;
     }
   }
+
+  /**
+   * `captureRenderState()` copies main-screen history. Cache its result while
+   * one panel is open; terminal resize or hide/dispose invalidates the cache.
+   */
+  private getLayout(): PanelLayout {
+    const termHeight = this.tui?.terminal?.rows;
+    const termWidth = this.tui?.terminal?.columns;
+    if (!termHeight || !termWidth) return { suffixHeight: 0, bottomAnchored: false };
+    if (
+      this.layoutCache?.termHeight === termHeight &&
+      this.layoutCache.termWidth === termWidth &&
+      locateEditor(this.tui, this.anchor) !== null
+    ) {
+      return this.layoutCache.layout;
+    }
+
+    const layout = resolveLayout(this.tui, this.anchor);
+    if (!layout) return { suffixHeight: 0, bottomAnchored: false };
+    this.layoutCache = { termHeight, termWidth, layout };
+    return layout;
+  }
+}
+
+function hasSameGeometry(left: FloatingOverlayOptions, right: FloatingOverlayOptions): boolean {
+  return left.row === right.row && left.col === right.col && left.width === right.width;
 }

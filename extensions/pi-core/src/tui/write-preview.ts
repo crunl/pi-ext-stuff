@@ -28,13 +28,18 @@ function highlightSingleLine(line: string, lang: string): string {
   return highlighted[0] ?? "";
 }
 
+/** Match Pi 0.84's public renderer behavior without importing private helpers. */
+function normalizeWritePreviewContent(content: string): string {
+  return content.replace(/\r/g, "").replace(/\t/g, "   ");
+}
+
 function rebuildWriteHighlightCache(
   rawPath: string,
   fileContent: string,
 ): WriteHighlightCache | undefined {
   const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
   if (!lang) return undefined;
-  const normalized = fileContent.replace(/\r\n?/g, "\n");
+  const normalized = normalizeWritePreviewContent(fileContent);
   return {
     rawPath,
     lang,
@@ -86,7 +91,7 @@ export function updateWriteHighlightCache(
     cache.normalizedLines.push("");
     cache.highlightedLines.push("");
   }
-  const segments = deltaRaw.replace(/\r\n?/g, "\n").split("\n");
+  const segments = normalizeWritePreviewContent(deltaRaw).split("\n");
   const lastIndex = cache.normalizedLines.length - 1;
   cache.normalizedLines[lastIndex] += segments[0];
   cache.highlightedLines[lastIndex] = highlightSingleLine(

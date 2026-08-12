@@ -19,6 +19,7 @@ function fakeEditor() {
 /** tui whose editorContainer (children[1]) currently holds `occupant`. */
 function fakeTui(occupant: unknown): FloatingTui {
   return {
+    mode: "regular",
     terminal: { rows: 24, columns: 80 },
     children: [{ render: () => [] }, { children: [occupant] }, { render: () => [] }],
   } as FloatingTui;
@@ -86,11 +87,11 @@ describe("selector tab navigation", () => {
     } as any);
 
     const onTerminalInput = vi.fn();
-    handlers.get("session_start")?.({}, { hasUI: true, ui: { onTerminalInput } });
+    handlers.get("session_start")?.({}, { hasUI: true, mode: "tui", ui: { onTerminalInput } });
     expect(onTerminalInput).toHaveBeenCalledWith(rewriteSelectorNavInput);
 
     onTerminalInput.mockClear();
-    handlers.get("session_start")?.({}, { hasUI: false, ui: { onTerminalInput } });
+    handlers.get("session_start")?.({}, { hasUI: true, mode: "rpc", ui: { onTerminalInput } });
     expect(onTerminalInput).not.toHaveBeenCalled();
   });
 

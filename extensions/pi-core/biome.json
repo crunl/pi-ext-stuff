@@ -6,13 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": [
-      "**",
-      "!node_modules",
-      "!graphify-out",
-      "!docs",
-      "!work"
-    ]
+    "includes": ["**", "!node_modules", "!graphify-out", "!docs", "!work", "!.pi", "!.pi-subagents"]
   },
   "formatter": {
     "enabled": true,
@@ -66,9 +60,7 @@
   },
   "overrides": [
     {
-      "includes": [
-        "tests/**"
-      ],
+      "includes": ["tests/**"],
       "linter": {
         "rules": {
           "suspicious": {

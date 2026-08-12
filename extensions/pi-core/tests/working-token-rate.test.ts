@@ -83,13 +83,13 @@ describe("working token rate adapter", () => {
     handlers.get("tool_execution_start")?.({}, context);
     expect(setWorkingMessage).toHaveBeenCalledTimes(2);
 
-    // Idle (agent_end) restores pi's default working message and spinner.
+    // Idle (agent_end) restores pi's default working message.
     handlers.get("agent_end")?.({}, context);
     expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
-    expect(setWorkingIndicator).toHaveBeenLastCalledWith();
+    expect(setWorkingIndicator).not.toHaveBeenCalled();
   });
 
-  it("keeps pi's default spinner frames (only the message text changes)", () => {
+  it("does not overwrite spinner frames owned by Pi or another extension", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -101,10 +101,7 @@ describe("working token rate adapter", () => {
     vi.setSystemTime(2000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
 
-    // The spinner is only ever touched to restore the default — never
-    // re-applied with custom frames, so its animation is never restarted.
-    expect(setWorkingIndicator).toHaveBeenCalledTimes(1);
-    expect(setWorkingIndicator).toHaveBeenCalledWith();
+    expect(setWorkingIndicator).not.toHaveBeenCalled();
   });
 
   it("resets the measurement on model switch (usage not clamped across models)", () => {

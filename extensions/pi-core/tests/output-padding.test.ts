@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OutputPaddingController } from "../src/tui/output-padding.ts";
+import {
+  OutputPaddingController,
+  outputPaddingController,
+  registerOutputPaddingSync,
+} from "../src/tui/output-padding.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -21,6 +25,39 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+  vi.restoreAllMocks();
+});
+
+describe("registerOutputPaddingSync", () => {
+  it("shares the controller across isolated jiti module copies", () => {
+    const key = Symbol.for("@x1a2h1/pi-core:output-padding-controller");
+    expect((globalThis as Record<symbol, unknown>)[key]).toBe(outputPaddingController);
+  });
+
+  it("starts polling only for interactive TUI sessions", () => {
+    const handlers = new Map<string, (event: unknown, context: any) => void>();
+    registerOutputPaddingSync({
+      on: (name: string, handler: (event: unknown, context: any) => void) => {
+        handlers.set(name, handler);
+      },
+    } as any);
+    const start = vi.spyOn(outputPaddingController, "start").mockImplementation(() => {});
+    const stop = vi.spyOn(outputPaddingController, "stop").mockImplementation(() => {});
+    const context = {
+      hasUI: true,
+      mode: "rpc",
+      cwd: "/repo",
+      isProjectTrusted: () => true,
+    };
+
+    handlers.get("session_start")?.({}, context);
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledOnce();
+
+    context.mode = "tui";
+    handlers.get("session_start")?.({}, context);
+    expect(start).toHaveBeenCalledWith("/repo", true);
+  });
 });
 
 describe("OutputPaddingController", () => {

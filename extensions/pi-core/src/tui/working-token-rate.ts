@@ -10,7 +10,6 @@ interface UiContext {
   ui: {
     setWidget(key: string, content: string[] | undefined): void;
     setWorkingMessage(message?: string): void;
-    setWorkingIndicator(): void;
   };
 }
 
@@ -42,9 +41,9 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
       // Defensive: clear the above-editor widget previously shown by older
       // versions of this extension, if it is still mounted.
       context.ui.setWidget(TOKEN_RATE_WIDGET_KEY, undefined);
-      // Restore pi's default working message and spinner.
+      // Clear only the message this extension owns. The indicator frames may
+      // be owned by another extension, so never reset them here.
       context.ui.setWorkingMessage(undefined);
-      context.ui.setWorkingIndicator();
     }
   };
 
@@ -60,9 +59,9 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
   });
 
   pi.on("message_update", (event, context) => {
-    if (event.message.role !== "assistant") return;
+    if (event.message.role !== "assistant" || !isInteractiveTui(context)) return;
     const snapshot = tracker.update(event, now());
-    if (snapshot === undefined || !isInteractiveTui(context)) return;
+    if (snapshot === undefined) return;
     const message = formatWorkingMessage(snapshot);
     if (message !== lastMessage) {
       lastMessage = message;

@@ -89,6 +89,14 @@ export function installSelectorFloat(
       return originalRender(width);
     }
 
+    // Pi 0.84's fullscreen editor dock reserves a minimum container height.
+    // Collapsing that container while positioning against root children would
+    // offset the selector, so retain Pi's native inline selector there.
+    if (tui?.mode === "fullscreen") {
+      panel.hide();
+      return originalRender(width);
+    }
+
     // Selector open: render its lines for the floating panel.
     const contentWidth = Math.max(1, width - PANEL_INSET * 2);
     const innerWidth = Math.max(1, contentWidth - FRAME_OVERHEAD);

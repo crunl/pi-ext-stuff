@@ -28,14 +28,21 @@ function fakeTui(editor: unknown, { rows = 24, cols = 80, footerHeight = 2 } = {
   const overlays: any[] = [];
   const editorContainer = { children: [editor] };
   const tui: FloatingTui & { overlays: any[] } = {
+    mode: "regular",
     terminal: { rows, columns: cols },
-    cursorRow: rows - 1, // full screen => floating allowed
+    captureRenderState: () => ({ cursorRow: rows - 1 }), // full screen => floating allowed
     children: [fakeComponent(30), editorContainer, fakeComponent(footerHeight)],
     overlays,
     showOverlay: vi.fn((component: any, options: any) => {
       const entry = { component, options, hidden: false };
       overlays.push(entry);
-      return { hide: () => overlays.splice(overlays.indexOf(entry), 1) };
+      return {
+        hide: () => overlays.splice(overlays.indexOf(entry), 1),
+        setHidden: (hidden: boolean) => {
+          entry.hidden = hidden;
+        },
+        isHidden: () => entry.hidden,
+      };
     }),
   } as any;
   return tui;
@@ -77,9 +84,9 @@ describe("frameLines", () => {
 
 describe("applyAutocompleteAbove - floating mode", () => {
   it("shows a nonCapturing overlay and keeps editor lines unshifted", () => {
-    const editor = applyAutocompleteAbove(fakeEditor());
+    const editor = fakeEditor();
     const tui = fakeTui(editor);
-    editor.tui = tui;
+    applyAutocompleteAbove(editor, tui);
     activateAutocomplete(editor, ["item-a", "item-b"]);
 
     const lines = editor.render(20);
@@ -96,25 +103,49 @@ describe("applyAutocompleteAbove - floating mode", () => {
     expect(panelLines[1]).toContain("│"); // side verticals
   });
 
-  it("live-updates overlay options instead of re-creating the overlay", () => {
-    const editor = applyAutocompleteAbove(fakeEditor());
+  it("re-mounts the overlay when the panel height changes", () => {
+    const editor = fakeEditor();
     const tui = fakeTui(editor);
-    editor.tui = tui;
+    applyAutocompleteAbove(editor, tui);
     activateAutocomplete(editor, ["item-a", "item-b"]);
     editor.render(20);
 
     editor.autocompleteList = { render: () => ["only-one"] };
     editor.render(20);
 
-    expect(tui.showOverlay).toHaveBeenCalledOnce();
+    expect(tui.showOverlay).toHaveBeenCalledTimes(2);
+    expect(tui.overlays).toHaveLength(1);
     // panel = top border + 1 item = 2 rows
     expect(tui.overlays[0].options.row).toBe(24 - 2 - 3 - 2);
   });
 
-  it("self-heals: empties and removes the overlay when the editor is swapped out", async () => {
-    const editor = applyAutocompleteAbove(fakeEditor());
+  it("floats against Pi 0.84's fullscreen bottom dock", () => {
+    const editor = fakeEditor();
     const tui = fakeTui(editor);
-    editor.tui = tui;
+    (tui as any).mode = "fullscreen";
+    tui.captureRenderState = undefined;
+    applyAutocompleteAbove(editor, tui);
+    activateAutocomplete(editor, ["item-a"]);
+
+    expect(editor.render(20)).toEqual(EDITOR_LINES);
+    expect(tui.showOverlay).toHaveBeenCalledOnce();
+  });
+
+  it("prefers Editor.isShowingAutocomplete over the private state fallback", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    applyAutocompleteAbove(editor, tui);
+    activateAutocomplete(editor, ["item-a"]);
+    editor.isShowingAutocomplete = () => false;
+
+    expect(editor.render(20)).toEqual(EDITOR_LINES);
+    expect(tui.showOverlay).not.toHaveBeenCalled();
+  });
+
+  it("self-heals: empties and removes the overlay when the editor is swapped out", async () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    applyAutocompleteAbove(editor, tui);
     activateAutocomplete(editor, ["item-a"]);
     editor.render(20);
     expect(tui.overlays).toHaveLength(1);
@@ -129,10 +160,20 @@ describe("applyAutocompleteAbove - floating mode", () => {
     expect(tui.overlays).toHaveLength(0); // removed from the stack
   });
 
+  it("disposes an active panel left by another jiti module copy", () => {
+    const key = Symbol.for("@x1a2h1/pi-core:autocomplete-active-panel");
+    const dispose = vi.fn();
+    (globalThis as Record<symbol, unknown>)[key] = { dispose };
+
+    applyAutocompleteAbove(fakeEditor());
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it("hides the overlay when autocomplete deactivates", () => {
-    const editor = applyAutocompleteAbove(fakeEditor());
+    const editor = fakeEditor();
     const tui = fakeTui(editor);
-    editor.tui = tui;
+    applyAutocompleteAbove(editor, tui);
     activateAutocomplete(editor, ["item-a"]);
     editor.render(20);
     expect(tui.overlays).toHaveLength(1);
@@ -142,7 +183,8 @@ describe("applyAutocompleteAbove - floating mode", () => {
     const lines = editor.render(20);
 
     expect(lines).toEqual(EDITOR_LINES);
-    expect(tui.overlays).toHaveLength(0);
+    expect(tui.overlays).toHaveLength(1);
+    expect(tui.overlays[0].hidden).toBe(true);
   });
 });
 
@@ -162,10 +204,10 @@ describe("applyAutocompleteAbove - inline fallback", () => {
   });
 
   it("falls back inline on short sessions (top-aligned content)", () => {
-    const editor = applyAutocompleteAbove(fakeEditor());
+    const editor = fakeEditor();
     const tui = fakeTui(editor);
-    tui.cursorRow = 5;
-    editor.tui = tui;
+    tui.captureRenderState = () => ({ cursorRow: 5 });
+    applyAutocompleteAbove(editor, tui);
     activateAutocomplete(editor, ["item-a"]);
 
     const lines = editor.render(20);
@@ -265,6 +307,8 @@ describe("registerAutocompleteAbove", () => {
   function sessionStartContext() {
     let editorFactory: any;
     const ctx = {
+      hasUI: true,
+      mode: "tui",
       ui: {
         getEditorComponent: () => editorFactory,
         setEditorComponent: (factory: any) => {
@@ -320,5 +364,16 @@ describe("registerAutocompleteAbove", () => {
     handlers.get("session_start")?.({}, ctx);
 
     expect(getFactory()).toBe(first); // unchanged, no nesting
+  });
+
+  it("does not install terminal components in RPC mode", () => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+    registerAutocompleteAbove(fakePi(handlers));
+
+    const { ctx, getFactory } = sessionStartContext();
+    ctx.mode = "rpc";
+    handlers.get("session_start")?.({}, ctx);
+
+    expect(getFactory()).toBeUndefined();
   });
 });

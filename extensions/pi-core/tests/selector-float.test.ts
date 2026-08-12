@@ -34,8 +34,9 @@ function fakeTui(editor: unknown, { rows = 24, cols = 80 } = {}) {
     },
   };
   const tui: FloatingTui & { overlays: any[]; editorContainer: any } = {
+    mode: "regular",
     terminal: { rows, columns: cols },
-    cursorRow: rows - 1,
+    captureRenderState: () => ({ cursorRow: rows - 1 }),
     children: [fakeComponent(30), editorContainer, fakeComponent(2)],
     overlays,
     editorContainer,
@@ -140,11 +141,27 @@ describe("installSelectorFloat", () => {
     const tui = fakeTui(editor);
     installSelectorFloat(tui, editor);
     tui.editorContainer.children[0] = new SettingsSelectorComponent();
-    tui.cursorRow = 5; // short session: content top-aligned
+    tui.captureRenderState = () => ({ cursorRow: 5 }); // short session: top-aligned
 
     const lines = tui.editorContainer.render(80);
 
     expect(lines[0]).toContain("Settings"); // inline (unpatched) behavior
+  });
+
+  it("retains Pi's inline selector layout in fullscreen mode", () => {
+    const editor = fakeEditor();
+    const tui = fakeTui(editor);
+    (tui as any).mode = "fullscreen";
+    tui.captureRenderState = undefined;
+    installSelectorFloat(tui, editor);
+    tui.editorContainer.children[0] = new SettingsSelectorComponent();
+
+    expect(tui.editorContainer.render(80)).toEqual([
+      "Settings",
+      "> Auto-compact  true",
+      "  Theme  dark",
+    ]);
+    expect(tui.overlays).toHaveLength(0);
   });
 
   it("conceals the panel when the selector closes", () => {

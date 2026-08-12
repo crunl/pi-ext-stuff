@@ -3,5 +3,6 @@ coverage/
 dist/
 work/
 graphify-out/
+.pi/
+.pi-subagents/
 *.log
-

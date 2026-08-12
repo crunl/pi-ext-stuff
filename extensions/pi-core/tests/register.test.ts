@@ -12,6 +12,10 @@ describe("pi-core registration", () => {
 
     expect([...tools.keys()]).toEqual(["read", "grep", "find", "ls"]);
     expect([...tools.values()].every((tool) => tool.renderShell === "self")).toBe(true);
+    expect([...tools.values()].every((tool) => typeof tool.promptSnippet === "string")).toBe(true);
+    expect(tools.get("read")?.promptGuidelines).toContain(
+      "Use read to examine files instead of cat or sed.",
+    );
     expect(tools.has("bash")).toBe(false);
     expect(tools.has("write")).toBe(false);
     expect(tools.has("edit")).toBe(false);

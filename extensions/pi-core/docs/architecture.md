@@ -33,25 +33,39 @@ Adding an export here is the only supported way to widen the contract.
 
 ## TUI module map
 
-- `built-in-tools.ts` — registers Codex rendering on read/grep/find/ls. The four
-  per-tool blocks cannot be table-driven: `registerTool` infers the schema from
-  the spread argument, so each tool needs its own call site.
+- `built-in-tools.ts` — registers Codex rendering on read/grep/find/ls. It wraps
+  Pi's public `create*ToolDefinition` factories so prompt metadata and the full
+  execution context are preserved. The four per-tool blocks cannot be
+  table-driven: `registerTool` infers the schema from the spread argument, so
+  each tool needs its own call site.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary).
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)`.
+- `output-padding.ts` — watches effective settings only in TUI mode. Its
+  controller is shared through `globalThis`/`Symbol.for` so renderers imported
+  by pi-permissions through a separate jiti instance see the same value.
 - `write-preview.ts` — streaming write preview; `edit-diff.ts` — diff box.
 - Floating overlay chain (call order): `autocomplete-above.ts` installs the
   autocomplete provider and the editor float panel
   (`editor-float-panel.ts`); `selector-float.ts` marks floatable selectors and
-  `selector-tab-nav.ts` anchors Shift+Tab navigation into them.
+  `selector-tab-nav.ts` anchors Shift+Tab navigation into them. Placement uses
+  public `TUI.mode`, `children`, `showOverlay`, and the regular renderer's
+  `captureRenderState()`; fullscreen autocomplete uses the bottom dock while
+  fullscreen selectors retain Pi's native inline layout. The active panel and
+  selector anchor use shared symbols so statusline's isolated jiti copy can
+  replace the editor without leaking an overlay.
 - `token-rate.ts` (pure tracker) / `working-token-rate.ts` (indicator adapter):
   the rate is shown as part of the footer working line
-  (`setWorkingMessage`, `⠋ Working  50 tok/s`), restored to pi's default at
-  `agent_end`; the legacy `setWidget("pi-core:working-token-rate")` above the
-  editor is only cleared, never populated.
-- `ui-guard.ts` — `isInteractiveTui()` shared by three modules.
+  (`setWorkingMessage`, `⠋ Working  50 tok/s`), cleared at `agent_end`; it does
+  not overwrite spinner frames potentially owned by another extension. The
+  legacy `setWidget("pi-core:working-token-rate")` above the editor is only
+  cleared, never populated.
+- `ui-guard.ts` — shared `isInteractiveTui()` guard for terminal-only hooks;
+  `hasUI` alone is insufficient because it is also true in RPC mode.
 - `effort-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
   single-purpose patches. (`startup-header.ts` was removed — it rendered a
-  logo via the external `chafa` binary.)
+  logo via the external `chafa` binary.) Pi 0.84's
+  `registerMarkdownTransformer()` can rewrite source text but cannot replace a
+  themed token renderer, so framed code blocks remain a guarded prototype seam.
 
 ## Testing
 
@@ -59,3 +73,7 @@ Flat `tests/*.test.ts` mirror `src/tui/*` by basename. Pure modules
 (`token-rate`, `tool-renderer`, `edit-diff`) are tested directly; host-patch
 modules (`built-in-tools`, `write-preview`, `ui-guard`, `tools/index`) are
 covered indirectly via the renderer tests and `register.test.ts`.
+`pi-api-compat.test.ts` intentionally pins the remaining private runtime seams:
+the autocomplete list used for above-editor placement and Markdown's
+code-token renderer/theme used for framed code blocks. It also pins the
+settings-selector constructor identity used by the selector allowlist.
