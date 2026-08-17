@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createTokenRateTracker, estimateTokensFromChars } from "../src/tui/token-rate.ts";
+import {
+  createTokenRateTracker,
+  estimateTokensFromChars,
+  type TokenRateSnapshot,
+  type TokenRateTracker,
+} from "../src/tui/token-rate.ts";
 import { assistantMessage } from "./helpers/token-rate-fixtures.ts";
 
 function textDelta(delta: string) {
@@ -245,8 +250,8 @@ describe("token rate tracker", () => {
     expect(later).toEqual({ outputTokens: 40, source: "reported", tokensPerSecond: 40 });
   });
 
-  it("uses a sliding window so the rate reflects recent output", () => {
-    const tracker = createTokenRateTracker(100, 2000);
+  it("shows the whole-segment decode mean so the rate stays stable", () => {
+    const tracker = createTokenRateTracker(100);
     tracker.update(
       {
         type: "message_update",
@@ -256,7 +261,7 @@ describe("token rate tracker", () => {
       1000,
     );
     // Slow phase: 1 token per second. The first positive sample anchors the
-    // baseline (zero elapsed time), so the first display lands at 3000.
+    // decode baseline (zero elapsed time), so the first display lands at 3000.
     tracker.update(
       {
         type: "message_update",
@@ -274,8 +279,8 @@ describe("token rate tracker", () => {
       3000,
     );
     expect(slow).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 2 });
-    // Fast phase: +100 tokens in one second. The window spans only the fast
-    // second, so the rate reads 100/s instead of the 34/s whole-run average.
+    // Fast phase: +100 tokens in one second. The mean reads the combined
+    // 102/2s = 51/s (a sliding window would have spiked to 100/s).
     const fast = tracker.update(
       {
         type: "message_update",
@@ -284,9 +289,9 @@ describe("token rate tracker", () => {
       },
       4000,
     );
-    expect(fast).toEqual({ outputTokens: 102, source: "estimated", tokensPerSecond: 100 });
-    // Two seconds later the window (2s) spans 3s-6s: (202-2)/3s = 66.7
-    // while the whole-run average is still 34/s.
+    expect(fast).toEqual({ outputTokens: 102, source: "estimated", tokensPerSecond: 51 });
+    // Two seconds later the mean converges to the same ~51/s instead of
+    // oscillating with each burst - a stable glanceable number.
     const later = tracker.update(
       {
         type: "message_update",
@@ -295,7 +300,7 @@ describe("token rate tracker", () => {
       },
       6000,
     );
-    expect(later).toEqual({ outputTokens: 202, source: "estimated", tokensPerSecond: 67 });
+    expect(later).toEqual({ outputTokens: 202, source: "estimated", tokensPerSecond: 51 });
   });
 
   it("keeps reported output monotonic against lower re-reports", () => {
@@ -328,8 +333,8 @@ describe("token rate tracker", () => {
     expect(estimateTokensFromChars("𠀀𠀁𠀂𠀃")).toBe(4);
   });
 
-  it("re-baselines to the warm-up average when the source flips", () => {
-    const tracker = createTokenRateTracker(100, 2000);
+  it("self-corrects the mean when the source flips", () => {
+    const tracker = createTokenRateTracker(100);
     tracker.update(
       {
         type: "message_update",
@@ -354,9 +359,9 @@ describe("token rate tracker", () => {
       },
       3000,
     );
-    // usage arrives at +100ms: without re-baselining the window would read
-    // (50-2)/0.1s = 480/s; the flip resets the baseline, so it shows the
-    // warm-up average 50/1.1s ≈ 45/s.
+    // usage arrives at +100ms and bypasses the throttle: the numerator steps
+    // from the 2-token estimate to the true 50 and the mean self-corrects to
+    // the whole-segment truth (50/1.1s ≈ 45/s) with no re-baselining.
     const reported = tracker.update(
       {
         type: "message_update",
@@ -366,5 +371,75 @@ describe("token rate tracker", () => {
       3100,
     );
     expect(reported).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 45 });
+  });
+});
+
+describe("grok-build decode-throughput alignment", () => {
+  // grok-build (xai-org/grok-build, xai-grok-shell turn.rs) computes, per
+  // model call: tokens_per_sec = completion_tokens / (model_elapsed_ms -
+  // ttft_ms), where ttft_ms is measured to the FIRST content chunk
+  // (xai-grok-sampler metrics.rs: ttfb = chunk_timestamps[0] - stream_start).
+  // The denominator therefore reduces to last_chunk - first_chunk: the
+  // whole-call decode mean with prefill excluded. The tracker must land on
+  // the same number when fed the same chunk timeline; only the rounding
+  // differs (grok reports 1 decimal, the widget an integer).
+  interface Chunk {
+    at: number;
+    text?: string;
+    usage?: number;
+  }
+  const feed = (tracker: TokenRateTracker, chunks: Chunk[]): TokenRateSnapshot | undefined => {
+    let snapshot: TokenRateSnapshot | undefined;
+    for (const chunk of chunks) {
+      snapshot = tracker.update(
+        {
+          type: "message_update",
+          message: assistantMessage("", chunk.usage),
+          assistantMessageEvent: textDelta(chunk.text ?? ""),
+        },
+        chunk.at,
+      );
+    }
+    return snapshot;
+  };
+
+  it("equals grok's tokens/(model_elapsed - ttft) on a steady decode stream", () => {
+    const tracker = createTokenRateTracker(0);
+    const ttftMs = 850;
+    const chunks = Array.from({ length: 40 }, (_, i) => ({
+      at: ttftMs + i * 50, // one chunk every 50ms, first content chunk at TTFT
+      text: "x".repeat(20), // 20 latin chars -> 5 estimated tokens per chunk
+    }));
+    const last = feed(tracker, chunks);
+    // grok: 200 tokens / (2800 - 850)ms = 102.6/s; integer-rounded 103.
+    const grokTps = Math.round((40 * 5 * 1000) / (2800 - ttftMs));
+    expect(last?.outputTokens).toBe(200);
+    expect(last?.source).toBe("estimated");
+    expect(last?.tokensPerSecond).toBe(grokTps);
+    expect(last?.tokensPerSecond).toBe(103);
+  });
+
+  it("is independent of prefill length (TTFT)", () => {
+    const tracker = createTokenRateTracker(0);
+    const longPrefill = 60_850; // a 60s prefill must not dilute the decode rate
+    const chunks = Array.from({ length: 40 }, (_, i) => ({
+      at: longPrefill + i * 50,
+      text: "x".repeat(20),
+    }));
+    const last = feed(tracker, chunks);
+    expect(last?.tokensPerSecond).toBe(103);
+  });
+
+  it("equals grok when usage is reported cumulatively on every chunk", () => {
+    const tracker = createTokenRateTracker(0);
+    const ttftMs = 850;
+    const chunks = Array.from({ length: 40 }, (_, i) => ({
+      at: ttftMs + i * 50,
+      usage: (i + 1) * 5,
+    }));
+    const last = feed(tracker, chunks);
+    expect(last?.outputTokens).toBe(200);
+    expect(last?.source).toBe("reported");
+    expect(last?.tokensPerSecond).toBe(103);
   });
 });

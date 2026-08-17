@@ -17,26 +17,21 @@ export interface TokenRateTracker {
 }
 
 const DEFAULT_THROTTLE_MS = 100;
-/** Sliding window for the rate: recent output over the last N ms. */
-const DEFAULT_WINDOW_MS = 10_000;
-
-interface RateSample {
-  at: number;
-  tokens: number;
-}
 
 interface TrackerState {
   /** Incremental estimated token count from text/thinking/toolcall deltas. */
   accumulatedTokens: number;
-  /** Time of the first sample with positive tokens; the rate baseline. */
+  /** Time of the first sample with positive tokens - the decode baseline.
+   * Anchoring at the first content token (not the request start) excludes
+   * the prefill/TTFT phase from the denominator, so the rate measures pure
+   * decode throughput - the same semantics as `completion_tokens /
+   * (model_elapsed - ttft_ms)` in grok-build's telemetry. */
   firstTokenAt?: number;
   /** Last time a snapshot was allowed to refresh the display. */
   lastShownAt?: number;
   lastSource?: TokenRateSource;
   /** Latest positive `usage.output`; once seen, the source never downgrades. */
   reportedOutput?: number;
-  /** Refresh points (throttled), used as the sliding-window rate baseline. */
-  samples: RateSample[];
 }
 
 function deltaText(event: MessageUpdateEvent["assistantMessageEvent"]): string {
@@ -78,10 +73,7 @@ export function estimateTokensFromChars(chars: string): number {
   return Math.ceil(cjk + other / 4);
 }
 
-export function createTokenRateTracker(
-  throttleMs = DEFAULT_THROTTLE_MS,
-  windowMs = DEFAULT_WINDOW_MS,
-): TokenRateTracker {
+export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenRateTracker {
   let state: TrackerState | undefined;
 
   const reset = (): void => {
@@ -89,7 +81,7 @@ export function createTokenRateTracker(
   };
 
   const update = (event: MessageUpdateEvent, now: number): TokenRateSnapshot | undefined => {
-    state ??= { accumulatedTokens: 0, samples: [] };
+    state ??= { accumulatedTokens: 0 };
 
     // MessageUpdateEvent.message is the AgentMessage union; only assistant
     // messages carry usage.
@@ -125,38 +117,13 @@ export function createTokenRateTracker(
     if (state.lastShownAt !== undefined && !sourceChanged && now - state.lastShownAt < throttleMs) {
       return undefined;
     }
-    // A source flip (estimated -> reported) can jump the token count by a
-    // correction, which a window rate would read as a burst: re-baseline so
-    // the next rate is the warm-up average again.
-    if (sourceChanged) {
-      state.samples.length = 0;
-    }
-    // Drop refresh points that fell out of the window, keeping the oldest as
-    // the rate baseline. Samples are pushed only on displayed refreshes, so
-    // the ring is sparse by design and bounded by windowMs / throttleMs;
-    // with long pauses the base ages toward the whole-run average — the
-    // window is only as fresh as the latest refresh point.
-    while (state.samples.length > 1) {
-      const second = state.samples[1];
-      if (second === undefined || now - second.at <= windowMs) break;
-      state.samples.shift();
-    }
-    let tokensPerSecond: number;
-    const base = state.samples[0];
-    if (base === undefined) {
-      // Warm-up: no prior refresh point yet, average since the first token.
-      tokensPerSecond = Math.round((tokens * 1000) / elapsedMs);
-    } else {
-      // Sliding window: tokens produced since the oldest in-window refresh
-      // point, over that span — reflects recent speed instead of the whole
-      // run's average (which drifts down on long turns).
-      const dtMs = now - base.at;
-      tokensPerSecond =
-        dtMs > 0
-          ? Math.max(0, Math.round(((tokens - base.tokens) * 1000) / dtMs))
-          : Math.round((tokens * 1000) / elapsedMs);
-    }
-    state.samples.push({ at: now, tokens });
+    // Whole-segment decode mean: cumulative tokens over the time since the
+    // first content token (prefill excluded). The measurement domain is
+    // scoped per streaming segment by the lifecycle resets in
+    // working-token-rate.ts, so the mean stays short-lived and fresh. A
+    // source flip (estimated -> reported) merely steps the numerator to the
+    // corrected count - the mean self-corrects, no re-baselining needed.
+    const tokensPerSecond = Math.round((tokens * 1000) / elapsedMs);
     state.lastShownAt = now;
     state.lastSource = source;
     return {
