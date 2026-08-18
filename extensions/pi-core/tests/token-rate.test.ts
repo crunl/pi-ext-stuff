@@ -30,12 +30,12 @@ function toolcallDelta(delta: string) {
 }
 
 describe("token rate tracker", () => {
-  it("uses reported usage.output when positive", () => {
+  it("finalizes to the reported usage.output at message end", () => {
     const tracker = createTokenRateTracker();
     const first = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage("", 0),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("ab"),
       },
       1000,
@@ -45,12 +45,17 @@ describe("token rate tracker", () => {
     const second = tracker.update(
       {
         type: "message_update",
-        message: assistantMessage("", 40),
+        message: assistantMessage(""),
         assistantMessageEvent: textDelta("cd"),
       },
       2000,
     );
-    expect(second).toEqual({ outputTokens: 40, source: "reported", tokensPerSecond: 40 });
+    expect(second).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 2 });
+
+    // message_end carries the real usage; the rate is recomputed from it and
+    // always refreshes (no throttle in the way after 1s elapsed).
+    const finalized = tracker.finalize(assistantMessage("", 40), 2500);
+    expect(finalized).toEqual({ outputTokens: 40, source: "reported", tokensPerSecond: 27 });
   });
 
   it("falls back to incremental estimation from text deltas", () => {
@@ -162,7 +167,7 @@ describe("token rate tracker", () => {
     expect(later).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 2 });
   });
 
-  it("throttles refreshes inside the window and allows them after it", () => {
+  it("waits for the first-display warm-up and throttles refreshes after", () => {
     const tracker = createTokenRateTracker(100);
     tracker.update(
       {
@@ -172,17 +177,29 @@ describe("token rate tracker", () => {
       },
       1000,
     );
-    // First displayable sample: the baseline update had zero elapsed time, so
-    // the throttle window has not started yet.
+    // Before the 1s warm-up: nothing is shown, whatever the delta size. A
+    // 400-char burst at 50ms would have read ~2000 tok/s without the gate.
+    expect(
+      tracker.update(
+        {
+          type: "message_update",
+          message: assistantMessage(""),
+          assistantMessageEvent: textDelta("x".repeat(400)),
+        },
+        1050,
+      ),
+    ).toBeUndefined();
+    // At the 1s mark the first rate appears. The burst is accumulated but the
+    // denominator is a full second, so the spike is gone: 102 tokens / 1s.
     const firstShown = tracker.update(
       {
         type: "message_update",
         message: assistantMessage(""),
         assistantMessageEvent: textDelta("ef"),
       },
-      1050,
+      2000,
     );
-    expect(firstShown).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 40 });
+    expect(firstShown).toEqual({ outputTokens: 102, source: "estimated", tokensPerSecond: 102 });
     // 50ms later: inside the window, no refresh.
     expect(
       tracker.update(
@@ -191,7 +208,7 @@ describe("token rate tracker", () => {
           message: assistantMessage(""),
           assistantMessageEvent: textDelta("gh"),
         },
-        1100,
+        2050,
       ),
     ).toBeUndefined();
     // 100ms later (window edge): refresh is allowed again.
@@ -201,14 +218,14 @@ describe("token rate tracker", () => {
         message: assistantMessage(""),
         assistantMessageEvent: textDelta("ij"),
       },
-      1150,
+      2100,
     );
     expect(third).toBeDefined();
     expect(third?.source).toBe("estimated");
   });
 
-  it("refreshes immediately when the source flips from estimated to reported", () => {
-    const tracker = createTokenRateTracker(100);
+  it("finalize always refreshes, bypassing the throttle window", () => {
+    const tracker = createTokenRateTracker(10_000);
     tracker.update(
       {
         type: "message_update",
@@ -217,37 +234,29 @@ describe("token rate tracker", () => {
       },
       1000,
     );
-    // 10ms later: source flip bypasses the throttle window.
-    const reported = tracker.update(
-      {
-        type: "message_update",
-        message: assistantMessage("", 50),
-        assistantMessageEvent: textDelta("ef"),
-      },
-      1010,
-    );
-    expect(reported).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 5000 });
-  });
-
-  it("never downgrades a reported source back to estimated", () => {
-    const tracker = createTokenRateTracker();
-    tracker.update(
-      {
-        type: "message_update",
-        message: assistantMessage("", 40),
-        assistantMessageEvent: textDelta("ab"),
-      },
-      1000,
-    );
-    const later = tracker.update(
+    const shown = tracker.update(
       {
         type: "message_update",
         message: assistantMessage(""),
-        assistantMessageEvent: textDelta("cdef"),
+        assistantMessageEvent: textDelta("ef"),
       },
       2000,
     );
-    expect(later).toEqual({ outputTokens: 40, source: "reported", tokensPerSecond: 40 });
+    expect(shown).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 2 });
+    // A normal update 50ms later would be throttled for 10s...
+    expect(
+      tracker.update(
+        {
+          type: "message_update",
+          message: assistantMessage(""),
+          assistantMessageEvent: textDelta("gh"),
+        },
+        2050,
+      ),
+    ).toBeUndefined();
+    // ...but the final real usage always gets through: 50 tokens / 1.1s ≈ 45.
+    const finalized = tracker.finalize(assistantMessage("", 50), 2100);
+    expect(finalized).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 45 });
   });
 
   it("shows the whole-segment decode mean so the rate stays stable", () => {
@@ -303,27 +312,28 @@ describe("token rate tracker", () => {
     expect(later).toEqual({ outputTokens: 202, source: "estimated", tokensPerSecond: 51 });
   });
 
-  it("keeps reported output monotonic against lower re-reports", () => {
+  it("finalize ignores missing or zero usage", () => {
     const tracker = createTokenRateTracker();
     tracker.update(
       {
         type: "message_update",
-        message: assistantMessage("", 50),
-        assistantMessageEvent: textDelta("ab"),
+        message: assistantMessage(""),
+        assistantMessageEvent: textDelta("abcd"),
       },
       1000,
     );
-    // Provider re-reports a lower cumulative value: the rate must not go
-    // negative or step backwards.
-    const later = tracker.update(
-      {
-        type: "message_update",
-        message: assistantMessage("", 30),
-        assistantMessageEvent: textDelta("cd"),
-      },
-      2000,
-    );
-    expect(later).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 50 });
+    // No usage reported (provider omission): keep the estimate, do not clear.
+    expect(
+      tracker.finalize({ ...assistantMessage(""), usage: undefined } as never, 2000),
+    ).toBeUndefined();
+    expect(tracker.finalize(assistantMessage("", 0), 2000)).toBeUndefined();
+    // Non-assistant messages never carry output usage.
+    expect(
+      tracker.finalize({ role: "user", content: [], timestamp: 0 } as never, 2000),
+    ).toBeUndefined();
+    // Finalize without any prior stream (no baseline) cannot compute a rate.
+    tracker.reset();
+    expect(tracker.finalize(assistantMessage("", 50), 2000)).toBeUndefined();
   });
 
   it("counts hangul and supplementary CJK ideographs as one token each", () => {
@@ -333,7 +343,7 @@ describe("token rate tracker", () => {
     expect(estimateTokensFromChars("𠀀𠀁𠀂𠀃")).toBe(4);
   });
 
-  it("self-corrects the mean when the source flips", () => {
+  it("corrects the estimate to the true mean at finalize", () => {
     const tracker = createTokenRateTracker(100);
     tracker.update(
       {
@@ -351,7 +361,7 @@ describe("token rate tracker", () => {
       },
       2000,
     );
-    tracker.update(
+    const estimate = tracker.update(
       {
         type: "message_update",
         message: assistantMessage(""),
@@ -359,17 +369,10 @@ describe("token rate tracker", () => {
       },
       3000,
     );
-    // usage arrives at +100ms and bypasses the throttle: the numerator steps
-    // from the 2-token estimate to the true 50 and the mean self-corrects to
-    // the whole-segment truth (50/1.1s ≈ 45/s) with no re-baselining.
-    const reported = tracker.update(
-      {
-        type: "message_update",
-        message: assistantMessage("", 50),
-        assistantMessageEvent: textDelta("ij"),
-      },
-      3100,
-    );
+    expect(estimate).toEqual({ outputTokens: 2, source: "estimated", tokensPerSecond: 2 });
+    // Real usage at message_end replaces the estimate: the mean self-corrects
+    // to the whole-segment truth (50/1.1s ≈ 45/s), no re-baselining needed.
+    const reported = tracker.finalize(assistantMessage("", 50), 3100);
     expect(reported).toEqual({ outputTokens: 50, source: "reported", tokensPerSecond: 45 });
   });
 });
@@ -430,14 +433,17 @@ describe("grok-build decode-throughput alignment", () => {
     expect(last?.tokensPerSecond).toBe(103);
   });
 
-  it("equals grok when usage is reported cumulatively on every chunk", () => {
+  it("equals grok when the final usage is reported at message end", () => {
     const tracker = createTokenRateTracker(0);
     const ttftMs = 850;
     const chunks = Array.from({ length: 40 }, (_, i) => ({
       at: ttftMs + i * 50,
-      usage: (i + 1) * 5,
+      text: "x".repeat(20), // 5 estimated tokens per chunk
     }));
-    const last = feed(tracker, chunks);
+    feed(tracker, chunks);
+    // grok computes exactly once, at stream end, from the true completion
+    // token count: 200 / (2800 - 850)ms = 102.6/s -> 103.
+    const last = tracker.finalize(assistantMessage("", 40 * 5), 2800);
     expect(last?.outputTokens).toBe(200);
     expect(last?.source).toBe("reported");
     expect(last?.tokensPerSecond).toBe(103);

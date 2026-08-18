@@ -69,6 +69,21 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
     }
   });
 
+  pi.on("message_end", (event, context) => {
+    // message_update never carries usage (pi attaches it only on stream
+    // completion), so the final message is the one point where the rate can
+    // be corrected to the true decode throughput - same computation moment
+    // as grok-build's per-call telemetry.
+    if (event.message.role !== "assistant" || !isInteractiveTui(context)) return;
+    const snapshot = tracker.finalize(event.message, now());
+    if (snapshot === undefined) return;
+    const message = formatWorkingMessage(snapshot);
+    if (message !== lastMessage) {
+      lastMessage = message;
+      context.ui.setWorkingMessage(message);
+    }
+  });
+
   pi.on("tool_execution_start", () => {
     // Tools produce no output tokens; restart the counter but keep the last
     // rate visible so the working line never blanks during working.

@@ -48,7 +48,7 @@ describe("working token rate adapter", () => {
     expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
   });
 
-  it("formats reported usage without the estimate marker", () => {
+  it("shows the estimate during streaming and the true rate at message_end", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -58,11 +58,12 @@ describe("working token rate adapter", () => {
     vi.setSystemTime(1000);
     handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd", 0), "abcd"), context);
     vi.setSystemTime(2000);
-    handlers.get("message_update")?.(
-      messageUpdate(assistantMessage("abcdefgh", 30), "efgh"),
-      context,
-    );
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efgh", 0), "efgh"), context);
+    // Streaming estimates show with the ≈ marker: 2 tokens over 1s.
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
 
+    // message_end carries the true usage: the marker disappears.
+    handlers.get("message_end")?.({ message: assistantMessage("abcdefgh", 30) }, context);
     expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  30 tok/s");
   });
 
@@ -104,39 +105,35 @@ describe("working token rate adapter", () => {
     expect(setWorkingIndicator).not.toHaveBeenCalled();
   });
 
-  it("resets the measurement on model switch (usage not clamped across models)", () => {
+  it("resets the measurement baseline on model switch", () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
     const { handlers, context, setWorkingMessage } = registerForTest();
     handlers.get("agent_start")?.({}, context);
     handlers.get("message_start")?.({ message: assistantMessage("") }, context);
-    // Model A: reported usage climbs to 60.
     vi.setSystemTime(1000);
-    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd", 30), "abcd"), context);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
     vi.setSystemTime(2000);
-    handlers.get("message_update")?.(
-      messageUpdate(assistantMessage("abcdefgh", 60), "efgh"),
-      context,
-    );
-    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  60 tok/s");
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efgh"), "efgh"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
 
-    // Mid-turn switch (no new message_start): the tracker must not keep
-    // model A's cumulative usage as the new floor.
+    // Mid-turn switch (no new message_start): the tracker must start from a
+    // fresh baseline instead of folding the new stream into model A's.
     handlers.get("model_select")?.(
       { model: { id: "model-b" }, previousModel: { id: "model-a" } },
       context,
     );
-    vi.setSystemTime(2500);
-    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd", 20), "abcd"), context);
-    // Without the reset, usage would be clamped to 60 and the window rate
-    // would read 0 tok/s; a reset re-baselines to model B's 25 tokens.
     vi.setSystemTime(3000);
     handlers.get("message_update")?.(
-      messageUpdate(assistantMessage("abcdefgh", 25), "efgh"),
+      messageUpdate(assistantMessage("a".repeat(400)), "a".repeat(400)),
       context,
     );
-    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  50 tok/s");
+    // Anchored at 3000; at 4000 the rate is the new segment's 101 tokens/1s.
+    vi.setSystemTime(4000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efgh"), "efgh"), context);
+    // The ≈ marker takes the full 3-wide column, so no leading pad space.
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working ≈101 tok/s");
   });
 
   it("does not re-apply an identical working message", () => {

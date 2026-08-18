@@ -30,7 +30,7 @@ describe("pi-core registration", () => {
     expect(vi.isMockFunction(tools.get("read")?.execute)).toBe(false);
   });
 
-  it("registers the five token-rate lifecycle handlers", () => {
+  it("registers the six token-rate lifecycle handlers", () => {
     const events = new Set<string>();
     registerExtension(createPiMock({ on: (event: string) => events.add(event) }));
 
@@ -38,6 +38,7 @@ describe("pi-core registration", () => {
       "agent_start",
       "message_start",
       "message_update",
+      "message_end",
       "tool_execution_start",
       "agent_end",
     ]) {

@@ -1,4 +1,4 @@
-import type { MessageUpdateEvent } from "@earendil-works/pi-coding-agent";
+import type { MessageEndEvent, MessageUpdateEvent } from "@earendil-works/pi-coding-agent";
 
 export type TokenRateSource = "reported" | "estimated";
 
@@ -12,11 +12,21 @@ export interface TokenRateTracker {
   reset(): void;
   /** Feed one streaming update; returns a refresh-eligible snapshot or
    * `undefined` when nothing should be shown (no positive tokens yet, zero
-   * elapsed time, or inside the throttle window). */
+   * elapsed time, below the first-display warm-up, or inside the throttle
+   * window). */
   update(event: MessageUpdateEvent, now: number): TokenRateSnapshot | undefined;
+  /** Feed the final message of a stream (pi's `message_end` carries the
+   * request's real usage, which `message_update` never does). Recomputes the
+   * rate from the true token count and always refreshes the display. */
+  finalize(message: MessageEndEvent["message"], now: number): TokenRateSnapshot | undefined;
 }
 
 const DEFAULT_THROTTLE_MS = 100;
+/** Minimum elapsed decode time before the first rate is shown. The rate is a
+ * small-sample estimate at stream start (large first deltas over a tiny
+ * elapsed span read as a spike); waiting one second gives it statistical
+ * meaning while the previous rate stays on the working line. */
+const FIRST_SHOWN_MS = 1_000;
 
 interface TrackerState {
   /** Incremental estimated token count from text/thinking/toolcall deltas. */
@@ -29,9 +39,6 @@ interface TrackerState {
   firstTokenAt?: number;
   /** Last time a snapshot was allowed to refresh the display. */
   lastShownAt?: number;
-  lastSource?: TokenRateSource;
-  /** Latest positive `usage.output`; once seen, the source never downgrades. */
-  reportedOutput?: number;
 }
 
 function deltaText(event: MessageUpdateEvent["assistantMessageEvent"]): string {
@@ -82,56 +89,49 @@ export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenR
 
   const update = (event: MessageUpdateEvent, now: number): TokenRateSnapshot | undefined => {
     state ??= { accumulatedTokens: 0 };
-
-    // MessageUpdateEvent.message is the AgentMessage union; only assistant
-    // messages carry usage.
-    const reported = event.message.role === "assistant" ? event.message.usage?.output : undefined;
-    // Estimation is only a fallback. Once real cumulative usage is available,
-    // walking every subsequent text delta provides no value.
-    if (state.reportedOutput === undefined && !(reported !== undefined && reported > 0)) {
-      state.accumulatedTokens += estimateTokensFromChars(deltaText(event.assistantMessageEvent));
-    }
-    let tokens: number;
-    let source: TokenRateSource;
-    if (reported !== undefined && reported > 0) {
-      // usage.output is cumulative and should be monotonic, but guard against
-      // providers that report a re-computed lower value (it would otherwise
-      // break the token monotonicity the window rate relies on).
-      state.reportedOutput = Math.max(state.reportedOutput ?? 0, reported);
-      tokens = state.reportedOutput;
-      source = "reported";
-    } else if (state.reportedOutput !== undefined) {
-      tokens = state.reportedOutput;
-      source = "reported";
-    } else {
-      tokens = state.accumulatedTokens;
-      source = "estimated";
-    }
-    if (tokens <= 0) return undefined;
+    state.accumulatedTokens += estimateTokensFromChars(deltaText(event.assistantMessageEvent));
+    if (state.accumulatedTokens <= 0) return undefined;
 
     state.firstTokenAt ??= now;
     const elapsedMs = now - state.firstTokenAt;
     if (elapsedMs <= 0) return undefined;
+    // First display waits for a statistically meaningful span; later
+    // refreshes are throttled.
+    if (state.lastShownAt === undefined && elapsedMs < FIRST_SHOWN_MS) return undefined;
+    if (state.lastShownAt !== undefined && now - state.lastShownAt < throttleMs) return undefined;
 
-    const sourceChanged = state.lastSource !== undefined && state.lastSource !== source;
-    if (state.lastShownAt !== undefined && !sourceChanged && now - state.lastShownAt < throttleMs) {
-      return undefined;
-    }
-    // Whole-segment decode mean: cumulative tokens over the time since the
-    // first content token (prefill excluded). The measurement domain is
+    // Whole-segment decode mean of the estimate. The measurement domain is
     // scoped per streaming segment by the lifecycle resets in
-    // working-token-rate.ts, so the mean stays short-lived and fresh. A
-    // source flip (estimated -> reported) merely steps the numerator to the
-    // corrected count - the mean self-corrects, no re-baselining needed.
-    const tokensPerSecond = Math.round((tokens * 1000) / elapsedMs);
+    // working-token-rate.ts, so the mean stays short-lived and fresh.
+    const tokensPerSecond = Math.round((state.accumulatedTokens * 1000) / elapsedMs);
     state.lastShownAt = now;
-    state.lastSource = source;
     return {
-      outputTokens: tokens,
-      source,
+      outputTokens: state.accumulatedTokens,
+      source: "estimated",
       tokensPerSecond,
     };
   };
 
-  return { reset, update };
+  const finalize = (
+    message: MessageEndEvent["message"],
+    now: number,
+  ): TokenRateSnapshot | undefined => {
+    if (state === undefined) return undefined;
+    const output = message.role === "assistant" ? message.usage?.output : undefined;
+    if (output === undefined || output <= 0 || state.firstTokenAt === undefined) return undefined;
+    const elapsedMs = now - state.firstTokenAt;
+    if (elapsedMs <= 0) return undefined;
+    // Real usage replaces the estimate: the exact grok-build formula
+    // (completion_tokens / decode time). Always refreshes, bypassing the
+    // throttle - this is the final true value for the segment.
+    const tokensPerSecond = Math.round((output * 1000) / elapsedMs);
+    state.lastShownAt = now;
+    return {
+      outputTokens: output,
+      source: "reported",
+      tokensPerSecond,
+    };
+  };
+
+  return { reset, update, finalize };
 }
