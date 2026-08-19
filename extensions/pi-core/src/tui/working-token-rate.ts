@@ -22,6 +22,15 @@ function formatWorkingMessage(snapshot: TokenRateSnapshot): string {
   return `Working ${rate} tok/s`;
 }
 
+function isPureToolCallMessage(message: { content?: unknown }): boolean {
+  const content = (message as { content?: unknown[] }).content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((c: unknown) => {
+    const type = (c as { type?: string } | null)?.type;
+    return type === "toolCall" || type === "tool_call";
+  });
+}
+
 /** Adapter layer: tracks assistant streaming output and shows the token rate
  * as part of the footer working line (`⠋ Working  50 tok/s`) via
  * `setWorkingMessage` — which only updates the text and never restarts the
@@ -73,8 +82,12 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
     // message_update never carries usage (pi attaches it only on stream
     // completion), so the final message is the one point where the rate can
     // be corrected to the true decode throughput - same computation moment
-    // as grok-build's per-call telemetry.
+    // as grok-build's per-call telemetry. Pure tool-call messages are short
+    // and noisy; keeping the last meaningful (text/thinking) rate frozen
+    // during tool execution is more informative than flashing the tool JSON's
+    // rate.
     if (event.message.role !== "assistant" || !isInteractiveTui(context)) return;
+    if (isPureToolCallMessage(event.message as { content?: unknown[] })) return;
     const snapshot = tracker.finalize(event.message, now());
     if (snapshot === undefined) return;
     const message = formatWorkingMessage(snapshot);

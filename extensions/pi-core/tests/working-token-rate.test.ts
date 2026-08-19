@@ -158,6 +158,43 @@ describe("working token rate adapter", () => {
     expect(setWorkingMessage).toHaveBeenCalledTimes(2);
   });
 
+  it("does not refresh the rate for pure tool-call messages at message_end", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
+    vi.setSystemTime(1000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
+    vi.setSystemTime(2000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efgh"), "efgh"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
+
+    // Pure tool-call final message is short and noisy; it must not overwrite
+    // the last meaningful (text) rate that stays frozen during tool execution.
+    const pureToolCall = {
+      role: "assistant" as const,
+      content: [{ type: "toolCall" as const, id: "1", name: "read", arguments: { path: "a.ts" } }],
+      usage: {
+        input: 0,
+        output: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 100,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      api: "openai-completions" as const,
+      provider: "test",
+      model: "test-model",
+      stopReason: "stop" as const,
+      timestamp: 0,
+    };
+    handlers.get("message_end")?.({ message: pureToolCall }, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
+  });
+
   it("starts a new agent run with the legacy widget cleared", () => {
     const { handlers, context, setWidget } = registerForTest();
     handlers.get("agent_start")?.({}, context);
