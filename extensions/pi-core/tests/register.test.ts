@@ -46,6 +46,12 @@ describe("pi-core registration", () => {
     }
   });
 
+  it("registers /exit as alias for /quit", () => {
+    const commands = new Map<string, any>();
+    registerExtension(createPiMock({ registerCommand: (n: string, c: any) => commands.set(n, c) }));
+    expect(commands.has("exit")).toBe(true);
+  });
+
   it("keeps completed read and search calls on one collapsed line", () => {
     const tools = new Map<string, any>();
     registerExtension(createPiMock({ registerTool: (tool: any) => tools.set(tool.name, tool) }));

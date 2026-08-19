@@ -4,6 +4,7 @@ import { registerAutocompleteAbove } from "./tui/autocomplete-above.ts";
 import { registerCodexToolRendering } from "./tui/built-in-tools.ts";
 import { registerCanonicalBuiltinFallback } from "./tui/canonical-tool-fallback.ts";
 import { registerEffortCommand } from "./tui/effort-command.ts";
+import { registerExitCommand } from "./tui/exit-command.ts";
 import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
@@ -17,6 +18,7 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerAutocompleteAbove(pi);
   registerSelectorTabNav(pi);
   registerEffortCommand(pi);
+  registerExitCommand(pi);
   registerWorkingTokenRate(pi);
   applyMarkdownCodeFrame();
 }

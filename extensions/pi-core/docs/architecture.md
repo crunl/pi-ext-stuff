@@ -16,7 +16,7 @@ layout or cross-extension contract changes.
 ## Who registers what (tool registration is first-wins)
 
 | Tool | Registered by | Why |
-|---|---|---|
+| --- | --- | --- |
 | read / grep / find / ls | pi-core `src/tui/built-in-tools.ts` (`registerCodexToolRendering`) | Wraps the built-in tools with Codex-style rendering. |
 | bash / write / edit (canonical builtin owner) | pi-core `src/tui/canonical-tool-fallback.ts` (`registerCanonicalBuiltinFallback`) | In interactive TUI only, when the complete public metadata and synthetic builtin source match Pi's canonical definitions. The `core-builtin-presentation` flag supports `auto` (default) or `off`. |
 | bash / write / edit (extension owner) | pi-permissions | Permission extensions retain execution ownership and may apply pi-core's side-effect-free presentation decorator. First registration per name remains authoritative. |
@@ -81,8 +81,8 @@ Adding an export here is the only supported way to widen the contract.
   cleared, never populated.
 - `ui-guard.ts` — shared `isInteractiveTui()` guard for terminal-only hooks;
   `hasUI` alone is insufficient because it is also true in RPC mode.
-- `effort-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
-  single-purpose patches. (`startup-header.ts` was removed — it rendered a
+- `effort-command.ts`, `exit-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
+  single-purpose patches (effort/exit register slash commands `/effort` and `/exit` (alias for `/quit`)). (`startup-header.ts` was removed — it rendered a
   logo via the external `chafa` binary.) Pi 0.84's
   `registerMarkdownTransformer()` can rewrite source text but cannot replace a
   themed token renderer, so framed code blocks remain a guarded prototype seam.
