@@ -80,6 +80,26 @@ export function estimateTokensFromChars(chars: string): number {
   return Math.ceil(cjk + other / 4);
 }
 
+export type StreamHealth = "healthy" | "slow" | "stalled";
+
+/**
+ * Classify the in-flight turn's health from silence AND throughput. A sustained
+ * CRAWL (a trickle of tokens) is as bad as silence — the idle stall-timeout misses
+ * it because bytes keep arriving, so a turn can run ~30 min at 0.2 tok/s looking
+ * "busy". `tps` is null before any tokens have streamed (still "connecting").
+ *   idleMs  — ms since the last stream event of any kind
+ *   burstMs — ms the current generation burst has been running
+ *   tps     — live tokens/sec for this burst (null if not generating yet)
+ *
+ * Ported from Plicerin/freecode `src/tui/speed.ts` — thresholds proven in
+ * production for the same speedometer use-case.
+ */
+export function streamHealth(idleMs: number, burstMs: number, tps: number | null): StreamHealth {
+  if (idleMs >= 20_000 || (tps !== null && burstMs > 30_000 && tps < 2)) return "stalled";
+  if (idleMs >= 5_000 || (tps !== null && burstMs > 15_000 && tps < 5)) return "slow";
+  return "healthy";
+}
+
 export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenRateTracker {
   let state: TrackerState | undefined;
 

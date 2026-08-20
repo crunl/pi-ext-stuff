@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createTokenRateTracker,
   estimateTokensFromChars,
+  streamHealth,
   type TokenRateSnapshot,
   type TokenRateTracker,
 } from "../src/tui/token-rate.ts";
@@ -447,5 +448,32 @@ describe("grok-build decode-throughput alignment", () => {
     expect(last?.outputTokens).toBe(200);
     expect(last?.source).toBe("reported");
     expect(last?.tokensPerSecond).toBe(103);
+  });
+});
+
+describe("streamHealth", () => {
+  it("returns stalled on long silence", () => {
+    expect(streamHealth(20_000, 0, null)).toBe("stalled");
+    expect(streamHealth(19_999, 0, null)).toBe("slow");
+  });
+
+  it("returns stalled on sustained crawl", () => {
+    expect(streamHealth(0, 30_001, 1.9)).toBe("stalled");
+    expect(streamHealth(0, 30_000, 1.9)).toBe("slow");
+    expect(streamHealth(0, 30_001, 2)).toBe("slow");
+    expect(streamHealth(0, 30_001, null)).toBe("healthy");
+  });
+
+  it("returns slow on moderate silence or crawl", () => {
+    expect(streamHealth(5_000, 0, null)).toBe("slow");
+    expect(streamHealth(4_999, 0, null)).toBe("healthy");
+    expect(streamHealth(0, 15_001, 4.9)).toBe("slow");
+    expect(streamHealth(0, 15_000, 4.9)).toBe("healthy");
+    expect(streamHealth(0, 15_001, 5)).toBe("healthy");
+  });
+
+  it("prioritizes stalled over slow", () => {
+    expect(streamHealth(20_000, 15_001, 4.9)).toBe("stalled");
+    expect(streamHealth(5_000, 30_001, 1.9)).toBe("stalled");
   });
 });
