@@ -44,7 +44,7 @@ function readArgument(args: Record<string, unknown>): string {
 }
 
 export const codexReadToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "󰈙",
   runningVerb: "Reading",
   completedVerb: "Read",
   argument: readArgument,
@@ -52,7 +52,7 @@ export const codexReadToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexGrepToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "󰱽",
   runningVerb: "Searching",
   completedVerb: "Searched",
   argument: (args) => {
@@ -64,7 +64,7 @@ export const codexGrepToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexFindToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "󰈞",
   runningVerb: "Finding",
   completedVerb: "Found",
   argument: (args) => {
@@ -76,7 +76,7 @@ export const codexFindToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexLsToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "󰉋",
   runningVerb: "Listing",
   completedVerb: "Listed",
   argument: (args) => (typeof args.path === "string" ? args.path : "."),
@@ -95,7 +95,7 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = {
-  icon: "",
+  icon: "󰝒",
   runningVerb: "Writing",
   completedVerb: "Wrote",
   argument: (args) => (typeof args.path === "string" ? args.path : ""),
@@ -116,7 +116,7 @@ export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = 
 };
 
 export const codexEditToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "󰏫",
   runningVerb: "Editing",
   completedVerb: "Edited",
   argument: (args) => (typeof args.path === "string" ? args.path : ""),

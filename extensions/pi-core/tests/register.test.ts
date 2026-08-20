@@ -65,25 +65,25 @@ describe("pi-core registration", () => {
         name: "read",
         args: { path: "src/index.ts" },
         output: "file contents",
-        expected: " Read src/index.ts",
+        expected: "󰈙 Read src/index.ts",
       },
       {
         name: "grep",
         args: { pattern: "renderCall", path: "src" },
         output: "src/a.ts:1\nsrc/b.ts:2",
-        expected: ' Searched "renderCall" in src · 2 matches',
+        expected: '󰱽 Searched "renderCall" in src · 2 matches',
       },
       {
         name: "find",
         args: { pattern: "*.ts", path: "src" },
         output: "src/a.ts\nsrc/b.ts",
-        expected: " Found *.ts in src · 2 files",
+        expected: "󰈞 Found *.ts in src · 2 files",
       },
       {
         name: "ls",
         args: { path: "src" },
         output: "a.ts\nb.ts",
-        expected: " Listed src · 2 entries",
+        expected: "󰉋 Listed src · 2 entries",
       },
     ]) {
       const tool = tools.get(example.name);
