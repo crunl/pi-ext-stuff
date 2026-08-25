@@ -2930,10 +2930,6 @@ describe("Default mode registration", () => {
     );
 
     await app.shortcuts.get("shift+tab")!.handler(app.context);
-    expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("Full bypass mode 已启用"),
-      "info",
-    );
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Full bypass");
     expect(app.abort).not.toHaveBeenCalled();
   });
@@ -2998,10 +2994,6 @@ describe("Default mode registration", () => {
     const firstCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
     const secondCycle = app.shortcuts.get("shift+tab")!.handler(app.context);
     await Promise.all([firstCycle, secondCycle]);
-    expect(app.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("Approve for me mode 已启用"),
-      "info",
-    );
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
   });
 

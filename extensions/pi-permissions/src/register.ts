@@ -42,10 +42,7 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
-import {
-  type DefaultDecision,
-  evaluateDefaultRequest,
-} from "./default-mode.ts";
+import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { GrantLedger, type Grant } from "./grant-ledger.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
@@ -814,10 +811,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // double assertion per direction instead of threading casts through call sites.
     return createPiCoreCodexToolRendering(
       spec as Parameters<typeof createPiCoreCodexToolRendering>[0],
-    ) as unknown as Pick<
-      ToolDefinition<TSchema>,
-      "renderShell" | "renderCall" | "renderResult"
-    >;
+    ) as unknown as Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">;
   }
 
   pi.registerTool({
@@ -1620,7 +1614,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             clearPendingModeTransitionIfCurrent(transition);
           }
           setDefaultStatus(ctx);
-          ctx.ui.notify(`pi-permissions: ${runtime.statusLabel} mode 已启用`, "info");
           settleModeTransitionBarrier(transitionBarrier, true);
         } catch (error: unknown) {
           if (transition && transitionOwnsPendingState) {
