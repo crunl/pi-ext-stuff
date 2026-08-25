@@ -13,10 +13,10 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
   type AutoReviewRequest,
   type AutoReviewResult,
+  type AutoReviewerContext,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
 } from "./auto-review-request.ts";
-import type { PermissionsConfig } from "./config.ts";
 import { resolveGuardianModel } from "./guardian-model.ts";
 import {
   GUARDIAN_REVIEW_MAX_ATTEMPTS,
@@ -26,17 +26,17 @@ import {
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
+import {
+  AutoReviewerFailure,
+  type GuardianReviewIdentity,
+} from "./guardian/errors.ts";
 
-export interface AutoReviewerContext {
-  modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
-  activeModel?: Model<Api>;
-  reviewer?: PermissionsConfig["reviewer"];
-  guardianPolicy?: string;
-  guardianSession: {
-    cwd: string;
-    configFingerprint: string;
-  };
-}
+export type {
+  AutoReviewerFailureKind,
+  GuardianReviewIdentity,
+} from "./guardian/errors.ts";
+export { AutoReviewerFailure } from "./guardian/errors.ts";
+export type { AutoReviewerContext } from "./auto-review-request.ts";
 
 export interface AutoReviewer {
   invalidateSession(): void;
@@ -45,27 +45,6 @@ export interface AutoReviewer {
     context: AutoReviewerContext,
     signal?: AbortSignal,
   ): Promise<AutoReviewResult>;
-}
-
-export type AutoReviewerFailureKind =
-  | "unavailable"
-  | "timeout"
-  | "cancelled"
-  | "provider"
-  | "parse";
-
-export type GuardianReviewIdentity = NonNullable<AutoReviewResult["guardian"]>;
-
-export class AutoReviewerFailure extends Error {
-  constructor(
-    readonly kind: AutoReviewerFailureKind,
-    message: string,
-    options?: ErrorOptions,
-    readonly guardian?: GuardianReviewIdentity,
-  ) {
-    super(message, options);
-    this.name = "AutoReviewerFailure";
-  }
 }
 
 type Complete = (

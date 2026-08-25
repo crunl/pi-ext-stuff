@@ -1,5 +1,8 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { DefaultDecision } from "./default-mode.ts";
+import type { PermissionsConfig } from "./config.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
 import { renderGuardianSystemPrompt } from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
@@ -17,6 +20,20 @@ export interface AutoReviewResult {
     model: string;
     source: "configured" | "active" | "active-fallback";
     fallbackNotice?: "configured-reviewer-unavailable";
+  };
+}
+
+/** Host-provided inputs a guardian review run needs. Owned here so that
+ * model selection and the reviewer implementation can share it without
+ * importing each other. */
+export interface AutoReviewerContext {
+  modelRegistry: Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
+  activeModel?: Model<Api>;
+  reviewer?: PermissionsConfig["reviewer"];
+  guardianPolicy?: string;
+  guardianSession: {
+    cwd: string;
+    configFingerprint: string;
   };
 }
 
