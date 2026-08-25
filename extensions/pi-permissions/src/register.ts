@@ -42,7 +42,11 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
-import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
+import {
+  type DefaultDecision,
+  evaluateDefaultRequest,
+} from "./default-mode.ts";
+import { GrantLedger, type Grant } from "./grant-ledger.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import { validateGuardianPolicy } from "./guardian-policy.ts";
@@ -97,13 +101,6 @@ export interface RegisterExtensionOptions {
   guardianSessionManager?: GuardianReviewSessionManager;
   guardianPolicySource?: GuardianPolicySource;
   riskEvaluator?: typeof evaluateDefaultRequest;
-}
-
-interface ApprovedCall {
-  authority: "user" | "auto-review";
-  configFingerprint: string;
-  cwd: string;
-  requestFingerprint: string;
 }
 
 type ExecutablePermissionMode = PermissionMode;
@@ -254,9 +251,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         configFingerprint: string;
       }
     | undefined;
-  const approvedCalls = new Map<string, ApprovedCall>();
-  const approvedNetworkHosts = new Map<string, string[]>();
-  const approvedWriteRoots = new Map<string, string[]>();
+  const grants = new GrantLedger();
   // Session-scoped approval memory (codex ExecpolicyAmendment/ApprovedForSession/
   // NetworkPolicyAmendment equivalents). Cleared on extension reload (a new
   // session), never persisted.
@@ -284,10 +279,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     | { kind: "failed"; error: string } = { kind: "pending" };
 
   const revokeApprovedCall = (toolCallId: string | undefined): void => {
-    if (!toolCallId) return;
-    approvedCalls.delete(toolCallId);
-    approvedNetworkHosts.delete(toolCallId);
-    approvedWriteRoots.delete(toolCallId);
+    grants.revoke(toolCallId);
   };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
@@ -328,9 +320,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
     reviewControllers.clear();
     modeRuntime?.cancelReviews();
-    approvedCalls.clear();
-    approvedNetworkHosts.clear();
-    approvedWriteRoots.clear();
+    grants.clear();
     if (preserveAutoDenials) {
       autoApprovalLedger.clearPendingOverride();
     } else {
@@ -506,18 +496,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     rememberSession = false,
   ): void => {
     if (!event.toolCallId) return;
-    approvedCalls.set(event.toolCallId, {
+    grants.mint({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input,
       authority,
       configFingerprint: fingerprintConfig(executionContext.config),
       cwd: resolve(cwd),
-      requestFingerprint: fingerprintValue({
-        tool: event.toolName.toLowerCase(),
-        input: event.input,
-      }),
+      networkHosts: decision.networkHosts,
+      writeRoots: [
+        ...new Set([...oneCallWriteRoots(event, cwd), ...(decision.filesystemWriteRoots ?? [])]),
+      ],
     });
-    if (decision.networkHosts?.length) {
-      approvedNetworkHosts.set(event.toolCallId, [...decision.networkHosts]);
-    }
     if (rememberSession) {
       // Remember user-approved commands and hosts for the rest of the session
       // (mirrors codex execpolicy amendments and network rules, exposed as the
@@ -532,12 +522,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       for (const host of decision.networkHosts ?? []) {
         approvedNetworkHostsSession.add(host);
       }
-    }
-    const writeRoots = [
-      ...new Set([...oneCallWriteRoots(event, cwd), ...(decision.filesystemWriteRoots ?? [])]),
-    ];
-    if (writeRoots.length > 0) {
-      approvedWriteRoots.set(event.toolCallId, writeRoots);
     }
   };
 
@@ -744,23 +728,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     input: Record<string, unknown>,
     ctx: Pick<ExtensionContext, "cwd">,
     executionContext: EffectiveExecutionContext,
-  ): Promise<void> => {
+  ): Promise<Grant | undefined> => {
     if (!getEffectiveExecutionContext(executionContext.snapshot)) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
     const activeConfig = executionContext.config;
     const executionEpoch = permissionContextEpoch;
-    const approval = approvedCalls.get(id);
-    approvedCalls.delete(id);
-    const approved =
-      approval !== undefined &&
-      approval.cwd === resolve(ctx.cwd) &&
-      approval.configFingerprint === fingerprintConfig(activeConfig) &&
-      approval.requestFingerprint ===
-        fingerprintValue({
-          tool: tool.toLowerCase(),
-          input,
-        });
+    // Single-use burn happens up front, matching fail-closed semantics: any
+    // execution attempt (even one that fails validation) consumes the grant,
+    // so a tampered input can never be retried against a stale approval.
+    const peeked = grants.peek(id);
+    const approved = grants.verify(peeked, {
+      tool,
+      input,
+      cwd: resolve(ctx.cwd),
+      configFingerprint: fingerprintConfig(activeConfig),
+    });
+    const spent = grants.consume(id);
     const currentDecision = await evaluateDefaultRequest(
       tool,
       input,
@@ -781,6 +765,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (currentDecision.action === "block" || (currentDecision.action === "prompt" && !approved)) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
+    return spent;
   };
 
   const sandboxOperations = (
@@ -861,20 +846,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         revokeApprovedCall(id);
         return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
       }
-      const needsExclusiveLease = (approvedNetworkHosts.get(id)?.length ?? 0) > 0;
+      const needsExclusiveLease = grants.needsExclusiveLease(id);
 
       const executeWithSnapshot = async (allowNetworkEscalation: boolean) => {
-        const networkHosts = approvedNetworkHosts.get(id) ?? [];
-        approvedNetworkHosts.delete(id);
-        const writeRoots = approvedWriteRoots.get(id) ?? [];
-        approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
+        const grant = await assertExecutionAuthorized(
           "bash",
           id,
           params as Record<string, unknown>,
           ctx,
           executionContext,
         );
+        const networkHosts = grant?.networkHosts ?? [];
+        const writeRoots = grant?.writeRoots ?? [];
 
         if (!executionContext.config.sandbox.enabled) {
           return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
@@ -977,15 +960,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
       return sandboxCoordinator.runShared(async () => {
-        const writeRoots = approvedWriteRoots.get(id) ?? [];
-        approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
+        const grant = await assertExecutionAuthorized(
           "write",
           id,
           params as Record<string, unknown>,
           ctx,
           executionContext,
         );
+        const writeRoots = grant?.writeRoots ?? [];
         if (!executionContext.config.sandbox.enabled) {
           return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
@@ -1018,15 +1000,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
       }
       return sandboxCoordinator.runShared(async () => {
-        const writeRoots = approvedWriteRoots.get(id) ?? [];
-        approvedWriteRoots.delete(id);
-        await assertExecutionAuthorized(
+        const grant = await assertExecutionAuthorized(
           "edit",
           id,
           params as Record<string, unknown>,
           ctx,
           executionContext,
         );
+        const writeRoots = grant?.writeRoots ?? [];
         if (!executionContext.config.sandbox.enabled) {
           return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
         }
@@ -1236,9 +1217,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     "tool_call",
     async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
       if (event.toolCallId) {
-        approvedCalls.delete(event.toolCallId);
-        approvedNetworkHosts.delete(event.toolCallId);
-        approvedWriteRoots.delete(event.toolCallId);
+        grants.revoke(event.toolCallId);
       }
       let result: LoadedPermissionsConfig;
       const activationGeneration = modeMutationGeneration;
