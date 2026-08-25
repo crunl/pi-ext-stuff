@@ -34,8 +34,7 @@ function globalConfigPath(agentDir: string): string {
 }
 
 describe("permissions config", () => {
-  it("defaults to sandboxed default mode", () => {
-    expect(DEFAULT_CONFIG.defaultMode).toBe("default");
+  it("defaults to a sandboxed Auto session", () => {
     expect(DEFAULT_CONFIG.sandbox.enabled).toBe(true);
     expect(DEFAULT_CONFIG.sandbox.filesystem.allowWrite).toEqual([".", "/tmp"]);
     expect(DEFAULT_CONFIG.sandbox.network.allowedDomains).toEqual([]);
@@ -55,47 +54,14 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig(JSON.parse(contents))).not.toThrow();
   });
 
-  it("accepts YOLO as a configured default mode", () => {
-    expect(() => validatePermissionsConfig({ version: 1, defaultMode: "yolo" })).not.toThrow();
-  });
-
-  it("defaults approval mode to on-request with all granular switches on", () => {
-    expect(DEFAULT_CONFIG.approvalMode).toBe("on-request");
-    expect(DEFAULT_CONFIG.granularApproval).toEqual({
-      sandboxApproval: true,
-      rules: true,
-      requestPermissions: true,
-    });
-  });
-
-  it("accepts and merges approval-mode configuration", () => {
-    const never = validatePermissionsConfig({ version: 1, approvalMode: "never" });
-    expect(never.approvalMode).toBe("never");
-    expect(never.granularApproval).toEqual(DEFAULT_CONFIG.granularApproval);
-
-    const granular = validatePermissionsConfig({
+  it("accepts and ignores removed human-prompt keys for backward compatibility", () => {
+    const merged = validatePermissionsConfig({
       version: 1,
-      approvalMode: "granular",
+      defaultMode: "yolo",
+      approvalMode: "never",
       granularApproval: { rules: false },
     });
-    expect(granular.approvalMode).toBe("granular");
-    expect(granular.granularApproval).toEqual({
-      sandboxApproval: true,
-      rules: false,
-      requestPermissions: true,
-    });
-  });
-
-  it("rejects invalid approval-mode values and granular keys", () => {
-    expect(() => validatePermissionsConfig({ approvalMode: "sometimes" })).toThrow(
-      /approvalMode/,
-    );
-    expect(() => validatePermissionsConfig({ granularApproval: { unknown: true } })).toThrow(
-      /unknown/,
-    );
-    expect(() =>
-      validatePermissionsConfig({ granularApproval: { rules: "yes" } }),
-    ).toThrow(/boolean/);
+    expect(merged).toEqual(DEFAULT_CONFIG);
   });
 
   it("produces stable fingerprints", () => {
@@ -167,7 +133,6 @@ describe("permissions config", () => {
       });
       const loaded = await loadPermissionsConfig(agentDir);
 
-      expect(loaded.config.defaultMode).toBe("auto");
       expect(loaded.config.sandbox.network.allowedDomains).toEqual(["github.com"]);
     });
   });
@@ -188,9 +153,10 @@ describe("permissions config", () => {
       await mkdir(join(cwd, ".pi"), { recursive: true });
       await writeFile(join(cwd, ".pi", "permissions.json"), "{");
 
-      await expect(loadPermissionsConfig(agentDir)).resolves.toMatchObject({
-        config: { defaultMode: "default" },
-      });
+      // The legacy defaultMode key is accepted but ignored (never merged).
+      const loaded = await loadPermissionsConfig(agentDir);
+      expect(loaded.config).toEqual(DEFAULT_CONFIG);
+      expect(loaded.config).not.toHaveProperty("defaultMode");
     });
   });
 

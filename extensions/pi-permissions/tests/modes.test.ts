@@ -10,23 +10,18 @@ import {
 } from "../src/state.ts";
 
 describe("ModeController", () => {
-  it("cycles Default, Auto, and YOLO immediately", () => {
-    const controller = new ModeController("default");
-    expect(controller.cycle()).toBe("auto");
+  it("cycles between Auto and YOLO immediately", () => {
+    const controller = new ModeController("auto");
     expect(controller.cycle()).toBe("yolo");
-    expect(controller.cycle()).toBe("default");
+    expect(controller.cycle()).toBe("auto");
   });
 
-  it("applies a transition immediately while busy", () => {
-    const controller = new ModeController("default");
+  it("applies a transition immediately", () => {
+    const controller = new ModeController("auto");
+    expect(controller.request("yolo")).toBe("yolo");
+    expect(controller.active).toBe("yolo");
     expect(controller.request("auto")).toBe("auto");
     expect(controller.active).toBe("auto");
-  });
-
-  it("applies a transition immediately during approval", () => {
-    const controller = new ModeController("auto");
-    expect(controller.request("default")).toBe("default");
-    expect(controller.active).toBe("default");
   });
 });
 
@@ -40,10 +35,10 @@ describe("permission session state", () => {
     expect(calls).toEqual([["pi-permissions-state", state]]);
   });
 
-  it("restores the last valid state entry and reports malformed entries", () => {
+  it("restores the last valid state entry, coercing legacy modes to auto", () => {
     const malformed: unknown[] = [];
     const first = {
-      mode: "plan" as const,
+      mode: "plan" as string,
       auto: { consecutiveDenials: 1, paused: false },
       sandboxProfile: "workspace-write" as const,
       configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
@@ -66,6 +61,14 @@ describe("permission session state", () => {
 
     expect(state).toEqual(latest);
     expect(malformed).toHaveLength(1);
+
+    // A session persisted with a removed default/plan mode restores as auto.
+    const legacyOnly = reducePermissionEntries(
+      [{ type: "custom", customType: "pi-permissions-state", data: first }],
+      DEFAULT_CONFIG,
+    );
+    expect(legacyOnly.mode).toBe("auto");
+    expect(legacyOnly.auto.consecutiveDenials).toBe(1);
   });
 
   it("restores a persisted YOLO session state", () => {

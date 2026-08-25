@@ -1,9 +1,10 @@
-# Core execution abort gate
+# Optional core execution abort gate
 
-YOLO mode requires one small patch to Homebrew Pi 0.82.1. The patch adds an
-`AbortSignal` check immediately before each prepared tool closure invokes
-`tool.execute()`. It also publishes a runtime capability marker consumed by
-pi-permissions.
+YOLO mode does not require a core patch. It already follows Pi's native Full
+Access behavior: no approval prompt and no pi-permissions sandbox. The optional
+patch adds an `AbortSignal` check immediately before each prepared tool closure
+invokes `tool.execute()`. It is useful only when a deployment wants an extra
+last-moment guard against starting a prepared tool after an abort.
 
 Install and verify:
 
@@ -19,6 +20,6 @@ an adjacent `.pi-permissions-0.82.1.orig` backup, and verifies the exact patched
 SHA-256. Re-running it is safe. A Pi upgrade or source mismatch is rejected
 without modifying the core.
 
-Until the runtime marker is present, pi-permissions refuses to enter YOLO and
-continues with the last restrictive mode.
-
+The runtime marker is not consulted when entering YOLO. Without the marker,
+YOLO remains fully usable; only the additional core-level abort guarantee is
+absent. The patch also cannot forcibly stop a tool that has already started.

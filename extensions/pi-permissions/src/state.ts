@@ -1,12 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fingerprintConfig, type PermissionsConfig } from "./config.ts";
 
-export type PermissionMode = "default" | "plan" | "auto" | "yolo";
+export type PermissionMode = "auto" | "yolo";
+
+/** Modes persisted by older versions; they restore as "auto". */
+const legacyModes = new Set<string>(["default", "plan"]);
 
 export interface PermissionSessionState {
   mode: PermissionMode;
-  modeBeforePlan?: Exclude<PermissionMode, "plan">;
-  plan?: { markdown: string; status: "draft" | "approved" | "revising" };
   auto: { consecutiveDenials: number; paused: boolean };
   sandboxProfile: "workspace-write" | "read-only";
   configFingerprint: string;
@@ -18,57 +19,38 @@ type StateEntry = {
   data?: unknown;
 };
 
-const modes = new Set<PermissionMode>(["default", "plan", "auto", "yolo"]);
-const planStatuses = new Set<NonNullable<PermissionSessionState["plan"]>["status"]>([
-  "draft",
-  "approved",
-  "revising",
-]);
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "auto" || value === "yolo";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isMode(value: unknown): value is PermissionMode {
-  return typeof value === "string" && modes.has(value as PermissionMode);
-}
-
 function isSessionState(value: unknown): value is PermissionSessionState {
-  if (!isRecord(value) || !isMode(value.mode) || !isRecord(value.auto)) return false;
+  if (!isRecord(value)) return false;
+  // Accept legacy modes here so reducePermissionEntries can coerce them.
+  if (
+    typeof value.mode !== "string" ||
+    (!isPermissionMode(value.mode) && !legacyModes.has(value.mode))
+  ) {
+    return false;
+  }
   const auto = value.auto;
-  if (
-    typeof auto.consecutiveDenials !== "number" ||
-    !Number.isSafeInteger(auto.consecutiveDenials) ||
-    auto.consecutiveDenials < 0 ||
-    typeof auto.paused !== "boolean" ||
-    (value.sandboxProfile !== "workspace-write" && value.sandboxProfile !== "read-only") ||
-    typeof value.configFingerprint !== "string"
-  ) {
-    return false;
-  }
-  if (
-    value.modeBeforePlan !== undefined &&
-    value.modeBeforePlan !== "default" &&
-    value.modeBeforePlan !== "auto" &&
-    value.modeBeforePlan !== "yolo"
-  ) {
-    return false;
-  }
-  if (value.plan !== undefined) {
-    if (
-      !isRecord(value.plan) ||
-      typeof value.plan.markdown !== "string" ||
-      !planStatuses.has(value.plan.status as NonNullable<PermissionSessionState["plan"]>["status"])
-    ) {
-      return false;
-    }
-  }
-  return true;
+  if (!isRecord(auto)) return false;
+  return (
+    typeof auto.consecutiveDenials === "number" &&
+    Number.isSafeInteger(auto.consecutiveDenials) &&
+    auto.consecutiveDenials >= 0 &&
+    typeof auto.paused === "boolean" &&
+    (value.sandboxProfile === "workspace-write" || value.sandboxProfile === "read-only") &&
+    typeof value.configFingerprint === "string"
+  );
 }
 
 export function createPermissionSessionState(config: PermissionsConfig): PermissionSessionState {
   return {
-    mode: config.defaultMode,
+    mode: "auto",
     auto: { consecutiveDenials: 0, paused: false },
     sandboxProfile: config.sandbox.profile,
     configFingerprint: fingerprintConfig(config),
@@ -96,6 +78,7 @@ export function reducePermissionEntries(
       continue;
     }
     state = structuredClone(candidate.data);
+    if (!isPermissionMode(state.mode)) state.mode = "auto"; // legacy default/plan -> auto
   }
   return state;
 }

@@ -30,39 +30,23 @@ describe("PermissionModeRuntime", () => {
     runtime.endReview("call-2");
   });
 
-  it("serializes human dialogs with cancellation-safe tokens", () => {
-    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
-    const first = runtime.beginHumanApproval();
-    expect(first).toEqual(expect.any(Number));
-    expect(runtime.beginHumanApproval()).toBeUndefined();
-
-    runtime.cancelReviews();
-    const second = runtime.beginHumanApproval();
-    expect(second).toEqual(expect.any(Number));
-    expect(second).not.toBe(first);
-
-    runtime.endHumanApproval(first!);
-    expect(runtime.beginHumanApproval()).toBeUndefined();
-    runtime.endHumanApproval(second!);
-    expect(runtime.beginHumanApproval()).toEqual(expect.any(Number));
-  });
-
-  it("cycles immediately while working", () => {
+  it("cycles immediately between Auto and YOLO while a review is active", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.beginReview("active-review");
 
-    expect(runtime.cycle()).toBe("auto");
     expect(runtime.cycle()).toBe("yolo");
-    expect(runtime.cycle()).toBe("default");
+    expect(runtime.cycle()).toBe("auto");
+    runtime.endReview("active-review");
   });
 
-  it("switches from Auto to Default immediately while a review remains active", () => {
+  it("switches from Auto to YOLO immediately while a review remains active", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     runtime.activate("auto");
     runtime.beginReview("active-review");
 
-    expect(runtime.activate("default")).toBe("default");
-    expect(runtime.mode).toBe("default");
+    expect(runtime.activate("yolo")).toBe("yolo");
+    expect(runtime.mode).toBe("yolo");
+    expect(runtime.statusSeverity).toBe("error");
     runtime.endReview("active-review");
   });
 
@@ -106,7 +90,6 @@ describe("PermissionModeRuntime", () => {
     runtime.recordAutoReview("deny");
 
     runtime.activate("yolo", { preserveAutoTransientState: true });
-    runtime.activate("default", { preserveAutoTransientState: true });
     runtime.activate("auto", { preserveAutoTransientState: true });
 
     expect(runtime.autoState).toEqual({ consecutiveDenials: 3, paused: true });
@@ -125,7 +108,6 @@ describe("PermissionModeRuntime", () => {
     }
 
     runtime.activate("yolo", { preserveAutoTransientState: true });
-    runtime.activate("default", { preserveAutoTransientState: true });
     runtime.activate("auto", { preserveAutoTransientState: true });
 
     expect(runtime.recordAutoReview("deny")).toEqual({ consecutiveDenials: 1, paused: true });
@@ -162,9 +144,9 @@ describe("PermissionModeRuntime", () => {
     });
   });
 
-  it("discards a legacy persisted pending transition", () => {
+  it("restores a legacy persisted state with a removed mode as Auto without pending data", () => {
     const pendingState = {
-      mode: "default" as const,
+      mode: "default" as string,
       pendingMode: "auto" as const,
       auto: { consecutiveDenials: 0, paused: false },
       sandboxProfile: "workspace-write" as const,
@@ -183,18 +165,8 @@ describe("PermissionModeRuntime", () => {
       DEFAULT_CONFIG,
     );
 
-    expect(runtime.mode).toBe("default");
+    expect(runtime.mode).toBe("auto");
     expect(runtime.snapshot()).not.toHaveProperty("pendingMode");
-  });
-
-  it("does not activate the unimplemented Plan mode from configuration or persisted state", () => {
-    const config = structuredClone(DEFAULT_CONFIG);
-    config.defaultMode = "plan";
-    const runtime = new PermissionModeRuntime(config, vi.fn());
-
-    expect(runtime.mode).toBe("default");
-    expect(runtime.statusLabel).toBe("default");
-    expect(() => runtime.activate("plan")).toThrow("Plan mode is not implemented");
   });
 
   it("activates and reports YOLO without mutating Auto state", () => {

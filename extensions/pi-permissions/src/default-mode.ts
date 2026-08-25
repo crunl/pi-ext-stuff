@@ -260,21 +260,9 @@ export async function evaluateDefaultRequest(
     command !== undefined &&
     isApprovedCommand(command, approved.commandPrefixes);
 
-  // ── approval-mode adjustments (mirrors codex AskForApproval) ──────────
+  // ── escalation gate ────────────────────────────────────────────────────
   if (commandApproved) {
     return { action: "allow", risk, reason: "Approved command prefix (session)" };
-  }
-  if (config.approvalMode === "never" && wouldPrompt) {
-    // Never ask: escalation is forbidden, failures return to the model.
-    return { action: "block", risk, reason: `Blocked by approvalMode=never (${risk} operation)` };
-  }
-  if (config.approvalMode === "granular" && wouldPrompt) {
-    if (promptedByRule && !config.granularApproval.rules) {
-      return { action: "block", risk, reason: "Blocked by granularApproval.rules=false" };
-    }
-    if (!promptedByRule && !config.granularApproval.sandboxApproval) {
-      return { action: "block", risk, reason: "Blocked by granularApproval.sandboxApproval=false" };
-    }
   }
 
   if (wouldPrompt) {
@@ -289,22 +277,6 @@ export async function evaluateDefaultRequest(
           : undefined,
       filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
       justification: additionalWriteRoots.justification,
-    };
-  }
-
-  // untrusted: only read-only whitelisted commands auto-approve; any other
-  // command prompts even when it is otherwise low-risk.
-  if (
-    config.approvalMode === "untrusted" &&
-    request.operation === "execute" &&
-    command !== undefined &&
-    !isKnownSafeCommand(command)
-  ) {
-    return {
-      action: "prompt",
-      risk: "REVIEW",
-      reason: "Command is not in the read-only whitelist (untrusted mode)",
-      summary: summarize(tool, input),
     };
   }
 

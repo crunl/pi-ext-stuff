@@ -849,60 +849,6 @@ describe("Default mode gate", () => {
   });
 });
 
-describe("approval modes (codex-aligned)", () => {
-  it("never blocks escalations instead of prompting", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-modes-"));
-    const never = config({ approvalMode: "never" });
-    await expect(
-      evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, never),
-    ).resolves.toMatchObject({ action: "block" });
-    await expect(
-      evaluateDefaultRequest("write", { path: "/var/tmp/out.txt", content: "x" }, cwd, never),
-    ).resolves.toMatchObject({ action: "block" });
-    // Low-risk commands still run (sandbox is the boundary).
-    await expect(
-      evaluateDefaultRequest("read", { path: "README.md" }, cwd, never),
-    ).resolves.toMatchObject({ action: "allow" });
-  });
-
-  it("untrusted auto-approves only read-only whitelisted commands", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-modes-"));
-    const untrusted = config({ approvalMode: "untrusted" });
-    await expect(
-      evaluateDefaultRequest("bash", { command: "ls -la" }, cwd, untrusted),
-    ).resolves.toMatchObject({ action: "allow" });
-    await expect(
-      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, untrusted),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
-  });
-
-  it("granular rules=false blocks rule-driven prompts", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-modes-"));
-    const granular = config({
-      approvalMode: "granular",
-      granularApproval: { sandboxApproval: true, rules: false, requestPermissions: true },
-      rules: [{ action: "ask", tool: "bash" }],
-    });
-    await expect(
-      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, granular),
-    ).resolves.toMatchObject({ action: "block" });
-  });
-
-  it("granular sandboxApproval=false blocks command prompts but keeps reads", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-modes-"));
-    const granular = config({
-      approvalMode: "granular",
-      granularApproval: { sandboxApproval: false, rules: true, requestPermissions: true },
-    });
-    await expect(
-      evaluateDefaultRequest("bash", { command: "rm -rf build" }, cwd, granular),
-    ).resolves.toMatchObject({ action: "block" });
-    await expect(
-      evaluateDefaultRequest("read", { path: "README.md" }, cwd, granular),
-    ).resolves.toMatchObject({ action: "allow" });
-  });
-});
-
 describe("deletion sandbox boundary (stage 3)", () => {
   it("auto-approves deletions inside the workspace", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
@@ -1055,23 +1001,21 @@ describe("session approval memory (stage 5)", () => {
     ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 
-  it("honors approval memory under never and untrusted modes", async () => {
+  it("honors session approval memory for exact prefixes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
     const approvals = { commandPrefixes: [["npm", "test"]] };
-    const never = config({ approvalMode: "never" });
     await expect(
       evaluateDefaultRequest(
         "bash",
         { command: "npm test -- --watch" },
         cwd,
-        never,
+        config(),
         undefined,
         approvals,
       ),
     ).resolves.toMatchObject({ action: "allow" });
-    const untrusted = config({ approvalMode: "untrusted" });
     await expect(
-      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, untrusted, undefined, approvals),
+      evaluateDefaultRequest("bash", { command: "npm test" }, cwd, config(), undefined, approvals),
     ).resolves.toMatchObject({ action: "allow" });
   });
 });

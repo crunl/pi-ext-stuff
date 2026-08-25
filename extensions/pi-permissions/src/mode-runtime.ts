@@ -17,7 +17,6 @@ import {
 
 function functionalState(state: PermissionSessionState): PermissionSessionState {
   const normalized = structuredClone(state);
-  if (normalized.mode === "plan") normalized.mode = "default";
   delete (normalized as PermissionSessionState & { pendingMode?: PermissionMode }).pendingMode;
   return normalized;
 }
@@ -31,8 +30,6 @@ export class PermissionModeRuntime {
   private state: PermissionSessionState;
   private readonly activeReviewIds = new Set<string>();
   private readonly autoReviewWindow: boolean[] = [];
-  private humanApprovalGeneration = 0;
-  private activeHumanApproval: number | undefined;
 
   constructor(
     config: PermissionsConfig,
@@ -51,27 +48,20 @@ export class PermissionModeRuntime {
   }
 
   get approvalActive(): boolean {
-    return this.activeHumanApproval !== undefined || this.activeReviewIds.size > 0;
+    return this.activeReviewIds.size > 0;
   }
 
-  get statusLabel(): "default" | "Approve for me" | "Full bypass" {
-    if (this.mode === "default") return "default";
-    if (this.mode === "auto") return "Approve for me";
-    if (this.mode === "yolo") return "Full bypass";
-    throw new Error("Plan mode is not implemented");
+  get statusLabel(): "Approve for me" | "Full bypass" {
+    return this.mode === "auto" ? "Approve for me" : "Full bypass";
   }
 
   /**
-   * Badge severity for status consumers (e.g. statusline): "none" hides the
-   * badge, "warning" marks guardian-reviewed hand-off, "error" marks
-   * unreviewed execution. Consumers must key behavior off this field, not
-   * off the human-readable label.
+   * Badge severity for status consumers (e.g. statusline): "warning" marks
+   * guardian-reviewed execution, "error" marks unreviewed execution. Consumers
+   * must key behavior off this field, not off the human-readable label.
    */
-  get statusSeverity(): "none" | "warning" | "error" {
-    if (this.mode === "default") return "none";
-    if (this.mode === "auto") return "warning";
-    if (this.mode === "yolo") return "error";
-    throw new Error("Plan mode is not implemented");
+  get statusSeverity(): "warning" | "error" {
+    return this.mode === "auto" ? "warning" : "error";
   }
 
   beginReview(toolCallId: string): boolean {
@@ -86,26 +76,12 @@ export class PermissionModeRuntime {
 
   cancelReviews(): void {
     this.activeReviewIds.clear();
-    this.humanApprovalGeneration += 1;
-    this.activeHumanApproval = undefined;
-  }
-
-  beginHumanApproval(): number | undefined {
-    if (this.activeHumanApproval !== undefined) return undefined;
-    this.humanApprovalGeneration += 1;
-    this.activeHumanApproval = this.humanApprovalGeneration;
-    return this.activeHumanApproval;
-  }
-
-  endHumanApproval(token: number): void {
-    if (this.activeHumanApproval === token) this.activeHumanApproval = undefined;
   }
 
   activate(
     mode: PermissionMode,
     { preserveAutoTransientState = false }: PermissionModeActivationOptions = {},
   ): PermissionMode {
-    if (mode === "plan") throw new Error("Plan mode is not implemented");
     const result = this.controller.request(mode);
     this.state.mode = result;
     if (!preserveAutoTransientState) {
@@ -167,8 +143,6 @@ export class PermissionModeRuntime {
     this.controller = new ModeController(this.state.mode);
     this.activeReviewIds.clear();
     this.autoReviewWindow.length = 0;
-    this.humanApprovalGeneration += 1;
-    this.activeHumanApproval = undefined;
   }
 
   snapshot(): PermissionSessionState {

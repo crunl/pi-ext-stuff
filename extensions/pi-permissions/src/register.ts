@@ -106,7 +106,7 @@ interface ApprovedCall {
   requestFingerprint: string;
 }
 
-type ExecutablePermissionMode = Exclude<PermissionMode, "plan">;
+type ExecutablePermissionMode = PermissionMode;
 
 type PermissionTurnPhase = "idle" | "active" | "between";
 
@@ -149,10 +149,6 @@ function isActivationSupersededError(error: unknown): error is ActivationSuperse
   return error instanceof ActivationSupersededError;
 }
 
-const DEFAULT_ALLOW_ONCE_CHOICE = "Allow Once";
-const DEFAULT_ALLOW_AND_REMEMBER_CHOICE = "Allow and Remember";
-const DEFAULT_ALLOW_AND_AUTO_CHOICE = "Allow, switch future approvals to Auto";
-const DEFAULT_DENY_CHOICE = "Deny";
 const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
 const guardianFallbackNoticeKeys = new Set<string>();
 
@@ -214,18 +210,12 @@ function guardianTranscriptEntryFromMessage(message: unknown): GuardianTranscrip
   return undefined;
 }
 
-function executableMode(mode: PermissionMode): ExecutablePermissionMode {
-  return mode === "plan" ? "default" : mode;
-}
-
-function requiresSandbox(mode: ExecutablePermissionMode, config: PermissionsConfig): boolean {
+function requiresSandbox(mode: PermissionMode, config: PermissionsConfig): boolean {
   return mode !== "yolo" && config.sandbox.enabled;
 }
 
-function nextExecutableMode(mode: ExecutablePermissionMode): ExecutablePermissionMode {
-  if (mode === "default") return "auto";
-  if (mode === "auto") return "yolo";
-  return "default";
+function nextMode(mode: PermissionMode): PermissionMode {
+  return mode === "auto" ? "yolo" : "auto";
 }
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
@@ -301,14 +291,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "default");
+    ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Approve for me");
     // Structured mode event for status consumers (e.g. statusline). The
     // string published via setStatus above stays as the built-in-footer
     // fallback; consumers should key off `mode`/`severity`, never the label.
     pi.events.emit("pi-permissions:mode", {
-      mode: modeRuntime?.mode ?? "default",
-      label: modeRuntime?.statusLabel ?? "default",
-      severity: modeRuntime?.statusSeverity ?? "none",
+      mode: modeRuntime?.mode ?? "auto",
+      label: modeRuntime?.statusLabel ?? "Approve for me",
+      severity: modeRuntime?.statusSeverity ?? "warning",
     });
   };
 
@@ -380,7 +370,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (!loaded || !modeRuntime) return undefined;
     activeExecutionSnapshot = {
       turnId,
-      mode: executableMode(modeRuntime.mode),
+      mode: modeRuntime.mode,
       config: loaded.config,
       baseSandboxConfig,
       sandboxReady: sandboxState.kind === "ready",
@@ -606,9 +596,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     assertActivationCurrent(expectedGeneration);
     const key = configKey(ctx);
     if (!force && configFailure) throw configFailure;
-    const cachedMode = targetMode ?? (modeRuntime ? executableMode(modeRuntime.mode) : undefined);
+    const cachedMode = targetMode ?? (modeRuntime ? modeRuntime.mode : undefined);
     if (!force && loaded && loadedKey === key) {
-      const effectiveCachedMode = cachedMode ?? executableMode(loaded.config.defaultMode);
+      const effectiveCachedMode = cachedMode ?? "auto";
       if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
         return loaded;
       }
@@ -629,7 +619,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // is loading. Do not let that obsolete activation reset or initialize the
     // shared sandbox runtime for the new generation.
     assertActivationCurrent(expectedGeneration);
-    const effectiveMode = cachedMode ?? executableMode(candidate.config.defaultMode);
+    const effectiveMode = cachedMode ?? "auto";
     const previous = {
       loaded,
       loadedKey,
@@ -728,22 +718,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
 
-  const MODE_RANK: Record<ExecutablePermissionMode, number> = {
-    default: 0,
+  const MODE_RANK: Record<PermissionMode, number> = {
     auto: 1,
     yolo: 2,
   };
 
   // Privilege-max mode: the runtime mode applies when it is not a downgrade
   // relative to the turn-snapshot mode; otherwise the snapshot mode keeps
-  // routing until agent_end invalidates it. So upgrades (default->auto,
-  // *->yolo) take effect for the next call immediately, while downgrades only
-  // land at the idle boundary. One formula expresses both semantics, so review
-  // branches, approval records, and execute gating all read the same value.
+  // routing until agent_end invalidates it. So upgrades (auto->yolo) take
+  // effect for the next call immediately, while downgrades only land at the
+  // idle boundary. One formula expresses both semantics, so review branches,
+  // approval records, and execute gating all read the same value.
   const privilegeMaxMode = (
     executionContext: EffectiveExecutionContext,
   ): ExecutablePermissionMode => {
-    const runtimeMode = executableMode(modeRuntime?.mode ?? "default");
+    const runtimeMode = modeRuntime?.mode ?? "auto";
     return MODE_RANK[executionContext.mode] > MODE_RANK[runtimeMode]
       ? executionContext.mode
       : runtimeMode;
@@ -1051,14 +1040,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!executionContext) {
         throw new Error("pi-permissions: request_permissions requires an active permission turn");
       }
-      if (
-        executionContext.config.approvalMode === "granular" &&
-        !executionContext.config.granularApproval.requestPermissions
-      ) {
-        throw new Error(
-          "request_permissions is disabled by granularApproval.requestPermissions=false",
-        );
-      }
       const scope = params.scope ?? "turn";
       const hosts = params.permissions?.network?.hosts ?? [];
       const roots = params.permissions?.filesystem?.write ?? [];
@@ -1098,112 +1079,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return { block: true, reason: `pi-permissions configuration error: ${message}` };
   };
 
-  const requestHumanApproval = async (
-    event: ToolCallEvent,
-    decision: Extract<DefaultDecision, { action: "prompt" }>,
-    executionContext: EffectiveExecutionContext,
-    ctx: ExtensionContext,
-    options: {
-      guardianFailure?: AutoReviewerFailureKind;
-    } = {},
-  ): Promise<ToolCallEventResult | undefined> => {
-    if (!ctx.hasUI) {
-      return {
-        block: true,
-        reason: `pi-permissions: ${decision.risk} operation requires interactive approval`,
-      };
-    }
-    const runtime = ensureModeRuntime(executionContext.config);
-    const humanApprovalToken = runtime.beginHumanApproval();
-    if (humanApprovalToken === undefined) {
-      return {
-        block: true,
-        reason: "pi-permissions: another approval is already active",
-      };
-    }
-    const approvalEpoch = permissionContextEpoch;
-    let transitionGrantCreated = false;
-
-    try {
-      const guardianFailure =
-        options.guardianFailure === undefined
-          ? ""
-          : `Guardian review failed (${options.guardianFailure}); manual approval is required.\n\n`;
-      const prompt = `${guardianFailure}pi-permissions · ${decision.risk}\n\n${event.toolName}: ${decision.summary}\n\n${decision.reason}${
-        decision.networkHosts?.length
-          ? `\n\nNetwork for this command: ${decision.networkHosts.join(", ")}`
-          : ""
-      }${
-        decision.filesystemWriteRoots?.length
-          ? `\n\nFilesystem for this command: ${decision.filesystemWriteRoots.join(", ")}`
-          : ""
-      }${decision.justification ? `\n\nJustification: ${decision.justification}` : ""}`;
-      const choice = await ctx.ui.select(prompt, [
-        DEFAULT_ALLOW_ONCE_CHOICE,
-        DEFAULT_ALLOW_AND_REMEMBER_CHOICE,
-        DEFAULT_ALLOW_AND_AUTO_CHOICE,
-        DEFAULT_DENY_CHOICE,
-      ]);
-      if (
-        choice === DEFAULT_ALLOW_ONCE_CHOICE ||
-        choice === DEFAULT_ALLOW_AND_REMEMBER_CHOICE ||
-        choice === DEFAULT_ALLOW_AND_AUTO_CHOICE
-      ) {
-        if (
-          permissionContextEpoch !== approvalEpoch ||
-          !getEffectiveExecutionContext(executionContext.snapshot)
-        ) {
-          return {
-            block: true,
-            reason: "pi-permissions: approval context changed before confirmation",
-          };
-        }
-        if (choice === DEFAULT_ALLOW_AND_AUTO_CHOICE) {
-          grantApprovedCall(event, decision, executionContext, ctx.cwd, "user");
-          transitionGrantCreated = true;
-          runtime.activate("auto", {
-            preserveAutoTransientState: permissionTurnPhase === "active",
-          });
-          // privilegeMaxMode() makes the next review branch auto immediately; no queued
-          // idle-boundary activation is needed (default and auto share the
-          // same sandbox config).
-          setDefaultStatus(ctx);
-          ctx.ui.notify("pi-permissions: Approve for me mode 已启用", "info");
-          return;
-        }
-        grantApprovedCall(
-          event,
-          decision,
-          executionContext,
-          ctx.cwd,
-          "user",
-          choice === DEFAULT_ALLOW_AND_REMEMBER_CHOICE,
-        );
-        return;
-      }
-      return {
-        block: true,
-        reason: `pi-permissions: user denied ${decision.risk} operation`,
-      };
-    } catch (error: unknown) {
-      if (transitionGrantCreated) {
-        revokeApprovedCall(event.toolCallId);
-        return {
-          block: true,
-          reason: "pi-permissions approval failed",
-        };
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        block: true,
-        reason: `pi-permissions approval failed: ${message}`,
-      };
-    } finally {
-      runtime.endHumanApproval(humanApprovalToken);
-      if (!transitionGrantCreated) setDefaultStatus(ctx);
-    }
-  };
-
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
@@ -1221,7 +1096,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     try {
       const restoredRuntime = new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi));
       restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
-      const restoredMode = executableMode(restoredRuntime.mode);
+      const restoredMode = restoredRuntime.mode;
       await activateConfig(ctx, true, restoredMode, candidate, generation);
       if (generation !== modeMutationGeneration) return;
       modeRuntime = restoredRuntime;
@@ -1250,10 +1125,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     resetBranchPermissionContext("session tree changed");
     return runModeMutation(async (generation) => {
       if (loaded && modeRuntime && generation === modeMutationGeneration) {
-        const previousMode = executableMode(modeRuntime.mode);
+        const previousMode = modeRuntime.mode;
         const restoredRuntime = new PermissionModeRuntime(loaded.config, pi.appendEntry.bind(pi));
         restoredRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
-        const restoredMode = executableMode(restoredRuntime.mode);
+        const restoredMode = restoredRuntime.mode;
         try {
           await activateConfig(ctx, false, restoredMode, loaded, generation);
         } catch (error: unknown) {
@@ -1415,15 +1290,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (decision.action === "block") {
         return { block: true, reason: `pi-permissions: ${decision.reason}` };
       }
-      const effectiveMode = privilegeMaxMode(executionContext) === "auto" ? "auto" : "default";
-      if (effectiveMode === "auto" && runtime.autoState.paused) {
+      // yolo short-circuited above, so every call reaching review is auto.
+      if (runtime.autoState.paused) {
         return {
           block: true,
           reason:
             "pi-permissions: Auto review paused after repeated denials; start a new turn or use Shift+Tab to re-enter Auto",
         };
       }
-      if (effectiveMode === "auto") {
+      {
         const id = event.toolCallId;
         if (!id) {
           return {
@@ -1591,7 +1466,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
         }
       }
-      return requestHumanApproval(event, decision, executionContext, ctx);
+      // Unreachable: yolo returns before risk evaluation; every other mode is auto.
+      return { block: true, reason: "pi-permissions: action was not approved" };
     },
   );
 
@@ -1668,7 +1544,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // first asynchronous continuation.
     const transitionBarrier = createModeTransitionBarrier();
     const pendingBeforeTransition = pendingModeTransition;
-    const modeBeforeCycle = modeRuntime ? executableMode(modeRuntime.mode) : "default";
+    const modeBeforeCycle = modeRuntime ? modeRuntime.mode : "auto";
     // The switch itself runs immediately either way. For upgrades
     // (default->auto, *->yolo) that is the whole story: privilegeMaxMode routes
     // the next call to the new review branch while the turn snapshot (and its
@@ -1676,7 +1552,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // pending token keeps that snapshot valid, so privilegeMaxMode keeps
     // routing on the old mode until agent_end invalidates it — no mid-turn
     // sandbox teardown race.
-    const isUpgrade = MODE_RANK[nextExecutableMode(modeBeforeCycle)] > MODE_RANK[modeBeforeCycle];
+    const isUpgrade = MODE_RANK[nextMode(modeBeforeCycle)] > MODE_RANK[modeBeforeCycle];
     const transition = beganDuringActiveTurn && !isUpgrade ? scheduleModeTransition() : undefined;
     const transitionOwnsPendingState =
       transition !== undefined && transition !== pendingBeforeTransition;
@@ -1711,8 +1587,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           // mutations, so a rapid double Shift+Tab lands on the correct final
           // mode (default -> auto -> yolo) instead of both reading the same
           // starting mode.
-          const previousMode = executableMode(runtime.mode);
-          const targetMode = nextExecutableMode(previousMode);
+          const previousMode = runtime.mode;
+          const targetMode = nextMode(previousMode);
           const result = await activateConfig(
             ctx,
             !beganDuringActiveTurn,
@@ -1771,18 +1647,30 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       runModeMutation(async (generation) => {
         let candidateLoaded = false;
         try {
-          const previousMode = modeRuntime ? executableMode(modeRuntime.mode) : undefined;
+          const previousMode = modeRuntime ? modeRuntime.mode : undefined;
           const candidate = await loadPermissionsConfig(agentDir);
           candidateLoaded = true;
           const candidateFingerprint = fingerprintConfig(candidate.config);
+          // Reload persisted session state: a recorded state entry wins over
+          // the in-memory runtime even when the config itself is unchanged
+          // (e.g. a downgrade recorded by another lifecycle surface must beat
+          // a working YOLO turn).
+          const hasRecordedState = ctx.sessionManager
+            .getBranch()
+            .some(
+              (entry) =>
+                typeof entry === "object" &&
+                entry !== null &&
+                (entry as { customType?: unknown }).customType === "pi-permissions-state",
+            );
           const restoredRuntime =
-            !modeRuntime || modeRuntime.snapshot().configFingerprint !== candidateFingerprint
+            !modeRuntime ||
+            hasRecordedState ||
+            modeRuntime.snapshot().configFingerprint !== candidateFingerprint
               ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
               : undefined;
           restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
-          const targetMode = executableMode(
-            (restoredRuntime ?? modeRuntime)?.mode ?? candidate.config.defaultMode,
-          );
+          const targetMode = (restoredRuntime ?? modeRuntime)?.mode ?? "auto";
           const result = await activateConfig(ctx, true, targetMode, candidate, generation);
           if (generation !== modeMutationGeneration) return;
           if (restoredRuntime) modeRuntime = restoredRuntime;
