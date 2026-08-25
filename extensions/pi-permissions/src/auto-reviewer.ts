@@ -138,6 +138,46 @@ function timeoutFailure(guardian: GuardianReviewIdentity): AutoReviewerFailure {
   return new AutoReviewerFailure("timeout", "Auto review timed out", undefined, guardian);
 }
 
+/** One shared gate for the per-attempt provider-failure catches: rethrows
+ * timeout/fatal failures, returns normally only when a retry is allowed. */
+function assertRetryableRequestFailure(
+  error: unknown,
+  context: { attempt: number; timedOut: boolean; identity: GuardianReviewIdentity },
+): void {
+  if (context.timedOut) throw timeoutFailure(context.identity);
+  if (
+    context.attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
+    !isTransientProviderFailure(error)
+  ) {
+    throw new AutoReviewerFailure(
+      "provider",
+      "Auto reviewer request failed",
+      { cause: error },
+      context.identity,
+    );
+  }
+}
+
+/** Gate for non-"stop" terminal responses: only an upstream "error" stop
+ * whose message looks transient may be retried within the attempt budget. */
+function assertRetryableStop(
+  failure: AutoReviewerFailure,
+  context: {
+    attempt: number;
+    stopReason: string;
+    errorMessage?: string;
+    identity: GuardianReviewIdentity;
+  },
+): void {
+  if (
+    context.attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
+    context.stopReason !== "error" ||
+    !isTransientProviderFailure(new Error(context.errorMessage ?? ""))
+  ) {
+    throw failure;
+  }
+}
+
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -314,19 +354,11 @@ export class PiAutoReviewer implements AutoReviewer {
           );
         } catch (error) {
           if (callerSignal?.aborted) throw cancelledFailure();
-          if (deadlineSignal.aborted || Date.now() >= deadline) {
-            throw timeoutFailure(guardianIdentity);
-          }
-          if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS || !isTransientProviderFailure(error)) {
-            throw new AutoReviewerFailure(
-              "provider",
-              "Auto reviewer request failed",
-              {
-                cause: error,
-              },
-              guardianIdentity,
-            );
-          }
+          assertRetryableRequestFailure(error, {
+            attempt,
+            timedOut: deadlineSignal.aborted || Date.now() >= deadline,
+            identity: guardianIdentity,
+          });
           await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
           continue;
         }
@@ -394,19 +426,11 @@ export class PiAutoReviewer implements AutoReviewer {
             );
           } catch (error) {
             if (callerSignal?.aborted) throw cancelledFailure();
-            if (secondDeadlineSignal.aborted || Date.now() >= deadline) {
-              throw timeoutFailure(guardianIdentity);
-            }
-            if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS || !isTransientProviderFailure(error)) {
-              throw new AutoReviewerFailure(
-                "provider",
-                "Auto reviewer request failed",
-                {
-                  cause: error,
-                },
-                guardianIdentity,
-              );
-            }
+            assertRetryableRequestFailure(error, {
+              attempt,
+              timedOut: secondDeadlineSignal.aborted || Date.now() >= deadline,
+              identity: guardianIdentity,
+            });
             await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
             continue;
           }
@@ -426,19 +450,20 @@ export class PiAutoReviewer implements AutoReviewer {
           }
 
           if (response.stopReason !== "stop") {
-            const failure = new AutoReviewerFailure(
-              "provider",
-              `Auto reviewer stopped with ${response.stopReason}`,
-              undefined,
-              guardianIdentity,
+            assertRetryableStop(
+              new AutoReviewerFailure(
+                "provider",
+                `Auto reviewer stopped with ${response.stopReason}`,
+                undefined,
+                guardianIdentity,
+              ),
+              {
+                attempt,
+                stopReason: response.stopReason,
+                errorMessage: response.errorMessage,
+                identity: guardianIdentity,
+              },
             );
-            if (
-              attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
-              response.stopReason !== "error" ||
-              !isTransientProviderFailure(new Error(response.errorMessage ?? ""))
-            ) {
-              throw failure;
-            }
             await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
             continue;
           }
@@ -476,19 +501,20 @@ export class PiAutoReviewer implements AutoReviewer {
           continue;
         }
         if (response.stopReason !== "stop") {
-          const failure = new AutoReviewerFailure(
-            "provider",
-            `Auto reviewer stopped with ${response.stopReason}`,
-            undefined,
-            guardianIdentity,
+          assertRetryableStop(
+            new AutoReviewerFailure(
+              "provider",
+              `Auto reviewer stopped with ${response.stopReason}`,
+              undefined,
+              guardianIdentity,
+            ),
+            {
+              attempt,
+              stopReason: response.stopReason,
+              errorMessage: response.errorMessage,
+              identity: guardianIdentity,
+            },
           );
-          if (
-            attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
-            response.stopReason !== "error" ||
-            !isTransientProviderFailure(new Error(response.errorMessage ?? ""))
-          ) {
-            throw failure;
-          }
           await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
           continue;
         }
