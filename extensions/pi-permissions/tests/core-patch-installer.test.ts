@@ -2,13 +2,17 @@ import { access, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CORE_AGENT_LOOP_PATH, installCorePatch } from "../scripts/install-core-patch.mjs";
+import {
+  CORE_AGENT_LOOP_PATH,
+  SUPPORTED_VERSION,
+  installCorePatch,
+} from "../scripts/install-core-patch.mjs";
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pi-permissions-core-patch-"));
   const target = join(root, "pi-agent-core", "dist", "agent-loop.js");
   await mkdir(dirname(target), { recursive: true });
-  const backup = `${CORE_AGENT_LOOP_PATH}.pi-permissions-0.82.1.orig`;
+  const backup = `${CORE_AGENT_LOOP_PATH}.pi-permissions-${SUPPORTED_VERSION}.orig`;
   const original = await access(backup).then(
     () => backup,
     () => CORE_AGENT_LOOP_PATH,
@@ -16,7 +20,7 @@ async function fixture(): Promise<string> {
   await copyFile(original, target);
   await writeFile(
     join(root, "pi-agent-core", "package.json"),
-    JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "0.82.1" }),
+    JSON.stringify({ name: "@earendil-works/pi-agent-core", version: SUPPORTED_VERSION }),
   );
   return target;
 }
@@ -46,6 +50,8 @@ describe("core patch installer", () => {
       JSON.stringify({ name: "@earendil-works/pi-agent-core", version: "0.83.0" }),
     );
 
-    await expect(installCorePatch(target)).rejects.toThrow("supports pi-agent-core 0.82.1");
+    await expect(installCorePatch(target)).rejects.toThrow(
+      `supports pi-agent-core ${SUPPORTED_VERSION}`,
+    );
   });
 });

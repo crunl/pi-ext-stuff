@@ -15,8 +15,8 @@ npm run core:test
 ```
 
 The installer targets the active `/opt/homebrew/bin/pi`, accepts only
-`@earendil-works/pi-agent-core` 0.82.1 with the known original SHA-256, writes
-an adjacent `.pi-permissions-0.82.1.orig` backup, and verifies the exact patched
+`@earendil-works/pi-agent-core` 0.84.3 with the known original SHA-256, writes
+an adjacent `.pi-permissions-0.84.3.orig` backup, and verifies the exact patched
 SHA-256. Re-running it is safe. A Pi upgrade or source mismatch is rejected
 without modifying the core.
 

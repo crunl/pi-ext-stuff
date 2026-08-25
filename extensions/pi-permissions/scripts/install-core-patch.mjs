@@ -5,9 +5,9 @@ import { copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SUPPORTED_VERSION = "0.82.1";
-const ORIGINAL_SHA256 = "d3d20bc773ccc8d5f7cfe0eabf8b421ff3da8685617445b142d89a44457741bc";
-const PATCHED_SHA256 = "e4af3082d8c95203aff6bf7aa590e63d6cd1d0225723db271eeb315ded01dd63";
+export const SUPPORTED_VERSION = "0.84.3";
+const ORIGINAL_SHA256 = "43cc779ddaf90df41768d3d2d0f7d7ba8b8bce7bedc9dc6062ca8b4de84ae880";
+const PATCHED_SHA256 = "7e128be26d958a7f6ef2b93b3c4c4fd8a03b22452fb60d0a0a120908ca15dd6a";
 const MARKER = 'globalThis[Symbol.for("pi-permissions.core.execution-abort-gate.v1")] = 1;';
 const IMPORT_ANCHOR = 'import { getDefaultStreamFn } from "./stream-fn.js";';
 const EXECUTE_ANCHOR =
@@ -17,11 +17,28 @@ const EXECUTE_REPLACEMENT =
 
 const piExecutable = "/opt/homebrew/bin/pi";
 const resolvedPi = await import("node:fs/promises").then(({ realpath }) => realpath(piExecutable));
-export const CORE_AGENT_LOOP_PATH = join(
-  dirname(dirname(resolvedPi)),
-  "libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules",
-  "@earendil-works/pi-agent-core/dist/agent-loop.js",
-);
+import { existsSync } from "node:fs";
+
+// The bundled pi-agent-core moved between Pi releases: newer layouts keep it at
+// <pi-package>/node_modules/@earendil-works/pi-agent-core, older ones nested it
+// under dist/libexec/lib. Probe both so the installer survives either packaging.
+function resolveCoreAgentLoopPath() {
+  const piPackageDir = dirname(dirname(resolvedPi));
+  const candidates = [
+    join(piPackageDir, "../node_modules", "@earendil-works/pi-agent-core/dist/agent-loop.js"),
+    join(
+      piPackageDir,
+      "libexec/lib/node_modules/@earendil-works/pi-coding-agent/node_modules",
+      "@earendil-works/pi-agent-core/dist/agent-loop.js",
+    ),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return candidates[0];
+}
+export const CORE_AGENT_LOOP_PATH = resolveCoreAgentLoopPath();
+export const coreBackupSuffix = `.pi-permissions-${SUPPORTED_VERSION}.orig`;
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
@@ -29,7 +46,14 @@ function sha256(content) {
 
 async function assertSupportedVersion(target) {
   const packageJsonPath = join(dirname(dirname(target)), "package.json");
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  let packageJson;
+  try {
+    packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `cannot read pi-agent-core manifest at ${packageJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (
     packageJson.name !== "@earendil-works/pi-agent-core" ||
     packageJson.version !== SUPPORTED_VERSION
@@ -67,7 +91,7 @@ export async function installCorePatch(target = CORE_AGENT_LOOP_PATH) {
   }
 
   const sourceMode = (await stat(absoluteTarget)).mode;
-  const backup = `${absoluteTarget}.pi-permissions-0.82.1.orig`;
+  const backup = `${absoluteTarget}${coreBackupSuffix}`;
   const temporary = `${absoluteTarget}.pi-permissions-new`;
   await copyFile(absoluteTarget, backup, 1);
   await writeFile(temporary, patched, { mode: sourceMode });
