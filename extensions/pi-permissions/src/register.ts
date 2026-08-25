@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type {
@@ -7,6 +7,7 @@ import type {
   ExtensionContext,
   ToolCallEvent,
   ToolCallEventResult,
+  ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
   createBashTool,
@@ -14,12 +15,12 @@ import {
   createWriteTool,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
   codexWriteToolSpec,
-  createCodexToolRendering,
+  createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
 import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
 import { reviewAutoPrompt } from "./auto-policy.ts";
@@ -31,7 +32,6 @@ import {
 import {
   type AutoReviewer,
   AutoReviewerFailure,
-  type AutoReviewerFailureKind,
   type GuardianReviewIdentity,
   PiAutoReviewer,
 } from "./auto-reviewer.ts";
@@ -811,9 +811,33 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     );
   };
 
+  /**
+   * pi-core resolves its own physical copy of @earendil-works/pi-coding-agent,
+   * so Codex-rendered tools reference a nominal Theme twin (private-field
+   * clash; structurally identical at runtime). Contain the mismatch at this
+   * seam — do not widen it beyond the three Codex-rendered built-ins.
+   */
+  type CodexRenderedSpec =
+    | typeof codexBashToolSpec
+    | typeof codexWriteToolSpec
+    | typeof codexEditToolSpec;
+  function adoptHostTheme(
+    spec: CodexRenderedSpec,
+  ): Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult"> {
+    // SAFETY: both packages ship identical runtime shapes; only Theme's private-field
+    // declaration differs across the physical module copies, so the bridge needs one
+    // double assertion per direction instead of threading casts through call sites.
+    return createPiCoreCodexToolRendering(
+      spec as Parameters<typeof createPiCoreCodexToolRendering>[0],
+    ) as unknown as Pick<
+      ToolDefinition<TSchema>,
+      "renderShell" | "renderCall" | "renderResult"
+    >;
+  }
+
   pi.registerTool({
     ...baseBash,
-    ...createCodexToolRendering(codexBashToolSpec),
+    ...adoptHostTheme(codexBashToolSpec),
     label: "bash (sandboxed)",
     description: `${baseBash.description} To write outside the active sandbox, request sandbox_permissions="with_additional_permissions", list the minimum additional_permissions.file_system.write roots, and provide justification.`,
     promptGuidelines: [
@@ -934,7 +958,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseWrite,
-    ...createCodexToolRendering(codexWriteToolSpec),
+    ...adoptHostTheme(codexWriteToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       const activationGeneration = modeMutationGeneration;
@@ -975,7 +999,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseEdit,
-    ...createCodexToolRendering(codexEditToolSpec),
+    ...adoptHostTheme(codexEditToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
       const activationGeneration = modeMutationGeneration;
@@ -1028,7 +1052,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }),
       scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
-    async execute(id, params, signal, onUpdate, ctx) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
