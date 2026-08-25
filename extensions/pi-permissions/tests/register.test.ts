@@ -1094,7 +1094,7 @@ describe("Default mode registration", () => {
       },
     );
 
-    expect(header.render(80).join("\n")).toContain(" Wrote note.txt · +1");
+    expect(header.render(80).join("\n")).toContain("󰝒 Wrote note.txt · +1");
     expect(result.render(80)).toEqual([]);
   });
 
