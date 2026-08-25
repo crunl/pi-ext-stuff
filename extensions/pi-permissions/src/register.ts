@@ -825,6 +825,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     parameters: permissionedBashParameters,
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
+      }
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
@@ -938,6 +941,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...adoptHostTheme(codexWriteToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
+      }
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
@@ -978,6 +984,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...adoptHostTheme(codexEditToolSpec),
     executionMode: "sequential",
     async execute(id, params, signal, onUpdate, ctx) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
+      }
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
@@ -1028,6 +1037,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (_signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
+      }
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
