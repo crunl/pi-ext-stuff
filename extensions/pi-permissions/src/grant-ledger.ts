@@ -75,10 +75,7 @@ export class GrantLedger {
    * Callers run their async re-validation between verify() and consume(),
    * so a failed validation never burns the grant.
    */
-  verify(
-    grant: Grant | undefined,
-    expected: GrantVerifyInput,
-  ): boolean {
+  verify(grant: Grant | undefined, expected: GrantVerifyInput): boolean {
     if (!grant) return false;
     return (
       grant.cwd === expected.cwd &&

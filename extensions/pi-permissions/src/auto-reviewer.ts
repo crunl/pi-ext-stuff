@@ -26,10 +26,7 @@ import {
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
-import {
-  AutoReviewerFailure,
-  type GuardianReviewIdentity,
-} from "./guardian/errors.ts";
+import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
 
 export type {
   AutoReviewerFailureKind,
@@ -145,10 +142,7 @@ function assertRetryableRequestFailure(
   context: { attempt: number; timedOut: boolean; identity: GuardianReviewIdentity },
 ): void {
   if (context.timedOut) throw timeoutFailure(context.identity);
-  if (
-    context.attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS ||
-    !isTransientProviderFailure(error)
-  ) {
+  if (context.attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS || !isTransientProviderFailure(error)) {
     throw new AutoReviewerFailure(
       "provider",
       "Auto reviewer request failed",
