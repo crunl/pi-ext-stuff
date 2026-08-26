@@ -81,10 +81,7 @@ export class PermissionSession {
     if (this.pendingTransition?.turnId === turnId) this.pendingTransition = undefined;
   }
 
-  isPendingCurrent(
-    transition: PendingModeTransition,
-    turn: TurnFacts,
-  ): boolean {
+  isPendingCurrent(transition: PendingModeTransition, turn: TurnFacts): boolean {
     return (
       this.pendingTransition?.id === transition.id &&
       turn.phase === transition.phase &&
