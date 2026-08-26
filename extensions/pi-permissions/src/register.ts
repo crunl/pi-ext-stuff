@@ -45,7 +45,10 @@ import {
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { GrantLedger, type Grant } from "./grant-ledger.ts";
 import { type EnforcerHost, type GuardedSpec, makeGuardedExecute } from "./enforced-tool.ts";
-import { PermissionSession } from "./permission-session.ts";
+import {
+  PermissionSession,
+  type PermissionExecutionSnapshot,
+} from "./permission-session.ts";
 import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
@@ -104,16 +107,6 @@ export interface RegisterExtensionOptions {
 }
 
 type ExecutablePermissionMode = PermissionMode;
-
-type PermissionTurnPhase = "idle" | "active" | "between";
-
-interface PermissionExecutionSnapshot {
-  turnId: number;
-  mode: ExecutablePermissionMode;
-  config: PermissionsConfig;
-  baseSandboxConfig?: SandboxRuntimeConfig;
-  sandboxReady: boolean;
-}
 
 interface EffectiveExecutionContext {
   snapshot: PermissionExecutionSnapshot;
@@ -248,11 +241,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
   const turnApprovedWriteRoots: string[] = [];
   const turnApprovedNetworkHosts = new Set<string>();
-  let permissionTurnPhase: PermissionTurnPhase = "idle";
-  let permissionTurnId = 0;
-  let activeTurnId: number | undefined;
   let lifecycleEventsObserved = false;
-  let activeExecutionSnapshot: PermissionExecutionSnapshot | undefined;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -312,9 +301,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     guardianTranscript = [];
     inputFallbackTranscript = [];
-    permissionTurnPhase = "idle";
-    activeTurnId = undefined;
-    activeExecutionSnapshot = undefined;
+    session.resetTurn();
     session.clearPending();
     invalidatePermissionContext(reason);
   };
@@ -334,42 +321,36 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const captureExecutionSnapshot = (turnId: number): PermissionExecutionSnapshot | undefined => {
-    if (activeExecutionSnapshot) return activeExecutionSnapshot;
+    const existing = session.getExecutionSnapshot();
+    if (existing) return existing;
     if (!loaded || !modeRuntime) return undefined;
-    activeExecutionSnapshot = {
+    const snapshot: PermissionExecutionSnapshot = {
       turnId,
       mode: modeRuntime.mode,
       config: loaded.config,
       baseSandboxConfig,
       sandboxReady: sandboxState.kind === "ready",
     };
-    return activeExecutionSnapshot;
+    session.setExecutionSnapshot(snapshot);
+    return snapshot;
   };
-
-  const currentExecutionSnapshot = (): PermissionExecutionSnapshot | undefined =>
-    permissionTurnPhase === "active" &&
-    activeTurnId !== undefined &&
-    activeExecutionSnapshot?.turnId === activeTurnId
-      ? activeExecutionSnapshot
-      : undefined;
 
   const ensureExecutionSnapshot = (
     _ctx: Pick<ExtensionContext, "isIdle">,
   ): PermissionExecutionSnapshot | undefined => {
-    const current = currentExecutionSnapshot();
+    const current = session.currentExecutionSnapshot();
     if (current) return current;
     if (session.hasInFlightBarrier()) return undefined;
-    if (permissionTurnPhase === "between" || lifecycleEventsObserved) return undefined;
+    if (session.getTurnPhase() === "between" || lifecycleEventsObserved) return undefined;
 
     // Direct tool-hook invocations without lifecycle events are themselves proof of active work.
-    permissionTurnId += 1;
-    activeTurnId = permissionTurnId;
-    permissionTurnPhase = "active";
-    return captureExecutionSnapshot(activeTurnId);
+    const turnId = session.allocateTurnId();
+    session.beginTurn(turnId);
+    return captureExecutionSnapshot(turnId);
   };
 
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
-    currentExecutionSnapshot() === snapshot;
+    session.currentExecutionSnapshot() === snapshot;
 
   const getEffectiveExecutionContext = (
     snapshot: PermissionExecutionSnapshot,
@@ -393,7 +374,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // turn snapshot (and its approvals) mid-switch; agent_end/agent_settled
   // clears it, letting the next turn start on the new mode.
   const scheduleModeTransition = (): PendingModeTransition | undefined => {
-    return session.schedulePendingTransition({ phase: permissionTurnPhase, activeTurnId });
+    return session.schedulePendingTransition();
   };
 
   const clearPendingModeTransition = (turnId: number): void => {
@@ -401,7 +382,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const isPendingModeTransitionCurrent = (transition: PendingModeTransition): boolean =>
-    session.isPendingCurrent(transition, { phase: permissionTurnPhase, activeTurnId });
+    session.isPendingCurrent(transition);
 
   const clearPendingModeTransitionIfCurrent = (transition: PendingModeTransition): void => {
     session.clearPendingIfCurrent(transition);
@@ -421,11 +402,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const finishPermissionTurn = (reason: string): void => {
-    if (permissionTurnPhase !== "active") return;
-    const closingTurnId = activeTurnId;
-    activeExecutionSnapshot = undefined;
-    activeTurnId = undefined;
-    permissionTurnPhase = "between";
+    const closingTurnId = session.finishTurn();
+    if (closingTurnId === undefined) return;
     if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
     turnApprovedWriteRoots.length = 0;
     turnApprovedNetworkHosts.clear();
@@ -1060,9 +1038,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_shutdown", async () => {
     session.bumpGeneration();
     cancelInFlightModeTransition();
-    permissionTurnPhase = "idle";
-    activeTurnId = undefined;
-    activeExecutionSnapshot = undefined;
+    session.resetTurn();
     session.clearPending();
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
@@ -1089,19 +1065,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("agent_start", async () => {
     lifecycleEventsObserved = true;
-    if (permissionTurnPhase === "active") return;
-    permissionTurnId += 1;
-    const startingTurnId = permissionTurnId;
-    activeTurnId = startingTurnId;
-    permissionTurnPhase = "active";
+    if (session.getTurnPhase() === "active") return;
+    const startingTurnId = session.allocateTurnId();
+    session.beginTurn(startingTurnId);
     const transition = session.getInFlightBarrier();
     if (transition) {
       const readyForNextTurn = await transition.completion;
       session.clearInFlightIfCurrent(transition);
       if (
         !readyForNextTurn ||
-        permissionTurnPhase !== "active" ||
-        activeTurnId !== startingTurnId
+        session.getTurnPhase() !== "active" ||
+        !session.isCurrentTurn(startingTurnId)
       ) {
         return;
       }
@@ -1118,7 +1092,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("agent_settled", () => {
     lifecycleEventsObserved = true;
     finishPermissionTurn("permission turn settled");
-    if (permissionTurnPhase === "between") permissionTurnPhase = "idle";
+    session.settleBetween();
   });
 
   pi.on(
@@ -1451,7 +1425,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {
     if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
-    const beganDuringActiveTurn = permissionTurnPhase === "active";
+    const beganDuringActiveTurn = session.getTurnPhase() === "active";
     // Register the barrier synchronously with the shortcut invocation. A queued
     // agent_start must observe it even if agent_end runs before this mutation's
     // first asynchronous continuation.

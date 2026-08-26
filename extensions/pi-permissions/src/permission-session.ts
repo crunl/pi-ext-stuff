@@ -1,7 +1,12 @@
 // Protocol C concurrency control: generation counters, permission epochs,
-// mode-transition barriers, pending transitions, and the guardian-review
-// controller registry. Pure state machine — no I/O, no host knowledge; the
-// host supplies turn-phase facts as method arguments where they gate behavior.
+// turn lifecycle, execution snapshots, mode-transition barriers, pending
+// transitions, and the guardian-review controller registry. Pure state
+// machine — no I/O, no host knowledge; the host supplies snapshot contents
+// and performs side effects around these transitions.
+
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { PermissionsConfig } from "./config.ts";
+import type { PermissionMode } from "./state.ts";
 
 export interface PendingModeTransition {
   id: number;
@@ -15,9 +20,13 @@ export interface ModeTransitionBarrier {
   settle(readyForNextTurn: boolean): void;
 }
 
-export interface TurnFacts {
-  phase: "idle" | "active" | "between";
-  activeTurnId: number | undefined;
+/** Immutable view of the config/sandbox world a specific turn started under. */
+export interface PermissionExecutionSnapshot {
+  turnId: number;
+  mode: PermissionMode;
+  config: PermissionsConfig;
+  baseSandboxConfig?: SandboxRuntimeConfig;
+  sandboxReady: boolean;
 }
 
 export class PermissionSession {
@@ -27,6 +36,12 @@ export class PermissionSession {
   private nextBarrierId = 0;
   private pendingTransition: PendingModeTransition | undefined;
   private inFlightBarrier: ModeTransitionBarrier | undefined;
+
+  // --- turn lifecycle ----------------------------------------------------
+  private turnPhase: "idle" | "active" | "between" = "idle";
+  private turnCounter = 0;
+  private currentTurnId: number | undefined;
+  private executionSnapshot: PermissionExecutionSnapshot | undefined;
 
   /** Registry of in-flight Guardian review abort controllers. */
   readonly reviewControllers = new Map<string, AbortController>();
@@ -59,18 +74,77 @@ export class PermissionSession {
     this.epochCounter += 1;
   }
 
+  // --- turn lifecycle ------------------------------------------------------
+
+  getTurnPhase(): "idle" | "active" | "between" {
+    return this.turnPhase;
+  }
+
+  allocateTurnId(): number {
+    this.turnCounter += 1;
+    return this.turnCounter;
+  }
+
+  beginTurn(turnId: number): void {
+    this.currentTurnId = turnId;
+    this.turnPhase = "active";
+  }
+
+  isCurrentTurn(turnId: number): boolean {
+    return this.currentTurnId === turnId;
+  }
+
+  /** Close the active turn; returns the closing id, or undefined when idle. */
+  finishTurn(): number | undefined {
+    if (this.turnPhase !== "active") return undefined;
+    const closingTurnId = this.currentTurnId;
+    this.executionSnapshot = undefined;
+    this.currentTurnId = undefined;
+    this.turnPhase = "between";
+    return closingTurnId;
+  }
+
+  /** agent_settled quiescence: an ended turn fully leaves the between state. */
+  settleBetween(): void {
+    if (this.turnPhase === "between") this.turnPhase = "idle";
+  }
+
+  /** Hard reset to idle (extension init / session shutdown). */
+  resetTurn(): void {
+    this.executionSnapshot = undefined;
+    this.currentTurnId = undefined;
+    this.turnPhase = "idle";
+  }
+
+  setExecutionSnapshot(snapshot: PermissionExecutionSnapshot): void {
+    this.executionSnapshot = snapshot;
+  }
+
+  getExecutionSnapshot(): PermissionExecutionSnapshot | undefined {
+    return this.executionSnapshot;
+  }
+
+  /** Snapshot currency: it must belong to the still-active turn. */
+  currentExecutionSnapshot(): PermissionExecutionSnapshot | undefined {
+    return this.turnPhase === "active" &&
+      this.currentTurnId !== undefined &&
+      this.executionSnapshot?.turnId === this.currentTurnId
+      ? this.executionSnapshot
+      : undefined;
+  }
+
   // --- pending mode transitions -------------------------------------------
 
   /**
    * Mint the turn-scoped token that keeps a mid-switch invalidate from tearing
    * down the live snapshot. First caller owns it for the turn.
    */
-  schedulePendingTransition(turn: TurnFacts): PendingModeTransition | undefined {
-    if (turn.phase !== "active" || turn.activeTurnId === undefined) return undefined;
+  schedulePendingTransition(): PendingModeTransition | undefined {
+    if (this.turnPhase !== "active" || this.currentTurnId === undefined) return undefined;
     if (this.pendingTransition) return this.pendingTransition;
     this.pendingTransition = {
       id: ++this.nextTransitionId,
-      turnId: turn.activeTurnId,
+      turnId: this.currentTurnId,
       phase: "active",
     };
     return this.pendingTransition;
@@ -81,11 +155,11 @@ export class PermissionSession {
     if (this.pendingTransition?.turnId === turnId) this.pendingTransition = undefined;
   }
 
-  isPendingCurrent(transition: PendingModeTransition, turn: TurnFacts): boolean {
+  isPendingCurrent(transition: PendingModeTransition): boolean {
     return (
       this.pendingTransition?.id === transition.id &&
-      turn.phase === transition.phase &&
-      turn.activeTurnId === transition.turnId
+      this.turnPhase === transition.phase &&
+      this.currentTurnId === transition.turnId
     );
   }
 

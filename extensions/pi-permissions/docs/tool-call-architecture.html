@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pi-permissions · Tool Call 链路与 Sandbox 角色</title>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #f85149;
+        --yellow: #d29922;
+        --purple: #bc8cff;
+        --orange: #f0883e;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        padding: 40px 24px;
+        line-height: 1.5;
+      }
+      .wrap {
+        max-width: 1080px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin-bottom: 4px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 32px;
+      }
+      h2 {
+        font-size: 15px;
+        color: var(--accent);
+        margin: 40px 0 16px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+      }
+
+      /* ---- flow ---- */
+      .lane {
+        display: flex;
+        align-items: stretch;
+        gap: 12px;
+      }
+      .node {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        flex: 1;
+      }
+      .node .t {
+        font-weight: bold;
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+      .node .d {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .node code {
+        color: var(--accent);
+        font-size: 11.5px;
+      }
+      .node.guard {
+        border-left: 3px solid var(--red);
+      }
+      .node.sandbox {
+        border-left: 3px solid var(--orange);
+      }
+      .node.grant {
+        border-left: 3px solid var(--green);
+      }
+      .node.fastpath {
+        border-left: 3px solid var(--yellow);
+      }
+      .arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-size: 18px;
+        padding: 2px 0;
+      }
+      .arrow.dn::after {
+        content: "↓";
+      }
+      .branch {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin: 0;
+        position: relative;
+      }
+      .branch::before {
+        content: "";
+        position: absolute;
+        top: -14px;
+        left: 25%;
+        right: 25%;
+        border-top: 1px dashed var(--border);
+      }
+      .tag {
+        display: inline-block;
+        font-size: 10px;
+        padding: 1px 7px;
+        border-radius: 10px;
+        margin-right: 6px;
+        vertical-align: 1px;
+      }
+      .tag.red {
+        background: rgba(248, 81, 73, 0.15);
+        color: var(--red);
+      }
+      .tag.green {
+        background: rgba(63, 185, 80, 0.15);
+        color: var(--green);
+      }
+      .tag.yellow {
+        background: rgba(210, 153, 34, 0.15);
+        color: var(--yellow);
+      }
+      .tag.orange {
+        background: rgba(240, 136, 62, 0.15);
+        color: var(--orange);
+      }
+      .tag.purple {
+        background: rgba(188, 140, 255, 0.15);
+        color: var(--purple);
+      }
+      .tag.blue {
+        background: rgba(88, 166, 255, 0.15);
+        color: var(--accent);
+      }
+
+      /* ---- sandbox role cards ---- */
+      .roles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 14px;
+      }
+      .role {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+        border-top: 3px solid var(--orange);
+      }
+      .role h3 {
+        font-size: 13px;
+        color: var(--orange);
+        margin-bottom: 8px;
+      }
+      .role p,
+      .role li {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .role ul {
+        padding-left: 18px;
+        margin-top: 6px;
+      }
+      .role code {
+        color: var(--accent);
+        font-size: 11px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 8px 10px;
+        text-align: left;
+      }
+      th {
+        background: var(--panel);
+        color: var(--text);
+      }
+      td {
+        color: var(--muted);
+      }
+      td:first-child {
+        color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Tool Call 执行链路 · pi-permissions</h1>
+      <div class="sub">
+        register.ts + enforced-tool.ts + sandbox-coordinator.ts · fail-closed
+        设计
+      </div>
+
+      <!-- ================= 主链路 ================= -->
+      <h2>① 主链路：从事件到副作用</h2>
+
+      <div class="node">
+        <div class="t">
+          Agent Loop 发出 <code>tool_call</code> 事件（bash / write / edit）
+        </div>
+        <div class="d">
+          宿主把执行权交给扩展注册的 wrapped execute —— 从这里开始全部受控
+        </div>
+      </div>
+      <div class="arrow dn"></div>
+
+      <div class="node guard">
+        <div class="t">
+          <span class="tag red">门 1</span>入口 Abort 门
+          <code>if (signal?.aborted)</code>
+        </div>
+        <div class="d">
+          已中止的调用直接返回 aborted 结果 —— 堵住「批准后、执行前」被 Esc
+          的竞态窗口
+        </div>
+      </div>
+      <div class="arrow dn"></div>
+
+      <div class="node">
+        <div class="t">
+          <code>host.activate(ctx)</code> → 激活快照 ActivationFacts
+        </div>
+        <div class="d">
+          { privilegeMax, sandboxEnabled, sandboxReady, baseSandboxConfig } ·
+          代际检查防过期激活
+        </div>
+      </div>
+      <div class="arrow dn"></div>
+
+      <div class="branch">
+        <div class="node fastpath">
+          <div class="t">
+            <span class="tag yellow">分岔 A</span>yolo 快速路径
+          </div>
+          <div class="d">
+            <code>snap.privilegeMax === "yolo"</code><br />撤销遗留 grant →
+            <code>spec.bare()</code> 裸执行<br /><b style="color: var(--yellow)"
+              >完全不经过 sandbox 与授权</b
+            >
+          </div>
+        </div>
+        <div>
+          <div class="node" style="margin-bottom: 0">
+            <div class="t">
+              <span class="tag blue">分岔 B</span>auto 模式（Approve for me）
+            </div>
+            <div class="d">继续向下走完整防护管线 ↓</div>
+          </div>
+          <div class="arrow dn"></div>
+          <div class="node sandbox">
+            <div class="t">
+              <span class="tag orange">租约调度</span
+              ><code>SandboxExecutionCoordinator</code>
+            </div>
+            <div class="d">
+              grant 带 networkHosts？<br />→ <b>EXCLUSIVE</b>
+              <code>runExclusive</code>（独占排队）<br />→ 否则 <b>SHARED</b>
+              <code>runShared</code>（并发放行）<br /><span
+                style="color: var(--muted)"
+                >防止网络提权与文件操作互相踩踏</span
+              >
+            </div>
+          </div>
+          <div class="arrow dn"></div>
+          <div class="node grant">
+            <div class="t">
+              <span class="tag green">门 2</span>授权消耗
+              <code>host.authorize()</code>
+            </div>
+            <div class="d">
+              GrantLedger：verify(epoch+指纹) → consume()<br />single-use
+              burn：失败即销毁授权<br />TOCTOU 再验证：批准时的世界 ≠
+              执行时的世界则拒绝
+            </div>
+          </div>
+          <div class="arrow dn"></div>
+          <div class="node sandbox">
+            <div class="t">
+              <span class="tag orange">门 3</span>Sandbox 就绪裁决
+            </div>
+            <div class="d">
+              <code>sandboxEnabled === false</code> → 裸执行（策略明确关闭）<br /><code
+                >!sandboxReady</code
+              >
+              →
+              <b style="color: var(--red)">fail-closed 抛错</b
+              >，绝不降级裸跑<br />就绪 → 进入 <code>runInLease</code> 按 grant
+              裁剪沙箱配置 ↓
+            </div>
+          </div>
+          <div class="arrow dn"></div>
+          <div class="node sandbox">
+            <div class="t"><span class="tag orange">按调用裁剪沙箱</span></div>
+            <div class="d">
+              writeRoots →
+              <code>withAdditionalWriteRoots(baseConfig, …)</code>
+              只开本次批准的写目录<br />
+              networkHosts → 合并 <code>allowedDomains</code> + 启动
+              <b>Filtering Proxy</b>（上游本地代理端口）<br />
+              特例：纯 <code>git init</code> 结构性豁免（sandbox-runtime 硬禁
+              .git/hooks 写）
+            </div>
+          </div>
+          <div class="arrow dn"></div>
+          <div class="node">
+            <div class="t">
+              沙箱内基底执行
+              <code>bashToolFactory / createSandboxedFileOperations</code>
+            </div>
+            <div class="d">
+              文件系统白名单写、域名白名单网络 · 副作用被限制在本次批准的边界内
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= sandbox 角色 ================= -->
+      <h2>② Sandbox 在链路中的四个角色</h2>
+
+      <div class="roles">
+        <div class="role">
+          <h3>1 · 并发协调者（Coordinator）</h3>
+          <p><code>runShared / runExclusive</code> 两档租约：</p>
+          <ul>
+            <li>普通文件操作 → 共享租约，可并行</li>
+            <li>带网络豁免的调用 → 独占租约，强制排队</li>
+            <li>会话关闭时 <code>runExclusive(reset)</code> 安全重置</li>
+          </ul>
+        </div>
+        <div class="role">
+          <h3>2 · 权限边界的执行者</h3>
+          <p>
+            grant 里批准的 <code>writeRoots</code> /
+            <code>networkHosts</code> 不是建议，是沙箱配置的<b
+              style="color: var(--text)"
+              >硬边界</b
+            >：
+          </p>
+          <ul>
+            <li>写权限逐调用裁剪进 <code>filesystem.allowWrite</code></li>
+            <li>网络域名并入 <code>allowedDomains</code></li>
+            <li>策略级 denyRead / denyWrite 永久生效</li>
+          </ul>
+        </div>
+        <div class="role">
+          <h3>3 · 网络出口的过滤代理</h3>
+          <p>网络提权必须走 Filtering Proxy：</p>
+          <ul>
+            <li>所有出站流量经本地代理端口转发</li>
+            <li>仅放行 grant 批准的域名</li>
+            <li>未批准域名的请求在代理层被拒——进程内代码无法绕过</li>
+          </ul>
+        </div>
+        <div class="role">
+          <h3>4 · Fail-closed 的最后防线</h3>
+          <p>沙箱不可用时：</p>
+          <ul>
+            <li>
+              <b style="color: var(--red)">抛错阻断</b>，绝不静默降级为裸执行
+            </li>
+            <li>与入口 abort 门、epoch 再验证共同构成三层纵深防御</li>
+            <li>唯一例外是策略显式声明 sandbox off</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- ================= 对照表 ================= -->
+      <h2>③ 三种执行形态对照</h2>
+      <table>
+        <tr>
+          <th></th>
+          <th>yolo 快速路径</th>
+          <th>auto · 无网络豁免</th>
+          <th>auto · 带网络豁免</th>
+        </tr>
+        <tr>
+          <td>Abort 门</td>
+          <td>✅ 经过</td>
+          <td>✅ 经过</td>
+          <td>✅ 经过</td>
+        </tr>
+        <tr>
+          <td>grant 授权消耗</td>
+          <td>❌ 直接撤销遗留 grant</td>
+          <td>✅ verify + consume</td>
+          <td>✅ verify + consume</td>
+        </tr>
+        <tr>
+          <td>租约类型</td>
+          <td>—</td>
+          <td>SHARED（可并发）</td>
+          <td><b>EXCLUSIVE</b>（独占）</td>
+        </tr>
+        <tr>
+          <td>文件系统</td>
+          <td>宿主全权</td>
+          <td>base 白名单 + 本次 writeRoots</td>
+          <td>同左</td>
+        </tr>
+        <tr>
+          <td>网络</td>
+          <td>无限制</td>
+          <td>默认策略域</td>
+          <td>仅 grant 域名，经过滤代理</td>
+        </tr>
+        <tr>
+          <td>sandbox 故障时</td>
+          <td>不适用（本就不进沙箱）</td>
+          <td colspan="2" style="color: var(--red)">
+            fail-closed 抛错，调用被拒
+          </td>
+        </tr>
+      </table>
+
+      <div class="sub" style="margin-top: 28px">
+        关键不变量：任何一次有副作用的执行，要么在 yolo
+        下用户显式放弃保护，要么其副作用边界 ⊆ 该次 grant 批准的边界。
+      </div>
+    </div>
+  </body>
+</html>
