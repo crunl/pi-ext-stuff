@@ -838,6 +838,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const upstreamProxyPorts = resolveLocalProxyPorts();
           const hasLocalProxy = Boolean(upstreamProxyPorts.http || upstreamProxyPorts.socks);
           if (hasLocalProxy) {
+            // Live path, not legacy residue: when the host itself routes
+            // egress through an upstream proxy (HTTPS_PROXY/ALL_PROXY),
+            // nono's supervised proxy cannot reach the network directly.
+            // Our filtering proxy then fronts that upstream with the same
+            // domain allowlist; without one, allow_domain domains go via
+            // nono's supervised proxy instead. Retirement was evaluated
+            // 2026-08 and rejected for exactly this case.
             filteringProxy = await filteringProxyFactory(
               allowedDomains,
               upstreamProxyPorts,
