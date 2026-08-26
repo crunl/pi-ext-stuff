@@ -1,6 +1,5 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type {
   BashOperations,
   ExtensionAPI,
@@ -74,6 +73,7 @@ import {
   withLocalProxy,
   type SandboxPolicy,
 } from "./sandbox.ts";
+import { NonoSandboxManager } from "./sandbox/nono-enforcer.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
@@ -196,7 +196,7 @@ function nextMode(mode: PermissionMode): PermissionMode {
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
-  const sandboxManager = options.sandboxManager ?? SandboxManager;
+  const sandboxManager = options.sandboxManager ?? new NonoSandboxManager();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
