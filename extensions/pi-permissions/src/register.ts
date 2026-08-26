@@ -45,10 +45,7 @@ import {
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { GrantLedger, type Grant } from "./grant-ledger.ts";
 import { type EnforcerHost, type GuardedSpec, makeGuardedExecute } from "./enforced-tool.ts";
-import {
-  PermissionSession,
-  type PermissionExecutionSnapshot,
-} from "./permission-session.ts";
+import { PermissionSession, type PermissionExecutionSnapshot } from "./permission-session.ts";
 import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
