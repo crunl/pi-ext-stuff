@@ -240,7 +240,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
   const turnApprovedWriteRoots: string[] = [];
   const turnApprovedNetworkHosts = new Set<string>();
-  let lifecycleEventsObserved = false;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -324,7 +323,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const current = session.currentExecutionSnapshot();
     if (current) return current;
     if (session.hasInFlightBarrier()) return undefined;
-    if (session.getTurnPhase() === "between" || lifecycleEventsObserved) return undefined;
+    if (session.getTurnPhase() === "between" || session.hasObservedLifecycle()) return undefined;
 
     // Direct tool-hook invocations without lifecycle events are themselves proof of active work.
     const turnId = session.allocateTurnId();
@@ -1007,7 +1006,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
-    lifecycleEventsObserved = false;
+    session.clearLifecycleEvents();
     const generation = session.getGeneration();
     let candidate: LoadedPermissionsConfig;
     try {
@@ -1098,7 +1097,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("agent_start", async () => {
-    lifecycleEventsObserved = true;
+    session.markLifecycleEvent();
     if (session.getTurnPhase() === "active") return;
     const startingTurnId = session.allocateTurnId();
     session.beginTurn(startingTurnId);
@@ -1119,12 +1118,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("agent_end", () => {
-    lifecycleEventsObserved = true;
+    session.markLifecycleEvent();
     finishPermissionTurn("permission turn ended");
   });
 
   pi.on("agent_settled", () => {
-    lifecycleEventsObserved = true;
+    session.markLifecycleEvent();
     finishPermissionTurn("permission turn settled");
     session.settleBetween();
   });

@@ -42,6 +42,7 @@ export class PermissionSession {
   private turnCounter = 0;
   private currentTurnId: number | undefined;
   private executionSnapshot: PermissionExecutionSnapshot | undefined;
+  private lifecycleEventsObserved = false;
 
   /** Registry of in-flight Guardian review abort controllers. */
   readonly reviewControllers = new Map<string, AbortController>();
@@ -131,6 +132,23 @@ export class PermissionSession {
       this.executionSnapshot?.turnId === this.currentTurnId
       ? this.executionSnapshot
       : undefined;
+  }
+
+  /**
+   * Record that a real host lifecycle event arrived. Direct tool-hook
+   * invocations no longer qualify as implicit turns once this is set.
+   */
+  markLifecycleEvent(): void {
+    this.lifecycleEventsObserved = true;
+  }
+
+  /** session_start: a fresh host session forgets prior lifecycle activity. */
+  clearLifecycleEvents(): void {
+    this.lifecycleEventsObserved = false;
+  }
+
+  hasObservedLifecycle(): boolean {
+    return this.lifecycleEventsObserved;
   }
 
   // --- pending mode transitions -------------------------------------------
