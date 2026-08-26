@@ -19,13 +19,17 @@ function shellQuote(value: string): string {
  * deny_domain). denyRead and denyWrite are unioned into filesystem.deny:
  * nono's profile-level deny blocks both operations, which can only over-
  * restrict relative to srt semantics — the fail-closed direction.
+ *
+ * Deliberate boundary: nono's built-in system groups grant r+w on /private/tmp
+ * (and TMPDIR-adjacent paths) so compilers and package managers can stage temp
+ * files without per-call approval. This matches srt parity and is accepted
+ * agent-sandbox practice; profile-level `deny` entries can still override it
+ * if a policy ever needs to fence off temp storage.
  */
 export function buildNonoProfile(policy: SandboxPolicy): object {
   return {
     filesystem: {
-      ...(policy.filesystem.allowWrite.length > 0
-        ? { allow: policy.filesystem.allowWrite }
-        : {}),
+      ...(policy.filesystem.allowWrite.length > 0 ? { allow: policy.filesystem.allowWrite } : {}),
       deny: [...new Set([...policy.filesystem.denyRead, ...policy.filesystem.denyWrite])],
     },
     network: {

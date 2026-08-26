@@ -87,16 +87,9 @@ function localProxyPort(value: string | undefined): number | undefined {
   }
 }
 
-export function detectLocalProxyPorts(
-  env: NodeJS.ProcessEnv = process.env,
-): LocalProxyPorts {
+export function detectLocalProxyPorts(env: NodeJS.ProcessEnv = process.env): LocalProxyPorts {
   return {
-    http: localProxyPort(
-      env.HTTPS_PROXY
-      ?? env.https_proxy
-      ?? env.HTTP_PROXY
-      ?? env.http_proxy,
-    ),
+    http: localProxyPort(env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy),
     socks: localProxyPort(env.ALL_PROXY ?? env.all_proxy),
   };
 }
@@ -140,8 +133,7 @@ export function withAdditionalWriteRoots(
     filesystem: {
       ...config.filesystem,
       allowWrite: [...new Set([...config.filesystem.allowWrite, ...roots])],
-      denyWrite: config.filesystem.denyWrite.filter((path) =>
-        !roots.includes(path)),
+      denyWrite: config.filesystem.denyWrite.filter((path) => !roots.includes(path)),
       // sandbox-runtime additionally hard-denies .git/config unless opted in;
       // approved git write roots imply the command needs git metadata access.
       allowGitConfig: true,
@@ -313,10 +305,7 @@ function guardianReadOnlyExecutablePath(executable: GuardianReadOnlyExecutable):
 export function createSandboxedReadOnlyCommandRunner(
   manager: SandboxManagerLike,
   executable: GuardianReadOnlyExecutable,
-): (
-  args: readonly string[],
-  signal?: AbortSignal,
-) => Promise<SandboxedCommandResult> {
+): (args: readonly string[], signal?: AbortSignal) => Promise<SandboxedCommandResult> {
   const resolvedExecutable = guardianReadOnlyExecutablePath(executable);
   return async (args, signal) => {
     if (signal?.aborted) throw new Error("aborted");
@@ -796,8 +785,9 @@ export function createSandboxedGuardianFileOperations(
         parseJsonSafe<string[]>((await runFileOperation("readdir", path)).toString("utf8")),
     },
     resolveReadPath: (path, cwd) =>
-      runFileOperation("resolveReadPath", path, [Buffer.from(cwd).toString("base64")])
-        .then((output) => output.toString("utf8")),
+      runFileOperation("resolveReadPath", path, [Buffer.from(cwd).toString("base64")]).then(
+        (output) => output.toString("utf8"),
+      ),
     readPrefix: (path, bytes) => runFileOperation("readPrefix", path, [String(bytes)]),
     readText: (path, offset, limit, maxLines, maxBytes) =>
       runFileOperation("readText", path, [
@@ -807,8 +797,9 @@ export function createSandboxedGuardianFileOperations(
         String(maxBytes),
       ]).then((output) => parseJsonSafe<SandboxedGuardianTextRead>(output.toString("utf8"))),
     listDirectory: (path, limit) =>
-      runFileOperation("list", path, [String(limit)])
-        .then((output) => parseJsonSafe<SandboxedGuardianDirectoryListing>(output.toString("utf8"))),
+      runFileOperation("list", path, [String(limit)]).then((output) =>
+        parseJsonSafe<SandboxedGuardianDirectoryListing>(output.toString("utf8")),
+      ),
   };
 }
 
@@ -820,10 +811,7 @@ function fileOperationConfig(
     ...baseConfig,
     filesystem: {
       ...baseConfig.filesystem,
-      allowWrite: [...new Set([
-        ...baseConfig.filesystem.allowWrite,
-        ...writePaths,
-      ])],
+      allowWrite: [...new Set([...baseConfig.filesystem.allowWrite, ...writePaths])],
     },
   };
 }
@@ -842,13 +830,10 @@ async function runSandboxedFileOperation(
     FILE_OPERATION_HELPER,
     operation,
     Buffer.from(path).toString("base64"),
-  ].map(shellQuote).join(" ");
-  const wrappedCommand = await manager.wrapWithSandbox(
-    command,
-    undefined,
-    config,
-    signal,
-  );
+  ]
+    .map(shellQuote)
+    .join(" ");
+  const wrappedCommand = await manager.wrapWithSandbox(command, undefined, config, signal);
 
   return new Promise((resolvePromise, reject) => {
     const child = spawn("/bin/bash", ["-c", wrappedCommand], {
@@ -876,7 +861,12 @@ async function runSandboxedFileOperation(
       if (signal?.aborted) {
         reject(new Error("aborted"));
       } else if (code !== 0) {
-        reject(new Error(Buffer.concat(stderr).toString("utf8") || `sandboxed file operation exited with ${code}`));
+        reject(
+          new Error(
+            Buffer.concat(stderr).toString("utf8") ||
+              `sandboxed file operation exited with ${code}`,
+          ),
+        );
       } else {
         resolvePromise(Buffer.concat(stdout));
       }
@@ -902,8 +892,7 @@ export function createSandboxedFileOperations(
     writeFile: async (path, content) => {
       await runSandboxedFileOperation(manager, config, "write", path, content, signal);
     },
-    readFile: (path) =>
-      runSandboxedFileOperation(manager, config, "read", path, undefined, signal),
+    readFile: (path) => runSandboxedFileOperation(manager, config, "read", path, undefined, signal),
     access: async (path) => {
       await runSandboxedFileOperation(manager, config, "access", path, undefined, signal);
     },

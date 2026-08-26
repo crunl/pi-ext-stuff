@@ -4,7 +4,6 @@
 // machine — no I/O, no host knowledge; the host supplies snapshot contents
 // and performs side effects around these transitions.
 
-
 import type { PermissionsConfig } from "./config.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 import type { PermissionMode } from "./state.ts";
