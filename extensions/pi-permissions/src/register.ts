@@ -473,70 +473,66 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const assertActivationCurrent = (expectedGeneration: number): void => {
     if (!isActivationCurrent(expectedGeneration)) throw new ActivationSupersededError();
   };
-  const activateConfigUnlocked = async (
-    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
-    force = false,
-    targetMode?: ExecutablePermissionMode,
-    candidateOverride?: LoadedPermissionsConfig,
-    expectedGeneration = session.getGeneration(),
+  const loadActivationCandidate = async (
+    candidateOverride: LoadedPermissionsConfig | undefined,
+    expectedGeneration: number,
   ): Promise<LoadedPermissionsConfig> => {
-    // The exclusive coordinator can delay this work until after a session/tree reset.
-    // Check before every cache shortcut so an old tool call cannot borrow the new
-    // session's cached policy and synthesize a compatibility snapshot.
-    assertActivationCurrent(expectedGeneration);
-    const key = configKey(ctx);
-    if (!force && configFailure) throw configFailure;
-    const cachedMode = targetMode ?? (modeRuntime ? modeRuntime.mode : undefined);
-    if (!force && loaded && loadedKey === key) {
-      const effectiveCachedMode = cachedMode ?? "auto";
-      if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
-        return loaded;
-      }
-    }
-    if (!force && activationFailure?.key === key && cachedMode !== "yolo") {
-      throw activationFailure.error;
-    }
-
-    let candidate: LoadedPermissionsConfig;
     try {
-      candidate = candidateOverride ?? (await loadPermissionsConfig(agentDir));
+      if (candidateOverride) return candidateOverride;
+      return await loadPermissionsConfig(agentDir);
     } catch (error: unknown) {
       assertActivationCurrent(expectedGeneration);
       configFailure = error instanceof Error ? error : new Error(String(error));
       throw error;
     }
-    // A session/tree reset can supersede the activation while its candidate config
-    // is loading. Do not let that obsolete activation reset or initialize the
-    // shared sandbox runtime for the new generation.
-    assertActivationCurrent(expectedGeneration);
-    const effectiveMode = cachedMode ?? "auto";
-    const previous = {
-      loaded,
-      loadedKey,
-      baseSandboxConfig,
-      sandboxState,
-    };
-    const candidateSandbox = candidate.config.sandbox.enabled
-      ? createSandboxRuntimeConfig(
-          candidate.config.sandbox,
-          ctx.cwd,
-          defaultProtectedWritePaths(ctx.cwd, agentDir),
-        )
-      : undefined;
+  };
 
-    if (!requiresSandbox(effectiveMode, candidate.config)) {
-      assertActivationCurrent(expectedGeneration);
-      configFailure = undefined;
-      activationFailure = undefined;
-      if (force) invalidatePermissionContext("permission context changed");
-      loaded = candidate;
-      loadedKey = key;
-      baseSandboxConfig = candidateSandbox;
-      sandboxState = { kind: "disabled" };
-      setDefaultStatus(ctx);
-      return candidate;
+  type ActivationPrior = {
+    loaded: LoadedPermissionsConfig | undefined;
+    loadedKey: string | undefined;
+    baseSandboxConfig: SandboxRuntimeConfig | undefined;
+    sandboxState:
+      | { kind: "pending" }
+      | { kind: "disabled" }
+      | { kind: "ready"; profile: LoadedPermissionsConfig["config"]["sandbox"]["profile"] }
+      | { kind: "failed"; error: string };
+  };
+
+  const commitActivation = (
+    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
+    key: string,
+    candidate: LoadedPermissionsConfig,
+    candidateSandbox: SandboxRuntimeConfig | undefined,
+    nextSandboxState: ActivationPrior["sandboxState"],
+    force: boolean,
+  ): LoadedPermissionsConfig => {
+    activationFailure = undefined;
+    configFailure = undefined;
+    if (force) {
+      invalidatePermissionContext("permission context changed");
     }
+    loaded = candidate;
+    loadedKey = key;
+    baseSandboxConfig = candidateSandbox;
+    sandboxState = nextSandboxState;
+    setDefaultStatus(ctx);
+    return candidate;
+  };
 
+  // Install the candidate sandbox for the new generation, rolling back to the
+  // previous activation when initialization fails. Every staleness check sits
+  // exactly where an await could have been superseded by a lifecycle reset; a
+  // rollback still runs for obsolete generations because leaving the sandbox
+  // manager torn down would poison the newer generation.
+  const activateWithSandbox = async (
+    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
+    key: string,
+    candidate: LoadedPermissionsConfig,
+    candidateSandbox: SandboxRuntimeConfig | undefined,
+    previous: ActivationPrior,
+    force: boolean,
+    expectedGeneration: number,
+  ): Promise<LoadedPermissionsConfig> => {
     try {
       await sandboxManager.reset();
       // reset() yields control to lifecycle handlers. A reset/session transition
@@ -578,21 +574,76 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       throw error;
     }
+    return commitActivation(
+      ctx,
+      key,
+      candidate,
+      candidateSandbox,
+      candidateSandbox
+        ? { kind: "ready", profile: candidate.config.sandbox.profile }
+        : { kind: "disabled" },
+      force,
+    );
+  };
 
+  const activateConfigUnlocked = async (
+    ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
+    force = false,
+    targetMode?: ExecutablePermissionMode,
+    candidateOverride?: LoadedPermissionsConfig,
+    expectedGeneration = session.getGeneration(),
+  ): Promise<LoadedPermissionsConfig> => {
+    // The exclusive coordinator can delay this work until after a session/tree reset.
+    // Check before every cache shortcut so an old tool call cannot borrow the new
+    // session's cached policy and synthesize a compatibility snapshot.
     assertActivationCurrent(expectedGeneration);
-    activationFailure = undefined;
-    configFailure = undefined;
-    if (force) {
-      invalidatePermissionContext("permission context changed");
+    const key = configKey(ctx);
+    if (!force && configFailure) throw configFailure;
+    const cachedMode = targetMode ?? (modeRuntime ? modeRuntime.mode : undefined);
+    if (!force && loaded && loadedKey === key) {
+      const effectiveCachedMode = cachedMode ?? "auto";
+      if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
+        return loaded;
+      }
     }
-    loaded = candidate;
-    loadedKey = key;
-    baseSandboxConfig = candidateSandbox;
-    sandboxState = candidateSandbox
-      ? { kind: "ready", profile: candidate.config.sandbox.profile }
-      : { kind: "disabled" };
-    setDefaultStatus(ctx);
-    return candidate;
+    if (!force && activationFailure?.key === key && cachedMode !== "yolo") {
+      throw activationFailure.error;
+    }
+
+    const candidate = await loadActivationCandidate(candidateOverride, expectedGeneration);
+    // A session/tree reset can supersede the activation while its candidate config
+    // is loading. Do not let that obsolete activation reset or initialize the
+    // shared sandbox runtime for the new generation.
+    assertActivationCurrent(expectedGeneration);
+    const effectiveMode = cachedMode ?? "auto";
+    const previous: ActivationPrior = {
+      loaded,
+      loadedKey,
+      baseSandboxConfig,
+      sandboxState,
+    };
+    const candidateSandbox = candidate.config.sandbox.enabled
+      ? createSandboxRuntimeConfig(
+          candidate.config.sandbox,
+          ctx.cwd,
+          defaultProtectedWritePaths(ctx.cwd, agentDir),
+        )
+      : undefined;
+
+    if (!requiresSandbox(effectiveMode, candidate.config)) {
+      assertActivationCurrent(expectedGeneration);
+      return commitActivation(ctx, key, candidate, candidateSandbox, { kind: "disabled" }, force);
+    }
+
+    return activateWithSandbox(
+      ctx,
+      key,
+      candidate,
+      candidateSandbox,
+      previous,
+      force,
+      expectedGeneration,
+    );
   };
 
   const activateConfig = (
