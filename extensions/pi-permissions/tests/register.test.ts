@@ -12,7 +12,7 @@ vi.mock("@earendil-works/pi-ai/compat", () => ({
 
 import { type AutoReviewer, AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
-import type { DefaultDecision } from "../src/default-mode.ts";
+import type { RiskDecision } from "../src/risk-policy.ts";
 import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
 import { registerExtension } from "../src/register.ts";
 
@@ -48,7 +48,7 @@ function harness(
     runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   },
   reviewer?: AutoReviewer,
-  riskEvaluator?: (...args: any[]) => Promise<DefaultDecision>,
+  riskEvaluator?: (...args: any[]) => Promise<RiskDecision>,
   guardianPolicySource?: (context: {
     cwd: string;
     configFingerprint: string;
@@ -181,7 +181,7 @@ async function cycleToMode(
   }
 }
 
-describe("Default mode registration", () => {
+describe("Permission mode registration", () => {
   it("runs YOLO without the optional core execution abort gate", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
@@ -492,7 +492,7 @@ describe("Default mode registration", () => {
   });
 
   it("keeps a hard block when risk evaluation resolves after a future YOLO switch", async () => {
-    const evaluation = deferred<DefaultDecision>();
+    const evaluation = deferred<RiskDecision>();
     const riskEvaluator = vi.fn(async () => evaluation.promise);
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
@@ -524,7 +524,7 @@ describe("Default mode registration", () => {
 
   it("fails closed when risk evaluation rejects after a future YOLO switch", async () => {
     const evaluationStarted = deferred();
-    const riskEvaluator = vi.fn(async (): Promise<DefaultDecision> => {
+    const riskEvaluator = vi.fn(async (): Promise<RiskDecision> => {
       await evaluationStarted.promise;
       throw new Error("stale evaluator failure");
     });
@@ -553,7 +553,7 @@ describe("Default mode registration", () => {
   });
 
   it("fails closed when a risk result returns after its config fingerprint changes", async () => {
-    const evaluation = deferred<DefaultDecision>();
+    const evaluation = deferred<RiskDecision>();
     const riskEvaluator = vi.fn(async () => evaluation.promise);
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir, false, true, {}, undefined, undefined, riskEvaluator);
@@ -628,7 +628,7 @@ describe("Default mode registration", () => {
 
   it("bypasses only with a live YOLO snapshot and fails closed after it ends", async () => {
     const riskEvaluator = vi.fn(
-      async (): Promise<DefaultDecision> => ({
+      async (): Promise<RiskDecision> => ({
         action: "block",
         risk: "HARD",
         reason: "This must never be evaluated in YOLO.",
@@ -1306,11 +1306,10 @@ describe("Default mode registration", () => {
     expect(app.select).not.toHaveBeenCalled();
   });
 
-  it("consumes a Default-to-Auto approval when the execution input changes", async () => {
+  it("burns a guardian-approved grant when the execution input changes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
-    app.select.mockResolvedValueOnce("Allow, switch future approvals to Auto");
-    await app.handlers.get("session_start")?.(
+        await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
@@ -1334,7 +1333,7 @@ describe("Default mode registration", () => {
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions", "Approve for me");
   });
 
-  it("routes only Default prompts through Auto reviewer", async () => {
+  it("routes only risk-evaluated prompts through Auto reviewer", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     await writeFile(globalConfigPath(agentDir), JSON.stringify({ defaultMode: "auto" }));
     const reviewer = {
@@ -1378,7 +1377,7 @@ describe("Default mode registration", () => {
       })),
     };
     const riskEvaluator = vi.fn(
-      async (): Promise<DefaultDecision> => ({
+      async (): Promise<RiskDecision> => ({
         action: "prompt",
         risk: "REVIEW",
         reason: "custom tool requires review",
@@ -4208,7 +4207,7 @@ describe("Default mode registration", () => {
     expect(reviewer.review).toHaveBeenCalledTimes(4);
   });
 
-  it("resets previous Auto denials before an active Default approval switches future approvals to Auto", async () => {
+  it("coerces legacy default persisted state to auto and resets denials", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
     app.context.sessionManager.getBranch = (() => [
@@ -4223,8 +4222,7 @@ describe("Default mode registration", () => {
         },
       },
     ]) as typeof app.context.sessionManager.getBranch;
-    app.select.mockResolvedValueOnce("Allow, switch future approvals to Auto");
-    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+        await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
     await expect(
@@ -4678,7 +4676,7 @@ describe("Default mode registration", () => {
       },
     };
     const riskEvaluator = vi.fn(
-      async (): Promise<DefaultDecision> => ({
+      async (): Promise<RiskDecision> => ({
         action: "allow",
         risk: "LOW",
         reason: "Fresh session read is allowed.",
@@ -4736,7 +4734,7 @@ describe("Default mode registration", () => {
       },
     };
     const riskEvaluator = vi.fn(
-      async (): Promise<DefaultDecision> => ({
+      async (): Promise<RiskDecision> => ({
         action: "allow",
         risk: "LOW",
         reason: "Fresh session read is allowed.",

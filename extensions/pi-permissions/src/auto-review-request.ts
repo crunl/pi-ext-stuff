@@ -1,7 +1,7 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { DefaultDecision } from "./default-mode.ts";
+import type { RiskDecision } from "./risk-policy.ts";
 import type { PermissionsConfig } from "./config.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
 import { renderGuardianSystemPrompt } from "./guardian-policy.ts";
@@ -64,7 +64,7 @@ export interface AutoReviewRequest {
   approvalOverride?: AutoReviewApprovalOverride;
 }
 
-type PromptDecision = Extract<DefaultDecision, { action: "prompt" }>;
+type PromptDecision = Extract<RiskDecision, { action: "prompt" }>;
 
 const MAX_ACTION_CHARACTERS = 16_000;
 

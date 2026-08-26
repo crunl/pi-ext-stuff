@@ -41,7 +41,7 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
-import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
+import { type RiskDecision, evaluateRiskRequest } from "./risk-policy.ts";
 import { GrantLedger, type Grant } from "./grant-ledger.ts";
 import { type EnforcerHost, type GuardedSpec, makeGuardedExecute } from "./enforced-tool.ts";
 import { PermissionSession, type PermissionExecutionSnapshot } from "./permission-session.ts";
@@ -101,7 +101,7 @@ export interface RegisterExtensionOptions {
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
   guardianPolicySource?: GuardianPolicySource;
-  riskEvaluator?: typeof evaluateDefaultRequest;
+  riskEvaluator?: typeof evaluateRiskRequest;
 }
 
 type ExecutablePermissionMode = PermissionMode;
@@ -205,7 +205,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     options.localProxyPortsProvider ?? (() => options.localProxyPorts ?? detectLocalProxyPorts());
   const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
-  const riskEvaluator = options.riskEvaluator ?? evaluateDefaultRequest;
+  const riskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
   const autoReviewer =
     options.autoReviewer ??
     new PiAutoReviewer(undefined, options.guardianSessionManager, undefined, (cwd) =>
@@ -392,7 +392,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const grantApprovedCall = (
     event: ToolCallEvent,
-    decision: Extract<DefaultDecision, { action: "prompt" }>,
+    decision: Extract<RiskDecision, { action: "prompt" }>,
     executionContext: EffectiveExecutionContext,
     cwd: string,
     authority: "user" | "auto-review",
@@ -435,7 +435,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const guardianPermissionContext = (
     event: ToolCallEvent,
-    decision: Extract<DefaultDecision, { action: "prompt" }>,
+    decision: Extract<RiskDecision, { action: "prompt" }>,
     executionContext: EffectiveExecutionContext,
     cwd: string,
   ): GuardianPermissionContext => {
@@ -699,7 +699,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       configFingerprint: fingerprintConfig(activeConfig),
     });
     const spent = grants.consume(id);
-    const currentDecision = await evaluateDefaultRequest(
+    const currentDecision = await evaluateRiskRequest(
       tool,
       input,
       ctx.cwd,
@@ -1166,7 +1166,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (privilegeMaxMode(executionContext) === "yolo") return;
 
       const evaluationEpoch = session.getEpoch();
-      let decision: DefaultDecision;
+      let decision: RiskDecision;
       try {
         decision = await riskEvaluator(
           event.toolName,

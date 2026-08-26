@@ -21,10 +21,9 @@ import {
 } from "./permissions/risk.ts";
 import { rmArgsIncludeForce } from "./permissions/dangerous-commands.ts";
 import { matchRules } from "./permissions/rules.ts";
-import { isKnownSafeCommand } from "./permissions/safe-commands.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 
-export type DefaultDecision =
+export type RiskDecision =
   | { action: "allow"; risk: Risk; reason: string }
   | {
       action: "prompt";
@@ -85,14 +84,14 @@ function pathOperation(operation: string): "read" | "write" | undefined {
   return undefined;
 }
 
-export async function evaluateDefaultRequest(
+export async function evaluateRiskRequest(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
   config: PermissionsConfig,
   protectedWritePaths?: readonly string[],
   approved: SessionApprovals = {},
-): Promise<DefaultDecision> {
+): Promise<RiskDecision> {
   const request = normalizeToolCall(tool, input, cwd);
   // Drop session-approved hosts from the network targets so they no longer
   // escalate; anything still pending keeps the existing checks.
