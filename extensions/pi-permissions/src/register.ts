@@ -1209,7 +1209,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             "pi-permissions: Auto review paused after repeated denials; start a new turn or use Shift+Tab to re-enter Auto",
         };
       }
-      {
+      // Guardian review is the only remaining verdict handler: the human-popup
+      // mode was retired, so every non-allow/block call goes to the configured
+      // reviewer ("Approve for me").
+      const runGuardianReview = async (): Promise<ToolCallEventResult | undefined> => {
         const id = event.toolCallId;
         if (!id) {
           return {
@@ -1376,9 +1379,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             runtime.endReview(id);
           }
         }
-      }
-      // Unreachable: yolo returns before risk evaluation; every other mode is auto.
-      return { block: true, reason: "pi-permissions: action was not approved" };
+      };
+      return runGuardianReview();
     },
   );
 
