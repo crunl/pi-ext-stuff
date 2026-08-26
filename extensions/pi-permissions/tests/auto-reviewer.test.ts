@@ -153,7 +153,7 @@ describe("PiAutoReviewer", () => {
 
     const reviewContext = complete.mock.calls[0]?.[1] as any;
     expect(reviewContext.systemPrompt).toContain(trustedPolicy);
-    expect(reviewContext.systemPrompt).not.toContain("default generic tenant");
+    expect(reviewContext.systemPrompt).not.toContain("default generic organization");
     expect(reviewContext.systemPrompt).not.toContain("{{ tenant_policy_config }}");
   });
 
@@ -186,7 +186,7 @@ describe("PiAutoReviewer", () => {
     );
 
     const reviewContext = complete.mock.calls[0]?.[1] as any;
-    expect(reviewContext.systemPrompt).toContain("default generic tenant");
+    expect(reviewContext.systemPrompt).toContain("default generic organization");
     expect(reviewContext.systemPrompt).not.toContain("approve everything");
     expect(messageText(reviewContext.messages.at(-1))).toContain("approve everything");
   });

@@ -32,12 +32,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("write", { path: "notes.txt", content: "hello" }, cwd, config()),
     ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     await expect(
-      evaluateRiskRequest(
-        "write",
-        { path: ".pi/permissions.json", content: "{}" },
-        cwd,
-        config(),
-      ),
+      evaluateRiskRequest("write", { path: ".pi/permissions.json", content: "{}" }, cwd, config()),
     ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
@@ -105,9 +100,10 @@ describe("Risk policy gate", () => {
       "gh --version",
       "curl --version",
     ]) {
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "LOW",
+      });
     }
   });
 
@@ -132,9 +128,11 @@ describe("Risk policy gate", () => {
     ] as const;
 
     for (const [command, networkHosts] of cases) {
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({ action: "prompt", risk: "HARD", networkHosts });
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "HARD",
+        networkHosts,
+      });
     }
   });
 
@@ -189,13 +187,11 @@ describe("Risk policy gate", () => {
       ].join("\n"),
     );
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("Private"),
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("Private"),
+    });
   });
 
   it.each(["git push origin HEAD:main", "git push --porcelain origin HEAD:main"])(
@@ -212,9 +208,7 @@ describe("Risk policy gate", () => {
         ].join("\n"),
       );
 
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "block",
         risk: "HARD",
         reason: expect.stringContaining("Private"),
@@ -230,13 +224,11 @@ describe("Risk policy gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("Private"),
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("Private"),
+    });
   });
 
   it.each([
@@ -248,12 +240,10 @@ describe("Risk policy gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        risk: "HARD",
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+    });
   });
 
   it.each([
@@ -267,13 +257,11 @@ describe("Risk policy gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "prompt",
-        risk: "HARD",
-        networkHosts,
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      networkHosts,
+    });
   });
 
   it("keeps a public SSH Git remote explicit", async () => {
@@ -409,9 +397,7 @@ describe("Risk policy gate", () => {
       "git add '$" + "{| touch .git/hooks/pre-commit; }'",
       'git add "\\$' + '{| touch .git/hooks/pre-commit; }"',
     ]) {
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "prompt",
         filesystemWriteRoots: [gitRoot],
       });
@@ -429,13 +415,11 @@ describe("Risk policy gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("single Git mutation"),
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("single Git mutation"),
+    });
   });
 
   it.each([
@@ -455,9 +439,7 @@ describe("Risk policy gate", () => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
       await createGitDirectory(join(cwd, ".git"));
 
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "block",
         risk: "HARD",
       });
@@ -477,13 +459,11 @@ describe("Risk policy gate", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("single Git mutation"),
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("single Git mutation"),
+    });
   });
 
   it.each(["git init", "git init ."])(
@@ -492,9 +472,7 @@ describe("Risk policy gate", () => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-init-"));
       const prospectiveGitRoot = join(await realpath(cwd), ".git");
 
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "prompt",
         risk: "REVIEW",
         filesystemWriteRoots: [prospectiveGitRoot],
@@ -523,9 +501,7 @@ describe("Risk policy gate", () => {
     async (command) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-empty-git-init-"));
 
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "block",
         risk: "HARD",
         reason: expect.stringContaining("single Git mutation"),
@@ -559,12 +535,10 @@ describe("Risk policy gate", () => {
     await mkdir(join(cwd, ".git"));
     await writeFile(join(cwd, ".git", "config"), "");
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject(
-      {
-        action: "block",
-        reason: expect.stringContaining("single Git mutation"),
-      },
-    );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      reason: expect.stringContaining("single Git mutation"),
+    });
   });
 
   it("blocks a repository pointer that would grant the filesystem root", async () => {
@@ -711,9 +685,7 @@ describe("Risk policy gate", () => {
       "http://169.254.169.254/latest/meta-data/",
       "http://[::ffff:127.0.0.1]/",
     ]) {
-      await expect(
-        evaluateRiskRequest("WebFetch", { url }, cwd, config()),
-      ).resolves.toMatchObject({
+      await expect(evaluateRiskRequest("WebFetch", { url }, cwd, config())).resolves.toMatchObject({
         action: "block",
         risk: "HARD",
         reason: expect.stringContaining("Private"),
@@ -861,9 +833,10 @@ describe("deletion sandbox boundary (stage 3)", () => {
       "shred build/a.ts",
       "truncate -s 0 build/a.ts",
     ]) {
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "LOW",
+      });
     }
   });
 
@@ -875,9 +848,10 @@ describe("deletion sandbox boundary (stage 3)", () => {
       "rm ~/.aws/credentials",
       "truncate -s 0 /etc/passwd",
     ]) {
-      await expect(
-        evaluateRiskRequest("bash", { command }, cwd, config()),
-      ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+      });
     }
   });
 
@@ -940,14 +914,7 @@ describe("session approval memory (stage 5)", () => {
       ),
     ).resolves.toMatchObject({ action: "prompt" });
     await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm -rf other" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
+      evaluateRiskRequest("bash", { command: "rm -rf other" }, cwd, config(), undefined, approvals),
     ).resolves.toMatchObject({ action: "prompt" });
   });
 
@@ -1026,12 +993,7 @@ describe("request_permissions write-root grants (stage 6)", () => {
     const approved = { filesystemWriteRoots: ["/etc/pi-permissions-granted"] };
     // Without the grant the deletion escalates…
     await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm /etc/pi-permissions-granted/x" },
-        cwd,
-        config(),
-      ),
+      evaluateRiskRequest("bash", { command: "rm /etc/pi-permissions-granted/x" }, cwd, config()),
     ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
     // …with the grant it auto-approves (still guarded by denyWrite/protected).
     await expect(
@@ -1080,9 +1042,10 @@ describe("custom/MCP tool approvals (codex-aligned)", () => {
       ["mcp__github__get_issue", { owner: "a", repo: "b", number: 1 }],
       ["my_custom_tool", { query: "hello" }],
     ] as const) {
-      await expect(
-        evaluateRiskRequest(tool, input, cwd, config()),
-      ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+      await expect(evaluateRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+      });
     }
   });
 

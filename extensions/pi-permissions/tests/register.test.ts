@@ -1309,7 +1309,7 @@ describe("Permission mode registration", () => {
   it("burns a guardian-approved grant when the execution input changes", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-"));
     const app = harness(agentDir);
-        await app.handlers.get("session_start")?.(
+    await app.handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       app.context,
     );
@@ -2257,7 +2257,7 @@ describe("Permission mode registration", () => {
     expect(reviewContext.systemPrompt).toContain(
       `Trusted hook saw config=${fingerprintConfig(DEFAULT_CONFIG)}`,
     );
-    expect(reviewContext.systemPrompt).not.toContain("default generic tenant");
+    expect(reviewContext.systemPrompt).not.toContain("default generic organization");
   });
 
   it("sanitizes cancellation and unknown reviewer failures", async () => {
@@ -4222,7 +4222,7 @@ describe("Permission mode registration", () => {
         },
       },
     ]) as typeof app.context.sessionManager.getBranch;
-        await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
+    await app.handlers.get("session_start")?.({ type: "session_start" }, app.context);
     await app.handlers.get("agent_start")?.({ type: "agent_start" }, app.context);
 
     await expect(
