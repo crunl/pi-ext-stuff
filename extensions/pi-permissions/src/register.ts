@@ -44,6 +44,11 @@ import {
 } from "./config.ts";
 import { type DefaultDecision, evaluateDefaultRequest } from "./default-mode.ts";
 import { GrantLedger, type Grant } from "./grant-ledger.ts";
+import {
+  type EnforcerHost,
+  type GuardedSpec,
+  makeGuardedExecute,
+} from "./enforced-tool.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import { validateGuardianPolicy } from "./guardian-policy.ts";
@@ -274,10 +279,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     | { kind: "disabled" }
     | { kind: "ready"; profile: LoadedPermissionsConfig["config"]["sandbox"]["profile"] }
     | { kind: "failed"; error: string } = { kind: "pending" };
-
-  const revokeApprovedCall = (toolCallId: string | undefined): void => {
-    grants.revoke(toolCallId);
-  };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Approve for me");
@@ -765,29 +766,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return spent;
   };
 
-  const sandboxOperations = (
-    customConfig?: SandboxRuntimeConfig,
-    executionContext?: EffectiveExecutionContext,
-  ): BashOperations => {
-    if (!executionContext?.sandboxReady) {
-      const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
-      throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
-    }
-    return createSandboxedBashOperations(sandboxManager, customConfig);
-  };
+  // Readiness gating happens in the enforced-tool skeleton before these run.
+  const sandboxOperations = (customConfig?: SandboxRuntimeConfig): BashOperations =>
+    createSandboxedBashOperations(sandboxManager, customConfig);
 
   const sandboxFileOperations = (
+    baseConfig: SandboxRuntimeConfig,
     writeRoots: readonly string[],
     signal?: AbortSignal,
-    executionContext?: EffectiveExecutionContext,
   ) => {
-    if (!executionContext?.sandboxReady || !executionContext.baseSandboxConfig) {
-      const reason = sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
-      throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
-    }
     return createSandboxedFileOperations(
       sandboxManager,
-      executionContext.baseSandboxConfig,
+      baseConfig,
       writeRoots,
       signal,
     );
@@ -814,6 +804,164 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ) as unknown as Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">;
   }
 
+  const enforcerHost: EnforcerHost<EffectiveExecutionContext> = {
+    async activate(ctx) {
+      const activationGeneration = modeMutationGeneration;
+      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+      assertActivationCurrent(activationGeneration);
+      const executionSnapshot = ensureExecutionSnapshot(ctx);
+      if (!executionSnapshot) {
+        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+      }
+      const executionContext = getEffectiveExecutionContext(executionSnapshot);
+      if (!executionContext) {
+        throw new Error("pi-permissions: call is no longer authorized; request approval again");
+      }
+      return {
+        privilegeMax: privilegeMaxMode(executionContext),
+        sandboxEnabled: executionContext.config.sandbox.enabled,
+        sandboxReady: executionContext.sandboxReady,
+        baseSandboxConfig: executionContext.baseSandboxConfig,
+        raw: executionContext,
+      };
+    },
+    authorize: (tool, id, input, ctx, snap) =>
+      assertExecutionAuthorized(tool, id, input, ctx, snap),
+    peekGrant: (id) => grants.peek(id),
+    revokeGrant: (id) => grants.revoke(id),
+    coordinate: (lease, signal, run) =>
+      lease === "exclusive"
+        ? sandboxCoordinator.runExclusive(run, signal)
+        : sandboxCoordinator.runShared(run, signal),
+    sandboxUnavailableReason: () =>
+      sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable",
+  };
+
+  // Per-tool concrete types derived from the base factories so strategy
+  // bodies below stay cast-free.
+  type BashInstance = ReturnType<typeof bashToolFactory>;
+  type BashParams = Parameters<BashInstance["execute"]>[1];
+  type BashOnUpdate = Parameters<BashInstance["execute"]>[3];
+  type BashResult = Awaited<ReturnType<BashInstance["execute"]>>;
+  type WriteInstance = ReturnType<typeof createWriteTool>;
+  type WriteParams = Parameters<WriteInstance["execute"]>[1];
+  type WriteOnUpdate = Parameters<WriteInstance["execute"]>[3];
+  type WriteResult = Awaited<ReturnType<WriteInstance["execute"]>>;
+  type EditInstance = ReturnType<typeof createEditTool>;
+  type EditParams = Parameters<EditInstance["execute"]>[1];
+  type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
+  type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
+
+  const bashSpec: GuardedSpec<BashParams, BashOnUpdate, BashResult> = {
+    toolName: "bash",
+    leaseFor: (grant) =>
+      (grant?.networkHosts?.length ?? 0) > 0 ? "exclusive" : "shared",
+    bare: ({ ctx, id, params, signal, onUpdate }) =>
+      bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate),
+    runInLease: async ({
+      id,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+      cwd,
+      lease,
+      baseConfig,
+      grant,
+    }) => {
+      const networkHosts = grant?.networkHosts ?? [];
+      const writeRoots = grant?.writeRoots ?? [];
+
+      const isBareGitInit = shellCommandInitializesCurrentDirectory(params.command);
+      if (isBareGitInit) {
+        // sandbox-runtime hard-denies .git/hooks writes with no config
+        // switch, which makes `git init` structurally impossible inside the
+        // sandbox (it must create the hooks directory). A pure, approved
+        // `git init` only writes sample hooks and never executes them, so it
+        // runs unsandboxed; all other git mutations stay sandboxed.
+        return bashToolFactory(cwd).execute(id, params, signal, onUpdate);
+      }
+
+      let commandConfig =
+        writeRoots.length > 0 ? withAdditionalWriteRoots(baseConfig, writeRoots) : baseConfig;
+      let filteringProxy: HostFilteringProxy | undefined;
+      try {
+        if (networkHosts.length > 0) {
+          if (lease !== "exclusive") {
+            throw new Error(
+              "pi-permissions network escalation requires an exclusive sandbox lease",
+            );
+          }
+          const allowedDomains = [
+            ...new Set([...baseConfig.network.allowedDomains, ...networkHosts]),
+          ];
+          const upstreamProxyPorts = resolveLocalProxyPorts();
+          const hasLocalProxy = Boolean(upstreamProxyPorts.http || upstreamProxyPorts.socks);
+          if (hasLocalProxy) {
+            filteringProxy = await filteringProxyFactory(
+              allowedDomains,
+              upstreamProxyPorts,
+              baseConfig.network.deniedDomains,
+            );
+          }
+          commandConfig = filteringProxy
+            ? withLocalProxy(commandConfig, filteringProxy.ports, allowedDomains)
+            : withAllowedDomains(commandConfig, allowedDomains);
+          await sandboxManager.reset();
+          await sandboxManager.initialize(commandConfig);
+        }
+
+        const sandboxedBash = bashToolFactory(cwd, {
+          operations: sandboxOperations(commandConfig),
+        });
+        return await sandboxedBash.execute(id, params, signal, onUpdate);
+      } finally {
+        if (networkHosts.length > 0) {
+          try {
+            await sandboxManager.reset();
+            await sandboxManager.initialize(baseConfig);
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            sandboxState = { kind: "failed", error: message };
+            if (ctx.hasUI) {
+              ctx.ui.notify(`pi-permissions sandbox 恢复失败：${message}`, "error");
+            }
+          } finally {
+            await filteringProxy?.close();
+          }
+        }
+      }
+    },
+  };
+
+  const writeSpec: GuardedSpec<WriteParams, WriteOnUpdate, WriteResult> = {
+    toolName: "write",
+    leaseFor: () => "shared",
+    bare: ({ ctx, id, params, signal, onUpdate }) =>
+      createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate),
+    runInLease: ({ id, params, signal, onUpdate, ctx, baseConfig, grant }) => {
+      const writeRoots = grant?.writeRoots ?? [];
+      const tool = createWriteTool(ctx.cwd, {
+        operations: sandboxFileOperations(baseConfig, writeRoots, signal),
+      });
+      return tool.execute(id, params, signal, onUpdate);
+    },
+  };
+
+  const editSpec: GuardedSpec<EditParams, EditOnUpdate, EditResult> = {
+    toolName: "edit",
+    leaseFor: () => "shared",
+    bare: ({ ctx, id, params, signal, onUpdate }) =>
+      createEditTool(ctx.cwd).execute(id, params, signal, onUpdate),
+    runInLease: ({ id, params, signal, onUpdate, ctx, baseConfig, grant }) => {
+      const writeRoots = grant?.writeRoots ?? [];
+      const tool = createEditTool(ctx.cwd, {
+        operations: sandboxFileOperations(baseConfig, writeRoots, signal),
+      });
+      return tool.execute(id, params, signal, onUpdate);
+    },
+  };
+
   pi.registerTool({
     ...baseBash,
     ...adoptHostTheme(codexBashToolSpec),
@@ -824,202 +972,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",
-    async execute(id, params, signal, onUpdate, ctx) {
-      if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
-      }
-      const activationGeneration = modeMutationGeneration;
-      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-      assertActivationCurrent(activationGeneration);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
-      }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        throw new Error("pi-permissions: call is no longer authorized; request approval again");
-      }
-      if (privilegeMaxMode(executionContext) === "yolo") {
-        revokeApprovedCall(id);
-        return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
-      }
-      const needsExclusiveLease = grants.needsExclusiveLease(id);
-
-      const executeWithSnapshot = async (allowNetworkEscalation: boolean) => {
-        const grant = await assertExecutionAuthorized(
-          "bash",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-          executionContext,
-        );
-        const networkHosts = grant?.networkHosts ?? [];
-        const writeRoots = grant?.writeRoots ?? [];
-
-        if (!executionContext.config.sandbox.enabled) {
-          return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
-        }
-        const baseConfig = executionContext.baseSandboxConfig;
-        if (!executionContext.sandboxReady || !baseConfig) {
-          const reason =
-            sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable";
-          throw new Error(`pi-permissions sandbox unavailable: ${reason}`);
-        }
-
-        const command = (params as Record<string, unknown>).command;
-        const isBareGitInit =
-          typeof command === "string" && shellCommandInitializesCurrentDirectory(command);
-        if (isBareGitInit) {
-          // sandbox-runtime hard-denies .git/hooks writes with no config
-          // switch, which makes `git init` structurally impossible inside the
-          // sandbox (it must create the hooks directory). A pure, approved
-          // `git init` only writes sample hooks and never executes them, so it
-          // runs unsandboxed; all other git mutations stay sandboxed.
-          return bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate);
-        }
-
-        let commandConfig =
-          writeRoots.length > 0 ? withAdditionalWriteRoots(baseConfig, writeRoots) : baseConfig;
-        let filteringProxy: HostFilteringProxy | undefined;
-        try {
-          if (networkHosts.length > 0) {
-            if (!allowNetworkEscalation) {
-              throw new Error(
-                "pi-permissions network escalation requires an exclusive sandbox lease",
-              );
-            }
-            const allowedDomains = [
-              ...new Set([...baseConfig.network.allowedDomains, ...networkHosts]),
-            ];
-            const upstreamProxyPorts = resolveLocalProxyPorts();
-            const hasLocalProxy = Boolean(upstreamProxyPorts.http || upstreamProxyPorts.socks);
-            if (hasLocalProxy) {
-              filteringProxy = await filteringProxyFactory(
-                allowedDomains,
-                upstreamProxyPorts,
-                baseConfig.network.deniedDomains,
-              );
-            }
-            commandConfig = filteringProxy
-              ? withLocalProxy(commandConfig, filteringProxy.ports, allowedDomains)
-              : withAllowedDomains(commandConfig, allowedDomains);
-            await sandboxManager.reset();
-            await sandboxManager.initialize(commandConfig);
-          }
-
-          const sandboxedBash = bashToolFactory(ctx.cwd, {
-            operations: sandboxOperations(commandConfig, executionContext),
-          });
-          return await sandboxedBash.execute(id, params, signal, onUpdate);
-        } finally {
-          if (networkHosts.length > 0) {
-            try {
-              await sandboxManager.reset();
-              await sandboxManager.initialize(baseConfig);
-            } catch (error: unknown) {
-              const message = error instanceof Error ? error.message : String(error);
-              sandboxState = { kind: "failed", error: message };
-              if (ctx.hasUI) {
-                ctx.ui.notify(`pi-permissions sandbox 恢复失败：${message}`, "error");
-              }
-            } finally {
-              await filteringProxy?.close();
-            }
-          }
-        }
-      };
-
-      if (needsExclusiveLease) {
-        return sandboxCoordinator.runExclusive(() => executeWithSnapshot(true), signal);
-      }
-      return sandboxCoordinator.runShared(() => executeWithSnapshot(false), signal);
-    },
+    execute: makeGuardedExecute(enforcerHost, bashSpec),
   });
 
   pi.registerTool({
     ...baseWrite,
     ...adoptHostTheme(codexWriteToolSpec),
     executionMode: "sequential",
-    async execute(id, params, signal, onUpdate, ctx) {
-      if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
-      }
-      const activationGeneration = modeMutationGeneration;
-      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-      assertActivationCurrent(activationGeneration);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
-      }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        throw new Error("pi-permissions: call is no longer authorized; request approval again");
-      }
-      if (privilegeMaxMode(executionContext) === "yolo") {
-        revokeApprovedCall(id);
-        return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
-      }
-      return sandboxCoordinator.runShared(async () => {
-        const grant = await assertExecutionAuthorized(
-          "write",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-          executionContext,
-        );
-        const writeRoots = grant?.writeRoots ?? [];
-        if (!executionContext.config.sandbox.enabled) {
-          return createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate);
-        }
-        const tool = createWriteTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal, executionContext),
-        });
-        return tool.execute(id, params, signal, onUpdate);
-      }, signal);
-    },
+    execute: makeGuardedExecute(enforcerHost, writeSpec),
   });
 
   pi.registerTool({
     ...baseEdit,
     ...adoptHostTheme(codexEditToolSpec),
     executionMode: "sequential",
-    async execute(id, params, signal, onUpdate, ctx) {
-      if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
-      }
-      const activationGeneration = modeMutationGeneration;
-      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-      assertActivationCurrent(activationGeneration);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
-      }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        throw new Error("pi-permissions: call is no longer authorized; request approval again");
-      }
-      if (privilegeMaxMode(executionContext) === "yolo") {
-        revokeApprovedCall(id);
-        return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
-      }
-      return sandboxCoordinator.runShared(async () => {
-        const grant = await assertExecutionAuthorized(
-          "edit",
-          id,
-          params as Record<string, unknown>,
-          ctx,
-          executionContext,
-        );
-        const writeRoots = grant?.writeRoots ?? [];
-        if (!executionContext.config.sandbox.enabled) {
-          return createEditTool(ctx.cwd).execute(id, params, signal, onUpdate);
-        }
-        const tool = createEditTool(ctx.cwd, {
-          operations: sandboxFileOperations(writeRoots, signal, executionContext),
-        });
-        return tool.execute(id, params, signal, onUpdate);
-      }, signal);
-    },
+    execute: makeGuardedExecute(enforcerHost, editSpec),
   });
 
   pi.registerTool({
@@ -1038,7 +1005,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (_signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true, details: undefined };
+        return {
+          content: [{ type: "text", text: "Operation aborted" }],
+          isError: true,
+          details: undefined,
+        };
       }
       const activationGeneration = modeMutationGeneration;
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
