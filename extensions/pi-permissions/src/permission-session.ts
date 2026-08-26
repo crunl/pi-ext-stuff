@@ -212,6 +212,29 @@ export class PermissionSession {
     }
   }
 
+  // --- mode mutation serialization -----------------------------------------
+
+  private mutationTail: Promise<void> = Promise.resolve();
+
+  /**
+   * Serialize mode mutations so they never interleave. The generation is
+   * captured at enqueue time; an operation superseded by a later bump
+   * resolves to undefined without running.
+   */
+  runModeMutation<T>(operation: (generation: number) => Promise<T>): Promise<T | undefined> {
+    const generation = this.getGeneration();
+    const execute = async (): Promise<T | undefined> => {
+      if (!this.isCurrentGeneration(generation)) return undefined;
+      return operation(generation);
+    };
+    const result = this.mutationTail.then(execute, execute);
+    this.mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   /** Whether a mode transition is still settling (blocks snapshot creation). */
   hasInFlightBarrier(): boolean {
     return this.inFlightBarrier !== undefined;

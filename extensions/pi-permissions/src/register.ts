@@ -222,7 +222,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   const autoApprovalLedger = new AutoApprovalLedger();
-  let modeMutationTail: Promise<void> = Promise.resolve();
   let lastGuardianSelection:
     | {
         guardian: GuardianReviewIdentity;
@@ -259,22 +258,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       label: modeRuntime?.statusLabel ?? "Approve for me",
       severity: modeRuntime?.statusSeverity ?? "warning",
     });
-  };
-
-  const runModeMutation = <T>(
-    operation: (generation: number) => Promise<T>,
-  ): Promise<T | undefined> => {
-    const generation = session.getGeneration();
-    const execute = async (): Promise<T | undefined> => {
-      if (!session.isCurrentGeneration(generation)) return undefined;
-      return operation(generation);
-    };
-    const result = modeMutationTail.then(execute, execute);
-    modeMutationTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
   };
 
   const invalidatePermissionContext = (
@@ -1014,7 +997,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("session_tree", (_event, ctx) => {
     resetBranchPermissionContext("session tree changed");
-    return runModeMutation(async (generation) => {
+    return session.runModeMutation(async (generation) => {
       if (loaded && modeRuntime && session.isCurrentGeneration(generation)) {
         const previousMode = modeRuntime.mode;
         const restoredRuntime = new PermissionModeRuntime(loaded.config, pi.appendEntry.bind(pi));
@@ -1445,7 +1428,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       transition !== undefined && transition !== pendingBeforeTransition;
 
     try {
-      await runModeMutation(async (generation) => {
+      await session.runModeMutation(async (generation) => {
         try {
           if ((await shiftTabAvailability(agentDir)) !== "available") {
             ctx.ui.notify(
@@ -1530,7 +1513,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.registerCommand("permissions", {
     description: "Show the active pi-permissions policy",
     handler: async (_args, ctx) =>
-      runModeMutation(async (generation) => {
+      session.runModeMutation(async (generation) => {
         let candidateLoaded = false;
         try {
           const previousMode = modeRuntime ? modeRuntime.mode : undefined;
