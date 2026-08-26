@@ -15,9 +15,6 @@
     "check": "tsc --noEmit",
     "test": "vitest --run"
   },
-  "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.26"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -27,8 +24,8 @@
     "@earendil-works/pi-ai": "0.84.3",
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
     "typebox": "1.1.38",
+    "typescript": "^5.9.0",
     "vitest": "^4.1.0"
   }
 }
