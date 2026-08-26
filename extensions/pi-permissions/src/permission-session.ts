@@ -4,8 +4,9 @@
 // machine — no I/O, no host knowledge; the host supplies snapshot contents
 // and performs side effects around these transitions.
 
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+
 import type { PermissionsConfig } from "./config.ts";
+import type { SandboxPolicy } from "./sandbox.ts";
 import type { PermissionMode } from "./state.ts";
 
 export interface PendingModeTransition {
@@ -25,7 +26,7 @@ export interface PermissionExecutionSnapshot {
   turnId: number;
   mode: PermissionMode;
   config: PermissionsConfig;
-  baseSandboxConfig?: SandboxRuntimeConfig;
+  baseSandboxConfig?: SandboxPolicy;
   sandboxReady: boolean;
 }
 

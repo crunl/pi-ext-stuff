@@ -4,7 +4,8 @@
 // Step-4 seam: today it adapts register.ts closures, tomorrow it is the
 // PermissionSession instance — the skeleton does not change.
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { SandboxPolicy } from "./sandbox.ts";
+
 import type { Grant } from "./grant-ledger.ts";
 
 export const ABORTED_TOOL_MESSAGE = "Operation aborted";
@@ -14,7 +15,7 @@ export interface ActivationFacts {
   privilegeMax: string;
   sandboxEnabled: boolean;
   sandboxReady: boolean;
-  baseSandboxConfig: SandboxRuntimeConfig | undefined;
+  baseSandboxConfig: SandboxPolicy | undefined;
 }
 
 /** Host adapter. `Snap` stays opaque here; only the host knows its shape. */
@@ -50,7 +51,7 @@ export interface LeasedInvocation<P, OU> {
   cwd: string;
   /** Which lease the substrate actually runs under. */
   lease: "exclusive" | "shared";
-  baseConfig: SandboxRuntimeConfig;
+  baseConfig: SandboxPolicy;
   grant: Grant | undefined;
 }
 

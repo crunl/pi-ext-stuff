@@ -1,5 +1,5 @@
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type {
   BashOperations,
@@ -72,6 +72,7 @@ import {
   withAdditionalWriteRoots,
   withAllowedDomains,
   withLocalProxy,
+  type SandboxPolicy,
 } from "./sandbox.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
@@ -109,7 +110,7 @@ interface EffectiveExecutionContext {
   snapshot: PermissionExecutionSnapshot;
   mode: ExecutablePermissionMode;
   config: PermissionsConfig;
-  baseSandboxConfig?: SandboxRuntimeConfig;
+  baseSandboxConfig?: SandboxPolicy;
   sandboxReady: boolean;
 }
 
@@ -237,7 +238,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
   const turnApprovedWriteRoots: string[] = [];
   const turnApprovedNetworkHosts = new Set<string>();
-  let baseSandboxConfig: SandboxRuntimeConfig | undefined;
+  let baseSandboxConfig: SandboxPolicy | undefined;
   let sandboxState:
     | { kind: "pending" }
     | { kind: "disabled" }
@@ -486,7 +487,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type ActivationPrior = {
     loaded: LoadedPermissionsConfig | undefined;
     loadedKey: string | undefined;
-    baseSandboxConfig: SandboxRuntimeConfig | undefined;
+    baseSandboxConfig: SandboxPolicy | undefined;
     sandboxState:
       | { kind: "pending" }
       | { kind: "disabled" }
@@ -498,7 +499,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     key: string,
     candidate: LoadedPermissionsConfig,
-    candidateSandbox: SandboxRuntimeConfig | undefined,
+    candidateSandbox: SandboxPolicy | undefined,
     nextSandboxState: ActivationPrior["sandboxState"],
     force: boolean,
   ): LoadedPermissionsConfig => {
@@ -524,7 +525,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     key: string,
     candidate: LoadedPermissionsConfig,
-    candidateSandbox: SandboxRuntimeConfig | undefined,
+    candidateSandbox: SandboxPolicy | undefined,
     previous: ActivationPrior,
     force: boolean,
     expectedGeneration: number,
@@ -722,11 +723,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   // Readiness gating happens in the enforced-tool skeleton before these run.
-  const sandboxOperations = (customConfig?: SandboxRuntimeConfig): BashOperations =>
+  const sandboxOperations = (customConfig?: SandboxPolicy): BashOperations =>
     createSandboxedBashOperations(sandboxManager, customConfig);
 
   const sandboxFileOperations = (
-    baseConfig: SandboxRuntimeConfig,
+    baseConfig: SandboxPolicy,
     writeRoots: readonly string[],
     signal?: AbortSignal,
   ) => {

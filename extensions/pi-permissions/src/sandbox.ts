@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type {
   BashOperations,
   EditOperations,
@@ -17,15 +16,40 @@ import {
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
 
+/**
+ * Our own sandbox policy — the complete description of what a sandboxed
+ * process may touch. Deliberately plain data so it can be derived from
+ * grants and rendered into any enforcer's flags.
+ */
+export interface SandboxPolicy {
+  filesystem: {
+    allowWrite: string[];
+    denyRead: string[];
+    denyWrite: string[];
+    /**
+     * srt parity: .git/config writes are hard-denied unless a grant explicitly
+     * opts in (an approved git write root implies git metadata access).
+     */
+    allowGitConfig?: boolean;
+  };
+  network: {
+    allowedDomains: string[];
+    deniedDomains: string[];
+    /** Local filtering-proxy ports injected for egress control (srt parity). */
+    httpProxyPort?: number;
+    socksProxyPort?: number;
+  };
+}
+
 export interface SandboxManagerLike {
   initialize(
-    config: SandboxRuntimeConfig,
+    config: SandboxPolicy,
     askCallback?: (request: { host: string; port: number | undefined }) => Promise<boolean>,
   ): Promise<void>;
   wrapWithSandbox(
     command: string,
     binShell?: string,
-    customConfig?: Partial<SandboxRuntimeConfig>,
+    customConfig?: Partial<SandboxPolicy>,
     abortSignal?: AbortSignal,
   ): Promise<string>;
   reset(): Promise<void>;
@@ -36,7 +60,7 @@ export interface LocalProxyPorts {
   socks?: number;
 }
 
-export function createGuardianReadOnlySandboxConfig(): SandboxRuntimeConfig {
+export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
   return {
     filesystem: {
       allowWrite: [],
@@ -78,10 +102,10 @@ export function detectLocalProxyPorts(
 }
 
 export function withLocalProxy(
-  config: SandboxRuntimeConfig,
+  config: SandboxPolicy,
   ports: LocalProxyPorts,
   allowedDomains: readonly string[] = config.network.allowedDomains,
-): SandboxRuntimeConfig {
+): SandboxPolicy {
   return {
     ...config,
     network: {
@@ -94,9 +118,9 @@ export function withLocalProxy(
 }
 
 export function withAllowedDomains(
-  config: SandboxRuntimeConfig,
+  config: SandboxPolicy,
   allowedDomains: readonly string[],
-): SandboxRuntimeConfig {
+): SandboxPolicy {
   return {
     ...config,
     network: {
@@ -107,9 +131,9 @@ export function withAllowedDomains(
 }
 
 export function withAdditionalWriteRoots(
-  config: SandboxRuntimeConfig,
+  config: SandboxPolicy,
   writeRoots: readonly string[],
-): SandboxRuntimeConfig {
+): SandboxPolicy {
   const roots = [...new Set(writeRoots.flatMap(expandSymlinkAliases))];
   return {
     ...config,
@@ -129,7 +153,7 @@ export function createSandboxRuntimeConfig(
   config: PermissionsConfig["sandbox"],
   cwd: string,
   protectedWritePaths?: readonly string[],
-): SandboxRuntimeConfig {
+): SandboxPolicy {
   const filesystem = createFilesystemPolicy(
     config,
     cwd,
@@ -163,7 +187,7 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
 
 export function createSandboxedBashOperations(
   manager: SandboxManagerLike,
-  customConfig?: SandboxRuntimeConfig,
+  customConfig?: SandboxPolicy,
 ): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -255,6 +279,16 @@ main().catch((error) => {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function parseJsonSafe<T>(raw: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new Error(
+      `malformed sandboxed output: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 export interface SandboxedCommandResult {
@@ -553,7 +587,7 @@ async function resolveReadPath(rawPath, cwd) {
   const resolved = resolveToCwd(rawPath, cwd);
   const variants = [
     resolved,
-    resolved.replace(/ (AM|PM)\./gi, "\u202f$1."),
+    resolved.replace(/ (AM|PM)./gi, "\u202f$1."),
     resolved.normalize("NFD"),
     resolved.replace(/'/g, "\u2019"),
     resolved.normalize("NFD").replace(/'/g, "\u2019"),
@@ -736,9 +770,9 @@ export function createSandboxedGuardianFileOperations(
   const exists = async (path: string): Promise<boolean> =>
     (await runFileOperation("exists", path)).toString("utf8") === "true";
   const stat = async (path: string): Promise<{ isDirectory: boolean }> =>
-    JSON.parse((await runFileOperation("stat", path)).toString("utf8")) as {
-      isDirectory: boolean;
-    };
+    parseJsonSafe<{ isDirectory: boolean }>(
+      (await runFileOperation("stat", path)).toString("utf8"),
+    );
 
   return {
     read: {
@@ -759,7 +793,7 @@ export function createSandboxedGuardianFileOperations(
         return { isDirectory: () => details.isDirectory };
       },
       readdir: async (path) =>
-        JSON.parse((await runFileOperation("readdir", path)).toString("utf8")) as string[],
+        parseJsonSafe<string[]>((await runFileOperation("readdir", path)).toString("utf8")),
     },
     resolveReadPath: (path, cwd) =>
       runFileOperation("resolveReadPath", path, [Buffer.from(cwd).toString("base64")])
@@ -771,17 +805,17 @@ export function createSandboxedGuardianFileOperations(
         limit === undefined ? "" : String(limit),
         String(maxLines),
         String(maxBytes),
-      ]).then((output) => JSON.parse(output.toString("utf8")) as SandboxedGuardianTextRead),
+      ]).then((output) => parseJsonSafe<SandboxedGuardianTextRead>(output.toString("utf8"))),
     listDirectory: (path, limit) =>
       runFileOperation("list", path, [String(limit)])
-        .then((output) => JSON.parse(output.toString("utf8")) as SandboxedGuardianDirectoryListing),
+        .then((output) => parseJsonSafe<SandboxedGuardianDirectoryListing>(output.toString("utf8"))),
   };
 }
 
 function fileOperationConfig(
-  baseConfig: SandboxRuntimeConfig,
+  baseConfig: SandboxPolicy,
   writePaths: readonly string[],
-): SandboxRuntimeConfig {
+): SandboxPolicy {
   return {
     ...baseConfig,
     filesystem: {
@@ -796,7 +830,7 @@ function fileOperationConfig(
 
 async function runSandboxedFileOperation(
   manager: SandboxManagerLike,
-  config: SandboxRuntimeConfig,
+  config: SandboxPolicy,
   operation: "mkdir" | "write" | "read" | "access",
   path: string,
   input?: string,
@@ -856,7 +890,7 @@ export type SandboxedFileOperations = WriteOperations & EditOperations;
 
 export function createSandboxedFileOperations(
   manager: SandboxManagerLike,
-  baseConfig: SandboxRuntimeConfig,
+  baseConfig: SandboxPolicy,
   writePaths: readonly string[] = [],
   signal?: AbortSignal,
 ): SandboxedFileOperations {
