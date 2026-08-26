@@ -20,9 +20,7 @@ export interface ActivationFacts {
 /** Host adapter. `Snap` stays opaque here; only the host knows its shape. */
 export interface EnforcerHost<Snap> {
   /** Settle pending config/mode mutations, then read the turn snapshot. */
-  activate(
-    ctx: ExtensionContext,
-  ): Promise<ActivationFacts & { raw: Snap }>;
+  activate(ctx: ExtensionContext): Promise<ActivationFacts & { raw: Snap }>;
   /** TOCTOU re-validation; consumes the single-use grant on any attempt. */
   authorize(
     tool: string,
@@ -110,9 +108,7 @@ export function makeGuardedExecute<P extends Record<string, unknown>, OU, R>(
         return spec.bare({ id, params, signal, onUpdate, ctx });
       }
       if (!snap.sandboxReady || !snap.baseSandboxConfig) {
-        throw new Error(
-          `pi-permissions sandbox unavailable: ${host.sandboxUnavailableReason()}`,
-        );
+        throw new Error(`pi-permissions sandbox unavailable: ${host.sandboxUnavailableReason()}`);
       }
       return spec.runInLease({
         id,

@@ -49,6 +49,11 @@ import {
   type GuardedSpec,
   makeGuardedExecute,
 } from "./enforced-tool.ts";
+import { PermissionSession } from "./permission-session.ts";
+import type {
+  ModeTransitionBarrier,
+  PendingModeTransition,
+} from "./permission-session.ts";
 import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
 import { validateGuardianPolicy } from "./guardian-policy.ts";
@@ -123,18 +128,6 @@ interface EffectiveExecutionContext {
   config: PermissionsConfig;
   baseSandboxConfig?: SandboxRuntimeConfig;
   sandboxReady: boolean;
-}
-
-interface PendingModeTransition {
-  id: number;
-  turnId: number;
-  phase: "active";
-}
-
-interface ModeTransitionBarrier {
-  id: number;
-  completion: Promise<boolean>;
-  settle(readyForNextTurn: boolean): void;
 }
 
 class ActivationSupersededError extends Error {
@@ -243,9 +236,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   const autoApprovalLedger = new AutoApprovalLedger();
-  const reviewControllers = new Map<string, AbortController>();
   let modeMutationTail: Promise<void> = Promise.resolve();
-  let modeMutationGeneration = 0;
   let lastGuardianSelection:
     | {
         guardian: GuardianReviewIdentity;
@@ -254,6 +245,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     | undefined;
   const grants = new GrantLedger();
+  const session = new PermissionSession();
   // Session-scoped approval memory (codex ExecpolicyAmendment/ApprovedForSession/
   // NetworkPolicyAmendment equivalents). Cleared on extension reload (a new
   // session), never persisted.
@@ -263,16 +255,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
   const turnApprovedWriteRoots: string[] = [];
   const turnApprovedNetworkHosts = new Set<string>();
-  let permissionContextEpoch = 0;
   let permissionTurnPhase: PermissionTurnPhase = "idle";
   let permissionTurnId = 0;
   let activeTurnId: number | undefined;
   let lifecycleEventsObserved = false;
   let activeExecutionSnapshot: PermissionExecutionSnapshot | undefined;
-  let pendingModeTransition: PendingModeTransition | undefined;
-  let modeTransitionId = 0;
-  let modeTransitionBarrierId = 0;
-  let inFlightModeTransition: ModeTransitionBarrier | undefined;
   let baseSandboxConfig: SandboxRuntimeConfig | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -295,9 +282,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const runModeMutation = <T>(
     operation: (generation: number) => Promise<T>,
   ): Promise<T | undefined> => {
-    const generation = modeMutationGeneration;
+    const generation = session.getGeneration();
     const execute = async (): Promise<T | undefined> => {
-      if (generation !== modeMutationGeneration) return undefined;
+      if (!session.isCurrentGeneration(generation)) return undefined;
       return operation(generation);
     };
     const result = modeMutationTail.then(execute, execute);
@@ -312,11 +299,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     reason: string,
     { preserveAutoDenials = false }: { preserveAutoDenials?: boolean } = {},
   ): void => {
-    permissionContextEpoch += 1;
-    for (const controller of reviewControllers.values()) {
+    session.bumpEpoch();
+    for (const controller of session.reviewControllers.values()) {
       controller.abort(new Error(reason));
     }
-    reviewControllers.clear();
+    session.reviewControllers.clear();
     modeRuntime?.cancelReviews();
     grants.clear();
     if (preserveAutoDenials) {
@@ -328,14 +315,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   const resetBranchPermissionContext = (reason: string): void => {
-    modeMutationGeneration += 1;
+    session.bumpGeneration();
     cancelInFlightModeTransition();
     guardianTranscript = [];
     inputFallbackTranscript = [];
     permissionTurnPhase = "idle";
     activeTurnId = undefined;
     activeExecutionSnapshot = undefined;
-    pendingModeTransition = undefined;
+    session.clearPending();
     invalidatePermissionContext(reason);
   };
 
@@ -378,7 +365,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): PermissionExecutionSnapshot | undefined => {
     const current = currentExecutionSnapshot();
     if (current) return current;
-    if (inFlightModeTransition) return undefined;
+    if (session.hasInFlightBarrier()) return undefined;
     if (permissionTurnPhase === "between" || lifecycleEventsObserved) return undefined;
 
     // Direct tool-hook invocations without lifecycle events are themselves proof of active work.
@@ -413,64 +400,31 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // turn snapshot (and its approvals) mid-switch; agent_end/agent_settled
   // clears it, letting the next turn start on the new mode.
   const scheduleModeTransition = (): PendingModeTransition | undefined => {
-    if (permissionTurnPhase !== "active" || activeTurnId === undefined) return undefined;
-    if (pendingModeTransition) {
-      // Keep the first token as the owner for this turn. The lifecycle boundary
-      // that owns it is the only path that may clear it.
-      return pendingModeTransition;
-    }
-    pendingModeTransition = { id: ++modeTransitionId, turnId: activeTurnId, phase: "active" };
-    return pendingModeTransition;
+    return session.schedulePendingTransition({ phase: permissionTurnPhase, activeTurnId });
   };
 
   const clearPendingModeTransition = (turnId: number): void => {
-    if (pendingModeTransition?.turnId === turnId) pendingModeTransition = undefined;
+    session.clearPendingForTurn(turnId);
   };
 
   const isPendingModeTransitionCurrent = (transition: PendingModeTransition): boolean =>
-    pendingModeTransition?.id === transition.id &&
-    permissionTurnPhase === transition.phase &&
-    activeTurnId === transition.turnId;
+    session.isPendingCurrent(transition, { phase: permissionTurnPhase, activeTurnId });
 
   const clearPendingModeTransitionIfCurrent = (transition: PendingModeTransition): void => {
-    if (pendingModeTransition?.id === transition.id) pendingModeTransition = undefined;
+    session.clearPendingIfCurrent(transition);
   };
 
-  const createModeTransitionBarrier = (): ModeTransitionBarrier => {
-    let resolveCompletion!: (readyForNextTurn: boolean) => void;
-    let settled = false;
-    const barrier: ModeTransitionBarrier = {
-      id: ++modeTransitionBarrierId,
-      completion: new Promise<boolean>((resolvePromise) => {
-        resolveCompletion = resolvePromise;
-      }),
-      settle(readyForNextTurn) {
-        if (settled) return;
-        settled = true;
-        resolveCompletion(readyForNextTurn);
-      },
-    };
-    inFlightModeTransition = barrier;
-    return barrier;
-  };
+  const createModeTransitionBarrier = (): ModeTransitionBarrier => session.createBarrier();
 
   const settleModeTransitionBarrier = (
     barrier: ModeTransitionBarrier,
     readyForNextTurn: boolean,
   ): void => {
-    barrier.settle(readyForNextTurn);
-    if (readyForNextTurn && inFlightModeTransition?.id === barrier.id) {
-      inFlightModeTransition = undefined;
-    }
+    session.settleBarrier(barrier, readyForNextTurn);
   };
 
   const cancelInFlightModeTransition = (): void => {
-    const barrier = inFlightModeTransition;
-    if (!barrier) return;
-    barrier.settle(false);
-    if (inFlightModeTransition?.id === barrier.id) {
-      inFlightModeTransition = undefined;
-    }
+    session.cancelInFlightBarrier();
   };
 
   const finishPermissionTurn = (reason: string): void => {
@@ -561,7 +515,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
   const isActivationCurrent = (expectedGeneration: number): boolean =>
-    expectedGeneration === modeMutationGeneration;
+    session.isCurrentGeneration(expectedGeneration);
   const assertActivationCurrent = (expectedGeneration: number): void => {
     if (!isActivationCurrent(expectedGeneration)) throw new ActivationSupersededError();
   };
@@ -570,7 +524,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     force = false,
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
-    expectedGeneration = modeMutationGeneration,
+    expectedGeneration = session.getGeneration(),
   ): Promise<LoadedPermissionsConfig> => {
     // The exclusive coordinator can delay this work until after a session/tree reset.
     // Check before every cache shortcut so an old tool call cannot borrow the new
@@ -692,7 +646,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     force = false,
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
-    expectedGeneration = modeMutationGeneration,
+    expectedGeneration = session.getGeneration(),
   ): Promise<LoadedPermissionsConfig> =>
     targetMode === "yolo"
       ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration)
@@ -731,7 +685,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
     }
     const activeConfig = executionContext.config;
-    const executionEpoch = permissionContextEpoch;
+    const executionEpoch = session.getEpoch();
     // Single-use burn happens up front, matching fail-closed semantics: any
     // execution attempt (even one that fails validation) consumes the grant,
     // so a tampered input can never be retried against a stale approval.
@@ -755,7 +709,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       },
     );
     if (
-      permissionContextEpoch !== executionEpoch ||
+      !session.epochMatches(executionEpoch) ||
       !getEffectiveExecutionContext(executionContext.snapshot)
     ) {
       throw new Error("pi-permissions: call is no longer authorized; request approval again");
@@ -775,12 +729,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     writeRoots: readonly string[],
     signal?: AbortSignal,
   ) => {
-    return createSandboxedFileOperations(
-      sandboxManager,
-      baseConfig,
-      writeRoots,
-      signal,
-    );
+    return createSandboxedFileOperations(sandboxManager, baseConfig, writeRoots, signal);
   };
 
   /**
@@ -806,7 +755,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const enforcerHost: EnforcerHost<EffectiveExecutionContext> = {
     async activate(ctx) {
-      const activationGeneration = modeMutationGeneration;
+      const activationGeneration = session.getGeneration();
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
       const executionSnapshot = ensureExecutionSnapshot(ctx);
@@ -854,21 +803,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const bashSpec: GuardedSpec<BashParams, BashOnUpdate, BashResult> = {
     toolName: "bash",
-    leaseFor: (grant) =>
-      (grant?.networkHosts?.length ?? 0) > 0 ? "exclusive" : "shared",
+    leaseFor: (grant) => ((grant?.networkHosts?.length ?? 0) > 0 ? "exclusive" : "shared"),
     bare: ({ ctx, id, params, signal, onUpdate }) =>
       bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate),
-    runInLease: async ({
-      id,
-      params,
-      signal,
-      onUpdate,
-      ctx,
-      cwd,
-      lease,
-      baseConfig,
-      grant,
-    }) => {
+    runInLease: async ({ id, params, signal, onUpdate, ctx, cwd, lease, baseConfig, grant }) => {
       const networkHosts = grant?.networkHosts ?? [];
       const writeRoots = grant?.writeRoots ?? [];
 
@@ -1011,7 +949,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           details: undefined,
         };
       }
-      const activationGeneration = modeMutationGeneration;
+      const activationGeneration = session.getGeneration();
       await activateConfig(ctx, false, undefined, undefined, activationGeneration);
       assertActivationCurrent(activationGeneration);
       const executionSnapshot = ensureExecutionSnapshot(ctx);
@@ -1065,12 +1003,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
     lifecycleEventsObserved = false;
-    const generation = modeMutationGeneration;
+    const generation = session.getGeneration();
     let candidate: LoadedPermissionsConfig;
     try {
       candidate = await loadPermissionsConfig(agentDir);
     } catch (error: unknown) {
-      if (generation !== modeMutationGeneration) return;
+      if (!session.isCurrentGeneration(generation)) return;
       configFailure = error instanceof Error ? error : new Error(String(error));
       reportConfigError(ctx, error);
       return;
@@ -1080,11 +1018,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       restoredRuntime.restore(ctx.sessionManager.getBranch(), candidate.config);
       const restoredMode = restoredRuntime.mode;
       await activateConfig(ctx, true, restoredMode, candidate, generation);
-      if (generation !== modeMutationGeneration) return;
+      if (!session.isCurrentGeneration(generation)) return;
       modeRuntime = restoredRuntime;
       setDefaultStatus(ctx);
       if ((await shiftTabAvailability(agentDir)) === "reserved" && !shortcutWarningShown) {
-        if (generation !== modeMutationGeneration) return;
+        if (!session.isCurrentGeneration(generation)) return;
         shortcutWarningShown = true;
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -1094,7 +1032,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         }
       }
     } catch (error: unknown) {
-      if (generation !== modeMutationGeneration) return;
+      if (!session.isCurrentGeneration(generation)) return;
       reportConfigError(ctx, error);
     }
   });
@@ -1106,7 +1044,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_tree", (_event, ctx) => {
     resetBranchPermissionContext("session tree changed");
     return runModeMutation(async (generation) => {
-      if (loaded && modeRuntime && generation === modeMutationGeneration) {
+      if (loaded && modeRuntime && session.isCurrentGeneration(generation)) {
         const previousMode = modeRuntime.mode;
         const restoredRuntime = new PermissionModeRuntime(loaded.config, pi.appendEntry.bind(pi));
         restoredRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
@@ -1114,11 +1052,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         try {
           await activateConfig(ctx, false, restoredMode, loaded, generation);
         } catch (error: unknown) {
-          if (generation !== modeMutationGeneration) return;
+          if (!session.isCurrentGeneration(generation)) return;
           reportConfigError(ctx, error);
           return;
         }
-        if (generation !== modeMutationGeneration) return;
+        if (!session.isCurrentGeneration(generation)) return;
         modeRuntime = restoredRuntime;
         setDefaultStatus(ctx);
         if (previousMode === "yolo" && restoredMode !== "yolo" && !ctx.isIdle()) ctx.abort();
@@ -1127,12 +1065,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("session_shutdown", async () => {
-    modeMutationGeneration += 1;
+    session.bumpGeneration();
     cancelInFlightModeTransition();
     permissionTurnPhase = "idle";
     activeTurnId = undefined;
     activeExecutionSnapshot = undefined;
-    pendingModeTransition = undefined;
+    session.clearPending();
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
@@ -1163,10 +1101,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const startingTurnId = permissionTurnId;
     activeTurnId = startingTurnId;
     permissionTurnPhase = "active";
-    const transition = inFlightModeTransition;
+    const transition = session.getInFlightBarrier();
     if (transition) {
       const readyForNextTurn = await transition.completion;
-      if (inFlightModeTransition?.id === transition.id) inFlightModeTransition = undefined;
+      session.clearInFlightIfCurrent(transition);
       if (
         !readyForNextTurn ||
         permissionTurnPhase !== "active" ||
@@ -1197,7 +1135,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         grants.revoke(event.toolCallId);
       }
       let result: LoadedPermissionsConfig;
-      const activationGeneration = modeMutationGeneration;
+      const activationGeneration = session.getGeneration();
       try {
         result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
         assertActivationCurrent(activationGeneration);
@@ -1229,7 +1167,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       if (privilegeMaxMode(executionContext) === "yolo") return;
 
-      const evaluationEpoch = permissionContextEpoch;
+      const evaluationEpoch = session.getEpoch();
       let decision: DefaultDecision;
       try {
         decision = await riskEvaluator(
@@ -1245,7 +1183,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         );
       } catch (error: unknown) {
         if (
-          permissionContextEpoch !== evaluationEpoch ||
+          !session.epochMatches(evaluationEpoch) ||
           !getEffectiveExecutionContext(executionContext.snapshot)
         ) {
           return {
@@ -1258,7 +1196,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
 
       if (
-        permissionContextEpoch !== evaluationEpoch ||
+        !session.epochMatches(evaluationEpoch) ||
         !getEffectiveExecutionContext(executionContext.snapshot)
       ) {
         return {
@@ -1290,7 +1228,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return { block: true, reason: "pi-permissions: duplicate Auto review" };
         }
         const reviewController = new AbortController();
-        reviewControllers.set(id, reviewController);
+        session.reviewControllers.set(id, reviewController);
         const reviewSignal = ctx.signal
           ? AbortSignal.any([ctx.signal, reviewController.signal])
           : reviewController.signal;
@@ -1440,8 +1378,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             reason: "pi-permissions Auto review failed closed; the action was not run",
           };
         } finally {
-          if (reviewControllers.get(id) === reviewController) {
-            reviewControllers.delete(id);
+          if (session.reviewControllers.get(id) === reviewController) {
+            session.reviewControllers.delete(id);
             runtime.endReview(id);
           }
         }
@@ -1455,7 +1393,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     description: "Approve one exact retry of a recent Auto-review denial",
     handler: async (_args, ctx) => {
       let result: LoadedPermissionsConfig;
-      const activationGeneration = modeMutationGeneration;
+      const activationGeneration = session.getGeneration();
       try {
         result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
         assertActivationCurrent(activationGeneration);
@@ -1523,7 +1461,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // agent_start must observe it even if agent_end runs before this mutation's
     // first asynchronous continuation.
     const transitionBarrier = createModeTransitionBarrier();
-    const pendingBeforeTransition = pendingModeTransition;
+    const pendingBeforeTransition = session.getPendingTransition();
     const modeBeforeCycle = modeRuntime ? modeRuntime.mode : "auto";
     // The switch itself runs immediately either way. For upgrades
     // (default->auto, *->yolo) that is the whole story: privilegeMaxMode routes
@@ -1557,7 +1495,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           let runtime = modeRuntime;
           if (!runtime) {
             const initial = await activateConfig(ctx, false, undefined, undefined, generation);
-            if (generation !== modeMutationGeneration) {
+            if (!session.isCurrentGeneration(generation)) {
               settleModeTransitionBarrier(transitionBarrier, false);
               return;
             }
@@ -1576,7 +1514,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             undefined,
             generation,
           );
-          if (generation !== modeMutationGeneration) {
+          if (!session.isCurrentGeneration(generation)) {
             if (transition && transitionOwnsPendingState) {
               clearPendingModeTransitionIfCurrent(transition);
             }
@@ -1603,7 +1541,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             clearPendingModeTransitionIfCurrent(transition);
           }
           settleModeTransitionBarrier(transitionBarrier, false);
-          if (generation !== modeMutationGeneration) return;
+          if (!session.isCurrentGeneration(generation)) return;
           const message = error instanceof Error ? error.message : String(error);
           setDefaultStatus(ctx);
           ctx.ui.notify(`pi-permissions mode 切换失败：${message}`, "error");
@@ -1651,7 +1589,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
           const targetMode = (restoredRuntime ?? modeRuntime)?.mode ?? "auto";
           const result = await activateConfig(ctx, true, targetMode, candidate, generation);
-          if (generation !== modeMutationGeneration) return;
+          if (!session.isCurrentGeneration(generation)) return;
           if (restoredRuntime) modeRuntime = restoredRuntime;
           const config = result.config;
           const runtime = ensureModeRuntime(config);
@@ -1694,7 +1632,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             "info",
           );
         } catch (error: unknown) {
-          if (generation !== modeMutationGeneration) return;
+          if (!session.isCurrentGeneration(generation)) return;
           if (!candidateLoaded) {
             configFailure = error instanceof Error ? error : new Error(String(error));
           }
