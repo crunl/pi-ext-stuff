@@ -1,7 +1,6 @@
-import { dirname, isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import type {
-  BashOperations,
   ExtensionAPI,
   ExtensionContext,
   ToolCallEvent,
@@ -14,26 +13,23 @@ import {
   createWriteTool,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Type, type TSchema } from "typebox";
+import { type TSchema, Type } from "typebox";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
-import { AutoApprovalLedger } from "./auto-approval-ledger.ts";
-import { reviewAutoPrompt } from "./auto-policy.ts";
 import {
-  AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-  buildAutoReviewRequest,
-  type GuardianPermissionContext,
-} from "./auto-review-request.ts";
-import {
-  type AutoReviewer,
-  AutoReviewerFailure,
-  type GuardianReviewIdentity,
-  PiAutoReviewer,
-} from "./auto-reviewer.ts";
+  type AdmissionPlan,
+  createApproveForMeEngine,
+  type Invocation,
+  type RuntimeOutcome,
+  type TurnHandle,
+  type TurnSnapshot,
+} from "./approve-for-me-engine.ts";
+import { AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX } from "./auto-review-request.ts";
+import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   fingerprintConfig,
   fingerprintValue,
@@ -41,13 +37,7 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
-import { type RiskDecision, evaluateRiskRequest } from "./risk-policy.ts";
-import { GrantLedger, type Grant } from "./grant-ledger.ts";
-import { type EnforcerHost, type GuardedSpec, makeGuardedExecute } from "./enforced-tool.ts";
-import { PermissionSession, type PermissionExecutionSnapshot } from "./permission-session.ts";
-import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
-import { defaultProtectedWritePaths } from "./filesystem-policy.ts";
-import { type HostFilteringProxy, startHostFilteringProxy } from "./filtering-proxy.ts";
+import { defaultProtectedWritePaths, resolvePolicyPath } from "./filesystem-policy.ts";
 import { validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createSandboxedGuardianToolRuntime } from "./guardian-tools.ts";
@@ -57,23 +47,22 @@ import {
   type GuardianTranscriptEntry,
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
+import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
+import { type PermissionExecutionSnapshot, PermissionSession } from "./permission-session.ts";
 import {
-  parseCommandSegments,
-  shellCommandInitializesCurrentDirectory,
-} from "./permissions/risk.ts";
+  admissionPlanFromRiskDecision,
+  createPiGuardianAdapter,
+  type PiGuardianReviewContext,
+} from "./pi-approve-for-me-adapters.ts";
+import { evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
+import { NonoSandboxManager } from "./sandbox/nono-enforcer.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
   createSandboxRuntimeConfig,
-  detectLocalProxyPorts,
-  type LocalProxyPorts,
   type SandboxManagerLike,
-  withAdditionalWriteRoots,
-  withAllowedDomains,
-  withLocalProxy,
   type SandboxPolicy,
 } from "./sandbox.ts";
-import { NonoSandboxManager } from "./sandbox/nono-enforcer.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
@@ -84,19 +73,10 @@ export type GuardianPolicySource = (context: {
   configFingerprint: string;
 }) => string | undefined;
 
-export type LocalProxyPortsProvider = () => LocalProxyPorts;
-
 export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
   bashToolFactory?: typeof createBashTool;
-  localProxyPorts?: LocalProxyPorts;
-  localProxyPortsProvider?: LocalProxyPortsProvider;
-  filteringProxyFactory?: (
-    approvedHosts: readonly string[],
-    upstream: LocalProxyPorts,
-    deniedHosts?: readonly string[],
-  ) => Promise<HostFilteringProxy>;
   sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
@@ -201,9 +181,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
-  const resolveLocalProxyPorts: LocalProxyPortsProvider =
-    options.localProxyPortsProvider ?? (() => options.localProxyPorts ?? detectLocalProxyPorts());
-  const filteringProxyFactory = options.filteringProxyFactory ?? startHostFilteringProxy;
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const riskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
   const autoReviewer =
@@ -219,7 +196,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let shortcutWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
-  const autoApprovalLedger = new AutoApprovalLedger();
+  let currentEngineContext: ExtensionContext | undefined;
+  let enginePauseNotified = false;
+  const engine = createApproveForMeEngine<PiGuardianReviewContext>({
+    guardian: createPiGuardianAdapter(autoReviewer),
+    onAutoStateChange: (state) => {
+      modeRuntime?.applyAutoState(state);
+      if (!state.paused || enginePauseNotified) return;
+      const ctx = currentEngineContext;
+      if (!ctx) return;
+      enginePauseNotified = true;
+      if (ctx.hasUI) {
+        ctx.ui.notify("Auto-review interrupted this turn after repeated denials", "warning");
+      }
+      ctx.abort();
+    },
+  });
+  let engineTurn: TurnHandle<PiGuardianReviewContext> | undefined;
   let lastGuardianSelection:
     | {
         guardian: GuardianReviewIdentity;
@@ -227,17 +220,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         configFingerprint: string;
       }
     | undefined;
-  const grants = new GrantLedger();
   const session = new PermissionSession();
-  // Session-scoped approval memory (codex ExecpolicyAmendment/ApprovedForSession/
-  // NetworkPolicyAmendment equivalents). Cleared on extension reload (a new
-  // session), never persisted.
-  const approvedCommandPrefixes: string[][] = [];
-  const approvedNetworkHostsSession = new Set<string>();
-  const sessionApprovedWriteRoots: string[] = [];
-  // Turn-scoped grants from request_permissions (codex PermissionGrantScope::Turn).
-  const turnApprovedWriteRoots: string[] = [];
-  const turnApprovedNetworkHosts = new Set<string>();
   let baseSandboxConfig: SandboxPolicy | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -257,26 +240,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
   };
 
-  const invalidatePermissionContext = (
-    reason: string,
-    { preserveAutoDenials = false }: { preserveAutoDenials?: boolean } = {},
-  ): void => {
-    session.bumpEpoch();
-    for (const controller of session.reviewControllers.values()) {
-      controller.abort(new Error(reason));
-    }
-    session.reviewControllers.clear();
-    modeRuntime?.cancelReviews();
-    grants.clear();
-    if (preserveAutoDenials) {
-      autoApprovalLedger.clearPendingOverride();
-    } else {
-      autoApprovalLedger.clear();
-    }
+  const invalidateEngineContext = (reason: string): void => {
+    engine.invalidate(reason);
+    engineTurn = undefined;
+    currentEngineContext = undefined;
+    enginePauseNotified = false;
+  };
+
+  const invalidatePermissionContext = (_reason: string): void => {
     autoReviewer.invalidateSession();
   };
 
   const resetBranchPermissionContext = (reason: string): void => {
+    invalidateEngineContext(reason);
     session.bumpGeneration();
     cancelInFlightModeTransition();
     guardianTranscript = [];
@@ -284,15 +260,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.resetTurn();
     session.clearPending();
     invalidatePermissionContext(reason);
-  };
-
-  const oneCallWriteRoots = (event: ToolCallEvent, cwd: string): string[] => {
-    const tool = event.toolName.toLowerCase();
-    if (tool !== "write" && tool !== "edit") return [];
-    const input = event.input as Record<string, unknown>;
-    if (typeof input.path !== "string") return [];
-    const path = isAbsolute(input.path) ? resolve(input.path) : resolve(cwd, input.path);
-    return [path, dirname(path)];
   };
 
   const ensureModeRuntime = (config: PermissionsConfig): PermissionModeRuntime => {
@@ -349,10 +316,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   // The pending token never defers activation: the mode switch runs immediately
-  // inside runModeMutation (activateConfig + runtime.activate). The token only
-  // stops the mutation's invalidatePermissionContext from tearing down the
-  // turn snapshot (and its approvals) mid-switch; agent_end/agent_settled
-  // clears it, letting the next turn start on the new mode.
+  // inside runModeMutation (activateConfig + runtime.activate). During an
+  // active turn it prevents the mutation from invalidating the current
+  // execution snapshot; agent_end/agent_settled clears it so the next turn
+  // captures the new mode.
   const scheduleModeTransition = (): PendingModeTransition | undefined => {
     return session.schedulePendingTransition();
   };
@@ -383,49 +350,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const finishPermissionTurn = (reason: string): void => {
     const closingTurnId = session.finishTurn();
+    closeEngineTurn(reason);
     if (closingTurnId === undefined) return;
     if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
-    turnApprovedWriteRoots.length = 0;
-    turnApprovedNetworkHosts.clear();
-    invalidatePermissionContext(reason, { preserveAutoDenials: true });
-  };
-
-  const grantApprovedCall = (
-    event: ToolCallEvent,
-    decision: Extract<RiskDecision, { action: "prompt" }>,
-    executionContext: EffectiveExecutionContext,
-    cwd: string,
-    authority: "user" | "auto-review",
-    rememberSession = false,
-  ): void => {
-    if (!event.toolCallId) return;
-    grants.mint({
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input,
-      authority,
-      configFingerprint: fingerprintConfig(executionContext.config),
-      cwd: resolve(cwd),
-      networkHosts: decision.networkHosts,
-      writeRoots: [
-        ...new Set([...oneCallWriteRoots(event, cwd), ...(decision.filesystemWriteRoots ?? [])]),
-      ],
-    });
-    if (rememberSession) {
-      // Remember user-approved commands and hosts for the rest of the session
-      // (mirrors codex execpolicy amendments and network rules, exposed as the
-      // "Allow and Remember" approval choice). Auto-review and one-off
-      // approvals are not remembered.
-      const command = (event.input as Record<string, unknown>).command;
-      if (typeof command === "string") {
-        for (const segment of parseCommandSegments(command)) {
-          approvedCommandPrefixes.push([segment.executable, ...segment.args]);
-        }
-      }
-      for (const host of decision.networkHosts ?? []) {
-        approvedNetworkHostsSession.add(host);
-      }
-    }
+    invalidatePermissionContext(reason);
   };
 
   const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
@@ -433,35 +361,49 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       guardianTranscript.length > 0 ? guardianTranscript : inputFallbackTranscript,
     );
 
-  const guardianPermissionContext = (
-    event: ToolCallEvent,
-    decision: Extract<RiskDecision, { action: "prompt" }>,
-    executionContext: EffectiveExecutionContext,
-    cwd: string,
-  ): GuardianPermissionContext => {
-    const sandboxConfig =
-      executionContext.baseSandboxConfig ??
-      createSandboxRuntimeConfig(
-        executionContext.config.sandbox,
-        cwd,
-        defaultProtectedWritePaths(cwd, agentDir),
-      );
-    return {
-      sandboxProfile: executionContext.config.sandbox.profile,
-      sandboxEnabled: executionContext.config.sandbox.enabled,
-      filesystemWriteRoots: [
-        ...new Set([
-          ...sandboxConfig.filesystem.allowWrite,
-          ...oneCallWriteRoots(event, cwd),
-          ...(decision.filesystemWriteRoots ?? []),
-        ]),
-      ],
-      filesystemDenyRead: [...sandboxConfig.filesystem.denyRead],
-      filesystemDenyWrite: [...sandboxConfig.filesystem.denyWrite],
-      requestedNetworkHosts: [...(decision.networkHosts ?? [])],
-      allowedNetworkHosts: [...sandboxConfig.network.allowedDomains],
-      deniedNetworkHosts: [...sandboxConfig.network.deniedDomains],
+  const stableSessionId = (
+    ctx: Pick<ExtensionContext, "sessionManager">,
+    generation: number,
+  ): string => {
+    const sessionManager = ctx.sessionManager as unknown as
+      | { getSessionId?: () => unknown }
+      | undefined;
+    if (typeof sessionManager?.getSessionId === "function") {
+      try {
+        const sessionId = sessionManager.getSessionId();
+        if (typeof sessionId === "string" && sessionId.trim().length > 0) return sessionId;
+      } catch {
+        // Compatibility test doubles may expose a throwing session manager.
+      }
+    }
+    return `pi-permissions-session-${generation}`;
+  };
+
+  const beginEngineTurn = (
+    ctx: ExtensionContext,
+    executionSnapshot: PermissionExecutionSnapshot,
+  ): void => {
+    const snapshot: TurnSnapshot = {
+      sessionId: stableSessionId(ctx, session.getGeneration()),
+      turnId: executionSnapshot.turnId,
+      mode: executionSnapshot.mode,
+      cwd: resolve(ctx.cwd),
+      configFingerprint: fingerprintConfig(executionSnapshot.config),
+      baseSandboxPolicy: executionSnapshot.baseSandboxConfig,
+      sandboxReady: executionSnapshot.sandboxReady,
+      transcript: currentGuardianTranscriptSnapshot(),
     };
+    currentEngineContext = ctx;
+    enginePauseNotified = false;
+    engineTurn = engine.beginTurn(snapshot);
+  };
+
+  const closeEngineTurn = (reason: string): void => {
+    const turn = engineTurn;
+    engineTurn = undefined;
+    currentEngineContext = undefined;
+    enginePauseNotified = false;
+    turn?.close(reason);
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
@@ -506,6 +448,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     activationFailure = undefined;
     configFailure = undefined;
     if (force) {
+      invalidateEngineContext("permission context changed");
       invalidatePermissionContext("permission context changed");
     }
     loaded = candidate;
@@ -661,79 +604,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     yolo: 2,
   };
 
-  // Privilege-max mode: the runtime mode applies when it is not a downgrade
-  // relative to the turn-snapshot mode; otherwise the snapshot mode keeps
-  // routing until agent_end invalidates it. So upgrades (auto->yolo) take
-  // effect for the next call immediately, while downgrades only land at the
-  // idle boundary. One formula expresses both semantics, so review branches,
-  // approval records, and execute gating all read the same value.
-  const privilegeMaxMode = (
-    executionContext: EffectiveExecutionContext,
-  ): ExecutablePermissionMode => {
-    const runtimeMode = modeRuntime?.mode ?? "auto";
-    return MODE_RANK[executionContext.mode] > MODE_RANK[runtimeMode]
-      ? executionContext.mode
-      : runtimeMode;
-  };
-
-  const assertExecutionAuthorized = async (
-    tool: string,
-    id: string,
-    input: Record<string, unknown>,
-    ctx: Pick<ExtensionContext, "cwd">,
-    executionContext: EffectiveExecutionContext,
-  ): Promise<Grant | undefined> => {
-    if (!getEffectiveExecutionContext(executionContext.snapshot)) {
-      throw new Error("pi-permissions: call is no longer authorized; request approval again");
-    }
-    const activeConfig = executionContext.config;
-    const executionEpoch = session.getEpoch();
-    // Single-use burn happens up front, matching fail-closed semantics: any
-    // execution attempt (even one that fails validation) consumes the grant,
-    // so a tampered input can never be retried against a stale approval.
-    const peeked = grants.peek(id);
-    const approved = grants.verify(peeked, {
-      tool,
-      input,
-      cwd: resolve(ctx.cwd),
-      configFingerprint: fingerprintConfig(activeConfig),
-    });
-    const spent = grants.consume(id);
-    const currentDecision = await evaluateRiskRequest(
-      tool,
-      input,
-      ctx.cwd,
-      activeConfig,
-      defaultProtectedWritePaths(ctx.cwd, agentDir),
-      {
-        commandPrefixes: approvedCommandPrefixes,
-        networkHosts: approvedNetworkHostsSession,
-      },
-    );
-    if (
-      !session.epochMatches(executionEpoch) ||
-      !getEffectiveExecutionContext(executionContext.snapshot)
-    ) {
-      throw new Error("pi-permissions: call is no longer authorized; request approval again");
-    }
-    if (currentDecision.action === "block" || (currentDecision.action === "prompt" && !approved)) {
-      throw new Error("pi-permissions: call is no longer authorized; request approval again");
-    }
-    return spent;
-  };
-
-  // Readiness gating happens in the enforced-tool skeleton before these run.
-  const sandboxOperations = (customConfig?: SandboxPolicy): BashOperations =>
-    createSandboxedBashOperations(sandboxManager, customConfig);
-
-  const sandboxFileOperations = (
-    baseConfig: SandboxPolicy,
-    writeRoots: readonly string[],
-    signal?: AbortSignal,
-  ) => {
-    return createSandboxedFileOperations(sandboxManager, baseConfig, writeRoots, signal);
-  };
-
   /**
    * pi-core resolves its own physical copy of @earendil-works/pi-coding-agent,
    * so Codex-rendered tools reference a nominal Theme twin (private-field
@@ -755,39 +625,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ) as unknown as Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">;
   }
 
-  const enforcerHost: EnforcerHost<EffectiveExecutionContext> = {
-    async activate(ctx) {
-      const activationGeneration = session.getGeneration();
-      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-      assertActivationCurrent(activationGeneration);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        throw new Error("pi-permissions: active permission turn snapshot is unavailable");
-      }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        throw new Error("pi-permissions: call is no longer authorized; request approval again");
-      }
-      return {
-        privilegeMax: privilegeMaxMode(executionContext),
-        sandboxEnabled: executionContext.config.sandbox.enabled,
-        sandboxReady: executionContext.sandboxReady,
-        baseSandboxConfig: executionContext.baseSandboxConfig,
-        raw: executionContext,
-      };
-    },
-    authorize: (tool, id, input, ctx, snap) =>
-      assertExecutionAuthorized(tool, id, input, ctx, snap),
-    peekGrant: (id) => grants.peek(id),
-    revokeGrant: (id) => grants.revoke(id),
-    coordinate: (lease, signal, run) =>
-      lease === "exclusive"
-        ? sandboxCoordinator.runExclusive(run, signal)
-        : sandboxCoordinator.runShared(run, signal),
-    sandboxUnavailableReason: () =>
-      sandboxState.kind === "failed" ? sandboxState.error : "sandbox is unavailable",
-  };
-
   // Per-tool concrete types derived from the base factories so strategy
   // bodies below stay cast-free.
   type BashInstance = ReturnType<typeof bashToolFactory>;
@@ -803,111 +640,429 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
   type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
 
-  const bashSpec: GuardedSpec<BashParams, BashOnUpdate, BashResult> = {
-    toolName: "bash",
-    leaseFor: (grant) => ((grant?.networkHosts?.length ?? 0) > 0 ? "exclusive" : "shared"),
-    bare: ({ ctx, id, params, signal, onUpdate }) =>
-      bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate),
-    runInLease: async ({ id, params, signal, onUpdate, ctx, cwd, lease, baseConfig, grant }) => {
-      const networkHosts = grant?.networkHosts ?? [];
-      const writeRoots = grant?.writeRoots ?? [];
+  interface PreparedEngineExecution {
+    executionSnapshot: PermissionExecutionSnapshot;
+    executionContext: EffectiveExecutionContext;
+    turn: TurnHandle<PiGuardianReviewContext>;
+  }
 
-      const isBareGitInit = shellCommandInitializesCurrentDirectory(params.command);
-      if (isBareGitInit) {
-        // sandbox-runtime hard-denies .git/hooks writes with no config
-        // switch, which makes `git init` structurally impossible inside the
-        // sandbox (it must create the hooks directory). A pure, approved
-        // `git init` only writes sample hooks and never executes them, so it
-        // runs unsandboxed; all other git mutations stay sandboxed.
-        return bashToolFactory(cwd).execute(id, params, signal, onUpdate);
+  const prepareEngineExecution = async (
+    ctx: ExtensionContext,
+  ): Promise<PreparedEngineExecution> => {
+    const activationGeneration = session.getGeneration();
+    await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+    assertActivationCurrent(activationGeneration);
+    const executionSnapshot = ensureExecutionSnapshot(ctx);
+    if (!executionSnapshot) {
+      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+    }
+    const executionContext = getEffectiveExecutionContext(executionSnapshot);
+    if (!executionContext) {
+      throw new Error("pi-permissions: active permission turn snapshot is unavailable");
+    }
+    if (!engineTurn) beginEngineTurn(ctx, executionSnapshot);
+    const turn = engineTurn;
+    if (!turn) throw new Error("pi-permissions: Engine turn is unavailable");
+    return { executionSnapshot, executionContext, turn };
+  };
+
+  const createPiGuardianReviewContext = (
+    event: ToolCallEvent,
+    executionContext: EffectiveExecutionContext,
+    ctx: ExtensionContext,
+  ): PiGuardianReviewContext => {
+    const configFingerprint = fingerprintConfig(executionContext.config);
+    const guardianCwd = resolve(ctx.cwd);
+    const suppliedGuardianPolicy = options.guardianPolicySource?.({
+      cwd: guardianCwd,
+      configFingerprint,
+    });
+    const guardianPolicy =
+      suppliedGuardianPolicy === undefined
+        ? undefined
+        : validateGuardianPolicy(suppliedGuardianPolicy);
+    return {
+      event,
+      autoReviewerContext: {
+        modelRegistry: ctx.modelRegistry,
+        activeModel: ctx.model,
+        reviewer: executionContext.config.reviewer,
+        guardianPolicy,
+        guardianSession: {
+          cwd: guardianCwd,
+          configFingerprint,
+        },
+      },
+      sandboxProfile: executionContext.config.sandbox.profile,
+      sandboxEnabled: executionContext.config.sandbox.enabled,
+      baseSandboxPolicy: executionContext.baseSandboxConfig,
+      onResult: (result) => {
+        const guardian = result.guardian;
+        if (guardian) {
+          lastGuardianSelection = {
+            guardian,
+            cwd: guardianCwd,
+            configFingerprint,
+          };
+        }
+        if (
+          guardian?.source === "active-fallback" &&
+          guardian.fallbackNotice === "configured-reviewer-unavailable" &&
+          ctx.hasUI
+        ) {
+          const preferred = executionContext.config.reviewer;
+          const noticeKey = fingerprintValue({
+            configFingerprint,
+            preferredProvider: preferred?.provider,
+            preferredModel: preferred?.model,
+            activeProvider: guardian.provider,
+            activeModel: guardian.model,
+          });
+          if (!guardianFallbackNoticeKeys.has(noticeKey)) {
+            guardianFallbackNoticeKeys.add(noticeKey);
+            ctx.ui.notify("Guardian preferred model unavailable; using active model", "warning");
+          }
+        }
+      },
+    };
+  };
+
+  const executeEngineInvocation = async <T>(
+    turn: TurnHandle<PiGuardianReviewContext>,
+    invocation: Invocation<T, PiGuardianReviewContext>,
+  ): Promise<T> => {
+    const outcome = await turn.execute(invocation);
+    if (outcome.kind === "completed") return outcome.value;
+    if (outcome.kind === "failed") throw outcome.error;
+    const error = new Error(`pi-permissions: ${outcome.error.code}: ${outcome.error.reason}`);
+    Object.assign(error, outcome.error);
+    throw error;
+  };
+
+  const executeHostToolWithEngine = async (
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): Promise<ToolCallEventResult | undefined> => {
+    if (!event.toolCallId) {
+      return {
+        block: true,
+        reason: "pi-permissions: host admission requires a tool-call ID",
+      };
+    }
+
+    let prepared: PreparedEngineExecution;
+    try {
+      prepared = await prepareEngineExecution(ctx);
+    } catch (error: unknown) {
+      if (isActivationSupersededError(error)) {
+        return {
+          block: true,
+          reason:
+            "pi-permissions: permission activation was superseded; retry in the active session",
+        };
       }
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "pi-permissions: active permission turn snapshot is unavailable") {
+        return { block: true, reason: message };
+      }
+      return reportConfigError(ctx, error);
+    }
 
-      let commandConfig =
-        writeRoots.length > 0 ? withAdditionalWriteRoots(baseConfig, writeRoots) : baseConfig;
-      let filteringProxy: HostFilteringProxy | undefined;
+    const { executionSnapshot, executionContext, turn } = prepared;
+    const requested = [
+      { kind: "external-tool" as const, provider: "pi-host", name: event.toolName },
+    ];
+    let admission: AdmissionPlan;
+    if (executionSnapshot.mode === "yolo") {
+      admission = { kind: "allow", requested };
+    } else {
+      let decision: RiskDecision;
       try {
-        if (networkHosts.length > 0) {
-          if (lease !== "exclusive") {
-            throw new Error(
-              "pi-permissions network escalation requires an exclusive sandbox lease",
-            );
-          }
-          const allowedDomains = [
-            ...new Set([...baseConfig.network.allowedDomains, ...networkHosts]),
-          ];
-          const upstreamProxyPorts = resolveLocalProxyPorts();
-          const hasLocalProxy = Boolean(upstreamProxyPorts.http || upstreamProxyPorts.socks);
-          if (hasLocalProxy) {
-            // Live path, not legacy residue: when the host itself routes
-            // egress through an upstream proxy (HTTPS_PROXY/ALL_PROXY),
-            // nono's supervised proxy cannot reach the network directly.
-            // Our filtering proxy then fronts that upstream with the same
-            // domain allowlist; without one, allow_domain domains go via
-            // nono's supervised proxy instead. Retirement was evaluated
-            // 2026-08 and rejected for exactly this case.
-            filteringProxy = await filteringProxyFactory(
-              allowedDomains,
-              upstreamProxyPorts,
-              baseConfig.network.deniedDomains,
-            );
-          }
-          commandConfig = filteringProxy
-            ? withLocalProxy(commandConfig, filteringProxy.ports, allowedDomains)
-            : withAllowedDomains(commandConfig, allowedDomains);
-          await sandboxManager.reset();
-          await sandboxManager.initialize(commandConfig);
-        }
-
-        const sandboxedBash = bashToolFactory(cwd, {
-          operations: sandboxOperations(commandConfig),
-        });
-        return await sandboxedBash.execute(id, params, signal, onUpdate);
-      } finally {
-        if (networkHosts.length > 0) {
-          try {
-            await sandboxManager.reset();
-            await sandboxManager.initialize(baseConfig);
-          } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            sandboxState = { kind: "failed", error: message };
-            if (ctx.hasUI) {
-              ctx.ui.notify(`pi-permissions sandbox 恢复失败：${message}`, "error");
-            }
-          } finally {
-            await filteringProxy?.close();
-          }
-        }
+        decision = await riskEvaluator(
+          event.toolName,
+          event.input as Record<string, unknown>,
+          ctx.cwd,
+          executionContext.config,
+          defaultProtectedWritePaths(ctx.cwd, agentDir),
+        );
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { block: true, reason: `pi-permissions failed closed: ${message}` };
       }
-    },
+      const riskAdmission = admissionPlanFromRiskDecision(decision);
+      if (riskAdmission.kind === "deny") {
+        admission = riskAdmission;
+      } else if (riskAdmission.kind === "allow") {
+        admission = { kind: "allow", requested };
+      } else {
+        admission = {
+          kind: "review",
+          requested,
+          review: "action",
+          reason: riskAdmission.reason,
+          ...(riskAdmission.summary === undefined ? {} : { summary: riskAdmission.summary }),
+        };
+      }
+    }
+
+    const invocation: Invocation<undefined, PiGuardianReviewContext> = {
+      ownership: "host-admission",
+      call: {
+        id: event.toolCallId,
+        tool: event.toolName,
+        input: event.input,
+        cwd: resolve(ctx.cwd),
+      },
+      admission,
+      reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
+      signal: ctx.signal,
+      executor: async (): Promise<RuntimeOutcome<undefined>> => ({
+        kind: "completed",
+        value: undefined,
+      }),
+    };
+    const outcome = await turn.execute(invocation);
+    if (outcome.kind === "completed") return;
+    if (outcome.kind === "failed") {
+      const message =
+        outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+      return { block: true, reason: `pi-permissions failed closed: ${message}` };
+    }
+    const reason =
+      outcome.error.code === "review-denied"
+        ? `${outcome.error.reason} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`
+        : `pi-permissions ${outcome.error.code}: ${outcome.error.reason}`;
+    return { block: true, reason };
   };
 
-  const writeSpec: GuardedSpec<WriteParams, WriteOnUpdate, WriteResult> = {
-    toolName: "write",
-    leaseFor: () => "shared",
-    bare: ({ ctx, id, params, signal, onUpdate }) =>
-      createWriteTool(ctx.cwd).execute(id, params, signal, onUpdate),
-    runInLease: ({ id, params, signal, onUpdate, ctx, baseConfig, grant }) => {
-      const writeRoots = grant?.writeRoots ?? [];
-      const tool = createWriteTool(ctx.cwd, {
-        operations: sandboxFileOperations(baseConfig, writeRoots, signal),
-      });
-      return tool.execute(id, params, signal, onUpdate);
-    },
+  const executeBashWithEngine = async (
+    id: string,
+    params: BashParams,
+    signal: AbortSignal | undefined,
+    onUpdate: BashOnUpdate,
+    ctx: ExtensionContext,
+  ): Promise<BashResult> => {
+    const { executionSnapshot, executionContext, turn } = await prepareEngineExecution(ctx);
+
+    const admission =
+      executionSnapshot.mode === "yolo"
+        ? { kind: "allow" as const }
+        : admissionPlanFromRiskDecision(
+            await riskEvaluator(
+              "bash",
+              params as Record<string, unknown>,
+              ctx.cwd,
+              executionContext.config,
+              defaultProtectedWritePaths(ctx.cwd, agentDir),
+            ),
+          );
+    const event: ToolCallEvent = {
+      type: "tool_call",
+      toolCallId: id,
+      toolName: "bash",
+      input: params,
+    };
+    const reviewContext = createPiGuardianReviewContext(event, executionContext, ctx);
+    const invocation: Invocation<BashResult, PiGuardianReviewContext> = {
+      ownership: "sandbox-owned",
+      call: {
+        id,
+        tool: "bash",
+        input: params,
+        cwd: resolve(ctx.cwd),
+      },
+      admission,
+      reviewContext,
+      signal,
+      executor: async ({ lease }): Promise<RuntimeOutcome<BashResult>> => {
+        try {
+          if (lease.mode === "unrestricted") {
+            return {
+              kind: "completed",
+              value: await bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate),
+            };
+          }
+          if (lease.mode !== "sandboxed" || !lease.policy) {
+            return {
+              kind: "failed",
+              error: new Error("pi-permissions: sandbox policy is unavailable"),
+            };
+          }
+          const sandboxedBash = bashToolFactory(ctx.cwd, {
+            operations: createSandboxedBashOperations(sandboxManager, lease.policy),
+          });
+          return {
+            kind: "completed",
+            value: await sandboxCoordinator.runShared(
+              () => sandboxedBash.execute(id, params, signal, onUpdate),
+              signal,
+            ),
+          };
+        } catch (error: unknown) {
+          return { kind: "failed", error };
+        }
+      },
+    };
+    return executeEngineInvocation(turn, invocation);
   };
 
-  const editSpec: GuardedSpec<EditParams, EditOnUpdate, EditResult> = {
-    toolName: "edit",
-    leaseFor: () => "shared",
-    bare: ({ ctx, id, params, signal, onUpdate }) =>
-      createEditTool(ctx.cwd).execute(id, params, signal, onUpdate),
-    runInLease: ({ id, params, signal, onUpdate, ctx, baseConfig, grant }) => {
-      const writeRoots = grant?.writeRoots ?? [];
-      const tool = createEditTool(ctx.cwd, {
-        operations: sandboxFileOperations(baseConfig, writeRoots, signal),
-      });
-      return tool.execute(id, params, signal, onUpdate);
-    },
+  type FileMutationParams = WriteParams | EditParams;
+
+  const admissionForFileMutation = async (
+    tool: "write" | "edit",
+    params: FileMutationParams,
+    executionSnapshot: PermissionExecutionSnapshot,
+    executionContext: EffectiveExecutionContext,
+    ctx: ExtensionContext,
+  ): Promise<AdmissionPlan> => {
+    if (executionSnapshot.mode === "yolo") return { kind: "allow" };
+    const decision = await riskEvaluator(
+      tool,
+      params as Record<string, unknown>,
+      ctx.cwd,
+      executionContext.config,
+      defaultProtectedWritePaths(ctx.cwd, agentDir),
+    );
+    const admission = admissionPlanFromRiskDecision(decision);
+    if (decision.action !== "prompt" || admission.kind !== "review") return admission;
+    const target = resolvePolicyPath(params.path, ctx.cwd);
+    const requested = admission.requested ?? [];
+    if (
+      requested.some(
+        (request) =>
+          request.kind === "filesystem" &&
+          request.operation === "write" &&
+          resolvePolicyPath(request.path, ctx.cwd) === target,
+      )
+    ) {
+      return admission;
+    }
+    return {
+      ...admission,
+      requested: [...requested, { kind: "filesystem", operation: "write", path: target }],
+    };
   };
+
+  type FileMutationExecutor<P, U, R> = (
+    id: string,
+    params: P,
+    signal: AbortSignal | undefined,
+    onUpdate: U,
+    ctx: ExtensionContext,
+  ) => Promise<R>;
+
+  const executeFileMutationWithEngine = async <P extends FileMutationParams, U, R>(
+    tool: "write" | "edit",
+    id: string,
+    params: P,
+    signal: AbortSignal | undefined,
+    onUpdate: U,
+    ctx: ExtensionContext,
+    bare: FileMutationExecutor<P, U, R>,
+    sandboxed: (
+      policy: SandboxPolicy,
+      id: string,
+      params: P,
+      signal: AbortSignal | undefined,
+      onUpdate: U,
+      ctx: ExtensionContext,
+    ) => Promise<R>,
+  ): Promise<R> => {
+    const { executionSnapshot, executionContext, turn } = await prepareEngineExecution(ctx);
+    const admission = await admissionForFileMutation(
+      tool,
+      params,
+      executionSnapshot,
+      executionContext,
+      ctx,
+    );
+    const event = {
+      type: "tool_call" as const,
+      toolCallId: id,
+      toolName: tool,
+      input: params,
+    } as ToolCallEvent;
+    const invocation: Invocation<R, PiGuardianReviewContext> = {
+      ownership: "sandbox-owned",
+      call: {
+        id,
+        tool,
+        input: params,
+        cwd: resolve(ctx.cwd),
+      },
+      admission,
+      reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
+      signal,
+      executor: async ({ lease }): Promise<RuntimeOutcome<R>> => {
+        try {
+          if (lease.mode === "unrestricted") {
+            return { kind: "completed", value: await bare(id, params, signal, onUpdate, ctx) };
+          }
+          if (lease.mode !== "sandboxed" || !lease.policy) {
+            return {
+              kind: "failed",
+              error: new Error("pi-permissions: sandbox policy is unavailable"),
+            };
+          }
+          const policy = lease.policy;
+          return {
+            kind: "completed",
+            value: await sandboxCoordinator.runShared(
+              () => sandboxed(policy, id, params, signal, onUpdate, ctx),
+              signal,
+            ),
+          };
+        } catch (error: unknown) {
+          return { kind: "failed", error };
+        }
+      },
+    };
+    return executeEngineInvocation(turn, invocation);
+  };
+
+  const executeWriteWithEngine = (
+    id: string,
+    params: WriteParams,
+    signal: AbortSignal | undefined,
+    onUpdate: WriteOnUpdate,
+    ctx: ExtensionContext,
+  ): Promise<WriteResult> =>
+    executeFileMutationWithEngine(
+      "write",
+      id,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+      (callId, callParams, callSignal, callOnUpdate, callCtx) =>
+        createWriteTool(callCtx.cwd).execute(callId, callParams, callSignal, callOnUpdate),
+      (policy, callId, callParams, callSignal, callOnUpdate, callCtx) =>
+        createWriteTool(callCtx.cwd, {
+          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal),
+        }).execute(callId, callParams, callSignal, callOnUpdate),
+    );
+
+  const executeEditWithEngine = (
+    id: string,
+    params: EditParams,
+    signal: AbortSignal | undefined,
+    onUpdate: EditOnUpdate,
+    ctx: ExtensionContext,
+  ): Promise<EditResult> =>
+    executeFileMutationWithEngine(
+      "edit",
+      id,
+      params,
+      signal,
+      onUpdate,
+      ctx,
+      (callId, callParams, callSignal, callOnUpdate, callCtx) =>
+        createEditTool(callCtx.cwd).execute(callId, callParams, callSignal, callOnUpdate),
+      (policy, callId, callParams, callSignal, callOnUpdate, callCtx) =>
+        createEditTool(callCtx.cwd, {
+          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal),
+        }).execute(callId, callParams, callSignal, callOnUpdate),
+    );
 
   pi.registerTool({
     ...baseBash,
@@ -919,28 +1074,28 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",
-    execute: makeGuardedExecute(enforcerHost, bashSpec),
+    execute: executeBashWithEngine,
   });
 
   pi.registerTool({
     ...baseWrite,
     ...adoptHostTheme(codexWriteToolSpec),
     executionMode: "sequential",
-    execute: makeGuardedExecute(enforcerHost, writeSpec),
+    execute: executeWriteWithEngine,
   });
 
   pi.registerTool({
     ...baseEdit,
     ...adoptHostTheme(codexEditToolSpec),
     executionMode: "sequential",
-    execute: makeGuardedExecute(enforcerHost, editSpec),
+    execute: executeEditWithEngine,
   });
 
   pi.registerTool({
     name: "request_permissions",
     label: "request_permissions",
     description:
-      "Explicitly request one-off (turn) or session-scoped filesystem write or network permissions from the user. Each request is approved or denied by the user; approved hosts/roots are honored without further prompts within the granted scope.",
+      "Explicitly request one-off (turn) or session-scoped filesystem write or network permissions. In Approve for me, Guardian approves or denies the exact amendment; approved hosts/roots are then honored without further review within the granted scope.",
     promptSnippet: "Request explicit filesystem/network permissions",
     parameters: Type.Object({
       reason: Type.Optional(Type.String()),
@@ -950,54 +1105,111 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }),
       scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      if (_signal?.aborted) {
-        return {
-          content: [{ type: "text", text: "Operation aborted" }],
-          isError: true,
-          details: undefined,
-        };
+    async execute(id, params, _signal, _onUpdate, ctx) {
+      const { executionContext, turn } = await prepareEngineExecution(ctx);
+      const decision = await riskEvaluator(
+        "request_permissions",
+        params as Record<string, unknown>,
+        ctx.cwd,
+        executionContext.config,
+        defaultProtectedWritePaths(ctx.cwd, agentDir),
+      );
+      if (decision.action === "block") {
+        const error = new Error(`pi-permissions: policy-denied: ${decision.reason}`);
+        Object.assign(error, { code: "policy-denied", reason: decision.reason });
+        throw error;
       }
-      const activationGeneration = session.getGeneration();
-      await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-      assertActivationCurrent(activationGeneration);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        throw new Error("pi-permissions: request_permissions requires an active permission turn");
+      const admission = admissionPlanFromRiskDecision(decision);
+      if (admission.kind !== "review" || !admission.requested || admission.requested.length === 0) {
+        const error = new Error(
+          "pi-permissions: policy-denied: request_permissions requires a non-empty capability request",
+        );
+        Object.assign(error, {
+          code: "policy-denied",
+          reason: "request_permissions requires a non-empty capability request",
+        });
+        throw error;
       }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        throw new Error("pi-permissions: request_permissions requires an active permission turn");
-      }
-      const scope = params.scope ?? "turn";
-      const hosts = params.permissions?.network?.hosts ?? [];
-      const roots = params.permissions?.filesystem?.write ?? [];
-      const detail = [
-        `pi-permissions · request_permissions (${scope})`,
-        params.reason ? `\nReason: ${params.reason}` : "",
-        roots.length > 0 ? `\nFilesystem write: ${roots.join(", ")}` : "",
-        hosts.length > 0 ? `\nNetwork hosts: ${hosts.join(", ")}` : "",
-      ].join("");
-      const confirmed = await ctx.ui.confirm("pi-permissions", detail);
-      if (!confirmed) throw new Error("User denied request_permissions");
-      if (scope === "session") {
-        for (const host of hosts) approvedNetworkHostsSession.add(host);
-        sessionApprovedWriteRoots.push(...roots);
-      } else {
-        for (const host of hosts) turnApprovedNetworkHosts.add(host);
-        turnApprovedWriteRoots.push(...roots);
-      }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Granted ${scope} permissions${
-              hosts.length > 0 ? `; hosts: ${hosts.join(", ")}` : ""
-            }${roots.length > 0 ? `; write roots: ${roots.join(", ")}` : ""}`,
-          },
-        ],
-        details: undefined,
+      const requested = admission.requested;
+      const scope = params.scope === "session" ? "session" : "turn";
+      const reason = params.reason ?? decision.reason;
+      const event = {
+        type: "tool_call" as const,
+        toolCallId: id,
+        toolName: "request_permissions",
+        input: params,
+      } as ToolCallEvent;
+      const invocation: Invocation<WriteResult, PiGuardianReviewContext> = {
+        ownership: "permission-amendment",
+        call: {
+          id,
+          tool: "request_permissions",
+          input: params,
+          cwd: resolve(ctx.cwd),
+        },
+        admission,
+        intent: {
+          kind: "permission-amendment",
+          requested,
+          scope,
+          reason,
+        },
+        reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
+        signal: _signal,
+        executor: async ({ lease }): Promise<RuntimeOutcome<WriteResult>> => {
+          try {
+            if (lease.mode === "unrestricted") {
+              return {
+                kind: "completed",
+                value: {
+                  content: [
+                    {
+                      type: "text",
+                      text: "YOLO is already unconstrained; extra request_permissions grants were not recorded",
+                    },
+                  ],
+                  details: undefined,
+                },
+              };
+            }
+            if (lease.mode !== "sandboxed" || !lease.policy) {
+              return {
+                kind: "failed",
+                error: new Error("pi-permissions: sandbox policy is unavailable"),
+              };
+            }
+            const grantedHosts = requested
+              .filter(
+                (request): request is Extract<typeof request, { kind: "network" }> =>
+                  request.kind === "network",
+              )
+              .map((request) => request.host);
+            const grantedRoots = requested
+              .filter(
+                (request): request is Extract<typeof request, { kind: "filesystem" }> =>
+                  request.kind === "filesystem" && request.operation === "write",
+              )
+              .map((request) => request.path);
+            return {
+              kind: "completed",
+              value: {
+                content: [
+                  {
+                    type: "text",
+                    text: `Granted ${scope} permissions${
+                      grantedHosts.length > 0 ? `; hosts: ${grantedHosts.join(", ")}` : ""
+                    }${grantedRoots.length > 0 ? `; write roots: ${grantedRoots.join(", ")}` : ""}`,
+                  },
+                ],
+                details: undefined,
+              },
+            };
+          } catch (error: unknown) {
+            return { kind: "failed", error };
+          }
+        },
       };
+      return executeEngineInvocation(turn, invocation);
     },
   });
 
@@ -1074,6 +1286,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("session_shutdown", async () => {
+    invalidateEngineContext("session shutdown");
     session.bumpGeneration();
     cancelInFlightModeTransition();
     session.resetTurn();
@@ -1101,7 +1314,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   });
 
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, ctx) => {
     session.markLifecycleEvent();
     if (session.getTurnPhase() === "active") return;
     const startingTurnId = session.allocateTurnId();
@@ -1119,7 +1332,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     }
     modeRuntime?.beginAgentTurn();
-    captureExecutionSnapshot(startingTurnId);
+    const executionSnapshot = captureExecutionSnapshot(startingTurnId);
+    if (executionSnapshot) beginEngineTurn(ctx, executionSnapshot);
   });
 
   pi.on("agent_end", () => {
@@ -1136,263 +1350,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on(
     "tool_call",
     async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
-      if (event.toolCallId) {
-        grants.revoke(event.toolCallId);
-      }
-      let result: LoadedPermissionsConfig;
-      const activationGeneration = session.getGeneration();
-      try {
-        result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-        assertActivationCurrent(activationGeneration);
-      } catch (error: unknown) {
-        if (isActivationSupersededError(error)) {
-          return {
-            block: true,
-            reason:
-              "pi-permissions: permission activation was superseded; retry in the active session",
-          };
-        }
-        return reportConfigError(ctx, error);
-      }
-
-      const runtime = ensureModeRuntime(result.config);
-      const executionSnapshot = ensureExecutionSnapshot(ctx);
-      if (!executionSnapshot) {
-        return {
-          block: true,
-          reason: "pi-permissions: active permission turn snapshot is unavailable",
-        };
-      }
-      const executionContext = getEffectiveExecutionContext(executionSnapshot);
-      if (!executionContext) {
-        return {
-          block: true,
-          reason: "pi-permissions: active permission turn snapshot is unavailable",
-        };
-      }
-      if (privilegeMaxMode(executionContext) === "yolo") return;
-
-      const evaluationEpoch = session.getEpoch();
-      let decision: RiskDecision;
-      try {
-        decision = await riskEvaluator(
-          event.toolName,
-          event.input as Record<string, unknown>,
-          ctx.cwd,
-          executionContext.config,
-          defaultProtectedWritePaths(ctx.cwd, agentDir),
-          {
-            commandPrefixes: approvedCommandPrefixes,
-            networkHosts: approvedNetworkHostsSession,
-          },
-        );
-      } catch (error: unknown) {
-        if (
-          !session.epochMatches(evaluationEpoch) ||
-          !getEffectiveExecutionContext(executionContext.snapshot)
-        ) {
-          return {
-            block: true,
-            reason: "pi-permissions: permission context changed during risk evaluation",
-          };
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        return { block: true, reason: `pi-permissions failed closed: ${message}` };
-      }
-
       if (
-        !session.epochMatches(evaluationEpoch) ||
-        !getEffectiveExecutionContext(executionContext.snapshot)
+        event.toolName === "bash" ||
+        event.toolName === "write" ||
+        event.toolName === "edit" ||
+        event.toolName === "request_permissions"
       ) {
-        return {
-          block: true,
-          reason: "pi-permissions: permission context changed during risk evaluation",
-        };
+        return;
       }
-      if (decision.action === "allow") return;
-      if (decision.action === "block") {
-        return { block: true, reason: `pi-permissions: ${decision.reason}` };
-      }
-      // yolo short-circuited above, so every call reaching review is auto.
-      if (runtime.autoState.paused) {
-        return {
-          block: true,
-          reason:
-            "pi-permissions: Auto review paused after repeated denials; start a new turn or use Shift+Tab to re-enter Auto",
-        };
-      }
-      // Guardian review is the only remaining verdict handler: the human-popup
-      // mode was retired, so every non-allow/block call goes to the configured
-      // reviewer ("Approve for me").
-      const runGuardianReview = async (): Promise<ToolCallEventResult | undefined> => {
-        const id = event.toolCallId;
-        if (!id) {
-          return {
-            block: true,
-            reason: "pi-permissions: Auto review requires a tool-call ID",
-          };
-        }
-        if (!runtime.beginReview(id)) {
-          return { block: true, reason: "pi-permissions: duplicate Auto review" };
-        }
-        const reviewController = new AbortController();
-        session.reviewControllers.set(id, reviewController);
-        const reviewSignal = ctx.signal
-          ? AbortSignal.any([ctx.signal, reviewController.signal])
-          : reviewController.signal;
-        try {
-          const actionFingerprint = fingerprintValue({
-            tool: event.toolName.toLowerCase(),
-            input: event.input,
-          });
-          const configFingerprint = fingerprintConfig(executionContext.config);
-          const guardianCwd = resolve(ctx.cwd);
-          const suppliedGuardianPolicy = options.guardianPolicySource?.({
-            cwd: guardianCwd,
-            configFingerprint,
-          });
-          const guardianPolicy =
-            suppliedGuardianPolicy === undefined
-              ? undefined
-              : validateGuardianPolicy(suppliedGuardianPolicy);
-          const approvalOverride = autoApprovalLedger.takeOverride({
-            actionFingerprint,
-            cwd: guardianCwd,
-            configFingerprint,
-          });
-          const request = buildAutoReviewRequest(
-            event,
-            decision,
-            ctx.cwd,
-            guardianPermissionContext(event, decision, executionContext, ctx.cwd),
-            currentGuardianTranscriptSnapshot(),
-            approvalOverride,
-          );
-          const auto = await reviewAutoPrompt(
-            autoReviewer,
-            request,
-            {
-              modelRegistry: ctx.modelRegistry,
-              activeModel: ctx.model,
-              reviewer: executionContext.config.reviewer,
-              guardianPolicy,
-              guardianSession: {
-                cwd: guardianCwd,
-                configFingerprint,
-              },
-            },
-            runtime.autoState,
-            reviewSignal,
-          );
-          if (reviewSignal.aborted) {
-            return {
-              block: true,
-              reason: "pi-permissions: permission context changed during Auto review",
-            };
-          }
-          if (!getEffectiveExecutionContext(executionContext.snapshot)) {
-            return {
-              block: true,
-              reason: "pi-permissions: permission context changed during Auto review",
-            };
-          }
-          const guardian = auto.action === "error" ? auto.error.guardian : auto.review.guardian;
-          if (guardian) {
-            lastGuardianSelection = {
-              guardian,
-              cwd: resolve(ctx.cwd),
-              configFingerprint,
-            };
-          }
-          if (
-            guardian?.source === "active-fallback" &&
-            guardian.fallbackNotice === "configured-reviewer-unavailable" &&
-            ctx.hasUI
-          ) {
-            const preferred = executionContext.config.reviewer;
-            const noticeKey = fingerprintValue({
-              configFingerprint,
-              preferredProvider: preferred?.provider,
-              preferredModel: preferred?.model,
-              activeProvider: guardian.provider,
-              activeModel: guardian.model,
-            });
-            if (!guardianFallbackNoticeKeys.has(noticeKey)) {
-              guardianFallbackNoticeKeys.add(noticeKey);
-              ctx.ui.notify("Guardian preferred model unavailable; using active model", "warning");
-            }
-          }
-          if (auto.action === "approve") {
-            runtime.recordAutoReview("approve");
-            grantApprovedCall(event, decision, executionContext, ctx.cwd, "auto-review");
-            return;
-          }
-          if (auto.action === "deny") {
-            const autoState = runtime.recordAutoReview("deny");
-            autoApprovalLedger.recordDenial({
-              tool: event.toolName,
-              input: event.input as Record<string, unknown>,
-              cwd: guardianCwd,
-              configFingerprint,
-              actionFingerprint,
-              summary: decision.summary,
-              rationale: auto.review.rationale,
-            });
-            if (autoState.paused) {
-              if (ctx.hasUI) {
-                ctx.ui.notify(
-                  "Auto-review interrupted this turn after repeated denials",
-                  "warning",
-                );
-              }
-              ctx.abort();
-            }
-            return {
-              block: true,
-              reason: `pi-permissions Auto denied: ${auto.review.rationale} Do not retry through a workaround or policy circumvention. Take a materially safer approach; otherwise stop and ask the user.`,
-            };
-          }
-          runtime.recordAutoNonDenial();
-          if (auto.action === "error" && auto.error.kind === "timeout") {
-            // codex TimedOut is an explicit decision: keep failing closed (no
-            // human fallback in auto mode), but say so with guidance.
-            return {
-              block: true,
-              reason:
-                "pi-permissions Auto review timed out; the action was not run. Ask the user to approve, or take a different approach.",
-            };
-          }
-          return {
-            block: true,
-            reason: "pi-permissions Auto review failed closed; the action was not run",
-          };
-        } catch (error) {
-          if (reviewSignal.aborted) {
-            return {
-              block: true,
-              reason: "pi-permissions: permission context changed during Auto review",
-            };
-          }
-          runtime.recordAutoNonDenial();
-          if (error instanceof AutoReviewerFailure && error.kind === "timeout") {
-            return {
-              block: true,
-              reason:
-                "pi-permissions Auto review timed out; the action was not run. Ask the user to approve, or take a different approach.",
-            };
-          }
-          return {
-            block: true,
-            reason: "pi-permissions Auto review failed closed; the action was not run",
-          };
-        } finally {
-          if (session.reviewControllers.get(id) === reviewController) {
-            session.reviewControllers.delete(id);
-            runtime.endReview(id);
-          }
-        }
-      };
-      return runGuardianReview();
+      return executeHostToolWithEngine(event, ctx);
     },
   );
 
@@ -1418,15 +1384,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ctx.ui.notify("/approve requires an interactive UI", "warning");
         return;
       }
-      const denials = autoApprovalLedger.listDenials().reverse();
+      const denials = [...engine.listDenials()].reverse();
       if (denials.length === 0) {
         ctx.ui.notify("No recent Auto-review denials", "info");
         return;
       }
       const choices = denials.map((denial, index) => {
-        const summary = denial.summary.replace(/\s+/g, " ").trim().slice(0, 120);
+        const summary = (denial.summary ?? denial.call.tool)
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120);
         const rationale = denial.rationale.replace(/\s+/g, " ").trim().slice(0, 160);
-        return `${index + 1}. ${denial.tool}: ${summary} — ${rationale}`;
+        return `${index + 1}. ${denial.call.tool}: ${summary} — ${rationale}`;
       });
       const choice = await ctx.ui.select("Auto-review Denials", choices);
       if (choice === undefined) return;
@@ -1434,8 +1403,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (selectedIndex < 0) return;
       const denial = denials[selectedIndex];
       if (!denial) return;
-      const selected = autoApprovalLedger.approveDenial(denial.id);
-      if (!selected) {
+      if (!engine.armRetry(denial.handle)) {
         ctx.ui.notify("That Auto-review denial is no longer available", "warning");
         return;
       }
@@ -1444,16 +1412,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           customType: "pi-permissions-auto-override",
           content: [
             AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-            `Tool: ${selected.tool}`,
-            `Input: ${JSON.stringify(selected.input)}`,
-            `Working directory: ${selected.cwd}`,
-            `Previous denial: ${selected.rationale}`,
+            `Tool: ${denial.call.tool}`,
+            `Input: ${JSON.stringify(denial.call.input)}`,
+            `Working directory: ${denial.call.cwd}`,
+            `Previous denial: ${denial.rationale}`,
             "Retry this exact action once. Do not broaden or alter it; the retry still requires Auto-review.",
           ].join("\n"),
           display: true,
           details: {
-            denialId: selected.id,
-            actionFingerprint: selected.actionFingerprint,
+            denialId: denial.handle.token,
           },
         },
         { triggerTurn: true },
@@ -1470,13 +1437,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const transitionBarrier = createModeTransitionBarrier();
     const pendingBeforeTransition = session.getPendingTransition();
     const modeBeforeCycle = modeRuntime ? modeRuntime.mode : "auto";
-    // The switch itself runs immediately either way. For upgrades
-    // (default->auto, *->yolo) that is the whole story: privilegeMaxMode routes
-    // the next call to the new review branch while the turn snapshot (and its
-    // already-granted approvals) stay intact. For downgrades (->default) the
-    // pending token keeps that snapshot valid, so privilegeMaxMode keeps
-    // routing on the old mode until agent_end invalidates it — no mid-turn
-    // sandbox teardown race.
+    // The switch itself runs immediately. An active turn keeps its captured
+    // execution snapshot; a pending token prevents a downgrade's async
+    // activation from tearing that snapshot down mid-turn. The lifecycle
+    // boundary clears the token, and the next turn captures the new mode.
     const isUpgrade = MODE_RANK[nextMode(modeBeforeCycle)] > MODE_RANK[modeBeforeCycle];
     const transition = beganDuringActiveTurn && !isUpgrade ? scheduleModeTransition() : undefined;
     const transitionOwnsPendingState =
@@ -1494,9 +1458,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             return;
           }
           if (!transition && !beganDuringActiveTurn) {
-            // Between turns and while idle there is no snapshot to preserve. Revoke any
-            // approval context before the async activation work begins. Immediate
-            // upgrades during an active turn keep the snapshot and its approvals.
+            // Between turns and while idle there is no snapshot to preserve.
+            // Invalidate the current Engine/reviewer context before activation;
+            // active-turn transitions leave the snapshot untouched.
+            invalidateEngineContext(PERMISSION_MODE_CHANGED_REASON);
             invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           }
           let runtime = modeRuntime;
@@ -1510,8 +1475,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           // Recompute from the latest runtime state: runModeMutation serializes
           // mutations, so a rapid double Shift+Tab lands on the correct final
-          // mode (default -> auto -> yolo) instead of both reading the same
-          // starting mode.
+          // two-state mode (auto -> yolo -> auto) instead of both reading the
+          // same starting mode.
           const previousMode = runtime.mode;
           const targetMode = nextMode(previousMode);
           const result = await activateConfig(
@@ -1532,6 +1497,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.activate(targetMode, {
             preserveAutoTransientState: beganDuringActiveTurn,
           });
+          if (beganDuringActiveTurn && previousMode === "yolo" && targetMode === "auto") {
+            // A downgrade must not leave the active turn's captured YOLO
+            // snapshot unrestricted. Abort it so the next turn captures Auto.
+            ctx.abort();
+          }
           if (
             transition &&
             transitionOwnsPendingState &&
@@ -1628,12 +1598,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             : config.reviewer
               ? `${config.reviewer.provider}/${config.reviewer.model}`
               : "current session model";
-          const autoSummary =
-            runtime.mode === "auto"
-              ? runtime.autoState.paused
-                ? "Auto paused"
-                : "Auto active"
-              : "manual approval";
+          const autoSummary = runtime.autoState.paused ? "Auto paused" : "Auto active";
           ctx.ui.notify(
             `${runtime.statusLabel} · reviewer ${reviewerSummary} · ${sandboxSummary} · ${autoSummary} · ${config.rules.length} rules · write roots: ${config.sandbox.filesystem.allowWrite.join(", ")}`,
             "info",

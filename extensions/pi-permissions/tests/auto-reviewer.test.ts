@@ -83,6 +83,25 @@ function messageText(message: {
 }
 
 describe("PiAutoReviewer", () => {
+  it("exposes only sandboxed read-only Guardian tools by default", async () => {
+    const complete = vi.fn(
+      async (_model: unknown, reviewContext: { tools?: Array<{ name: string }> }) => {
+        expect(reviewContext.tools?.map((tool) => tool.name)).toEqual([
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "inspect",
+        ]);
+        expect(reviewContext.tools?.some((tool) => tool.name === "bash")).toBe(false);
+        return response;
+      },
+    );
+    const reviewer = new PiAutoReviewer(complete as never);
+    await reviewer.review(request, context);
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
   it("uses configured Guardian metadata and bounded options", async () => {
     const configuredModel = { provider: "openai-codex", id: "reviewer" } as any;
     const complete = vi.fn(async (_model: unknown, _context: unknown) => response);

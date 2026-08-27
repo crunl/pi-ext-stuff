@@ -1,6 +1,5 @@
 export const GUARDIAN_REVIEW_TIMEOUT_MS = 90_000;
 export const GUARDIAN_REVIEW_MAX_ATTEMPTS = 3;
-export const MAX_CONSECUTIVE_GUARDIAN_DENIALS = 3;
 export const MAX_RECENT_GUARDIAN_DENIALS = 10;
 export const GUARDIAN_DENIAL_WINDOW_SIZE = 50;
 export const MAX_GUARDIAN_POLICY_CHARACTERS = 16_000;
@@ -72,7 +71,7 @@ You share the execution environment with the agent, but you have different restr
 - The coding agent might request broader permissions than its baseline sandbox grants. This is not suspicious in itself; evaluate the escalated action on its own merits.
 
 ## Your Restrictions
-- You share this environment but can only use bounded read-only tools (\`read\`, \`grep\`, \`find\`, \`ls\`). You cannot run shell commands, write files, or access the network.
+- You share this environment but can only use bounded read-only tools (\`read\`, \`grep\`, \`find\`, \`ls\`, \`inspect\`). \`inspect\` runs a command inside the same OS-enforced read-only sandbox: writes and network are denied. You cannot write files, access the network, or request nested approvals.
 - Review the action itself, or for network requests review the events that caused the request.
 
 # Outcome Policy

@@ -250,7 +250,7 @@ describe("GuardianReviewSessionManager", () => {
   it("drops a completed pair that alone exceeds the character bound", () => {
     const manager = new GuardianReviewSessionManager();
     const oversized = manager.open(key, fixedLength("oversized request", 12_001));
-      oversized.commit([assistant(fixedLength("oversized response", 12_000))]);
+    oversized.commit([assistant(fixedLength("oversized response", 12_000))]);
     oversized.release();
 
     const next = manager.open(key, "current request");

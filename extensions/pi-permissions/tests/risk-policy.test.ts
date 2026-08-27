@@ -1,10 +1,10 @@
 import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
-import { evaluateRiskRequest } from "../src/risk-policy.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
+import { evaluateRiskRequest } from "../src/risk-policy.ts";
 
 function config(overrides: Partial<PermissionsConfig> = {}): PermissionsConfig {
   return {
@@ -71,6 +71,38 @@ describe("Risk policy gate", () => {
         reason: "permission control path is protected",
       });
     }
+  });
+
+  it("does not treat $HOME as an implicit writable workspace", async () => {
+    const cwd = homedir();
+    const models = resolve(cwd, ".pi/agent/models.json");
+    await expect(
+      evaluateRiskRequest(
+        "edit",
+        { path: models, edits: [{ oldText: "a", newText: "b" }] },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    await expect(
+      evaluateRiskRequest("write", { path: "notes.txt", content: "x" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    await expect(
+      evaluateRiskRequest(
+        "write",
+        { path: resolve("/tmp", "pi-home-ok.txt"), content: "x" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    await expect(
+      evaluateRiskRequest(
+        "request_permissions",
+        { permissions: { filesystem: { write: [cwd] } }, scope: "turn" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "block" });
   });
 
   it("prompts for external writes and dangerous Bash", async () => {
@@ -757,7 +789,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "block",
-      reason: expect.stringContaining("filesystem root"),
+      reason: expect.stringContaining("protected sandbox state"),
     });
 
     await expect(
@@ -873,164 +905,54 @@ describe("deletion sandbox boundary (stage 3)", () => {
   });
 });
 
-describe("session approval memory (stage 5)", () => {
-  it("skips the prompt for user-approved command prefixes", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
-    const approvals = {
-      commandPrefixes: [
-        ["npm", "install"],
-        ["rm", "-r", "build"],
-      ],
-    };
-
+describe("request_permissions amendment decisions", () => {
+  it("prompts with normalized public hosts and write roots", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-eval-"));
     await expect(
       evaluateRiskRequest(
-        "bash",
-        { command: "npm install lodash" },
+        "request_permissions",
+        {
+          permissions: { network: { hosts: ["api.example.com"] } },
+          scope: "turn",
+        },
         cwd,
         config(),
-        undefined,
-        approvals,
       ),
-    ).resolves.toMatchObject({ action: "allow" });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm -r build extra" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
-    ).resolves.toMatchObject({ action: "allow" });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm /etc/pi-permissions-outside.txt" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
-    ).resolves.toMatchObject({ action: "prompt" });
-    await expect(
-      evaluateRiskRequest("bash", { command: "rm -rf other" }, cwd, config(), undefined, approvals),
-    ).resolves.toMatchObject({ action: "prompt" });
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "REVIEW",
+      networkHosts: ["api.example.com"],
+    });
   });
 
-  it("never lets approval memory bypass the deletion sandbox boundary", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
-    const approvals = { commandPrefixes: [["rm", "-r", "build"]] };
+  it("blocks private hosts and empty amendments without treating them as custom tools", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-eval-"));
     await expect(
       evaluateRiskRequest(
-        "bash",
-        { command: "rm -r build /etc/pi-permissions-outside.txt" },
+        "request_permissions",
+        { permissions: { network: { hosts: ["127.0.0.1"] } } },
         cwd,
         config(),
-        undefined,
-        approvals,
       ),
-    ).resolves.toMatchObject({ action: "prompt" });
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
     await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm -r build .git/objects" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
-    ).resolves.toMatchObject({ action: "prompt" });
+      evaluateRiskRequest("request_permissions", { permissions: {} }, cwd, config()),
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
   });
 
-  it("drops session-approved network hosts before escalating", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
-    const approvals = { networkHosts: new Set(["registry.npmjs.org"]) };
+  it("does not honor an allow-rule bypass for request_permissions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-eval-"));
+    const allowed = config({
+      rules: [{ action: "allow", tool: "request_permissions" }],
+    });
     await expect(
       evaluateRiskRequest(
-        "bash",
-        { command: "curl https://registry.npmjs.org/x" },
+        "request_permissions",
+        { permissions: { network: { hosts: ["api.example.com"] } } },
         cwd,
-        config(),
-        undefined,
-        approvals,
+        allowed,
       ),
-    ).resolves.toMatchObject({ action: "allow" });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "curl https://evil.example.com" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
-  });
-
-  it("honors session approval memory for exact prefixes", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-approval-"));
-    const approvals = { commandPrefixes: [["npm", "test"]] };
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "npm test -- --watch" },
-        cwd,
-        config(),
-        undefined,
-        approvals,
-      ),
-    ).resolves.toMatchObject({ action: "allow" });
-    await expect(
-      evaluateRiskRequest("bash", { command: "npm test" }, cwd, config(), undefined, approvals),
-    ).resolves.toMatchObject({ action: "allow" });
-  });
-});
-
-describe("request_permissions write-root grants (stage 6)", () => {
-  it("expands the deletion sandbox boundary with granted roots", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-"));
-    const approved = { filesystemWriteRoots: ["/etc/pi-permissions-granted"] };
-    // Without the grant the deletion escalates…
-    await expect(
-      evaluateRiskRequest("bash", { command: "rm /etc/pi-permissions-granted/x" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
-    // …with the grant it auto-approves (still guarded by denyWrite/protected).
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm /etc/pi-permissions-granted/x" },
-        cwd,
-        config(),
-        undefined,
-        approved,
-      ),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "rm /etc/pi-permissions-granted/.env" },
-        cwd,
-        config(),
-        undefined,
-        approved,
-      ),
-    ).resolves.toMatchObject({ action: "prompt" });
-  });
-
-  it("expands write-tool checks with granted roots", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-rp-"));
-    const approved = { filesystemWriteRoots: ["/etc/pi-permissions-granted"] };
-    await expect(
-      evaluateRiskRequest(
-        "write",
-        { path: "/etc/pi-permissions-granted/out.txt", content: "x" },
-        cwd,
-        config(),
-        undefined,
-        approved,
-      ),
-    ).resolves.toMatchObject({ action: "allow" });
+    ).resolves.toMatchObject({ action: "prompt", networkHosts: ["api.example.com"] });
   });
 });
 

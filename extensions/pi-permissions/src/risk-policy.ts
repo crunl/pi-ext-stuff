@@ -5,6 +5,8 @@ import {
   inspectRepositoryGitMetadata,
   readRepositoryRemoteHosts,
 } from "./git-metadata.ts";
+import { normalizePermissionAmendment } from "./permission-amendment.ts";
+import { rmArgsIncludeForce } from "./permissions/dangerous-commands.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
@@ -19,8 +21,8 @@ import {
   shellCommandInitializesCurrentDirectory,
   shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
-import { rmArgsIncludeForce } from "./permissions/dangerous-commands.ts";
 import { matchRules } from "./permissions/rules.ts";
+import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 
 export type RiskDecision =
@@ -36,33 +38,54 @@ export type RiskDecision =
     }
   | { action: "block"; risk: Risk; reason: string };
 
-/**
- * Session-scoped approvals (codex ExecpolicyAmendment/ApprovedForSession/
- * NetworkPolicyAmendment equivalents). Populated when the user approves a
- * call; matching later calls skip the prompt but never bypass hard blocks
- * (protected paths, private networks, git single-command constraint).
- */
-export interface SessionApprovals {
-  /** Whole-segment token prefixes of user-approved commands. */
-  commandPrefixes?: string[][];
-  /** Network hosts the user approved this session. */
-  networkHosts?: ReadonlySet<string>;
-  /** Extra write roots granted via request_permissions. */
-  filesystemWriteRoots?: string[];
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** True when every segment of `command` starts with an approved prefix. */
-function isApprovedCommand(command: string, prefixes: string[][]): boolean {
-  if (prefixes.length === 0) return false;
-  const segments = parseCommandSegments(command);
-  if (segments.length === 0) return false;
-  return segments.every((segment) => {
-    const tokens = [segment.executable, ...segment.args];
-    return prefixes.some((prefix) => {
-      if (prefix.length > tokens.length) return false;
-      return prefix.every((token, index) => token === tokens[index]);
-    });
-  });
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+async function evaluateRequestPermissions(
+  input: Record<string, unknown>,
+  cwd: string,
+  protectedWritePaths: readonly string[],
+): Promise<RiskDecision> {
+  const permissions = isRecord(input.permissions) ? input.permissions : {};
+  const network = isRecord(permissions.network) ? permissions.network : {};
+  const filesystem = isRecord(permissions.filesystem) ? permissions.filesystem : {};
+  const normalized = await normalizePermissionAmendment(
+    { hosts: stringList(network.hosts), writeRoots: stringList(filesystem.write) },
+    cwd,
+    protectedWritePaths,
+  );
+  if (!normalized.ok) {
+    return { action: "block", risk: "HARD", reason: normalized.reason };
+  }
+  if (
+    normalized.amendment.networkHosts.length === 0 &&
+    normalized.amendment.writeRoots.length === 0
+  ) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: "request_permissions requires at least one permission",
+    };
+  }
+  return {
+    action: "prompt",
+    risk: "REVIEW",
+    reason: "REVIEW operation",
+    summary: summarize("request_permissions", input),
+    ...(normalized.amendment.networkHosts.length > 0
+      ? { networkHosts: normalized.amendment.networkHosts }
+      : {}),
+    ...(normalized.amendment.writeRoots.length > 0
+      ? { filesystemWriteRoots: normalized.amendment.writeRoots }
+      : {}),
+  };
 }
 
 function summarize(tool: string, input: Record<string, unknown>): string {
@@ -90,19 +113,15 @@ export async function evaluateRiskRequest(
   cwd: string,
   config: PermissionsConfig,
   protectedWritePaths?: readonly string[],
-  approved: SessionApprovals = {},
 ): Promise<RiskDecision> {
-  const request = normalizeToolCall(tool, input, cwd);
-  // Drop session-approved hosts from the network targets so they no longer
-  // escalate; anything still pending keeps the existing checks.
-  const approvedHosts = approved.networkHosts;
-  const networkTargets = request.networkTargets ?? [];
-  const hadNetworkTargets = networkTargets.length > 0;
-  if (approvedHosts && approvedHosts.size > 0 && hadNetworkTargets) {
-    const pending = networkTargets.filter((host) => !approvedHosts.has(host));
-    request.networkTargets = pending.length > 0 ? pending : undefined;
+  if (tool.toLowerCase() === "request_permissions") {
+    return evaluateRequestPermissions(
+      input,
+      cwd,
+      protectedWritePaths ? [...protectedWritePaths] : defaultProtectedWritePaths(cwd),
+    );
   }
-  const networkFullyApproved = hadNetworkTargets && (request.networkTargets?.length ?? 0) === 0;
+  const request = normalizeToolCall(tool, input, cwd);
   const command = typeof input.command === "string" ? input.command : undefined;
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
@@ -167,7 +186,10 @@ export async function evaluateRiskRequest(
   if (!additionalWriteRoots.ok) {
     return { action: "block", risk: "HARD", reason: additionalWriteRoots.reason };
   }
-  const filesystemWriteRoots = [...new Set([...gitWriteRoots, ...additionalWriteRoots.writeRoots])];
+  const filesystemWriteRoots = filterFeasibleAllowPaths([
+    ...gitWriteRoots,
+    ...additionalWriteRoots.writeRoots,
+  ]);
   const rule = matchRules(request, config.rules);
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
@@ -180,20 +202,21 @@ export async function evaluateRiskRequest(
     };
   }
 
-  let risk = classifyRisk(request, networkFullyApproved, approved.filesystemWriteRoots ?? []);
-  if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
-
-  // Stage 3 (codex sandbox boundary): deletion commands auto-approve only
-  // when every target sits inside the sandbox write roots (and outside
-  // denyWrite/protected paths). Anything else escalates to REVIEW; `rm -f`
-  // is already HARD via classifyRisk.
   const filesystem = createFilesystemPolicy(
     config.sandbox,
     cwd,
     protectedWritePaths ? [...protectedWritePaths] : undefined,
   );
-  const allowWrite = [...filesystem.allowWrite, ...(approved.filesystemWriteRoots ?? [])];
-  let deletionBoundaryViolation = false;
+  let risk = classifyRisk(
+    request,
+    false,
+    [],
+    filesystem.protectedWritePaths,
+    filesystem.allowWrite,
+  );
+  if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
+
+  const allowWrite = filterFeasibleAllowPaths([...filesystem.allowWrite]);
   if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
     const segments = request.commandSegments ?? parseCommandSegments(command);
     for (const segment of segments) {
@@ -218,7 +241,6 @@ export async function evaluateRiskRequest(
       }
       if (!allAllowed) {
         risk = "REVIEW";
-        deletionBoundaryViolation = true;
         break;
       }
     }
@@ -250,20 +272,7 @@ export async function evaluateRiskRequest(
   const promptedByRule = rule?.action === "ask";
   const wouldPrompt = promptedByRule || risk !== "LOW";
 
-  // Session-approved commands skip the prompt (but never hard blocks or the
-  // deletion sandbox boundary).
-  const commandApproved =
-    !deletionBoundaryViolation &&
-    approved.commandPrefixes !== undefined &&
-    approved.commandPrefixes.length > 0 &&
-    command !== undefined &&
-    isApprovedCommand(command, approved.commandPrefixes);
-
   // ── escalation gate ────────────────────────────────────────────────────
-  if (commandApproved) {
-    return { action: "allow", risk, reason: "Approved command prefix (session)" };
-  }
-
   if (wouldPrompt) {
     return {
       action: "prompt",

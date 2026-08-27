@@ -22,6 +22,9 @@ describe("Guardian policy", () => {
     expect(prompt).toContain("malicious prompt injection");
     // Template: runtime adaptation for pi + nono
     expect(prompt).toContain("bounded read-only tools");
+    expect(prompt).toContain("`inspect`");
+    expect(prompt).toContain("writes and network are denied");
+    expect(prompt).not.toContain("You cannot run shell commands");
     expect(prompt).not.toContain("sandbox_permissions");
     expect(prompt).not.toContain("{{ tenant_policy_config }}");
 

@@ -1,12 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
-import { GUARDIAN_DENIAL_WINDOW_SIZE, MAX_RECENT_GUARDIAN_DENIALS } from "./guardian-policy.ts";
-import {
-  type AutoState,
-  recordAutoApproval,
-  recordAutoDenial,
-  resetAutoState,
-} from "./modes/auto.ts";
 import { ModeController } from "./modes/controller.ts";
 import {
   createPermissionSessionState,
@@ -14,6 +7,8 @@ import {
   type PermissionSessionState,
   restorePermissionState,
 } from "./state.ts";
+
+type AutoState = PermissionSessionState["auto"];
 
 function functionalState(state: PermissionSessionState): PermissionSessionState {
   const normalized = structuredClone(state);
@@ -25,11 +20,20 @@ export interface PermissionModeActivationOptions {
   preserveAutoTransientState?: boolean;
 }
 
+/** Engine-owned breaker state accepted at the persistence seam. */
+export interface AutoStateInput {
+  consecutiveDenials: number;
+  paused: boolean;
+  recentDenials?: number;
+}
+
+function freshAutoState(): AutoState {
+  return { consecutiveDenials: 0, paused: false };
+}
+
 export class PermissionModeRuntime {
   private controller: ModeController;
   private state: PermissionSessionState;
-  private readonly activeReviewIds = new Set<string>();
-  private readonly autoReviewWindow: boolean[] = [];
 
   constructor(
     config: PermissionsConfig,
@@ -47,10 +51,6 @@ export class PermissionModeRuntime {
     return structuredClone(this.state.auto);
   }
 
-  get approvalActive(): boolean {
-    return this.activeReviewIds.size > 0;
-  }
-
   get statusLabel(): "Approve for me" | "Full bypass" {
     return this.mode === "auto" ? "Approve for me" : "Full bypass";
   }
@@ -64,30 +64,13 @@ export class PermissionModeRuntime {
     return this.mode === "auto" ? "warning" : "error";
   }
 
-  beginReview(toolCallId: string): boolean {
-    if (this.activeReviewIds.has(toolCallId)) return false;
-    this.activeReviewIds.add(toolCallId);
-    return true;
-  }
-
-  endReview(toolCallId: string): void {
-    this.activeReviewIds.delete(toolCallId);
-  }
-
-  cancelReviews(): void {
-    this.activeReviewIds.clear();
-  }
-
   activate(
     mode: PermissionMode,
     { preserveAutoTransientState = false }: PermissionModeActivationOptions = {},
   ): PermissionMode {
     const result = this.controller.request(mode);
     this.state.mode = result;
-    if (!preserveAutoTransientState) {
-      this.autoReviewWindow.length = 0;
-      if (result === "auto") this.state.auto = resetAutoState();
-    }
+    if (!preserveAutoTransientState && result === "auto") this.state.auto = freshAutoState();
     this.persist();
     return result;
   }
@@ -95,54 +78,30 @@ export class PermissionModeRuntime {
   cycle(): PermissionMode {
     const result = this.controller.cycle();
     this.state.mode = result;
-    this.autoReviewWindow.length = 0;
-    if (result === "auto") this.state.auto = resetAutoState();
+    if (result === "auto") this.state.auto = freshAutoState();
     this.persist();
     return result;
   }
 
-  applyAutoState(state: AutoState): void {
-    this.state.auto = structuredClone(state);
+  applyAutoState(state: AutoStateInput): void {
+    this.state.auto = {
+      consecutiveDenials: state.consecutiveDenials,
+      paused: state.paused,
+    };
     this.persist();
   }
 
   beginAgentTurn(): void {
-    this.autoReviewWindow.length = 0;
     if (this.state.auto.consecutiveDenials === 0 && !this.state.auto.paused) {
       return;
     }
-    this.state.auto = resetAutoState();
+    this.state.auto = freshAutoState();
     this.persist();
-  }
-
-  recordAutoNonDenial(): void {
-    this.recordAutoReviewOutcome(false);
-    if (this.state.auto.consecutiveDenials === 0) return;
-    this.state.auto.consecutiveDenials = 0;
-    this.persist();
-  }
-
-  recordAutoReview(decision: "approve" | "deny"): AutoState {
-    this.recordAutoReviewOutcome(decision === "deny");
-    this.state.auto =
-      decision === "approve"
-        ? recordAutoApproval(this.state.auto)
-        : recordAutoDenial(this.state.auto);
-    if (
-      decision === "deny" &&
-      this.autoReviewWindow.filter(Boolean).length >= MAX_RECENT_GUARDIAN_DENIALS
-    ) {
-      this.state.auto.paused = true;
-    }
-    this.persist();
-    return this.autoState;
   }
 
   restore(entries: readonly unknown[], config: PermissionsConfig): void {
     this.state = functionalState(restorePermissionState(entries, config));
     this.controller = new ModeController(this.state.mode);
-    this.activeReviewIds.clear();
-    this.autoReviewWindow.length = 0;
   }
 
   snapshot(): PermissionSessionState {
@@ -151,12 +110,5 @@ export class PermissionModeRuntime {
 
   private persist(): void {
     this.appendEntry("pi-permissions-state", this.snapshot());
-  }
-
-  private recordAutoReviewOutcome(denied: boolean): void {
-    this.autoReviewWindow.push(denied);
-    if (this.autoReviewWindow.length > GUARDIAN_DENIAL_WINDOW_SIZE) {
-      this.autoReviewWindow.splice(0, this.autoReviewWindow.length - GUARDIAN_DENIAL_WINDOW_SIZE);
-    }
   }
 }

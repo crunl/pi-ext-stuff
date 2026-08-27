@@ -13,10 +13,7 @@ export class SandboxExecutionCoordinator {
   private writerActive = false;
   private readonly queue: Waiter[] = [];
 
-  async runShared<T>(
-    operation: () => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
+  async runShared<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const release = await this.acquire("shared", signal);
     try {
       return await operation();
@@ -25,10 +22,7 @@ export class SandboxExecutionCoordinator {
     }
   }
 
-  async runExclusive<T>(
-    operation: () => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
+  async runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const release = await this.acquire("exclusive", signal);
     try {
       return await operation();
@@ -60,7 +54,8 @@ export class SandboxExecutionCoordinator {
   private drain(): void {
     if (this.writerActive || this.queue.length === 0) return;
 
-    const first = this.queue[0]!;
+    const first = this.queue[0];
+    if (first === undefined) return;
     if (first.kind === "exclusive") {
       if (this.activeReaders > 0) return;
       this.queue.shift();
@@ -73,7 +68,8 @@ export class SandboxExecutionCoordinator {
     }
 
     while (this.queue[0]?.kind === "shared" && !this.writerActive) {
-      const waiter = this.queue.shift()!;
+      const waiter = this.queue.shift();
+      if (waiter === undefined) return;
       this.activeReaders += 1;
       this.grant(waiter, () => {
         this.activeReaders -= 1;

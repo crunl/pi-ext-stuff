@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   BashOperations,
   EditOperations,
@@ -15,6 +16,7 @@ import {
   expandSymlinkAliases,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
+import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
 
 /**
  * Our own sandbox policy — the complete description of what a sandboxed
@@ -27,25 +29,20 @@ export interface SandboxPolicy {
     denyRead: string[];
     denyWrite: string[];
     /**
-     * srt parity: .git/config writes are hard-denied unless a grant explicitly
-     * opts in (an approved git write root implies git metadata access).
+     * Deny entries that may be removed by an exact, explicitly approved
+     * filesystem write capability. The entries remain in denyWrite on the
+     * baseline policy; this is identity metadata for the Engine only.
      */
-    allowGitConfig?: boolean;
+    grantableDenyWrite?: string[];
   };
   network: {
     allowedDomains: string[];
     deniedDomains: string[];
-    /** Local filtering-proxy ports injected for egress control (srt parity). */
-    httpProxyPort?: number;
-    socksProxyPort?: number;
   };
 }
 
 export interface SandboxManagerLike {
-  initialize(
-    config: SandboxPolicy,
-    askCallback?: (request: { host: string; port: number | undefined }) => Promise<boolean>,
-  ): Promise<void>;
+  initialize(config: SandboxPolicy): Promise<void>;
   wrapWithSandbox(
     command: string,
     binShell?: string,
@@ -53,11 +50,6 @@ export interface SandboxManagerLike {
     abortSignal?: AbortSignal,
   ): Promise<string>;
   reset(): Promise<void>;
-}
-
-export interface LocalProxyPorts {
-  http?: number;
-  socks?: number;
 }
 
 export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
@@ -74,69 +66,25 @@ export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
   };
 }
 
-function localProxyPort(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") return undefined;
-    const port = Number(url.port);
-    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-export function detectLocalProxyPorts(env: NodeJS.ProcessEnv = process.env): LocalProxyPorts {
-  return {
-    http: localProxyPort(env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy),
-    socks: localProxyPort(env.ALL_PROXY ?? env.all_proxy),
-  };
-}
-
-export function withLocalProxy(
-  config: SandboxPolicy,
-  ports: LocalProxyPorts,
-  allowedDomains: readonly string[] = config.network.allowedDomains,
-): SandboxPolicy {
-  return {
-    ...config,
-    network: {
-      ...config.network,
-      allowedDomains: [...allowedDomains],
-      ...(ports.http ? { httpProxyPort: ports.http } : {}),
-      ...(ports.socks ? { socksProxyPort: ports.socks } : {}),
-    },
-  };
-}
-
-export function withAllowedDomains(
-  config: SandboxPolicy,
-  allowedDomains: readonly string[],
-): SandboxPolicy {
-  return {
-    ...config,
-    network: {
-      ...config.network,
-      allowedDomains: [...allowedDomains],
-    },
-  };
-}
-
 export function withAdditionalWriteRoots(
   config: SandboxPolicy,
   writeRoots: readonly string[],
 ): SandboxPolicy {
-  const roots = [...new Set(writeRoots.flatMap(expandSymlinkAliases))];
+  const roots = filterFeasibleAllowPaths(writeRoots.flatMap(expandSymlinkAliases));
+  if (roots.length === 0) return config;
+  const grantable = new Set(config.filesystem.grantableDenyWrite ?? []);
+  const released = new Set(
+    config.filesystem.denyWrite.filter((path) => grantable.has(path) && roots.includes(path)),
+  );
   return {
     ...config,
     filesystem: {
       ...config.filesystem,
       allowWrite: [...new Set([...config.filesystem.allowWrite, ...roots])],
-      denyWrite: config.filesystem.denyWrite.filter((path) => !roots.includes(path)),
-      // sandbox-runtime additionally hard-denies .git/config unless opted in;
-      // approved git write roots imply the command needs git metadata access.
-      allowGitConfig: true,
+      denyWrite: config.filesystem.denyWrite.filter((path) => !released.has(path)),
+      grantableDenyWrite: (config.filesystem.grantableDenyWrite ?? []).filter(
+        (path) => !released.has(path),
+      ),
     },
   };
 }
@@ -151,15 +99,27 @@ export function createSandboxRuntimeConfig(
     cwd,
     protectedWritePaths ? [...protectedWritePaths] : undefined,
   );
+  const denyRead = filesystem.denyRead.flatMap((pattern) =>
+    expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
+  );
+  const denyWrite = filesystem.denyWrite.flatMap((pattern) =>
+    expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
+  );
+  const gitRoot = resolve(cwd, ".git");
+  const gitAliases = new Set(expandSymlinkAliases(gitRoot));
+  const grantableDenyWrite = [
+    ...new Set(
+      filesystem.protectedWritePaths
+        .flatMap((pattern) => expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)))
+        .filter((path) => gitAliases.has(path) && denyWrite.includes(path)),
+    ),
+  ];
   return {
     filesystem: {
       allowWrite: filesystem.allowWrite,
-      denyRead: filesystem.denyRead.flatMap((pattern) =>
-        expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
-      ),
-      denyWrite: filesystem.denyWrite.flatMap((pattern) =>
-        expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
-      ),
+      denyRead,
+      denyWrite,
+      ...(grantableDenyWrite.length > 0 ? { grantableDenyWrite } : {}),
     },
     network: {
       allowedDomains: [...config.network.allowedDomains],
@@ -175,6 +135,140 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
   } catch {
     child.kill("SIGKILL");
   }
+}
+
+/** Outer shell that runs a command already wrapped by `wrapWithSandbox`. */
+const WRAP_SHELL = "/bin/bash";
+
+/** Default host-side deadline for a permissioned bash command. */
+export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
+
+/** Default host-side deadline for a native sandboxed file operation. */
+export const DEFAULT_FILE_OPERATION_TIMEOUT_MS = 30_000;
+
+interface WrappedSpawnOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  stdin?: "ignore" | string;
+  timeoutMs?: number;
+  onStdout?: (chunk: Buffer) => void;
+  onStderr?: (chunk: Buffer) => void;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
+}
+
+function spawnWrappedCommand(
+  wrappedCommand: string,
+  options: WrappedSpawnOptions = {},
+): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number | null }> {
+  return new Promise((resolvePromise, reject) => {
+    const stdinMode = options.stdin === undefined || options.stdin === "ignore" ? "ignore" : "pipe";
+    const child = spawn(WRAP_SHELL, ["-c", wrappedCommand], {
+      cwd: options.cwd,
+      env: options.env,
+      detached: true,
+      stdio: [stdinMode, "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timedOut = false;
+    let outputError: Error | undefined;
+    let settled = false;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const collectStreams = options.onStdout === undefined && options.onStderr === undefined;
+
+    const cleanup = (): void => {
+      options.signal?.removeEventListener("abort", onAbort);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    };
+    const finishError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = (): void => killProcessTree(child);
+    const ingest = (
+      chunks: Buffer[],
+      chunk: Buffer,
+      currentBytes: number,
+      maximumBytes: number | undefined,
+      streamName: "stdout" | "stderr",
+      onChunk?: (chunk: Buffer) => void,
+    ): number => {
+      onChunk?.(chunk);
+      if (!collectStreams && maximumBytes === undefined) return currentBytes;
+      if (outputError) return currentBytes;
+      if (maximumBytes === undefined) {
+        chunks.push(chunk);
+        return currentBytes + chunk.length;
+      }
+      const remaining = maximumBytes - currentBytes;
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      const nextBytes = currentBytes + chunk.length;
+      if (nextBytes > maximumBytes) {
+        outputError = new Error(`${streamName} exceeded the Guardian bound`);
+        killProcessTree(child);
+      }
+      return Math.min(nextBytes, maximumBytes);
+    };
+
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        killProcessTree(child);
+      }, options.timeoutMs);
+    }
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes = ingest(
+        stdout,
+        chunk,
+        stdoutBytes,
+        options.maxStdoutBytes,
+        "stdout",
+        options.onStdout,
+      );
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBytes = ingest(
+        stderr,
+        chunk,
+        stderrBytes,
+        options.maxStderrBytes,
+        "stderr",
+        options.onStderr,
+      );
+    });
+    child.once("error", (error) => finishError(outputError ?? error));
+    child.once("close", (exitCode) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (options.signal?.aborted) {
+        reject(new Error("aborted"));
+      } else if (timedOut) {
+        reject(new Error(`timeout:${(options.timeoutMs ?? 0) / 1000}`));
+      } else if (outputError) {
+        reject(outputError);
+      } else {
+        resolvePromise({
+          stdout: Buffer.concat(stdout),
+          stderr: Buffer.concat(stderr),
+          exitCode,
+        });
+      }
+    });
+    if (stdinMode === "pipe" && child.stdin) {
+      if (typeof options.stdin === "string") child.stdin.end(options.stdin);
+      else child.stdin.end();
+    }
+  });
 }
 
 export function createSandboxedBashOperations(
@@ -194,54 +288,21 @@ export function createSandboxedBashOperations(
         signal,
       );
 
-      return new Promise((resolvePromise, reject) => {
-        const child = spawn("/bin/bash", ["-c", wrappedCommand], {
-          cwd,
-          detached: true,
-          env,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        let timedOut = false;
-        let settled = false;
-        let timeoutHandle: NodeJS.Timeout | undefined;
-
-        const finishError = (error: Error): void => {
-          if (settled) return;
-          settled = true;
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          signal?.removeEventListener("abort", onAbort);
-          reject(error);
-        };
-
-        const onAbort = (): void => killProcessTree(child);
-        signal?.addEventListener("abort", onAbort, { once: true });
-        if (signal?.aborted) onAbort();
-
-        if (timeout !== undefined && timeout > 0) {
-          timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            killProcessTree(child);
-          }, timeout * 1000);
-        }
-
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-        child.on("error", finishError);
-        child.on("close", (code) => {
-          if (settled) return;
-          settled = true;
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          signal?.removeEventListener("abort", onAbort);
-
-          if (signal?.aborted) {
-            reject(new Error("aborted"));
-          } else if (timedOut) {
-            reject(new Error(`timeout:${timeout}`));
-          } else {
-            resolvePromise({ exitCode: code });
-          }
-        });
+      const result = await spawnWrappedCommand(wrappedCommand, {
+        cwd,
+        env,
+        signal,
+        stdin: "ignore",
+        timeoutMs:
+          timeout === undefined
+            ? DEFAULT_BASH_TIMEOUT_MS
+            : timeout > 0
+              ? timeout * 1000
+              : undefined,
+        onStdout: onData,
+        onStderr: onData,
       });
+      return { exitCode: result.exitCode };
     },
   };
 }
@@ -289,7 +350,7 @@ export interface SandboxedCommandResult {
   exitCode: number | null;
 }
 
-export type GuardianReadOnlyExecutable = "node";
+export type GuardianReadOnlyExecutable = "node" | "bash";
 
 const GUARDIAN_COMMAND_MAX_STDOUT_BYTES = 5 * 1024 * 1024;
 const GUARDIAN_COMMAND_MAX_STDERR_BYTES = 64 * 1024;
@@ -299,6 +360,7 @@ const GUARDIAN_DIRECTORY_MAX_BYTES = 512 * 1024;
 
 function guardianReadOnlyExecutablePath(executable: GuardianReadOnlyExecutable): string {
   if (executable === "node") return process.execPath;
+  if (executable === "bash") return WRAP_SHELL;
   throw new Error(`Unsupported Guardian read-only executable: ${executable}`);
 }
 
@@ -318,83 +380,12 @@ export function createSandboxedReadOnlyCommandRunner(
     );
     if (signal?.aborted) throw new Error("aborted");
 
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn("/bin/bash", ["-c", wrappedCommand], {
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
-      let outputError: Error | undefined;
-      let settled = false;
-
-      const cleanup = (): void => {
-        signal?.removeEventListener("abort", onAbort);
-      };
-      const onAbort = (): void => killProcessTree(child);
-
-      const collect = (
-        chunks: Buffer[],
-        chunk: Buffer,
-        currentBytes: number,
-        maximumBytes: number,
-        streamName: "stdout" | "stderr",
-      ): number => {
-        if (outputError) return currentBytes;
-        const remaining = maximumBytes - currentBytes;
-        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
-        const nextBytes = currentBytes + chunk.length;
-        if (nextBytes > maximumBytes) {
-          outputError = new Error(`${streamName} exceeded the Guardian bound`);
-          killProcessTree(child);
-        }
-        return Math.min(nextBytes, maximumBytes);
-      };
-
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdoutBytes = collect(
-          stdout,
-          chunk,
-          stdoutBytes,
-          GUARDIAN_COMMAND_MAX_STDOUT_BYTES,
-          "stdout",
-        );
-      });
-      child.stderr.on("data", (chunk: Buffer) => {
-        stderrBytes = collect(
-          stderr,
-          chunk,
-          stderrBytes,
-          GUARDIAN_COMMAND_MAX_STDERR_BYTES,
-          "stderr",
-        );
-      });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(outputError ?? error);
-      });
-      child.once("close", (exitCode) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (signal?.aborted) {
-          reject(new Error("aborted"));
-        } else if (outputError) {
-          reject(outputError);
-        } else {
-          resolvePromise({
-            stdout: Buffer.concat(stdout),
-            stderr: Buffer.concat(stderr),
-            exitCode,
-          });
-        }
-      });
+    return spawnWrappedCommand(wrappedCommand, {
+      signal,
+      stdin: "ignore",
+      timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,
+      maxStdoutBytes: GUARDIAN_COMMAND_MAX_STDOUT_BYTES,
+      maxStderrBytes: GUARDIAN_COMMAND_MAX_STDERR_BYTES,
     });
   };
 }
@@ -807,13 +798,7 @@ function fileOperationConfig(
   baseConfig: SandboxPolicy,
   writePaths: readonly string[],
 ): SandboxPolicy {
-  return {
-    ...baseConfig,
-    filesystem: {
-      ...baseConfig.filesystem,
-      allowWrite: [...new Set([...baseConfig.filesystem.allowWrite, ...writePaths])],
-    },
-  };
+  return writePaths.length === 0 ? baseConfig : withAdditionalWriteRoots(baseConfig, writePaths);
 }
 
 async function runSandboxedFileOperation(
@@ -834,46 +819,17 @@ async function runSandboxedFileOperation(
     .map(shellQuote)
     .join(" ");
   const wrappedCommand = await manager.wrapWithSandbox(command, undefined, config, signal);
-
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn("/bin/bash", ["-c", wrappedCommand], {
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let settled = false;
-    const onAbort = (): void => killProcessTree(child);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      signal?.removeEventListener("abort", onAbort);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      signal?.removeEventListener("abort", onAbort);
-      if (signal?.aborted) {
-        reject(new Error("aborted"));
-      } else if (code !== 0) {
-        reject(
-          new Error(
-            Buffer.concat(stderr).toString("utf8") ||
-              `sandboxed file operation exited with ${code}`,
-          ),
-        );
-      } else {
-        resolvePromise(Buffer.concat(stdout));
-      }
-    });
-    if (input === undefined) child.stdin.end();
-    else child.stdin.end(input);
+  const result = await spawnWrappedCommand(wrappedCommand, {
+    signal,
+    stdin: input === undefined ? "ignore" : input,
+    timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,
   });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr.toString("utf8") || `sandboxed file operation exited with ${result.exitCode}`,
+    );
+  }
+  return result.stdout;
 }
 
 export type SandboxedFileOperations = WriteOperations & EditOperations;

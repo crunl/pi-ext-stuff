@@ -123,11 +123,7 @@ function cloneConfig(config: PermissionsConfig): PermissionsConfig {
 
 function parseOverlay(input: unknown): PermissionsConfigOverlay {
   if (!isRecord(input)) throw new ConfigError("config must be an object");
-  rejectUnknownKeys(
-    input,
-    [...legacyIgnoredKeys, "version", "reviewer", "sandbox", "rules"],
-    "",
-  );
+  rejectUnknownKeys(input, [...legacyIgnoredKeys, "version", "reviewer", "sandbox", "rules"], "");
   const overlay: PermissionsConfigOverlay = {};
 
   if ("version" in input && input.version !== undefined) {

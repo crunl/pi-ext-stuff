@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
-import { homedir } from "node:os";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, relative, resolve, sep } from "node:path";
+import { defaultPermissionsConfigPath, resolvePolicyPath } from "../filesystem-policy.ts";
 import {
   isPublicNetworkHost,
   normalizeNetworkHost,
@@ -566,9 +566,7 @@ export function shellCommandCanGrantGitMetadata(command: string): boolean {
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
   return ["path", "filePath", "targetPath", "sourcePath"].flatMap((key) => {
     const value = input[key];
-    return typeof value === "string"
-      ? [isAbsolute(value) ? resolve(value) : resolve(cwd, value)]
-      : [];
+    return typeof value === "string" ? [resolvePolicyPath(value, cwd)] : [];
   });
 }
 
@@ -1054,10 +1052,20 @@ function isWithin(path: string, root: string): boolean {
   return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
 }
 
-function writeRisk(request: PermissionRequest, approvedWriteRoots: string[]): Risk {
-  const globalConfig = resolve(homedir(), ".pi/agent/extensions/pi-permissions/config.json");
-  if (request.resolvedPaths.some((path) => path === globalConfig)) return "HARD";
-  const roots = [request.cwd, ...approvedWriteRoots];
+function writeRisk(
+  request: PermissionRequest,
+  approvedWriteRoots: string[],
+  protectedWritePaths: readonly string[] = [defaultPermissionsConfigPath()],
+  workspaceWriteRoots: readonly string[] = [request.cwd],
+): Risk {
+  if (
+    request.resolvedPaths.some((path) =>
+      protectedWritePaths.some((control) => path === control || isWithin(path, control)),
+    )
+  ) {
+    return "HARD";
+  }
+  const roots = [...workspaceWriteRoots, ...approvedWriteRoots];
   return request.resolvedPaths.length > 0 &&
     request.resolvedPaths.every((path) => roots.some((root) => isWithin(path, root)))
     ? "LOW"
@@ -1121,11 +1129,15 @@ export function classifyRisk(
   request: PermissionRequest,
   networkApproved = false,
   approvedWriteRoots: string[] = [],
+  protectedWritePaths: readonly string[] = [defaultPermissionsConfigPath()],
+  workspaceWriteRoots: readonly string[] = [request.cwd],
 ): Risk {
   const lowerTool = request.tool.toLowerCase();
   if (lowerTool === "websearch") return "LOW";
   if (lowerTool === "webfetch") return webFetchRisk(request);
-  if (request.operation === "write") return writeRisk(request, approvedWriteRoots);
+  if (request.operation === "write") {
+    return writeRisk(request, approvedWriteRoots, protectedWritePaths, workspaceWriteRoots);
+  }
   if (request.operation === "read") return "LOW";
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";

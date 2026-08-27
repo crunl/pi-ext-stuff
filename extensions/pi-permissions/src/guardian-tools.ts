@@ -1,34 +1,26 @@
-import {
-  basename,
-  delimiter,
-  dirname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Tool as LlmTool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
   createLsToolDefinition,
-  createReadToolDefinition,
   createReadOnlyTools,
+  createReadToolDefinition,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
-  formatSize,
-  getAgentDir,
-  truncateHead,
-  truncateLine,
   type FindToolInput,
+  formatSize,
   type GrepToolDetails,
   type GrepToolInput,
+  getAgentDir,
   type LsToolDetails,
   type LsToolInput,
   type ReadToolDetails,
   type ReadToolInput,
+  truncateHead,
+  truncateLine,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
@@ -36,7 +28,7 @@ import {
   type SandboxManagerLike,
 } from "./sandbox.ts";
 
-const GUARDIAN_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
+const GUARDIAN_TOOL_NAMES = new Set(["read", "grep", "find", "ls", "inspect"]);
 const SENSITIVE_ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/\b(authorization|x-api-key|api-key)\s*[:=]\s*[^,\s]+/gi, "$1: [redacted]"],
   [/\bbearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"],
@@ -53,8 +45,7 @@ const DEFAULT_LS_LIMIT = 500;
 const MAX_LS_LIMIT = 1_000;
 const MAX_GREP_CONTEXT = 20;
 const MAX_RG_ARGUMENT_LENGTH = 16_384;
-const RG_UNAVAILABLE_MESSAGE =
-  "ripgrep (rg) is not available; Guardian will not download tools";
+const RG_UNAVAILABLE_MESSAGE = "ripgrep (rg) is not available; Guardian will not download tools";
 
 const RUN_RESOLVED_RG_HELPER = `
 const { execFile } = require("node:child_process");
@@ -101,12 +92,12 @@ if (
 
 let executable;
 for (const candidate of executableCandidates) {
-  if (!nodePath.isAbsolute(candidate) || !/^rg(?:\.exe)?$/i.test(nodePath.basename(candidate))) {
+  if (!nodePath.isAbsolute(candidate) || !/^rg(?:\\.exe)?$/i.test(nodePath.basename(candidate))) {
     continue;
   }
   try {
     const resolved = fs.realpathSync(candidate);
-    if (!/^rg(?:\.exe)?$/i.test(nodePath.basename(resolved)) || !fs.statSync(resolved).isFile()) {
+    if (!/^rg(?:\\.exe)?$/i.test(nodePath.basename(resolved)) || !fs.statSync(resolved).isFile()) {
       continue;
     }
     fs.accessSync(resolved, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
@@ -345,7 +336,11 @@ function resolvedMatchPath(
   return resolve(searchIsDirectory ? searchPath : dirname(searchPath), filePath);
 }
 
-function displayMatchPath(filePath: string, searchPath: string, searchIsDirectory: boolean): string {
+function displayMatchPath(
+  filePath: string,
+  searchPath: string,
+  searchIsDirectory: boolean,
+): string {
   const absolutePath = resolvedMatchPath(filePath, searchPath, searchIsDirectory);
   if (searchIsDirectory) {
     const pathFromRoot = relative(searchPath, absolutePath);
@@ -379,15 +374,19 @@ function publicToolFromDefinition(
 }
 
 function isNotFoundError(error: unknown): boolean {
-  return error instanceof Error
-    && ((error as NodeJS.ErrnoException).code === "ENOENT"
-      || /\bENOENT\b|no such file or directory/i.test(error.message));
+  return (
+    error instanceof Error &&
+    ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+      /\bENOENT\b|no such file or directory/i.test(error.message))
+  );
 }
 
 function supportedImageMimeType(buffer: Buffer): string | undefined {
-  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  )) return "image/png";
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  )
+    return "image/png";
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
     return "image/jpeg";
   }
@@ -440,9 +439,10 @@ async function executeSandboxedRead(
     outputText += `\n\n[Showing lines ${startLine}-${endLineDisplay} (${window.truncatedBy === "bytes" ? `${formatSize(DEFAULT_MAX_BYTES)} byte` : `${DEFAULT_MAX_LINES} line`} limit). Use offset=${nextOffset} to continue.]`;
   } else if (window.userLimitReached || (input.limit !== undefined && window.hasMore)) {
     const nextOffset = startLine + window.outputLines;
-    const remaining = window.totalLines === undefined
-      ? "More lines"
-      : `${Math.max(0, window.totalLines - nextOffset + 1)} more lines`;
+    const remaining =
+      window.totalLines === undefined
+        ? "More lines"
+        : `${Math.max(0, window.totalLines - nextOffset + 1)} more lines`;
     outputText += `\n\n[${remaining} in file. Use offset=${nextOffset} to continue.]`;
   }
 
@@ -466,8 +466,9 @@ async function executeSandboxedLs(
   } catch (error) {
     if (isNotFoundError(error)) throw new Error(`Path not found: ${directoryPath}`);
     if (
-      error instanceof Error
-      && ((error as NodeJS.ErrnoException).code === "ENOTDIR" || /not a directory/i.test(error.message))
+      error instanceof Error &&
+      ((error as NodeJS.ErrnoException).code === "ENOTDIR" ||
+        /not a directory/i.test(error.message))
     ) {
       throw new Error(`Not a directory: ${directoryPath}`);
     }
@@ -520,9 +521,9 @@ function parseGrepRecords(stdout: Buffer): RgGrepRecord[] {
     try {
       const event = JSON.parse(line) as RgGrepRecord;
       if (
-        (event.type === "match" || event.type === "context")
-        && typeof event.data?.path?.text === "string"
-        && typeof event.data.line_number === "number"
+        (event.type === "match" || event.type === "context") &&
+        typeof event.data?.path?.text === "string" &&
+        typeof event.data.line_number === "number"
       ) {
         records.push(event);
       }
@@ -553,10 +554,7 @@ async function executeSandboxedGrep(
   }
 
   const effectiveLimit = boundedLimit(input.limit, DEFAULT_GREP_LIMIT, MAX_GREP_LIMIT);
-  const context = Math.min(
-    MAX_GREP_CONTEXT,
-    Math.max(0, Math.floor(input.context ?? 0)),
-  );
+  const context = Math.min(MAX_GREP_CONTEXT, Math.max(0, Math.floor(input.context ?? 0)));
   const args = [
     "--json",
     "--line-number",
@@ -578,15 +576,13 @@ async function executeSandboxedGrep(
   const result = await runRg(args, "grep", effectiveLimit, context, signal);
   if (result.exitCode !== 0 && result.exitCode !== 1) {
     throw new Error(
-      result.stderr.toString("utf8").trim()
-      || `ripgrep exited with code ${result.exitCode ?? "unknown"}`,
+      result.stderr.toString("utf8").trim() ||
+        `ripgrep exited with code ${result.exitCode ?? "unknown"}`,
     );
   }
 
   const records = parseGrepRecords(result.stdout);
-  const matches = records
-    .filter((record) => record.type === "match")
-    .slice(0, effectiveLimit);
+  const matches = records.filter((record) => record.type === "match").slice(0, effectiveLimit);
   if (matches.length === 0) {
     return { content: [{ type: "text" as const, text: "No matches found" }], details: undefined };
   }
@@ -746,32 +742,27 @@ export function createSandboxedGuardianToolRuntime(
   const resolvedRgPaths = options.resolveRgPath
     ? [executableRgPath(options.resolveRgPath())].filter((path): path is string => Boolean(path))
     : resolveExistingRgPaths();
-  const runRg = resolvedRgPaths.length > 0
-    ? createSandboxedRgRunner(manager, resolvedRgPaths)
-    : undefined;
+  const runRg =
+    resolvedRgPaths.length > 0 ? createSandboxedRgRunner(manager, resolvedRgPaths) : undefined;
 
   const readDefinition = createReadToolDefinition(cwd);
-  const readTool = publicToolFromDefinition(
-    readDefinition,
-    async (_toolCallId, params, signal) =>
-      executeSandboxedRead(
-        cwd,
-        params as ReadToolInput,
-        createSandboxedGuardianFileOperations(manager, signal),
-      ),
+  const readTool = publicToolFromDefinition(readDefinition, async (_toolCallId, params, signal) =>
+    executeSandboxedRead(
+      cwd,
+      params as ReadToolInput,
+      createSandboxedGuardianFileOperations(manager, signal),
+    ),
   );
 
   const grepDefinition = createGrepToolDefinition(cwd);
-  const grepTool = publicToolFromDefinition(
-    grepDefinition,
-    async (_toolCallId, params, signal) =>
-      executeSandboxedGrep(
-        cwd,
-        params as GrepToolInput,
-        createSandboxedGuardianFileOperations(manager, signal),
-        runRg,
-        signal,
-      ),
+  const grepTool = publicToolFromDefinition(grepDefinition, async (_toolCallId, params, signal) =>
+    executeSandboxedGrep(
+      cwd,
+      params as GrepToolInput,
+      createSandboxedGuardianFileOperations(manager, signal),
+      runRg,
+      signal,
+    ),
   );
 
   const findDefinition = createFindToolDefinition(cwd);
@@ -805,8 +796,8 @@ export function createSandboxedGuardianToolRuntime(
             );
             if (result.exitCode !== 0 && result.exitCode !== 1) {
               throw new Error(
-                result.stderr.toString("utf8").trim()
-                || `ripgrep exited with code ${result.exitCode ?? "unknown"}`,
+                result.stderr.toString("utf8").trim() ||
+                  `ripgrep exited with code ${result.exitCode ?? "unknown"}`,
               );
             }
             return result.stdout
@@ -829,15 +820,52 @@ export function createSandboxedGuardianToolRuntime(
   );
 
   const lsDefinition = createLsToolDefinition(cwd);
-  const lsTool = publicToolFromDefinition(
-    lsDefinition,
-    async (_toolCallId, params, signal) =>
-      executeSandboxedLs(
-        cwd,
-        params as LsToolInput,
-        createSandboxedGuardianFileOperations(manager, signal),
-      ),
+  const lsTool = publicToolFromDefinition(lsDefinition, async (_toolCallId, params, signal) =>
+    executeSandboxedLs(
+      cwd,
+      params as LsToolInput,
+      createSandboxedGuardianFileOperations(manager, signal),
+    ),
   );
 
-  return createGuardianToolRuntime(cwd, () => [readTool, grepTool, findTool, lsTool]);
+  const runInspect = createSandboxedReadOnlyCommandRunner(manager, "bash");
+  const inspectTool = {
+    name: "inspect",
+    label: "inspect",
+    description:
+      "Run a bounded inspection command in the Guardian OS sandbox. Workspace and user-data writes are denied; network access is denied; temporary scratch follows sandbox defaults. Use only to gather evidence that would flip an allow/deny decision.",
+    parameters: Type.Object({
+      command: Type.String({
+        minLength: 1,
+        description: "Shell command to run for local inspection",
+      }),
+    }),
+    async execute(_toolCallId, params: unknown, signal) {
+      const command =
+        typeof params === "object" &&
+        params !== null &&
+        "command" in params &&
+        typeof params.command === "string"
+          ? params.command
+          : "";
+      const trimmed = command.trim();
+      if (trimmed.length === 0) throw new Error("inspect requires a command");
+      if (Buffer.byteLength(trimmed) > MAX_RG_ARGUMENT_LENGTH) {
+        throw new Error("inspect command exceeds the Guardian argument bound");
+      }
+      const result = await runInspect(["-c", trimmed], signal);
+      const stdout = result.stdout.toString("utf8");
+      const stderr = result.stderr.toString("utf8");
+      const text = [stdout, stderr, `exit ${result.exitCode ?? "null"}`]
+        .filter((part) => part.length > 0)
+        .join("\n");
+      return {
+        content: [{ type: "text" as const, text }],
+        details: undefined,
+        isError: result.exitCode !== 0 && result.exitCode !== null,
+      };
+    },
+  } as PiAgentTool;
+
+  return createGuardianToolRuntime(cwd, () => [readTool, grepTool, findTool, lsTool, inspectTool]);
 }

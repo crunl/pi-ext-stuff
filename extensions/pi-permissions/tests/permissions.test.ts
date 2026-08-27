@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { defaultPermissionsConfigPath } from "../src/filesystem-policy.ts";
 import { isPathAllowed } from "../src/permissions/paths.ts";
 import {
   classifyRisk,
@@ -284,10 +285,22 @@ describe("narrow static risk contract", () => {
         normalizeToolCall(
           "edit",
           {
-            path: join(homedir(), ".pi", "agent", "extensions", "pi-permissions", "config.json"),
+            path: defaultPermissionsConfigPath(),
           },
           "/work/repo",
         ),
+      ),
+    ).toBe("HARD");
+    expect(
+      classifyRisk(
+        normalizeToolCall(
+          "write",
+          { path: "/opt/pi/extensions/pi-permissions/config.json" },
+          "/work",
+        ),
+        false,
+        [],
+        ["/opt/pi/extensions/pi-permissions/config.json"],
       ),
     ).toBe("HARD");
   });

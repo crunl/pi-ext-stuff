@@ -1,11 +1,10 @@
-import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import type { RiskDecision } from "./risk-policy.ts";
+import type { ModelRegistry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
 import { renderGuardianSystemPrompt } from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
+import type { RiskDecision } from "./risk-policy.ts";
 
 export type AutoReviewRisk = "low" | "medium" | "high" | "critical";
 export type AutoReviewUserAuthorization = "unknown" | "low" | "medium" | "high";

@@ -11,12 +11,13 @@ import type {
 import { complete } from "@earendil-works/pi-ai/compat";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
+  type AutoReviewerContext,
   type AutoReviewRequest,
   type AutoReviewResult,
-  type AutoReviewerContext,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
 } from "./auto-review-request.ts";
+import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
 import { resolveGuardianModel } from "./guardian-model.ts";
 import {
   GUARDIAN_REVIEW_MAX_ATTEMPTS,
@@ -25,15 +26,15 @@ import {
   renderGuardianSystemPrompt,
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
-import { createGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
-import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
+import { createSandboxedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
+import { NonoSandboxManager } from "./sandbox/nono-enforcer.ts";
 
+export type { AutoReviewerContext } from "./auto-review-request.ts";
 export type {
   AutoReviewerFailureKind,
   GuardianReviewIdentity,
 } from "./guardian/errors.ts";
 export { AutoReviewerFailure } from "./guardian/errors.ts";
-export type { AutoReviewerContext } from "./auto-review-request.ts";
 
 export interface AutoReviewer {
   invalidateSession(): void;
@@ -250,12 +251,16 @@ async function waitBeforeRetry(
   if (Date.now() >= deadline) throw timeoutFailure(guardian);
 }
 
+function defaultGuardianToolRuntime(cwd: string): GuardianToolRuntime {
+  return createSandboxedGuardianToolRuntime(cwd, new NonoSandboxManager());
+}
+
 export class PiAutoReviewer implements AutoReviewer {
   constructor(
     private readonly invoke: Complete = complete,
     private readonly sessions = new GuardianReviewSessionManager(),
     private readonly sleep: Sleep = sleepWithAbort,
-    private readonly createTools: GuardianToolRuntimeFactory = createGuardianToolRuntime,
+    private readonly createTools: GuardianToolRuntimeFactory = defaultGuardianToolRuntime,
   ) {}
 
   invalidateSession(): void {

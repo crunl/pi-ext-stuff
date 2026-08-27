@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { defaultPermissionsConfigPath } from "../filesystem-policy.ts";
 
 export interface PathPolicy {
   cwd: string;
@@ -84,9 +85,7 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
     ? expandHome(path)
     : resolve(lexicalCwd, expandHome(path));
   const canonicalPath = await canonicalize(requested);
-  const protectedControls = policy.protectedWritePaths ?? [
-    resolve(homedir(), ".pi/agent/extensions/pi-permissions/config.json"),
-  ];
+  const protectedControls = policy.protectedWritePaths ?? [defaultPermissionsConfigPath()];
   const canonicalControls = await Promise.all(protectedControls.map(canonicalize));
 
   if (

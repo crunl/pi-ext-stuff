@@ -1,8 +1,7 @@
-// Protocol C concurrency control: generation counters, permission epochs,
-// turn lifecycle, execution snapshots, mode-transition barriers, pending
-// transitions, and the guardian-review controller registry. Pure state
-// machine — no I/O, no host knowledge; the host supplies snapshot contents
-// and performs side effects around these transitions.
+// Concurrency control for generations, turn lifecycle, execution snapshots,
+// mode-transition barriers, and pending transitions. Pure state machine — no
+// I/O, no host knowledge; the host supplies snapshot contents and performs
+// side effects around these transitions.
 
 import type { PermissionsConfig } from "./config.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
@@ -31,7 +30,6 @@ export interface PermissionExecutionSnapshot {
 
 export class PermissionSession {
   private generationCounter = 0;
-  private epochCounter = 0;
   private nextTransitionId = 0;
   private nextBarrierId = 0;
   private pendingTransition: PendingModeTransition | undefined;
@@ -43,9 +41,6 @@ export class PermissionSession {
   private currentTurnId: number | undefined;
   private executionSnapshot: PermissionExecutionSnapshot | undefined;
   private lifecycleEventsObserved = false;
-
-  /** Registry of in-flight Guardian review abort controllers. */
-  readonly reviewControllers = new Map<string, AbortController>();
 
   // --- generations -------------------------------------------------------
 
@@ -59,20 +54,6 @@ export class PermissionSession {
 
   bumpGeneration(): void {
     this.generationCounter += 1;
-  }
-
-  // --- permission epochs ---------------------------------------------------
-
-  getEpoch(): number {
-    return this.epochCounter;
-  }
-
-  epochMatches(expected: number): boolean {
-    return this.epochCounter === expected;
-  }
-
-  bumpEpoch(): void {
-    this.epochCounter += 1;
   }
 
   // --- turn lifecycle ------------------------------------------------------

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
-import { recordAutoDecision } from "../src/modes/auto.ts";
 import { ModeController } from "../src/modes/controller.ts";
 import {
   createPermissionSessionState,
@@ -101,21 +100,5 @@ describe("permission session state", () => {
         changed,
       ),
     ).toEqual(createPermissionSessionState(changed));
-  });
-});
-
-describe("recordAutoDecision", () => {
-  it("resets consecutive denials after approval", () => {
-    expect(recordAutoDecision({ consecutiveDenials: 2, paused: true }, "approve")).toEqual({
-      consecutiveDenials: 0,
-      paused: false,
-    });
-  });
-
-  it("pauses on the third denial", () => {
-    expect(recordAutoDecision({ consecutiveDenials: 2, paused: false }, "deny")).toEqual({
-      consecutiveDenials: 3,
-      paused: true,
-    });
   });
 });

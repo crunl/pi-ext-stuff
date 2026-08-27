@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PermissionsConfig } from "./config.ts";
+import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
 
 export interface ResolvedFilesystemPolicy {
   allowWrite: string[];
@@ -46,15 +47,20 @@ export function resolveSandboxDenyPattern(pattern: string, cwd: string): string 
   return resolve(cwd, pattern.includes("/") ? pattern : `**/${pattern}`);
 }
 
-export function defaultProtectedWritePaths(
-  cwd: string,
-  agentDir = resolve(homedir(), ".pi", "agent"),
-): string[] {
+function defaultAgentDir(): string {
+  return resolve(homedir(), ".pi", "agent");
+}
+
+export function defaultPermissionsConfigPath(agentDir = defaultAgentDir()): string {
+  return resolve(agentDir, "extensions", "pi-permissions", "config.json");
+}
+
+export function defaultProtectedWritePaths(cwd: string, agentDir = defaultAgentDir()): string[] {
   return [
     resolve(cwd, ".git"),
     resolve(cwd, ".agents"),
     resolve(cwd, ".codex"),
-    resolve(agentDir, "extensions", "pi-permissions", "config.json"),
+    defaultPermissionsConfigPath(agentDir),
   ];
 }
 
@@ -67,8 +73,10 @@ export function createFilesystemPolicy(
     allowWrite:
       config.profile === "read-only"
         ? []
-        : config.filesystem.allowWrite.flatMap((path) =>
-            expandSymlinkAliases(resolvePolicyPath(path, cwd)),
+        : filterFeasibleAllowPaths(
+            config.filesystem.allowWrite.flatMap((path) =>
+              expandSymlinkAliases(resolvePolicyPath(path, cwd)),
+            ),
           ),
     denyRead: [...config.filesystem.denyRead],
     denyWrite: [...config.filesystem.denyWrite, ...protectedWritePaths],

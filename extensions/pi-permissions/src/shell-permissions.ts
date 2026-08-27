@@ -3,41 +3,62 @@ import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { INFEASIBLE_ALLOW_PATH_REASON, isFeasibleAllowPath } from "./sandbox/feasible-allow.ts";
 
-const additionalFileSystemPermissions = Type.Object({
-  write: Type.Array(Type.String({
-    minLength: 1,
-    description: "File or directory to make writable for this command; relative paths resolve from cwd",
-  }), {
-    minItems: 1,
-    maxItems: 32,
-  }),
-}, { additionalProperties: false });
+const additionalFileSystemPermissions = Type.Object(
+  {
+    write: Type.Array(
+      Type.String({
+        minLength: 1,
+        description:
+          "File or directory to make writable for this command; relative paths resolve from cwd",
+      }),
+      {
+        minItems: 1,
+        maxItems: 32,
+      },
+    ),
+  },
+  { additionalProperties: false },
+);
 
-const additionalPermissions = Type.Object({
-  file_system: Type.Object({
-    write: additionalFileSystemPermissions.properties.write,
-  }, { additionalProperties: false }),
-}, { additionalProperties: false });
+const additionalPermissions = Type.Object(
+  {
+    file_system: Type.Object(
+      {
+        write: additionalFileSystemPermissions.properties.write,
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
 
-export const permissionedBashParameters = Type.Object({
-  command: Type.String({ description: "Bash command to execute" }),
-  timeout: Type.Optional(Type.Number({
-    description: "Timeout in seconds (optional, no default timeout)",
-  })),
-  sandbox_permissions: Type.Optional(Type.Union([
-    Type.Literal("use_default"),
-    Type.Literal("with_additional_permissions"),
-  ], {
-    description: "Use with_additional_permissions only when this command must write outside the active sandbox",
-  })),
-  additional_permissions: Type.Optional(additionalPermissions),
-  justification: Type.Optional(Type.String({
-    minLength: 1,
-    maxLength: 1000,
-    description: "Why the additional filesystem access is required",
-  })),
-}, { additionalProperties: false });
+export const permissionedBashParameters = Type.Object(
+  {
+    command: Type.String({ description: "Bash command to execute" }),
+    timeout: Type.Optional(
+      Type.Number({
+        description: "Timeout in seconds (optional, defaults to 120 seconds)",
+      }),
+    ),
+    sandbox_permissions: Type.Optional(
+      Type.Union([Type.Literal("use_default"), Type.Literal("with_additional_permissions")], {
+        description:
+          "Use with_additional_permissions only when this command must write outside the active sandbox",
+      }),
+    ),
+    additional_permissions: Type.Optional(additionalPermissions),
+    justification: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 1000,
+        description: "Why the additional filesystem access is required",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 export type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
@@ -47,10 +68,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
@@ -79,21 +97,23 @@ function requestedWriteRoots(
   }
   const write = fileSystem.write;
   if (
-    !Array.isArray(write)
-    || write.length === 0
-    || write.length > 32
-    || !write.every((path) =>
-      typeof path === "string"
-      && path.trim().length > 0
-      && path.length <= 4096
-      && !/[*?[\]]/.test(path))
+    !Array.isArray(write) ||
+    write.length === 0 ||
+    write.length > 32 ||
+    !write.every(
+      (path) =>
+        typeof path === "string" &&
+        path.trim().length > 0 &&
+        path.length <= 4096 &&
+        !/[*?[\]]/.test(path),
+    )
   ) {
     return { error: "additional_permissions.file_system.write contains invalid paths" };
   }
   if (
-    typeof input.justification !== "string"
-    || input.justification.trim().length === 0
-    || input.justification.length > 1000
+    typeof input.justification !== "string" ||
+    input.justification.trim().length === 0 ||
+    input.justification.length > 1000
   ) {
     return { error: "additional filesystem permissions require a justification" };
   }
@@ -111,15 +131,14 @@ export async function resolveAdditionalWriteRoots(
   if ("error" in requested) return { ok: false, reason: requested.error };
   if (!requested.requested) return { ok: true, writeRoots: [] };
 
-  const filesystem = createFilesystemPolicy(
-    config.sandbox,
-    cwd,
-    [...protectedWritePaths],
-  );
+  const filesystem = createFilesystemPolicy(config.sandbox, cwd, [...protectedWritePaths]);
   const permittedGitRoots = new Set(gitWriteRoots.map((path) => resolve(path)));
   const writeRoots: string[] = [];
   for (const rawPath of requested.roots) {
     const absolutePath = resolvePolicyPath(rawPath, cwd);
+    if (!isFeasibleAllowPath(absolutePath)) {
+      return { ok: false, reason: INFEASIBLE_ALLOW_PATH_REASON };
+    }
     const decision = await isPathAllowed(absolutePath, {
       cwd,
       allowWrite: filesystem.allowWrite,
@@ -139,11 +158,9 @@ export async function resolveAdditionalWriteRoots(
     }
     if (decision.allowed) continue;
     if (
-      decision.reason === "permission control path is protected"
-      && (
-        permittedGitRoots.has(resolve(absolutePath))
-        || permittedGitRoots.has(resolve(decision.canonicalPath))
-      )
+      decision.reason === "permission control path is protected" &&
+      (permittedGitRoots.has(resolve(absolutePath)) ||
+        permittedGitRoots.has(resolve(decision.canonicalPath)))
     ) {
       writeRoots.push(decision.canonicalPath);
       continue;
@@ -159,8 +176,6 @@ export async function resolveAdditionalWriteRoots(
   return {
     ok: true,
     writeRoots: [...new Set(writeRoots)],
-    justification: typeof input.justification === "string"
-      ? input.justification.trim()
-      : undefined,
+    justification: typeof input.justification === "string" ? input.justification.trim() : undefined,
   };
 }
