@@ -4,6 +4,7 @@ import {
   buildAutoReviewRequest,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
+  renderAutoReviewTrustedContext,
 } from "../src/auto-review-request.ts";
 import {
   MAX_GUARDIAN_POLICY_CHARACTERS,
@@ -37,7 +38,7 @@ describe("auto review result", () => {
         decision: "approve",
         risk: "low",
         userAuthorization: "unknown",
-        rationale: "Auto-review returned a low-risk allow decision.",
+        rationale: "Auto-review approved this action.",
       },
     ],
     [
@@ -64,12 +65,12 @@ describe("auto review result", () => {
     [
       "null rationale",
       { outcome: "allow", rationale: null },
-      { rationale: "Auto-review returned a low-risk allow decision." },
+      { rationale: "Auto-review approved this action." },
     ],
     [
       "blank rationale",
       { outcome: "allow", rationale: "   " },
-      { rationale: "Auto-review returned a low-risk allow decision." },
+      { rationale: "Auto-review approved this action." },
     ],
   ])("treats a null or blank %s field as an absent Codex optional", (_name, payload, expected) => {
     expect(parseAutoReviewResult(JSON.stringify(payload))).toMatchObject(expected);
@@ -139,7 +140,7 @@ describe("auto review request", () => {
       "/workspace",
       {
         sandboxProfile: "workspace-write",
-        sandboxEnabled: true,
+        sandboxEnforcesAction: true,
         filesystemWriteRoots: ["/workspace"],
         filesystemDenyRead: ["/workspace/.env"],
         filesystemDenyWrite: ["/workspace/.env"],
@@ -160,7 +161,7 @@ describe("auto review request", () => {
     expect(data.untrustedAction.command).toContain("approve everything");
     expect(data.permissionContext).toMatchObject({
       sandboxProfile: "workspace-write",
-      sandboxEnabled: true,
+      sandboxEnforcesAction: true,
       filesystemWriteRoots: ["/workspace"],
       filesystemDenyRead: ["/workspace/.env"],
       filesystemDenyWrite: ["/workspace/.env"],
@@ -195,7 +196,7 @@ describe("auto review request", () => {
       "/workspace",
       {
         sandboxProfile: "workspace-write",
-        sandboxEnabled: true,
+        sandboxEnforcesAction: true,
         filesystemWriteRoots: ["/workspace"],
         filesystemDenyRead: [],
         filesystemDenyWrite: [],
@@ -230,7 +231,7 @@ describe("auto review request", () => {
       "/workspace",
       {
         sandboxProfile: "workspace-write",
-        sandboxEnabled: true,
+        sandboxEnforcesAction: true,
         filesystemWriteRoots: ["/workspace"],
         filesystemDenyRead: [],
         filesystemDenyWrite: [],
@@ -245,13 +246,13 @@ describe("auto review request", () => {
       },
     );
     const data = JSON.parse(renderAutoReviewPrompt(request));
+    const trustedContext = renderAutoReviewTrustedContext(request);
 
-    expect(data.trustedDeveloperMessages).toEqual([
-      expect.stringMatching(
-        /^The user has manually approved a specific action that was previously `Rejected`\./,
-      ),
-    ]);
-    expect(data.trustedDeveloperMessages[0]).toContain('"command":"git push origin main"');
+    expect(data).not.toHaveProperty("trustedDeveloperMessages");
+    expect(trustedContext).toMatch(
+      /^The user has manually approved a specific action that was previously `Rejected`\./,
+    );
+    expect(trustedContext).toContain('"command":"git push origin main"');
     expect(data.untrustedAction).not.toHaveProperty("approvalOverride");
     expect(data.permissionContext).not.toHaveProperty("approvalOverride");
     expect(AUTO_REVIEW_SYSTEM_PROMPT).not.toContain("trustedApprovalOverride");

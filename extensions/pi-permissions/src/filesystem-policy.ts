@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PermissionsConfig } from "./config.ts";
-import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
 
 export interface ResolvedFilesystemPolicy {
   allowWrite: string[];
@@ -73,10 +72,8 @@ export function createFilesystemPolicy(
     allowWrite:
       config.profile === "read-only"
         ? []
-        : filterFeasibleAllowPaths(
-            config.filesystem.allowWrite.flatMap((path) =>
-              expandSymlinkAliases(resolvePolicyPath(path, cwd)),
-            ),
+        : config.filesystem.allowWrite.flatMap((path) =>
+            expandSymlinkAliases(resolvePolicyPath(path, cwd)),
           ),
     denyRead: [...config.filesystem.denyRead],
     denyWrite: [...config.filesystem.denyWrite, ...protectedWritePaths],

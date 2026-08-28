@@ -1,7 +1,6 @@
 import { expandSymlinkAliases, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
-import { INFEASIBLE_ALLOW_PATH_REASON, isFeasibleAllowPath } from "./sandbox/feasible-allow.ts";
 
 export interface PermissionAmendment {
   networkHosts: string[];
@@ -36,9 +35,6 @@ export async function normalizePermissionAmendment(
       return { ok: false, reason: "request_permissions write roots cannot contain globs" };
     }
     const resolved = resolvePolicyPath(raw.trim(), cwd);
-    if (!isFeasibleAllowPath(resolved)) {
-      return { ok: false, reason: INFEASIBLE_ALLOW_PATH_REASON };
-    }
     const decision = await isPathAllowed(resolved, {
       cwd,
       allowWrite: [resolved],

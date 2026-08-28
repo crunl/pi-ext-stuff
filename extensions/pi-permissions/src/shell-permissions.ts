@@ -3,7 +3,6 @@ import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
-import { INFEASIBLE_ALLOW_PATH_REASON, isFeasibleAllowPath } from "./sandbox/feasible-allow.ts";
 
 const additionalFileSystemPermissions = Type.Object(
   {
@@ -136,9 +135,6 @@ export async function resolveAdditionalWriteRoots(
   const writeRoots: string[] = [];
   for (const rawPath of requested.roots) {
     const absolutePath = resolvePolicyPath(rawPath, cwd);
-    if (!isFeasibleAllowPath(absolutePath)) {
-      return { ok: false, reason: INFEASIBLE_ALLOW_PATH_REASON };
-    }
     const decision = await isPathAllowed(absolutePath, {
       cwd,
       allowWrite: filesystem.allowWrite,

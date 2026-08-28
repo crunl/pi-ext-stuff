@@ -7,6 +7,11 @@ import type { AutoReviewRequest, AutoReviewResult } from "../src/auto-review-req
 import type { AutoReviewer } from "../src/auto-reviewer.ts";
 import { registerExtension } from "../src/register.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
+import type {
+  SandboxExecutionRequest,
+  SandboxExecutionResult,
+  SandboxPolicy,
+} from "../src/sandbox.ts";
 
 type RiskOverride = (
   tool: string,
@@ -38,6 +43,9 @@ interface HarnessOptions {
   hasUI?: boolean;
   risk?: RiskOverride;
   review?: ReviewOverride;
+  sandboxInitializeError?: Error;
+  sandboxExecuteError?: Error;
+  sandboxResetErrorAfter?: number;
 }
 
 interface Harness {
@@ -46,7 +54,14 @@ interface Harness {
   handlers: Map<string, (...args: unknown[]) => unknown>;
   commands: Map<string, { handler: (...args: unknown[]) => unknown }>;
   shortcuts: Map<string, { handler: (...args: unknown[]) => unknown }>;
-  tools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
+  tools: Map<
+    string,
+    {
+      label?: string;
+      description?: string;
+      execute: (...args: unknown[]) => Promise<unknown>;
+    }
+  >;
   context: Record<string, unknown>;
   sessionManager: {
     getBranch: ReturnType<typeof vi.fn>;
@@ -58,6 +73,7 @@ interface Harness {
   sandboxManager: {
     initialize: ReturnType<typeof vi.fn>;
     wrapWithSandbox: ReturnType<typeof vi.fn>;
+    execute: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   sandboxCoordinator: {
@@ -121,6 +137,10 @@ function blockRisk(reason = "HARD test policy"): RiskDecision {
   return { action: "block", risk: "HARD", reason };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-permissions-register-agent-"));
   const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-register-workspace-"));
@@ -138,18 +158,48 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (...args: unknown[]) => unknown }>();
   const shortcuts = new Map<string, { handler: (...args: unknown[]) => unknown }>();
-  const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+  const tools = new Map<
+    string,
+    {
+      label?: string;
+      description?: string;
+      execute: (...args: unknown[]) => Promise<unknown>;
+    }
+  >();
   const branch: unknown[] = [];
   const getBranch = vi.fn(() => branch);
   const getSessionId = vi.fn(() => "stable-register-session");
   const sessionManager = { getBranch, getSessionId };
 
-  const initialize = vi.fn(async (_config: unknown) => undefined);
+  const initialize = vi.fn(async (_config: unknown) => {
+    if (options.sandboxInitializeError) throw options.sandboxInitializeError;
+  });
   const wrapWithSandbox = vi.fn(
     async (command: string, _shell?: string, _config?: unknown, _signal?: AbortSignal) => command,
   );
-  const reset = vi.fn(async () => undefined);
-  const sandboxManager = { initialize, wrapWithSandbox, reset };
+  const execute = vi.fn(
+    async (request: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
+      if (options.sandboxExecuteError) throw options.sandboxExecuteError;
+      await wrapWithSandbox(
+        [request.program.executable, ...request.program.args].map(shellQuote).join(" "),
+        undefined,
+        request.policy as SandboxPolicy,
+        request.signal,
+      );
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+    },
+  );
+  let resetOrdinal = 0;
+  const reset = vi.fn(async () => {
+    resetOrdinal += 1;
+    if (
+      options.sandboxResetErrorAfter !== undefined &&
+      resetOrdinal >= options.sandboxResetErrorAfter
+    ) {
+      throw new Error("timeout:5");
+    }
+  });
+  const sandboxManager = { initialize, wrapWithSandbox, execute, reset };
 
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
@@ -218,8 +268,12 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       commands.set(name, command),
     registerShortcut: (key: string, shortcut: { handler: (...args: unknown[]) => unknown }) =>
       shortcuts.set(key, shortcut),
-    registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) =>
-      tools.set(tool.name, tool),
+    registerTool: (tool: {
+      name: string;
+      label?: string;
+      description?: string;
+      execute: (...args: unknown[]) => Promise<unknown>;
+    }) => tools.set(tool.name, tool),
     appendEntry,
     sendMessage,
     events: { emit },
@@ -353,6 +407,51 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
     expect(app.sessionManager.getSessionId).not.toHaveBeenCalled();
     expect(app.sessionManager.getBranch).toHaveBeenCalledOnce();
+    expect(app.tools.get("bash")?.label).toBe("bash");
+    expect(app.tools.get("bash")?.description).not.toContain("(sandboxed)");
+  });
+
+  it("reports sandbox activation failure without mislabeling it as a config error", async () => {
+    const app = await makeHarness({
+      sandboxInitializeError: new Error("sandbox helper is unavailable"),
+    });
+
+    await startSession(app);
+
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Sandbox activation failed"),
+      "error",
+    );
+    const message = String(app.notify.mock.calls.at(-1)?.[0]);
+    expect(message).toContain("previous sandbox could not be restored");
+    expect(message).not.toContain("configuration is invalid");
+  });
+
+  it("reports an invalid configuration distinctly from sandbox activation", async () => {
+    const app = await makeHarness({ config: { unexpected: true } });
+
+    await startSession(app);
+
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Permission configuration is invalid"),
+      "error",
+    );
+    expect(String(app.notify.mock.calls.at(-1)?.[0])).not.toContain("Sandbox activation failed");
+  });
+
+  it("humanizes a sandbox deadline when a permission mode change fails", async () => {
+    const app = await makeHarness({ sandboxResetErrorAfter: 2 });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing permission shortcut");
+
+    await shortcut.handler(app.context);
+
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reason: Timed out after 5 seconds."),
+      "error",
+    );
+    expect(String(app.notify.mock.calls.at(-1)?.[0])).not.toContain("timeout:5");
   });
 
   it("executes a LOW bash command through the sandbox without Guardian", async () => {
@@ -366,6 +465,25 @@ describe("Permission mode registration", () => {
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
     expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it("humanizes a sandbox execution deadline before returning it to the agent", async () => {
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecuteError: new Error("timeout:120"),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const failure = await executeBash(app, "timed-out-bash", "printf timeout").then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      code: "execution-failed",
+      message: expect.stringContaining("Timed out after 120 seconds"),
+    });
+    expect(String((failure as Error).message)).not.toContain("timeout:120");
   });
 
   it("reviews a bash network capability and leases the requested public host", async () => {
@@ -385,6 +503,12 @@ describe("Permission mode registration", () => {
       network: { allowedDomains: string[] };
     };
     expect(policy.network.allowedDomains).toContain(host);
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", "Reviewing");
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", undefined);
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Automatic approval review approved"),
+      "info",
+    );
   });
 
   it("denies a prompted bash command before invoking any backend", async () => {
@@ -397,11 +521,34 @@ describe("Permission mode registration", () => {
 
     await expect(executeBash(app, "denied-bash", "printf denied")).rejects.toMatchObject({
       code: "review-denied",
+      message: expect.stringContaining(
+        "must not attempt to achieve the same outcome through a workaround",
+      ),
     });
     expect(app.reviewInputs).toHaveLength(1);
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.notify).toHaveBeenCalledWith(
+      "Automatic approval review denied: No shell access.",
+      "warning",
+    );
+  });
+
+  it("presents managed-tool policy evaluation failures without internal error codes", async () => {
+    const app = await makeHarness({
+      risk: () => {
+        throw new Error("risk evaluator unavailable");
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(executeBash(app, "policy-error", "printf blocked")).rejects.toMatchObject({
+      code: "policy-error",
+      message: expect.stringContaining("The active permission policy could not evaluate"),
+    });
+    expect(app.sandboxBashExecute).not.toHaveBeenCalled();
   });
 
   it("approves an outside write with only the exact target in the lease", async () => {
@@ -433,6 +580,7 @@ describe("Permission mode registration", () => {
     if (!shortcut) throw new Error("missing shift+tab shortcut");
     await shortcut.handler(yolo.context);
 
+    expect(yolo.sandboxManager.reset).toHaveBeenCalledTimes(2);
     await executeBash(yolo, "yolo-bash", "printf yolo");
 
     expect(yolo.bareBashExecute).toHaveBeenCalledOnce();
@@ -505,7 +653,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
-  it("reviews a generic host tool with sandboxEnabled false and never invokes Nono", async () => {
+  it("reviews a generic host tool without claiming sandbox enforcement", async () => {
     const app = await makeHarness({ risk: () => promptRisk() });
     await startSession(app);
     await startAgent(app);
@@ -513,7 +661,7 @@ describe("Permission mode registration", () => {
     await expect(executeHostCall(app, "WebFetch", "host-approve")).resolves.toBeUndefined();
 
     expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.sandboxEnabled).toBe(false);
+    expect(app.reviewInputs[0]?.permissionContext.sandboxEnforcesAction).toBe(false);
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
@@ -528,7 +676,7 @@ describe("Permission mode registration", () => {
     const deniedCall = await executeHostCall(app, "WebFetch", "host-deny");
     expect(deniedCall).toMatchObject({ block: true });
     expect((deniedCall as { reason?: string }).reason).toContain(
-      "Do not retry through a workaround or policy circumvention",
+      "must not attempt to achieve the same outcome through a workaround",
     );
 
     const reviewCount = app.reviewInputs.length;
@@ -620,8 +768,10 @@ describe("Permission mode registration", () => {
         code: "review-denied",
       });
     }
-    expect(app.notify).toHaveBeenCalledOnce();
-    expect(app.notify.mock.calls[0]?.[0]).toContain("repeated denials");
+    const interruptionNotices = app.notify.mock.calls.filter(([message]) =>
+      String(message).includes("interrupting the turn"),
+    );
+    expect(interruptionNotices).toHaveLength(1);
     expect(app.abort).toHaveBeenCalledOnce();
 
     const persistedStates = app.appendEntry.mock.calls
@@ -656,6 +806,7 @@ describe("Permission mode registration", () => {
     await startAgent(app);
     const pending = executeBash(app, "stale-call", "printf stale");
     await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
+    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", "Reviewing");
 
     await invoke(app, "session_before_tree", { type: "session_before_tree" });
     releaseReview(approved());
@@ -664,6 +815,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions-review", undefined);
   });
 
   it("rejects a pre-aborted managed bash execute before backend execution", async () => {

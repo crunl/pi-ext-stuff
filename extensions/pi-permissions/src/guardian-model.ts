@@ -32,7 +32,7 @@ async function verifyActiveModel(
   ) {
     throw new AutoReviewerFailure(
       "unavailable",
-      "No usable Guardian or active Pi model is available",
+      "No usable configured or active reviewer model is available",
     );
   }
 

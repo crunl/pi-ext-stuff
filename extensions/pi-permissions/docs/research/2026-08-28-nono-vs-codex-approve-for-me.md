@@ -1,5 +1,10 @@
 # Nono、Codex “Approve for me” 与 pi-permissions 对照（2026-08-28）
 
+> 状态（2026-08-28 更新）：本文关于 Nono backend 的结论已被当前工作树的
+> SRT 0.0.74 executor 重构取代；保留本文仅作历史研究记录。当前架构以
+> `src/sandbox/srt-enforcer.ts`、process-global coordinator 与统一 execute seam
+> 为准。
+
 > 范围：Nono 官方文档、OpenAI 官方 Codex 文档，以及本仓库当前工作树（含未提交改动）。OpenAI 资料仅引用 `learn.chatgpt.com`。下文用 **文档事实**、**源码事实**、**推断** 明确证据层级；推断不是上游承诺，也不是性能实测。
 
 ## 结论先行

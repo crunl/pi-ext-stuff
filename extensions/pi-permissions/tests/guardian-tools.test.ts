@@ -1,4 +1,14 @@
-import { chmod, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
@@ -9,7 +19,13 @@ import {
   createSandboxedGuardianToolRuntime,
   type GuardianToolFactory,
 } from "../src/guardian-tools.ts";
-import { createGuardianReadOnlySandboxConfig, type SandboxManagerLike } from "../src/sandbox.ts";
+import {
+  createGuardianReadOnlySandboxConfig,
+  type SandboxExecutionRequest,
+  type SandboxExecutionResult,
+  type SandboxManagerLike,
+  type SandboxPolicy,
+} from "../src/sandbox.ts";
 
 type PiGuardianToolFactory = (cwd: string) => ReturnType<typeof createReadOnlyTools>;
 
@@ -59,18 +75,132 @@ async function fakeRg(directory: string, body: string): Promise<string> {
   return executable;
 }
 
-function passThroughSandboxManager(): SandboxManagerLike & {
-  wrapWithSandbox: ReturnType<typeof vi.fn<SandboxManagerLike["wrapWithSandbox"]>>;
-} {
-  return {
-    initialize: vi.fn(async () => undefined),
-    reset: vi.fn(async () => undefined),
-    wrapWithSandbox: vi.fn(async (command: string) => command),
-  };
-}
+type TestWrap = (
+  command: string,
+  shell?: string,
+  config?: SandboxPolicy,
+  signal?: AbortSignal,
+) => Promise<string>;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function killTestProcess(child: ReturnType<typeof spawn>): void {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
+function runWrappedCommand(command: string, request: SandboxExecutionRequest) {
+  return new Promise<SandboxExecutionResult>((resolve, reject) => {
+    const child = spawn("/bin/bash", ["-c", command], {
+      cwd: request.cwd,
+      env: request.env,
+      detached: true,
+      stdio: [
+        request.stdin !== undefined && request.stdin !== "ignore" ? "pipe" : "ignore",
+        "pipe",
+        "pipe",
+      ],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputError: Error | undefined;
+    let timedOut = false;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const cleanup = (): void => {
+      request.signal?.removeEventListener("abort", onAbort);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    };
+    const onAbort = (): void => killTestProcess(child);
+    const collect = (
+      chunks: Buffer[],
+      chunk: Buffer,
+      current: number,
+      bound: number | undefined,
+      name: "stdout" | "stderr",
+      onData?: (chunk: Buffer) => void,
+    ): number => {
+      onData?.(chunk);
+      if (outputError) return current;
+      const next = current + chunk.length;
+      if (bound !== undefined && next > bound) {
+        outputError = new Error(`${name} exceeded the Guardian bound`);
+        killTestProcess(child);
+      } else {
+        chunks.push(chunk);
+      }
+      return next;
+    };
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) onAbort();
+    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        killTestProcess(child);
+      }, request.timeoutMs);
+    }
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes = collect(
+        stdout,
+        chunk,
+        stdoutBytes,
+        request.maxStdoutBytes,
+        "stdout",
+        request.onStdout,
+      );
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBytes = collect(
+        stderr,
+        chunk,
+        stderrBytes,
+        request.maxStderrBytes,
+        "stderr",
+        request.onStderr,
+      );
+    });
+    child.once("error", (error) => {
+      cleanup();
+      reject(outputError ?? error);
+    });
+    child.once("close", (exitCode) => {
+      cleanup();
+      if (request.signal?.aborted) reject(new Error("aborted"));
+      else if (timedOut) reject(new Error(`timeout:${(request.timeoutMs ?? 0) / 1000}`));
+      else if (outputError) reject(outputError);
+      else resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode });
+    });
+    if (request.stdin !== undefined && request.stdin !== "ignore" && child.stdin) {
+      child.stdin.end(request.stdin);
+    }
+  });
+}
+
+function passThroughSandboxManager(): SandboxManagerLike & {
+  wrapWithSandbox: ReturnType<typeof vi.fn<TestWrap>>;
+} {
+  const wrapWithSandbox = vi.fn<TestWrap>(async (command) => command);
+  return {
+    initialize: vi.fn(async () => undefined),
+    reset: vi.fn(async () => undefined),
+    wrapWithSandbox,
+    execute: vi.fn(async (request: SandboxExecutionRequest) => {
+      const command = [request.program.executable, ...request.program.args]
+        .map(shellQuote)
+        .join(" ");
+      return runWrappedCommand(
+        await wrapWithSandbox(command, undefined, request.policy, request.signal),
+        request,
+      );
+    }),
+  };
 }
 
 function hangingSandboxManager(markerPath: string): SandboxManagerLike {
@@ -79,13 +209,11 @@ function hangingSandboxManager(markerPath: string): SandboxManagerLike {
     "writeFileSync(process.argv[1], String(process.pid));",
     "setInterval(() => {}, 1_000);",
   ].join("");
-  return {
-    initialize: vi.fn(async () => undefined),
-    reset: vi.fn(async () => undefined),
-    wrapWithSandbox: vi.fn(async () =>
-      [process.execPath, "-e", script, markerPath].map(shellQuote).join(" "),
-    ),
-  };
+  const manager = passThroughSandboxManager();
+  manager.wrapWithSandbox.mockImplementation(async () =>
+    [process.execPath, "-e", script, markerPath].map(shellQuote).join(" "),
+  );
+  return manager;
 }
 
 async function waitForPid(markerPath: string): Promise<number> {
@@ -666,6 +794,36 @@ setTimeout(() => {
     ]);
   });
 
+  it("passes a parent-resolved canonical rg executable into the Guardian child", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-canonical-rg-");
+    const binDirectory = await temporaryDirectory("pi-guardian-canonical-rg-bin-");
+    const target = await fakeRg(
+      binDirectory,
+      'process.stdout.write(JSON.stringify({ type: "end" }) + "\\n");',
+    );
+    const alias = join(cwd, "rg");
+    await symlink(target, alias);
+    const canonical = await realpath(target);
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+      resolveRgPath: () => alias,
+    });
+
+    const result = await runtime.execute({
+      type: "toolCall",
+      id: "grep-canonical-rg",
+      name: "grep",
+      arguments: { pattern: "needle", path: cwd },
+    });
+
+    expect(result).toMatchObject({ isError: false });
+    const encodedCanonical = Buffer.from(JSON.stringify([canonical])).toString("base64");
+    const encodedAlias = Buffer.from(JSON.stringify([alias])).toString("base64");
+    const command = manager.wrapWithSandbox.mock.calls.at(-1)?.[0] ?? "";
+    expect(command).toContain(encodedCanonical);
+    expect(command).not.toContain(encodedAlias);
+  });
+
   it("preserves sandboxed grep options, context, limits, and exit semantics", async () => {
     const cwd = await temporaryDirectory("pi-guardian-grep-");
     const sourcePath = join(cwd, "source.ts");
@@ -939,7 +1097,7 @@ process.exit(2);
           name,
           arguments: {},
         }),
-      ).rejects.toThrow(`Guardian tool ${name} is not available`);
+      ).rejects.toThrow(`Reviewer tool ${name} is not available`);
     },
   );
 });

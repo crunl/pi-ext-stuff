@@ -13,23 +13,6 @@ async function collectTs(dir: string): Promise<string[]> {
   return files;
 }
 
-function extractNamedFunction(source: string, name: string): string | undefined {
-  const start = source.indexOf(`function ${name}(`);
-  if (start < 0) return undefined;
-  const brace = source.indexOf("{", start);
-  if (brace < 0) return undefined;
-  let depth = 0;
-  for (let index = brace; index < source.length; index += 1) {
-    const character = source[index];
-    if (character === "{") depth += 1;
-    if (character === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-  return undefined;
-}
-
 describe("structure invariants named by the cohesion review", () => {
   it("legacy safe-command whitelist is removed from production", async () => {
     const files = await collectTs("src");
@@ -62,26 +45,23 @@ describe("structure invariants named by the cohesion review", () => {
     }
   });
 
-  it("duplicate shellQuote helpers are byte-identical", async () => {
-    const sandbox = extractNamedFunction(await readFile("src/sandbox.ts", "utf8"), "shellQuote");
-    const nono = extractNamedFunction(
-      await readFile("src/sandbox/nono-enforcer.ts", "utf8"),
-      "shellQuote",
-    );
-    expect(sandbox).toBeDefined();
-    expect(nono).toBeDefined();
-    expect(sandbox).toBe(nono);
+  it("uses one SRT-owned executor seam", async () => {
+    const source = await readFile("src/sandbox/srt-enforcer.ts", "utf8");
+    expect(source).toContain("@anthropic-ai/sandbox-runtime");
+    expect(source).toContain("wrapWithSandboxArgv");
+    expect(source).toMatch(/shell:\s*false/);
+    expect(source).toMatch(/detached:\s*true/);
   });
 
-  it("does not retain removed proxy or git-config policy fields", async () => {
+  it("does not retain removed backend or filtering modules", async () => {
     const sandboxSource = await readFile("src/sandbox.ts", "utf8");
-    const nonoSource = await readFile("src/sandbox/nono-enforcer.ts", "utf8");
-    for (const source of [sandboxSource, nonoSource]) {
+    const srtSource = await readFile("src/sandbox/srt-enforcer.ts", "utf8");
+    for (const source of [sandboxSource, srtSource]) {
       expect(source).not.toContain("httpProxyPort");
       expect(source).not.toContain("socksProxyPort");
-      expect(source).not.toContain("allowGitConfig");
-      expect(source).not.toContain("askCallback");
+      expect(source).not.toContain("upstream_proxy");
     }
-    expect(nonoSource).not.toContain("upstream_proxy");
+    expect(sandboxSource).not.toContain("feasible-allow");
+    expect(srtSource).not.toContain("nono");
   });
 });

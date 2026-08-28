@@ -73,7 +73,7 @@ describe("Risk policy gate", () => {
     }
   });
 
-  it("does not treat $HOME as an implicit writable workspace", async () => {
+  it("treats the configured current directory as the writable workspace", async () => {
     const cwd = homedir();
     const models = resolve(cwd, ".pi/agent/models.json");
     await expect(
@@ -83,10 +83,10 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     await expect(
       evaluateRiskRequest("write", { path: "notes.txt", content: "x" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     await expect(
       evaluateRiskRequest(
         "write",
@@ -102,7 +102,10 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "block" });
+    ).resolves.toMatchObject({
+      action: "prompt",
+      filesystemWriteRoots: [cwd],
+    });
   });
 
   it("prompts for external writes and dangerous Bash", async () => {
@@ -508,6 +511,12 @@ describe("Risk policy gate", () => {
         action: "prompt",
         risk: "REVIEW",
         filesystemWriteRoots: [prospectiveGitRoot],
+        executionPlan: {
+          kind: "git-init",
+          executable: expect.stringMatching(/^\//),
+          args: command === "git init" ? ["init"] : ["init", "."],
+          cwd: resolve(cwd),
+        },
       });
     },
   );
@@ -789,7 +798,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "block",
-      reason: expect.stringContaining("protected sandbox state"),
+      reason: expect.stringContaining("filesystem root"),
     });
 
     await expect(

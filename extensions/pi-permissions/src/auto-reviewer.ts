@@ -16,6 +16,7 @@ import {
   type AutoReviewResult,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
+  renderAutoReviewTrustedContext,
 } from "./auto-review-request.ts";
 import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
 import { resolveGuardianModel } from "./guardian-model.ts";
@@ -27,7 +28,7 @@ import {
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createSandboxedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
-import { NonoSandboxManager } from "./sandbox/nono-enforcer.ts";
+import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 
 export type { AutoReviewerContext } from "./auto-review-request.ts";
 export type {
@@ -252,7 +253,7 @@ async function waitBeforeRetry(
 }
 
 function defaultGuardianToolRuntime(cwd: string): GuardianToolRuntime {
-  return createSandboxedGuardianToolRuntime(cwd, new NonoSandboxManager());
+  return createSandboxedGuardianToolRuntime(cwd, new SrtSandboxManager());
 }
 
 export class PiAutoReviewer implements AutoReviewer {
@@ -294,7 +295,7 @@ export class PiAutoReviewer implements AutoReviewer {
     } catch {
       throw new AutoReviewerFailure(
         "unavailable",
-        "No usable Guardian or active Pi model is available",
+        "No usable configured or active reviewer model is available",
         undefined,
         guardianIdentity,
       );
@@ -302,7 +303,7 @@ export class PiAutoReviewer implements AutoReviewer {
     if (!auth.ok) {
       throw new AutoReviewerFailure(
         "unavailable",
-        "No usable Guardian or active Pi model is available",
+        "No usable configured or active reviewer model is available",
         undefined,
         guardianIdentity,
       );
@@ -312,7 +313,10 @@ export class PiAutoReviewer implements AutoReviewer {
     }
 
     const toolRuntime = this.createTools(context.guardianSession.cwd);
-    const systemPrompt = renderGuardianSystemPrompt(context.guardianPolicy);
+    const systemPrompt = renderGuardianSystemPrompt(
+      context.guardianPolicy,
+      renderAutoReviewTrustedContext(request),
+    );
     const lease = this.sessions.open(
       {
         cwd: context.guardianSession.cwd,
@@ -476,7 +480,7 @@ export class PiAutoReviewer implements AutoReviewer {
             ) {
               throw new AutoReviewerFailure(
                 "provider",
-                "Auto reviewer cannot approve after a read-only Guardian tool error",
+                "Auto reviewer cannot approve after a read-only reviewer tool error",
                 undefined,
                 guardianIdentity,
               );

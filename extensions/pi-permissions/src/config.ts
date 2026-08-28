@@ -142,7 +142,7 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
     const removedKey = removedReviewerPolicyKeys.find((key) => key in reviewer);
     if (removedKey) {
       throw new ConfigError(
-        `reviewer.${removedKey} is fixed by Codex-equivalent Guardian policy; remove it from config`,
+        `reviewer.${removedKey} is fixed by the Auto-review policy; remove it from config`,
       );
     }
     rejectUnknownKeys(reviewer, ["provider", "model", "reasoningEffort"], "reviewer");

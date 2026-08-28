@@ -149,7 +149,10 @@ describe("resolveGuardianModel", () => {
     });
 
     await expect(failure).rejects.toEqual(
-      new AutoReviewerFailure("unavailable", "No usable Guardian or active Pi model is available"),
+      new AutoReviewerFailure(
+        "unavailable",
+        "No usable configured or active reviewer model is available",
+      ),
     );
   });
 });

@@ -1,4 +1,5 @@
 import type { PermissionsConfig } from "./config.ts";
+import type { StructuredExecutionPlan } from "./execution-plan.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import {
   inspectCurrentDirectoryGitInitialization,
@@ -11,6 +12,7 @@ import { isPathAllowed } from "./permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
   classifyRisk,
+  gitInitializationPlan as createGitInitializationPlan,
   deletionExecutables,
   deletionTargets,
   isPublicNetworkHost,
@@ -22,7 +24,6 @@ import {
   shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
-import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 
 export type RiskDecision =
@@ -35,6 +36,7 @@ export type RiskDecision =
       networkHosts?: string[];
       filesystemWriteRoots?: string[];
       justification?: string;
+      executionPlan?: StructuredExecutionPlan;
     }
   | { action: "block"; risk: Risk; reason: string };
 
@@ -150,6 +152,18 @@ export async function evaluateRiskRequest(
   if (gitInitialization && !gitInitialization.ok) {
     return { action: "block", risk: "HARD", reason: gitInitialization.reason };
   }
+  const executionPlan = initializesCurrentDirectory
+    ? command === undefined
+      ? undefined
+      : createGitInitializationPlan(command, cwd)
+    : undefined;
+  if (initializesCurrentDirectory && executionPlan === undefined) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: "Trusted Git executable is unavailable for structured git init",
+    };
+  }
   const gitMetadata =
     !initializesCurrentDirectory && (usesImplicitGitNetwork || usesGitMutation)
       ? await inspectRepositoryGitMetadata(cwd)
@@ -186,10 +200,7 @@ export async function evaluateRiskRequest(
   if (!additionalWriteRoots.ok) {
     return { action: "block", risk: "HARD", reason: additionalWriteRoots.reason };
   }
-  const filesystemWriteRoots = filterFeasibleAllowPaths([
-    ...gitWriteRoots,
-    ...additionalWriteRoots.writeRoots,
-  ]);
+  const filesystemWriteRoots = [...gitWriteRoots, ...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
@@ -216,7 +227,7 @@ export async function evaluateRiskRequest(
   );
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
 
-  const allowWrite = filterFeasibleAllowPaths([...filesystem.allowWrite]);
+  const allowWrite = [...filesystem.allowWrite];
   if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
     const segments = request.commandSegments ?? parseCommandSegments(command);
     for (const segment of segments) {
@@ -285,6 +296,7 @@ export async function evaluateRiskRequest(
           : undefined,
       filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
       justification: additionalWriteRoots.justification,
+      ...(executionPlan === undefined ? {} : { executionPlan }),
     };
   }
 

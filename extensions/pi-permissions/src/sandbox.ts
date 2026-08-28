@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, rmdir } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type {
   BashOperations,
   EditOperations,
@@ -11,12 +12,14 @@ import type {
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
+import type { GitInitExecutionPlan } from "./execution-plan.ts";
 import {
   createFilesystemPolicy,
   expandSymlinkAliases,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
-import { filterFeasibleAllowPaths } from "./sandbox/feasible-allow.ts";
+import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
+import { inspectRepositoryGitMetadata } from "./git-metadata.ts";
 
 /**
  * Our own sandbox policy — the complete description of what a sandboxed
@@ -41,14 +44,46 @@ export interface SandboxPolicy {
   };
 }
 
+export interface SandboxProgram {
+  executable: string;
+  args: readonly string[];
+}
+
+export interface SandboxExecutionRequest {
+  policy: SandboxPolicy;
+  program: SandboxProgram;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** Replace the inherited host environment instead of overlaying it. */
+  envMode?: "inherit" | "replace";
+  /** Only the validated structured git-init plan may enable Git config writes. */
+  allowGitConfig?: boolean;
+  signal?: AbortSignal;
+  stdin?: "ignore" | string;
+  timeoutMs?: number;
+  commandId?: string;
+  commandText?: string;
+  onStdout?: (chunk: Buffer) => void;
+  onStderr?: (chunk: Buffer) => void;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
+}
+
+export interface SandboxExecutionResult {
+  stdout: Buffer;
+  stderr: Buffer;
+  exitCode: number | null;
+}
+
 export interface SandboxManagerLike {
   initialize(config: SandboxPolicy): Promise<void>;
-  wrapWithSandbox(
-    command: string,
-    binShell?: string,
-    customConfig?: Partial<SandboxPolicy>,
-    abortSignal?: AbortSignal,
-  ): Promise<string>;
+  /**
+   * Execute a program under the active policy. The implementation owns the
+   * sandbox wrapper, child process, deadlines, and cleanup lifecycle.
+   */
+  execute(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
+  /** Atomically reset and install a new process-global sandbox policy. */
+  activate?(config: SandboxPolicy): Promise<void>;
   reset(): Promise<void>;
 }
 
@@ -70,7 +105,7 @@ export function withAdditionalWriteRoots(
   config: SandboxPolicy,
   writeRoots: readonly string[],
 ): SandboxPolicy {
-  const roots = filterFeasibleAllowPaths(writeRoots.flatMap(expandSymlinkAliases));
+  const roots = [...new Set(writeRoots.flatMap(expandSymlinkAliases))];
   if (roots.length === 0) return config;
   const grantable = new Set(config.filesystem.grantableDenyWrite ?? []);
   const released = new Set(
@@ -93,6 +128,7 @@ export function createSandboxRuntimeConfig(
   config: PermissionsConfig["sandbox"],
   cwd: string,
   protectedWritePaths?: readonly string[],
+  gitMetadataWriteRoots: readonly string[] = [],
 ): SandboxPolicy {
   const filesystem = createFilesystemPolicy(
     config,
@@ -107,18 +143,31 @@ export function createSandboxRuntimeConfig(
   );
   const gitRoot = resolve(cwd, ".git");
   const gitAliases = new Set(expandSymlinkAliases(gitRoot));
+  const metadataRoots = [
+    ...new Set(gitMetadataWriteRoots.flatMap((path) => expandSymlinkAliases(resolve(path)))),
+  ];
+  const protectedMetadataRoots = [...new Set([...metadataRoots, ...gitAliases])];
+  const metadataDenyWrite = protectedMetadataRoots.flatMap((root) => [
+    root,
+    join(root, "hooks"),
+    join(root, "config"),
+  ]);
+  const finalDenyWrite = [...new Set([...denyWrite, ...metadataDenyWrite])];
   const grantableDenyWrite = [
     ...new Set(
-      filesystem.protectedWritePaths
+      [...filesystem.protectedWritePaths, ...metadataRoots]
         .flatMap((pattern) => expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)))
-        .filter((path) => gitAliases.has(path) && denyWrite.includes(path)),
+        .filter(
+          (path) =>
+            (gitAliases.has(path) || metadataRoots.includes(path)) && finalDenyWrite.includes(path),
+        ),
     ),
   ];
   return {
     filesystem: {
       allowWrite: filesystem.allowWrite,
       denyRead,
-      denyWrite,
+      denyWrite: finalDenyWrite,
       ...(grantableDenyWrite.length > 0 ? { grantableDenyWrite } : {}),
     },
     network: {
@@ -128,16 +177,7 @@ export function createSandboxRuntimeConfig(
   };
 }
 
-function killProcessTree(child: ReturnType<typeof spawn>): void {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    child.kill("SIGKILL");
-  }
-}
-
-/** Outer shell that runs a command already wrapped by `wrapWithSandbox`. */
+/** POSIX shell used as a program when the caller requested shell semantics. */
 const WRAP_SHELL = "/bin/bash";
 
 /** Default host-side deadline for a permissioned bash command. */
@@ -146,134 +186,208 @@ export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 /** Default host-side deadline for a native sandboxed file operation. */
 export const DEFAULT_FILE_OPERATION_TIMEOUT_MS = 30_000;
 
-interface WrappedSpawnOptions {
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  signal?: AbortSignal;
-  stdin?: "ignore" | string;
-  timeoutMs?: number;
-  onStdout?: (chunk: Buffer) => void;
-  onStderr?: (chunk: Buffer) => void;
-  maxStdoutBytes?: number;
-  maxStderrBytes?: number;
+/**
+ * Execute through the manager-owned process seam. Callers provide a program
+ * descriptor; the manager owns wrapping, spawning, deadlines, and cleanup.
+ */
+async function executeSandboxProgram(
+  manager: SandboxManagerLike,
+  request: SandboxExecutionRequest,
+): Promise<SandboxExecutionResult> {
+  return manager.execute(request);
 }
 
-function spawnWrappedCommand(
-  wrappedCommand: string,
-  options: WrappedSpawnOptions = {},
-): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number | null }> {
-  return new Promise((resolvePromise, reject) => {
-    const stdinMode = options.stdin === undefined || options.stdin === "ignore" ? "ignore" : "pipe";
-    const child = spawn(WRAP_SHELL, ["-c", wrappedCommand], {
-      cwd: options.cwd,
-      env: options.env,
-      detached: true,
-      stdio: [stdinMode, "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let outputError: Error | undefined;
-    let settled = false;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const collectStreams = options.onStdout === undefined && options.onStderr === undefined;
+function pathWithin(root: string, candidate: string): boolean {
+  const remainder = relative(resolve(root), resolve(candidate));
+  return remainder === "" || (!remainder.startsWith("..") && !isAbsolute(remainder));
+}
 
-    const cleanup = (): void => {
-      options.signal?.removeEventListener("abort", onAbort);
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-    };
-    const finishError = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const onAbort = (): void => killProcessTree(child);
-    const ingest = (
-      chunks: Buffer[],
-      chunk: Buffer,
-      currentBytes: number,
-      maximumBytes: number | undefined,
-      streamName: "stdout" | "stderr",
-      onChunk?: (chunk: Buffer) => void,
-    ): number => {
-      onChunk?.(chunk);
-      if (!collectStreams && maximumBytes === undefined) return currentBytes;
-      if (outputError) return currentBytes;
-      if (maximumBytes === undefined) {
-        chunks.push(chunk);
-        return currentBytes + chunk.length;
-      }
-      const remaining = maximumBytes - currentBytes;
-      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
-      const nextBytes = currentBytes + chunk.length;
-      if (nextBytes > maximumBytes) {
-        outputError = new Error(`${streamName} exceeded the Guardian bound`);
-        killProcessTree(child);
-      }
-      return Math.min(nextBytes, maximumBytes);
-    };
+function isMissingPath(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
 
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    if (options.signal?.aborted) onAbort();
-    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
-      timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        killProcessTree(child);
-      }, options.timeoutMs);
+function filesystemError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+interface PreparedGitInit {
+  policy: SandboxPolicy;
+  environment: NodeJS.ProcessEnv;
+  cleanup(succeeded: boolean): Promise<void>;
+}
+
+async function removeOwnedEmptyGitRoot(gitRoot: string): Promise<void> {
+  try {
+    await rmdir(gitRoot);
+  } catch (error) {
+    if (isMissingPath(error)) return;
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOTEMPTY"
+    ) {
+      throw new Error("partial Git metadata was retained after failed initialization");
     }
+    throw error;
+  }
+}
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBytes = ingest(
-        stdout,
-        chunk,
-        stdoutBytes,
-        options.maxStdoutBytes,
-        "stdout",
-        options.onStdout,
-      );
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBytes = ingest(
-        stderr,
-        chunk,
-        stderrBytes,
-        options.maxStderrBytes,
-        "stderr",
-        options.onStderr,
-      );
-    });
-    child.once("error", (error) => finishError(outputError ?? error));
-    child.once("close", (exitCode) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (options.signal?.aborted) {
-        reject(new Error("aborted"));
-      } else if (timedOut) {
-        reject(new Error(`timeout:${(options.timeoutMs ?? 0) / 1000}`));
-      } else if (outputError) {
-        reject(outputError);
-      } else {
-        resolvePromise({
-          stdout: Buffer.concat(stdout),
-          stderr: Buffer.concat(stderr),
-          exitCode,
-        });
-      }
-    });
-    if (stdinMode === "pipe" && child.stdin) {
-      if (typeof options.stdin === "string") child.stdin.end(options.stdin);
-      else child.stdin.end();
-    }
+/**
+ * Prepare the one sealed Git-init execution. SRT cannot permit creation of a
+ * future path below a mandatory hooks deny, so the host creates only the
+ * exact `.git` directory and verifies its identity before the child starts.
+ * The child still receives a hard hooks deny; only exact config deny entries
+ * are released for this typed plan.
+ */
+async function prepareGitInit(cwd: string, policy: SandboxPolicy): Promise<PreparedGitInit> {
+  const lexicalCwd = resolve(cwd);
+  const physicalCwd = await realpath(cwd).catch((error: unknown) => {
+    throw new Error(`pi-permissions: cannot resolve Git init cwd: ${filesystemError(error)}`);
   });
+  const gitRoots = [
+    ...new Set([
+      ...expandSymlinkAliases(join(lexicalCwd, ".git")),
+      ...expandSymlinkAliases(join(physicalCwd, ".git")),
+    ]),
+  ];
+  const gitRoot = join(physicalCwd, ".git");
+  const hookPaths = gitRoots.flatMap((root) => expandSymlinkAliases(join(root, "hooks")));
+  const configPaths = new Set(
+    gitRoots.flatMap((root) => expandSymlinkAliases(join(root, "config"))),
+  );
+  const denyWrite = policy.filesystem.denyWrite;
+  if (gitRoots.some((root) => denyWrite.includes(root))) {
+    throw new Error("pi-permissions: Git init metadata root was not released exactly");
+  }
+  if (!hookPaths.every((path) => denyWrite.includes(path))) {
+    throw new Error("pi-permissions: Git init hooks must remain hard-denied");
+  }
+  const allowed = gitRoots.some((root) =>
+    policy.filesystem.allowWrite.some((writeRoot) => pathWithin(writeRoot, root)),
+  );
+  if (!allowed) {
+    throw new Error("pi-permissions: Git init metadata root is outside the write lease");
+  }
+
+  let createdGitRoot = false;
+  let runtimeDirectory: string | undefined;
+  let templateDirectory: string | undefined;
+  try {
+    let details: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      details = await lstat(gitRoot);
+    } catch (error) {
+      if (!isMissingPath(error)) throw error;
+    }
+    if (details) {
+      if (details.isSymbolicLink() || !details.isDirectory()) {
+        throw new Error("pi-permissions: existing .git must be a real directory");
+      }
+      if ((await readdir(gitRoot)).length > 0) {
+        const metadata = await inspectRepositoryGitMetadata(cwd);
+        if (!metadata.ok || !metadata.writeRoots.some((root) => root === gitRoot)) {
+          throw new Error("pi-permissions: existing .git metadata is not trusted");
+        }
+      }
+    } else {
+      await mkdir(gitRoot, { mode: 0o700 });
+      createdGitRoot = true;
+    }
+    const verifiedRoot = await lstat(gitRoot);
+    if (verifiedRoot.isSymbolicLink() || !verifiedRoot.isDirectory()) {
+      throw new Error("pi-permissions: .git identity changed during preparation");
+    }
+
+    const preparedRuntimeDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-git-home-"));
+    runtimeDirectory = preparedRuntimeDirectory;
+    const preparedTemplateDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-git-template-"));
+    templateDirectory = preparedTemplateDirectory;
+    await chmod(preparedTemplateDirectory, 0o555);
+    const verifiedTemplate = await lstat(preparedTemplateDirectory);
+    if (verifiedTemplate.isSymbolicLink() || !verifiedTemplate.isDirectory()) {
+      throw new Error("pi-permissions: Git template directory is not trusted");
+    }
+    const preparedPolicy: SandboxPolicy = {
+      ...policy,
+      filesystem: {
+        ...policy.filesystem,
+        // Exact config identities are released only for the sealed helper;
+        // broad/glob entries and the hooks deny are intentionally untouched.
+        denyWrite: denyWrite.filter((path) => !configPaths.has(path)),
+        grantableDenyWrite: (policy.filesystem.grantableDenyWrite ?? []).filter(
+          (path) => !configPaths.has(path),
+        ),
+      },
+    };
+    return {
+      policy: preparedPolicy,
+      environment: gitInitializationEnvironment(
+        preparedRuntimeDirectory,
+        preparedTemplateDirectory,
+      ),
+      cleanup: async (succeeded) => {
+        let cleanupError: unknown;
+        try {
+          await rm(preparedTemplateDirectory, { recursive: true, force: true });
+        } catch (error) {
+          cleanupError = error;
+        }
+        try {
+          await rm(preparedRuntimeDirectory, { recursive: true, force: true });
+        } catch (error) {
+          cleanupError ??= error;
+        }
+        if (!succeeded && createdGitRoot) {
+          try {
+            const current = await lstat(gitRoot);
+            if (current.isSymbolicLink() || !current.isDirectory()) {
+              throw new Error(".git identity changed before cleanup");
+            }
+            await removeOwnedEmptyGitRoot(gitRoot);
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
+        if (cleanupError) {
+          throw new Error(
+            `pi-permissions: Git init cleanup failed: ${filesystemError(cleanupError)}`,
+          );
+        }
+      },
+    };
+  } catch (error) {
+    let cleanupError: unknown;
+    if (templateDirectory) {
+      try {
+        await rm(templateDirectory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    if (runtimeDirectory) {
+      try {
+        await rm(runtimeDirectory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    if (createdGitRoot) {
+      try {
+        await removeOwnedEmptyGitRoot(gitRoot);
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+    const message = `pi-permissions: Git init preparation failed: ${filesystemError(error)}`;
+    throw new Error(cleanupError ? `${message}; ${filesystemError(cleanupError)}` : message);
+  }
 }
 
 export function createSandboxedBashOperations(
   manager: SandboxManagerLike,
   customConfig?: SandboxPolicy,
+  options: { gitInitPlan?: GitInitExecutionPlan } = {},
 ): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -281,28 +395,62 @@ export function createSandboxedBashOperations(
         throw new Error(`Working directory does not exist: ${cwd}`);
       }
 
-      const wrappedCommand = await manager.wrapWithSandbox(
-        command,
-        undefined,
-        customConfig,
-        signal,
-      );
+      const gitInitPlan = options.gitInitPlan;
+      if (gitInitPlan && resolve(cwd) !== gitInitPlan.cwd) {
+        throw new Error("pi-permissions: structured git init cwd does not match execution cwd");
+      }
+      if (gitInitPlan) {
+        const trustedExecutable = resolveTrustedSystemGitExecutable(gitInitPlan.executable);
+        const fixedArgs =
+          (gitInitPlan.args.length === 1 && gitInitPlan.args[0] === "init") ||
+          (gitInitPlan.args.length === 2 &&
+            gitInitPlan.args[0] === "init" &&
+            gitInitPlan.args[1] === ".");
+        if (trustedExecutable !== gitInitPlan.executable || !fixedArgs) {
+          throw new Error("pi-permissions: structured Git init plan is not trusted");
+        }
+      }
 
-      const result = await spawnWrappedCommand(wrappedCommand, {
-        cwd,
-        env,
-        signal,
-        stdin: "ignore",
-        timeoutMs:
-          timeout === undefined
-            ? DEFAULT_BASH_TIMEOUT_MS
-            : timeout > 0
-              ? timeout * 1000
-              : undefined,
-        onStdout: onData,
-        onStderr: onData,
-      });
-      return { exitCode: result.exitCode };
+      const preparation = gitInitPlan
+        ? await prepareGitInit(cwd, customConfig ?? createGuardianReadOnlySandboxConfig())
+        : undefined;
+      try {
+        const result = await executeSandboxProgram(manager, {
+          policy: preparation?.policy ?? customConfig ?? createGuardianReadOnlySandboxConfig(),
+          program: gitInitPlan
+            ? { executable: gitInitPlan.executable, args: gitInitPlan.args }
+            : { executable: WRAP_SHELL, args: ["-c", command] },
+          cwd,
+          ...(gitInitPlan
+            ? {
+                env: preparation?.environment,
+                envMode: "replace" as const,
+                allowGitConfig: true,
+              }
+            : { env }),
+          signal,
+          stdin: "ignore",
+          timeoutMs:
+            timeout === undefined
+              ? DEFAULT_BASH_TIMEOUT_MS
+              : timeout > 0
+                ? timeout * 1000
+                : undefined,
+          onStdout: onData,
+          onStderr: onData,
+        });
+        await preparation?.cleanup(result.exitCode === 0);
+        return { exitCode: result.exitCode };
+      } catch (error) {
+        if (preparation) {
+          try {
+            await preparation.cleanup(false);
+          } catch (cleanupError) {
+            throw new Error(`${filesystemError(error)}; ${filesystemError(cleanupError)}`);
+          }
+        }
+        throw error;
+      }
     },
   };
 }
@@ -329,10 +477,6 @@ main().catch((error) => {
   process.exitCode = 1;
 });
 `.trim();
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
 
 function parseJsonSafe<T>(raw: string): T {
   try {
@@ -361,7 +505,46 @@ const GUARDIAN_DIRECTORY_MAX_BYTES = 512 * 1024;
 function guardianReadOnlyExecutablePath(executable: GuardianReadOnlyExecutable): string {
   if (executable === "node") return process.execPath;
   if (executable === "bash") return WRAP_SHELL;
-  throw new Error(`Unsupported Guardian read-only executable: ${executable}`);
+  throw new Error(`Unsupported reviewer read-only executable: ${executable}`);
+}
+
+function systemPath(): string {
+  return process.platform === "win32"
+    ? (process.env.SystemRoot ?? "")
+    : "/usr/bin:/bin:/usr/sbin:/sbin";
+}
+
+function guardianEnvironment(): NodeJS.ProcessEnv {
+  return {
+    PATH: systemPath(),
+    HOME: tmpdir(),
+    TMPDIR: tmpdir(),
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    TERM: "dumb",
+  };
+}
+
+/**
+ * The only command allowed to opt into Git's repository-local config writes.
+ * Every value is fixed or temporary; in particular no caller-provided loader,
+ * proxy, credential, Git directory, or global config variable is inherited.
+ */
+export function gitInitializationEnvironment(
+  homeDirectory: string,
+  templateDirectory: string,
+): NodeJS.ProcessEnv {
+  return {
+    PATH: systemPath(),
+    HOME: homeDirectory,
+    XDG_CONFIG_HOME: homeDirectory,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TEMPLATE_DIR: templateDirectory,
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    TERM: "dumb",
+  };
 }
 
 export function createSandboxedReadOnlyCommandRunner(
@@ -371,16 +554,11 @@ export function createSandboxedReadOnlyCommandRunner(
   const resolvedExecutable = guardianReadOnlyExecutablePath(executable);
   return async (args, signal) => {
     if (signal?.aborted) throw new Error("aborted");
-    const command = [resolvedExecutable, ...args].map(shellQuote).join(" ");
-    const wrappedCommand = await manager.wrapWithSandbox(
-      command,
-      undefined,
-      createGuardianReadOnlySandboxConfig(),
-      signal,
-    );
-    if (signal?.aborted) throw new Error("aborted");
-
-    return spawnWrappedCommand(wrappedCommand, {
+    return executeSandboxProgram(manager, {
+      policy: createGuardianReadOnlySandboxConfig(),
+      program: { executable: resolvedExecutable, args },
+      env: guardianEnvironment(),
+      envMode: "replace",
       signal,
       stdin: "ignore",
       timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,
@@ -393,9 +571,9 @@ export function createSandboxedReadOnlyCommandRunner(
 const GUARDIAN_FILE_OPERATION_HELPER = `
 const fs = require("node:fs/promises");
 const { constants, createReadStream } = require("node:fs");
-const os = require("node:os");
 const nodePath = require("node:path");
-const [operation, encodedPath, ...operationArgs] = process.argv.slice(1);
+const [encodedTrustedHome, operation, encodedPath, ...operationArgs] = process.argv.slice(1);
+const trustedHome = Buffer.from(encodedTrustedHome, "base64").toString("utf8");
 const path = Buffer.from(encodedPath, "base64").toString("utf8");
 const maxFileBytes = ${GUARDIAN_FILE_MAX_BYTES};
 const maxDirectoryEntries = ${GUARDIAN_DIRECTORY_MAX_ENTRIES};
@@ -407,7 +585,7 @@ async function readBounded(filePath) {
   for await (const chunk of createReadStream(filePath)) {
     bytes += chunk.length;
     if (bytes > maxFileBytes) {
-      throw new Error("file exceeds the Guardian byte bound");
+      throw new Error("file exceeds the reviewer byte bound");
     }
     chunks.push(chunk);
   }
@@ -558,8 +736,8 @@ async function readDirectoryEntries(directoryPath) {
 
 function resolveToCwd(rawPath, cwd) {
   let normalized = rawPath.replace(/^@/, "").replace(/\u00a0/g, " ");
-  if (normalized === "~") normalized = os.homedir();
-  else if (normalized.startsWith("~/")) normalized = nodePath.join(os.homedir(), normalized.slice(2));
+  if (normalized === "~") normalized = trustedHome;
+  else if (normalized.startsWith("~/")) normalized = nodePath.join(trustedHome, normalized.slice(2));
   return nodePath.resolve(cwd, normalized);
 }
 
@@ -654,7 +832,7 @@ async function main() {
     process.stdout.write(JSON.stringify(await readDirectoryEntries(path)));
   } else if (operation === "list") {
     process.stdout.write(JSON.stringify(await listDirectory(path, Number(operationArgs[0]))));
-  } else throw new Error("unsupported Guardian file operation");
+  } else throw new Error("unsupported reviewer file operation");
 }
 main().catch((error) => {
   process.stderr.write(JSON.stringify({
@@ -713,6 +891,7 @@ export interface SandboxedGuardianFileOperations {
 export function createSandboxedGuardianFileOperations(
   manager: SandboxManagerLike,
   signal?: AbortSignal,
+  trustedHome: string = homedir(),
 ): SandboxedGuardianFileOperations {
   const run = createSandboxedReadOnlyCommandRunner(manager, "node");
   const runFileOperation = async (
@@ -724,6 +903,7 @@ export function createSandboxedGuardianFileOperations(
       [
         "-e",
         GUARDIAN_FILE_OPERATION_HELPER,
+        Buffer.from(trustedHome).toString("base64"),
         operation,
         Buffer.from(path).toString("base64"),
         ...operationArgs,
@@ -732,7 +912,7 @@ export function createSandboxedGuardianFileOperations(
     );
     if (result.exitCode !== 0) {
       const stderr = result.stderr.toString("utf8");
-      let message = stderr || `sandboxed Guardian file operation exited with ${result.exitCode}`;
+      let message = stderr || `sandboxed reviewer file operation exited with ${result.exitCode}`;
       let code: string | undefined;
       try {
         const diagnostic = JSON.parse(stderr) as { code?: unknown; message?: unknown };
@@ -809,17 +989,12 @@ async function runSandboxedFileOperation(
   input?: string,
   signal?: AbortSignal,
 ): Promise<Buffer> {
-  const command = [
-    process.execPath,
-    "-e",
-    FILE_OPERATION_HELPER,
-    operation,
-    Buffer.from(path).toString("base64"),
-  ]
-    .map(shellQuote)
-    .join(" ");
-  const wrappedCommand = await manager.wrapWithSandbox(command, undefined, config, signal);
-  const result = await spawnWrappedCommand(wrappedCommand, {
+  const result = await executeSandboxProgram(manager, {
+    policy: config,
+    program: {
+      executable: process.execPath,
+      args: ["-e", FILE_OPERATION_HELPER, operation, Buffer.from(path).toString("base64")],
+    },
     signal,
     stdin: input === undefined ? "ignore" : input,
     timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,

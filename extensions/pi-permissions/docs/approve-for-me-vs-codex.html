@@ -564,8 +564,8 @@
 
           <line x1="825" y1="352" x2="825" y2="372" stroke="#30363d" />
           <rect x="590" y="372" width="470" height="58" rx="6" fill="#1c2330" stroke="#f0883e" />
-          <text x="825" y="395" text-anchor="middle" fill="#f0883e" font-size="12">nono run --silent --profile · 无 unsandbox 重试</text>
-          <text x="825" y="413" text-anchor="middle" fill="#8b949e" font-size="10">turn/session amendment ∪ exact lease → profile</text>
+          <text x="825" y="395" text-anchor="middle" fill="#f0883e" font-size="12">SRT executor · 无 unsandbox 重试</text>
+          <text x="825" y="413" text-anchor="middle" fill="#8b949e" font-size="10">turn/session amendment ∪ exact lease → policy</text>
 
           <rect x="590" y="448" width="470" height="52" rx="6" fill="#161b22" stroke="#d29922" />
           <text x="825" y="470" text-anchor="middle" fill="#d29922" font-size="11">request_permissions 也由 Engine 送 Guardian</text>
@@ -624,7 +624,7 @@
               暴露 <code>read</code> / <code>grep</code> / <code>find</code> / <code>ls</code> /
               <code>inspect</code>。<code>inspect</code> 使用固定
               <code>{command:string}</code> schema，参数和输出有上限；外层固定
-              <code>/bin/bash -c</code>，经 Nono 只读/无网络 profile 与 30s host deadline
+              <code>/bin/bash -c</code>，经 SRT 只读/无网络 policy 与 30s host deadline
               约束，临时 scratch 遵循 sandbox 默认值。
             </div>
           </div>
@@ -640,7 +640,7 @@
             </div>
             <div class="pi">
               <div class="k">Pi</div>
-              没有 unsandbox 重试。精确 filesystem capability 由 Engine 形成 lease，Nono profile 仍是最终 enforcement owner；只有 cwd `.git` 的 grantable deny 可被 exact grant 移除。
+              没有 unsandbox 重试。精确 filesystem capability 由 Engine 形成 lease，SRT policy 仍是最终 enforcement owner；只有 cwd `.git` 的 grantable deny 可被 exact grant 移除。
             </div>
           </div>
         </article>
@@ -655,7 +655,7 @@
             </div>
             <div class="pi">
               <div class="k">Pi</div>
-              从命令抽出 public hosts → Guardian → exact lease → <code>allow_domain</code>；无 host 时 Nono 写 <code>network.block</code>，有 host 才进入 per-call supervised proxy。
+              从命令抽出 public hosts → Guardian → exact lease → SRT <code>allowedDomains</code>；无 host 时 policy 保持 deny，有 host 才进入受控执行。
             </div>
           </div>
         </article>
@@ -689,7 +689,7 @@
         <div class="pill"><b>sticky</b> turn | session</div>
         <div class="pill"><b>Guardian 自身</b> 不升级</div>
         <div class="pill"><b>request_permissions</b> Guardian 批准后才 amend</div>
-        <div class="pill"><b>Nono</b> 无网络只写 block；silent 不吞 fatal error</div>
+        <div class="pill"><b>SRT</b> policy 独立 denyRead/denyWrite；cleanup 失败 poison 并 fail-closed</div>
       </div>
 
       <h2>⑥ 若还要对齐</h2>
@@ -697,9 +697,9 @@
         <div class="lane pi">
           <h3>剩余差异 / 值得评估</h3>
           <ol>
-            <li>补齐 Nono 明确 denial reason 的 typed runtime boundary，再交 Guardian 做一次 exact retry；不要解析 stderr 猜测。</li>
+            <li>补齐 SRT 明确 denial reason 的 typed runtime boundary，再交 Guardian 做一次 exact retry；不要解析 stderr 猜测。</li>
             <li>generic tool 的 host-admission 只覆盖 reviewer gate，实际 side effect 仍由宿主 owner 负责；若要更强隔离，应接入对应 native owner。</li>
-            <li>评估 per-call <code>nono run</code> 的固定成本与长生命周期 Tool Sandbox / <code>nono wrap</code> 的适用边界。</li>
+            <li>评估 per-call SRT wrap 的固定成本与长生命周期 Tool Sandbox 的适用边界。</li>
           </ol>
         </div>
         <div class="lane codex">
@@ -736,7 +736,7 @@
           pi: [
             ["risk LOW", "ok"],
             ["不审", "ok"],
-            ["nono 执行", "sb"],
+            ["SRT 执行", "sb"],
           ],
         },
         {
@@ -754,7 +754,7 @@
             ["抽出 public host → prompt", "g"],
             ["Guardian", "g"],
             ["grant.networkHosts", "ok"],
-            ["nono allow_domain", "sb"],
+            ["SRT allowedDomains", "sb"],
           ],
         },
         {
@@ -784,7 +784,7 @@
           pi: [
             ["writeRisk LOW", "ok"],
             ["不审", "ok"],
-            ["nono 写", "sb"],
+            ["SRT 写", "sb"],
           ],
         },
         {
@@ -800,7 +800,7 @@
           pi: [
             ["writeRisk REVIEW", "g"],
             ["Guardian", "g"],
-            ["grant.writeRoots ∪ nono", "sb"],
+            ["grant.writeRoots ∪ SRT", "sb"],
           ],
         },
         {

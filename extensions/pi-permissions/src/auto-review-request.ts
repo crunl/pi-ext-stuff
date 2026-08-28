@@ -43,15 +43,15 @@ export interface AutoReviewApprovalOverride {
 
 export interface GuardianPermissionContext {
   sandboxProfile: "workspace-write" | "read-only";
-  sandboxEnabled: boolean;
+  sandboxEnforcesAction: boolean;
   filesystemWriteRoots: string[];
   filesystemDenyRead: string[];
   filesystemDenyWrite: string[];
   requestedNetworkHosts: string[];
   allowedNetworkHosts: string[];
   deniedNetworkHosts: string[];
-  defaultRisk?: "LOW" | "REVIEW" | "HARD";
-  defaultReason?: string;
+  staticRisk?: "LOW" | "REVIEW" | "HARD";
+  staticReason?: string;
   justification?: string;
 }
 
@@ -108,8 +108,8 @@ export function buildAutoReviewRequest(
     filesystemWriteRoots: [...permissionContext.filesystemWriteRoots],
     filesystemDenyRead: [...permissionContext.filesystemDenyRead],
     filesystemDenyWrite: [...permissionContext.filesystemDenyWrite],
-    defaultRisk: decision.risk,
-    defaultReason: decision.reason,
+    staticRisk: decision.risk,
+    staticReason: decision.reason,
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
   serializeAction({
@@ -126,17 +126,10 @@ export function buildAutoReviewRequest(
 }
 
 export function renderAutoReviewPrompt(request: AutoReviewRequest): string {
-  const { approvalOverride } = request;
-  const serializedAction = serializeAction({
-    untrustedAction: request.untrustedAction,
-    permissionContext: request.permissionContext,
-  });
   return JSON.stringify({
     untrustedTranscript: boundGuardianTranscript(request.untrustedTranscript),
     untrustedAction: request.untrustedAction,
     permissionContext: request.permissionContext,
-    trustedDeveloperMessages:
-      approvalOverride === undefined ? [] : [approvedActionContext(serializedAction)],
     outputSchema: {
       risk_level: ["low", "medium", "high", "critical"],
       user_authorization: ["unknown", "low", "medium", "high"],
@@ -144,6 +137,16 @@ export function renderAutoReviewPrompt(request: AutoReviewRequest): string {
       rationale: "string",
     },
   });
+}
+
+export function renderAutoReviewTrustedContext(request: AutoReviewRequest): string | undefined {
+  if (request.approvalOverride === undefined) return undefined;
+  return approvedActionContext(
+    serializeAction({
+      untrustedAction: request.untrustedAction,
+      permissionContext: request.permissionContext,
+    }),
+  );
 }
 
 function approvedActionContext(serializedAction: string): string {
@@ -210,7 +213,7 @@ export function parseAutoReviewResult(text: string): AutoReviewResult {
     typeof parsed.rationale === "string" && parsed.rationale.trim().length > 0
       ? parsed.rationale
       : decision === "approve"
-        ? "Auto-review returned a low-risk allow decision."
+        ? "Auto-review approved this action."
         : "Auto-review returned a deny decision without a rationale.";
   return {
     decision,

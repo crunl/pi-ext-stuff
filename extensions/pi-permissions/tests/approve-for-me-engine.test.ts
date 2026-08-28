@@ -81,6 +81,7 @@ function reviewAdmission(
 ): AdmissionPlan {
   return {
     kind: "review",
+    risk: "REVIEW",
     requested,
     review: "capability",
     reason: "The operation needs a capability outside the baseline lease.",
@@ -116,6 +117,34 @@ describe("ApproveForMeEngine public seam", () => {
 
     await expect(turn.execute(call(execute))).resolves.toEqual({ kind: "completed", value: "ok" });
     expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("rejects an untrusted absolute executable in a typed Git plan", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const executor = vi.fn(async () => completed("must not run"));
+
+    const result = await turn.execute(
+      call(executor, {
+        admission: {
+          kind: "allow",
+          execution: {
+            kind: "git-init",
+            executable: "/tmp/evil",
+            args: ["init"],
+            cwd: "/workspace",
+          },
+        },
+      }),
+    );
+
+    expect(result.kind).toBe("blocked");
+    if (result.kind === "blocked") expect(result.error.code).toBe("policy-denied");
+    expect(executor).not.toHaveBeenCalled();
     expect(review).not.toHaveBeenCalled();
   });
 
@@ -421,6 +450,7 @@ describe("ApproveForMeEngine public seam", () => {
         call(execute, {
           admission: {
             kind: "review",
+            risk: "REVIEW",
             requested: writeOutsidePreview(),
             review: "capability",
             reason: "The operation needs an output path.",
@@ -464,6 +494,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(executor, {
         admission: {
           kind: "review",
+          risk: "REVIEW",
           review: "action",
           reason: "Confirm the action itself.",
           summary: "A no-capability action",
@@ -977,6 +1008,7 @@ describe("ApproveForMeEngine public seam", () => {
             },
             admission: {
               kind: "review",
+              risk: "REVIEW",
               requested: writeOutsidePreview(),
               review: "capability",
               reason: "The operation needs an output path.",
@@ -1240,6 +1272,7 @@ describe("ApproveForMeEngine public seam", () => {
           {
             admission: {
               kind: "review",
+              risk: "REVIEW",
               requested: writeOutsidePreview(),
               review: "action",
               reason: "Confirm this covered action.",

@@ -43,7 +43,7 @@ type PiGuardianInput = GuardianReviewInput<PiGuardianReviewContext> & {
 type PromptRiskDecision = Extract<RiskDecision, { action: "prompt" }>;
 
 const INVALID_GUARDIAN_IDENTITY =
-  "pi-permissions: Guardian review event identity does not match Engine invocation";
+  "pi-permissions: reviewer event identity does not match Engine invocation";
 
 function requestedCapabilities(decision: Extract<RiskDecision, { action: "prompt" }>): {
   requested: CapabilityRequestInput[];
@@ -81,10 +81,12 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
   const { requested } = requestedCapabilities(decision);
   return {
     kind: "review",
+    risk: decision.risk,
     ...(requested.length > 0 ? { requested } : {}),
     review: requested.length > 0 ? "capability" : "action",
     reason: decision.reason,
     summary: decision.summary,
+    ...(decision.executionPlan === undefined ? {} : { execution: decision.executionPlan }),
   };
 }
 
@@ -145,8 +147,8 @@ function policyForReview(
   if (input.ownership === "host-admission") {
     // Host-admission tools execute under their own host authority. A true
     // sandbox-enabled flag describes the coding-agent process only; it does
-    // not mean an external MCP/custom tool is isolated by Nono.
-    return context.baseSandboxPolicy;
+    // not mean an external MCP/custom tool is isolated by the sandbox adapter.
+    return undefined;
   }
   return input.effective.policy ?? context.baseSandboxPolicy;
 }
@@ -156,30 +158,30 @@ function guardianPermissionContext(
   decision: PromptRiskDecision,
 ): {
   sandboxProfile: "workspace-write" | "read-only";
-  sandboxEnabled: boolean;
+  sandboxEnforcesAction: boolean;
   filesystemWriteRoots: string[];
   filesystemDenyRead: string[];
   filesystemDenyWrite: string[];
   requestedNetworkHosts: string[];
   allowedNetworkHosts: string[];
   deniedNetworkHosts: string[];
-  defaultRisk: "LOW" | "REVIEW" | "HARD";
-  defaultReason: string;
+  staticRisk: "LOW" | "REVIEW" | "HARD";
+  staticReason: string;
   justification?: string;
 } {
   const policy = policyForReview(input);
   const requested = requestedCapabilities(decision);
   return {
     sandboxProfile: input.context.sandboxProfile,
-    sandboxEnabled: input.ownership === "host-admission" ? false : input.context.sandboxEnabled,
+    sandboxEnforcesAction: input.ownership !== "host-admission" && input.context.sandboxEnabled,
     filesystemWriteRoots: [...(policy?.filesystem.allowWrite ?? [])],
     filesystemDenyRead: [...(policy?.filesystem.denyRead ?? [])],
     filesystemDenyWrite: [...(policy?.filesystem.denyWrite ?? [])],
     requestedNetworkHosts: requested.networkHosts,
     allowedNetworkHosts: [...(policy?.network.allowedDomains ?? [])],
     deniedNetworkHosts: [...(policy?.network.deniedDomains ?? [])],
-    defaultRisk: decision.risk,
-    defaultReason: decision.reason,
+    staticRisk: decision.risk,
+    staticReason: decision.reason,
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
 }
@@ -202,7 +204,7 @@ function promptDecisionFromEngine(
     .map((request) => request.path);
   return {
     action: "prompt",
-    risk: "REVIEW",
+    risk: input.risk ?? "REVIEW",
     reason: input.reason ?? "Permission review requested",
     summary: input.summary ?? input.call.tool,
     ...(networkHosts.length > 0 ? { networkHosts } : {}),

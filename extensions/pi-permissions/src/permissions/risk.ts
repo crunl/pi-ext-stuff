@@ -1,6 +1,8 @@
 import { isIP } from "node:net";
 import { basename, relative, resolve, sep } from "node:path";
+import type { GitInitExecutionPlan } from "../execution-plan.ts";
 import { defaultPermissionsConfigPath, resolvePolicyPath } from "../filesystem-policy.ts";
+import { resolveTrustedSystemGitExecutable, TRUSTED_SYSTEM_GIT_PATHS } from "../git-executable.ts";
 import {
   isPublicNetworkHost,
   normalizeNetworkHost,
@@ -276,7 +278,9 @@ function executableContext(words: readonly string[]): ExecutableContext {
 }
 
 function isTrustedExecutableToken(token: string, executable: string): boolean {
-  return token === executable || token === `/usr/bin/${executable}`;
+  return (
+    token === executable || token === `/usr/bin/${executable}` || token === `/bin/${executable}`
+  );
 }
 
 interface ShellSyntax {
@@ -523,6 +527,53 @@ function invocationInitializesCurrentDirectory(invocation: GitInvocation): boole
     (invocation.arguments.length === 0 ||
       (invocation.arguments.length === 1 && invocation.arguments[0] === "."))
   );
+}
+
+function resolveTrustedGitExecutable(segment: CommandSegment): string | undefined {
+  if (!segment.directExecutable || !segment.executableTrusted) return undefined;
+  if (segment.executable !== "git") return undefined;
+  const candidates =
+    segment.executableToken === "/usr/bin/git"
+      ? ["/usr/bin/git"]
+      : segment.executableToken === "/bin/git"
+        ? ["/bin/git"]
+        : TRUSTED_SYSTEM_GIT_PATHS;
+  for (const candidate of candidates) {
+    const executable = resolveTrustedSystemGitExecutable(candidate);
+    if (executable) return executable;
+  }
+  return undefined;
+}
+
+export function gitInitializationPlan(
+  command: string,
+  cwd: string,
+): GitInitExecutionPlan | undefined {
+  const segments = parseCommandSegments(command);
+  const segment = segments.length === 1 ? segments[0] : undefined;
+  const invocation = segment ? parseGitInvocation(segment) : undefined;
+  const syntax = scanShellSyntax(command);
+  if (
+    !segment ||
+    !invocation ||
+    !invocationInitializesCurrentDirectory(invocation) ||
+    !segment.directExecutable ||
+    !invocation.globalOptionsSafe ||
+    syntax.hasActiveControl ||
+    segment.hasRedirect ||
+    segment.hasSubstitution ||
+    segment.nestedShell
+  ) {
+    return undefined;
+  }
+  const executable = resolveTrustedGitExecutable(segment);
+  if (!executable) return undefined;
+  return {
+    kind: "git-init",
+    executable,
+    args: invocation.arguments.length === 0 ? ["init"] : ["init", "."],
+    cwd: resolve(cwd),
+  };
 }
 
 export function shellCommandInitializesCurrentDirectory(command: string): boolean {

@@ -1,3 +1,5 @@
+import { accessSync, constants, lstatSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Tool as LlmTool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
@@ -45,7 +47,8 @@ const DEFAULT_LS_LIMIT = 500;
 const MAX_LS_LIMIT = 1_000;
 const MAX_GREP_CONTEXT = 20;
 const MAX_RG_ARGUMENT_LENGTH = 16_384;
-const RG_UNAVAILABLE_MESSAGE = "ripgrep (rg) is not available; Guardian will not download tools";
+const RG_UNAVAILABLE_MESSAGE =
+  "ripgrep (rg) is not available; the reviewer will not download tools";
 
 const RUN_RESOLVED_RG_HELPER = `
 const { execFile } = require("node:child_process");
@@ -242,7 +245,7 @@ child.once("close", (code) => {
   }
   if (records.length > 0) process.stdout.write(records.join("\\n") + "\\n");
   if (outputExceeded) {
-    process.stderr.write("ripgrep output exceeded the Guardian bound");
+    process.stderr.write("ripgrep output exceeded the reviewer bound");
     process.exitCode = 2;
   } else if (limited) {
     process.exitCode = 0;
@@ -264,6 +267,8 @@ type SandboxedRgRunner = (
 
 export interface SandboxedGuardianToolRuntimeOptions {
   resolveRgPath?: () => string | undefined;
+  /** Trusted host home used only for resolving Guardian's `~` paths. */
+  trustedHome?: string;
 }
 
 export type GuardianToolFactory = (cwd: string) => PiAgentTool[];
@@ -275,7 +280,18 @@ export interface GuardianToolRuntime {
 
 function executableRgPath(candidate: string | undefined): string | undefined {
   if (!candidate || !isAbsolute(candidate)) return undefined;
-  return /^rg(?:\.exe)?$/i.test(basename(candidate)) ? candidate : undefined;
+  if (!/^rg(?:\.exe)?$/i.test(basename(candidate))) return undefined;
+  try {
+    const entry = lstatSync(candidate);
+    if (!entry.isFile() && !entry.isSymbolicLink()) return undefined;
+    const canonical = realpathSync(candidate);
+    if (!/^rg(?:\.exe)?$/i.test(basename(canonical))) return undefined;
+    if (!lstatSync(canonical).isFile()) return undefined;
+    accessSync(canonical, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+    return canonical;
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveExistingRgPaths(): string[] {
@@ -318,7 +334,7 @@ function boundedLimit(value: number | undefined, fallback: number, maximum: numb
 
 function boundedArgument(value: string, label: string): string {
   if (Buffer.byteLength(value) > MAX_RG_ARGUMENT_LENGTH) {
-    throw new Error(`${label} exceeds the Guardian argument bound`);
+    throw new Error(`${label} exceeds the reviewer argument bound`);
   }
   return value;
 }
@@ -432,7 +448,7 @@ async function executeSandboxedRead(
 
   let outputText = window.content;
   if (window.firstLineExceedsLimit) {
-    outputText = `[Line ${startLine} exceeds the ${formatSize(DEFAULT_MAX_BYTES)} Guardian read limit]`;
+    outputText = `[Line ${startLine} exceeds the ${formatSize(DEFAULT_MAX_BYTES)} reviewer read limit]`;
   } else if (window.truncatedBy) {
     const endLineDisplay = startLine + window.outputLines - 1;
     const nextOffset = endLineDisplay + 1;
@@ -690,7 +706,7 @@ function toolErrorResult(toolCall: ToolCall, error: unknown): ToolResultMessage 
     content: [
       {
         type: "text",
-        text: `Guardian tool failed: ${sanitizeErrorMessage(error)}`,
+        text: `Reviewer tool failed: ${sanitizeErrorMessage(error)}`,
       },
     ],
     isError: true,
@@ -712,7 +728,7 @@ export function createGuardianToolRuntime(
     async execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage> {
       const tool = toolsByName.get(toolCall.name);
       if (!tool) {
-        throw new Error(`Guardian tool ${toolCall.name} is not available`);
+        throw new Error(`Reviewer tool ${toolCall.name} is not available`);
       }
 
       try {
@@ -739,6 +755,7 @@ export function createSandboxedGuardianToolRuntime(
   manager: SandboxManagerLike,
   options: SandboxedGuardianToolRuntimeOptions = {},
 ): GuardianToolRuntime {
+  const trustedHome = options.trustedHome ?? homedir();
   const resolvedRgPaths = options.resolveRgPath
     ? [executableRgPath(options.resolveRgPath())].filter((path): path is string => Boolean(path))
     : resolveExistingRgPaths();
@@ -750,7 +767,7 @@ export function createSandboxedGuardianToolRuntime(
     executeSandboxedRead(
       cwd,
       params as ReadToolInput,
-      createSandboxedGuardianFileOperations(manager, signal),
+      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
     ),
   );
 
@@ -759,7 +776,7 @@ export function createSandboxedGuardianToolRuntime(
     executeSandboxedGrep(
       cwd,
       params as GrepToolInput,
-      createSandboxedGuardianFileOperations(manager, signal),
+      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
       runRg,
       signal,
     ),
@@ -771,7 +788,7 @@ export function createSandboxedGuardianToolRuntime(
     async (toolCallId, params, signal, onUpdate) => {
       const input = params as FindToolInput;
       const effectiveLimit = boundedLimit(input.limit, DEFAULT_FIND_LIMIT, MAX_FIND_LIMIT);
-      const operations = createSandboxedGuardianFileOperations(manager, signal);
+      const operations = createSandboxedGuardianFileOperations(manager, signal, trustedHome);
       const sandboxedDefinition = createFindToolDefinition(cwd, {
         operations: {
           exists: operations.find.exists,
@@ -824,7 +841,7 @@ export function createSandboxedGuardianToolRuntime(
     executeSandboxedLs(
       cwd,
       params as LsToolInput,
-      createSandboxedGuardianFileOperations(manager, signal),
+      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
     ),
   );
 
@@ -833,7 +850,7 @@ export function createSandboxedGuardianToolRuntime(
     name: "inspect",
     label: "inspect",
     description:
-      "Run a bounded inspection command in the Guardian OS sandbox. Workspace and user-data writes are denied; network access is denied; temporary scratch follows sandbox defaults. Use only to gather evidence that would flip an allow/deny decision.",
+      "Run a bounded inspection command in the reviewer OS sandbox. Workspace and user-data writes are denied; network access is denied; temporary scratch follows sandbox defaults. Use only to gather evidence that would flip an allow/deny decision.",
     parameters: Type.Object({
       command: Type.String({
         minLength: 1,
@@ -851,7 +868,7 @@ export function createSandboxedGuardianToolRuntime(
       const trimmed = command.trim();
       if (trimmed.length === 0) throw new Error("inspect requires a command");
       if (Buffer.byteLength(trimmed) > MAX_RG_ARGUMENT_LENGTH) {
-        throw new Error("inspect command exceeds the Guardian argument bound");
+        throw new Error("inspect command exceeds the reviewer argument bound");
       }
       const result = await runInspect(["-c", trimmed], signal);
       const stdout = result.stdout.toString("utf8");

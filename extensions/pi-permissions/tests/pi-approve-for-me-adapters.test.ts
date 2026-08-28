@@ -141,6 +141,7 @@ describe("admissionPlanFromRiskDecision", () => {
         { kind: "filesystem", operation: "write", path: "/workspace/generated" },
       ],
       review: "capability",
+      risk: "REVIEW",
       reason: "Outside the baseline",
       summary: "npm test",
     });
@@ -156,6 +157,7 @@ describe("admissionPlanFromRiskDecision", () => {
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
       review: "action",
+      risk: "REVIEW",
       reason: "The action needs review",
       summary: "custom tool",
     });
@@ -198,6 +200,7 @@ describe("createPiGuardianAdapter", () => {
     await adapter.review(
       reviewInput({
         requested,
+        risk: "HARD",
         effective: { mode: "sandboxed", policy: effectivePolicy },
         reason: "Needs the generated output directory",
         summary: "npm test",
@@ -208,20 +211,20 @@ describe("createPiGuardianAdapter", () => {
     expect(request).toBeDefined();
     expect(request?.permissionContext).toMatchObject({
       sandboxProfile: "workspace-write",
-      sandboxEnabled: true,
+      sandboxEnforcesAction: true,
       filesystemWriteRoots: ["/workspace", "/workspace/turn", "/workspace/one-shot"],
       filesystemDenyRead: ["/secret"],
       filesystemDenyWrite: ["/secret"],
       requestedNetworkHosts: ["turn.example"],
       allowedNetworkHosts: ["example.com", "session.example", "turn.example"],
       deniedNetworkHosts: ["localhost"],
-      defaultRisk: "REVIEW",
-      defaultReason: "Needs the generated output directory",
+      staticRisk: "HARD",
+      staticReason: "Needs the generated output directory",
     });
     expect(request?.untrustedAction.toolCallId).toBe("call-1");
   });
 
-  it("uses base policy for host admission without claiming Nono isolates the tool", async () => {
+  it("does not present coding-agent sandbox roots as enforcement for a host tool", async () => {
     const { reviewer, review } = createReviewer();
     const adapter = createPiGuardianAdapter(reviewer);
     const hostPolicy: SandboxPolicy = {
@@ -242,12 +245,9 @@ describe("createPiGuardianAdapter", () => {
     );
 
     const request = review.mock.calls[0]?.[0] as AutoReviewRequest | undefined;
-    expect(request?.permissionContext.filesystemWriteRoots).toEqual([
-      "/workspace",
-      "/host-admission-base",
-    ]);
-    expect(request?.permissionContext.sandboxEnabled).toBe(false);
-    expect(request?.permissionContext.allowedNetworkHosts).toEqual(["example.com"]);
+    expect(request?.permissionContext.filesystemWriteRoots).toEqual([]);
+    expect(request?.permissionContext.sandboxEnforcesAction).toBe(false);
+    expect(request?.permissionContext.allowedNetworkHosts).toEqual([]);
   });
 
   it("passes the Engine-generated manual retry override unchanged", async () => {

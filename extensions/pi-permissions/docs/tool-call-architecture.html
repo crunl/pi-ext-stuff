@@ -374,7 +374,9 @@
         <code>src/approve-for-me-engine.ts</code>
         <code>src/pi-approve-for-me-adapters.ts</code>
         <code>src/permission-amendment.ts</code>
-        <code>src/sandbox/nono-enforcer.ts</code>
+        <code>src/sandbox/srt-enforcer.ts</code>
+        <code>src/sandbox/srt-coordinator.ts</code>
+        <code>src/execution-plan.ts</code>
       </div>
 
       <!-- ================= 总览 ================= -->
@@ -386,9 +388,12 @@
         其它宿主工具才在 <code>tool_call</code> 钩子做 host-admission。
         Approve for me 把 admission、Guardian、精确一次性 grant 和
         permission amendment 放进 <code>ApproveForMeEngine</code>，把实际
-        边界交给对应的 adapter。nono profile 随每次 sandbox-owned 执行生成
-        和销毁；Nono probe 与 profile preparation 各有 5 秒 deadline，宿主
-        bash 默认 120 秒、file operation 默认 30 秒，超时 fail-closed。
+        边界交给对应的 adapter。SRT adapter 通过统一的
+        <code>execute({policy, program, cwd, env})</code> seam 负责 argv、child
+        lifecycle 和 cleanup；进程级 coordinator 独占 SRT 的 mutable config，
+        cleanup/restore 失败会 poison executor，后续请求 fail-closed。宿主
+        bash 默认 120 秒、file operation 默认 30 秒，所有 deadline 覆盖
+        initialize / wrap / child / cleanup。
       </p>
 
       <div class="overview" aria-label="Approve for me 两段式总览">
@@ -459,7 +464,7 @@
           <text x="614" y="351" text-anchor="middle" fill="#8b949e" font-size="11">精确 admission / grant 再验证，失败则拒绝</text>
           <line x1="732" y1="338" x2="772" y2="338" stroke="#8b949e" marker-end="url(#arr)" />
           <rect x="776" y="312" width="288" height="52" rx="6" fill="#161b22" stroke="#f0883e" />
-          <text x="920" y="333" text-anchor="middle" fill="#f0883e" font-size="12">adapter lease + nono（sandbox-owned）</text>
+          <text x="920" y="333" text-anchor="middle" fill="#f0883e" font-size="12">adapter lease + SRT（sandbox-owned）</text>
           <text x="920" y="351" text-anchor="middle" fill="#8b949e" font-size="11">write roots / network hosts 写入本次 policy</text>
 
           <text x="8" y="396" fill="#8b949e" font-size="11">
@@ -544,8 +549,8 @@
       <div class="note">
         generic tool 的 host-admission 会把静态 prompt 投影为唯一的
         <code>{ kind: "external-tool", provider: "pi-host", name }</code>
-        capability。它覆盖 reviewer gate，不声称 Nono 已隔离该外部工具；
-        bash/write/edit 才由 Nono adapter 拥有 OS enforcement。
+        capability。它覆盖 reviewer gate，不声称 SRT 已隔离该外部工具；
+        bash/write/edit 才由 SRT adapter 拥有 OS enforcement。
       </div>
 
       <h3>确定性门内部（仍是 auto 链路的前置过滤器）</h3>
@@ -607,8 +612,8 @@
       <p>
         Engine 的 <code>runReview()</code> →
         <code>createPiGuardianAdapter</code> → <code>PiAutoReviewer.review</code>。
-        生产路径注入的是 <code>createSandboxedGuardianToolRuntime</code>（nono
-        只读）；adapter 只组装证据，Guardian 不能改变 capability lease。
+        生产路径注入的是 <code>createSandboxedGuardianToolRuntime</code>（SRT
+        全读、零写、零网）；adapter 只组装证据，Guardian 不能改变 capability lease。
       </p>
 
       <div class="node guardian">
@@ -668,9 +673,9 @@
           <li>
             若 <code>stopReason === "toolUse"</code>：并行跑只读工具
             <code>read</code> / <code>grep</code> / <code>find</code> /
-            <code>ls</code> / <code>inspect</code>（nono 只读 profile，rg 必须是预先解析的绝对路径）。
+            <code>ls</code> / <code>inspect</code>（SRT 只读 policy，rg 必须是预先解析的绝对路径）。
             <code>inspect</code> 固定为 <code>{command:string}</code> schema，参数和输出有上限；
-            外层固定 <code>/bin/bash -c</code>，由 Nono 只读/无网络 profile 与 30s host
+            外层固定 <code>/bin/bash -c</code>，由 SRT 只读/无网络 policy 与 30s host
             deadline 约束，临时 scratch 遵循 sandbox 默认值。
             只允许 <b>一轮</b> 工具，第二次再 toolUse → provider 失败。
           </li>
@@ -725,8 +730,8 @@
           <h3>Guardian 能碰什么</h3>
           <ul>
             <li>固定只读工具：<code>read</code> / <code>grep</code> / <code>find</code> / <code>ls</code> / <code>inspect</code></li>
-            <li><code>inspect</code> 是固定 schema、参数/输出有上限的诊断 command surface；外层固定 <code>/bin/bash -c</code>，受 Nono 只读/无网络 profile 与 30s host deadline 约束，临时 scratch 遵循 sandbox 默认值</li>
-            <li>工具跑在 Guardian 只读 sandbox（业务 <code>allowWrite</code> 为空；临时 scratch 遵循 Nono 默认）</li>
+            <li><code>inspect</code> 是固定 schema、参数/输出有上限的诊断 command surface；外层固定 <code>/bin/bash -c</code>，受 SRT 只读/无网络 policy 与 30s host deadline 约束，临时 scratch 遵循 sandbox 默认值</li>
+            <li>工具跑在 Guardian 只读 sandbox（业务 <code>allowWrite</code> 为空；临时 scratch 遵循 SRT 默认）</li>
             <li>敏感错误串（Bearer / API key）打码</li>
           </ul>
         </div>
@@ -770,7 +775,7 @@
         </tr>
         <tr>
           <td><code>effective lease</code></td>
-          <td>base sandbox policy ∪ 本次 exact request；host-admission 不伪造 Nono policy</td>
+          <td>base sandbox policy ∪ 本次 exact request；host-admission 不伪造 SRT policy</td>
         </tr>
         <tr>
           <td><code>turn/session amendment</code></td>
@@ -815,7 +820,7 @@
           <div class="t"><span class="tag yellow">yolo</span><code>unrestricted lease</code></div>
           <div class="d">
             Engine 给出 <code>unrestricted</code> lease 后直接调用宿主
-            bash/write/edit。不进 Guardian、不进 nono。
+            bash/write/edit。不进 Guardian、不进 SRT。
           </div>
         </div>
         <div class="stack">
@@ -825,8 +830,8 @@
               Engine 将 base policy 与本次 exact request 合并为不可变 lease；
               exact approved `.git` protected root 才能移除对应 grantable deny，
               broad root 和 `.agents`/`.codex`/权限配置等 hard deny 不会解锁；
-              <code>SandboxExecutionCoordinator</code> 只串行化 sandbox 配置
-              reload / shared execution，不拥有审批状态。
+              <code>srtProcessCoordinator</code> 是 process-global exclusive lease，
+              串行化 SRT config reload / child execution，不拥有审批状态。
             </div>
           </div>
           <div class="arrow dn"></div>
@@ -845,7 +850,7 @@
             <div class="d">
               yolo → 由 Engine 明确给出 unrestricted lease；auto 下 sandbox disabled
               或未 ready / 无 <code>baseSandboxConfig</code> →
-              <b style="color: var(--red)">抛错</b>，附 nono 未安装或上次失败原因。
+              <b style="color: var(--red)">抛错</b>，附 SRT 不可用或上次失败原因。
             </div>
           </div>
           <div class="arrow dn"></div>
@@ -855,28 +860,26 @@
               <b>write / edit</b>：由
               <code>createSandboxedFileOperations</code> 使用 lease.policy。<br />
               <b>bash</b>：由 <code>createSandboxedBashOperations</code> 使用
-              同一份 lease.policy；network hosts 进入该次 profile 的
-              <code>allow_domain</code>。<br />
+              同一份 lease.policy；network hosts 进入本次 SRT policy 的
+              <code>allowedDomains</code>。<br />
               permission-amendment 的 acknowledgement 只在 Guardian 批准后执行，
               成功才把 request 写入 turn/session capability world。
             </div>
           </div>
           <div class="arrow dn"></div>
           <div class="node sandbox">
-            <div class="t">nono 包裹</div>
-            <div class="d">
-              每次 sandbox-owned 执行生成临时 profile：<code>filesystem.allow</code> /
-              <code>filesystem.deny</code>（denyRead ∪ denyWrite）/
-              <code>network.allow_domain</code> /
-              <code>deny_domain</code>；无 allowed domain 时只写
-              <code>network.block</code>，IPv6 literal 不写入 deny_domain，避免
-              Nono 将冒号误当 port suffix。<br />
-              命令形态：<code>nono run --silent --profile &lt;file&gt; -- &lt;cmd&gt;</code>，
-              silent 仅隐藏 Nono banner/summary/status，不吞子进程输出或 fatal error；
-              再由 <code>/bin/bash -c</code> 执行包裹结果。内核强制（Seatbelt /
-              Landlock），子进程继承。探测 <code>nono --version</code> 失败则整条链路不可用；
-              probe 与 profile preparation 各有 5s deadline，probe 超时会 kill child。
-              host deadline：bash 默认 120s；file helper 默认 30s；超时 fail closed。
+              <div class="t">SRT executor</div>
+              <div class="d">
+              每次 sandbox-owned 执行将 backend-neutral policy 转换为 SRT
+              <code>denyRead</code> / <code>allowWrite</code> / <code>denyWrite</code>
+              与 network 规则；denyRead 与 denyWrite 独立，不做 union。SRT
+              <code>wrapWithSandboxArgv</code> 只在 coordinator lease 内调用，返回
+              argv/env 后由 adapter 以 <code>shell:false</code> spawn；stdout/stderr
+              有界，abort/timeout 杀 detached process group，随后 cleanup 并恢复
+              base config。Linux 含 glob 的 deny policy 确定性不可用，不静默放宽。
+              Git init 只接受 canonical system Git 的 typed plan，并以预创建的
+              <code>.git</code>、hard-deny hooks、exact config release 和空 template
+              helper 运行；任一恢复/清理失败都会 poison 全局 executor。
             </div>
           </div>
         </div>
@@ -971,13 +974,13 @@
           <td>无限制</td>
           <td>config 默认域</td>
           <td>config 默认域</td>
-          <td>默认域 ∪ exact lease 域名；由 Nono profile 执行</td>
+          <td>默认域 ∪ exact lease 域名；由 SRT policy 执行</td>
         </tr>
         <tr>
           <td>/tmp</td>
           <td>可用</td>
           <td colspan="3" style="color: var(--yellow)">
-            nono 系统组默认可写（与旧 srt 平价，已文档化）
+            SRT 的临时 scratch 遵循 backend 默认能力；workspace/metadata 仍按 policy deny
           </td>
         </tr>
         <tr>
@@ -1017,11 +1020,11 @@
           </ul>
         </div>
         <div class="role s">
-          <h3>nono + adapters</h3>
+          <h3>SRT + adapters</h3>
           <p>把 lease 变成内核边界</p>
           <ul>
-            <li>profile 按调用生成</li>
-            <li>probe / profile preparation 各 5s deadline</li>
+            <li>policy 按调用派生，child argv 由统一 executor 运行</li>
+            <li>initialize / wrap / child / cleanup 共用 deadline</li>
             <li>bash 120s / file 30s host deadline</li>
             <li>二进制缺失或超时 fail-closed</li>
           </ul>
@@ -1046,7 +1049,7 @@
       <div class="sub" style="margin-top: 28px">
         对照旧稿：那一版只画了 Phase B（execute + sandbox）。当前 Approve for me
         的中心是 Phase A 的 Guardian 代批，Phase B 只负责把那次批准的边界强制到
-        nono 上。人审 popup 已不在链路上。
+        SRT 上。人审 popup 已不在链路上。
       </div>
     </div>
   </body>

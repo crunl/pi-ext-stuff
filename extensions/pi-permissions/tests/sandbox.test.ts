@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,23 +14,166 @@ import {
   createSandboxRuntimeConfig,
   DEFAULT_BASH_TIMEOUT_MS,
   DEFAULT_FILE_OPERATION_TIMEOUT_MS,
+  type SandboxExecutionRequest,
+  type SandboxExecutionResult,
   type SandboxManagerLike,
+  type SandboxPolicy,
   withAdditionalWriteRoots,
 } from "../src/sandbox.ts";
 
+type TestWrap = (
+  command: string,
+  shell?: string,
+  config?: SandboxPolicy,
+  signal?: AbortSignal,
+) => Promise<string>;
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function killTestProcess(child: ReturnType<typeof spawn>): void {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
+function runTestCommand(command: string, request: SandboxExecutionRequest) {
+  return new Promise<SandboxExecutionResult>((resolve, reject) => {
+    const child = spawn("/bin/bash", ["-c", command], {
+      cwd: request.cwd,
+      env: request.env,
+      detached: true,
+      stdio: [
+        request.stdin !== undefined && request.stdin !== "ignore" ? "pipe" : "ignore",
+        "pipe",
+        "pipe",
+      ],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputError: Error | undefined;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    const cleanup = (): void => {
+      request.signal?.removeEventListener("abort", onAbort);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    };
+    const onAbort = (): void => killTestProcess(child);
+    const collect = (
+      chunks: Buffer[],
+      chunk: Buffer,
+      current: number,
+      bound: number | undefined,
+      name: "stdout" | "stderr",
+      onData?: (chunk: Buffer) => void,
+    ): number => {
+      onData?.(chunk);
+      if (outputError) return current;
+      const next = current + chunk.length;
+      if (bound !== undefined && next > bound) {
+        outputError = new Error(`${name} exceeded the Guardian bound`);
+        killTestProcess(child);
+      } else {
+        chunks.push(chunk);
+      }
+      return next;
+    };
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) onAbort();
+    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        killTestProcess(child);
+      }, request.timeoutMs);
+    }
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes = collect(
+        stdout,
+        chunk,
+        stdoutBytes,
+        request.maxStdoutBytes,
+        "stdout",
+        request.onStdout,
+      );
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBytes = collect(
+        stderr,
+        chunk,
+        stderrBytes,
+        request.maxStderrBytes,
+        "stderr",
+        request.onStderr,
+      );
+    });
+    child.once("error", (error) => {
+      cleanup();
+      reject(outputError ?? error);
+    });
+    child.once("close", (exitCode) => {
+      cleanup();
+      if (request.signal?.aborted) reject(new Error("aborted"));
+      else if (timedOut) reject(new Error(`timeout:${(request.timeoutMs ?? 0) / 1000}`));
+      else if (outputError) reject(outputError);
+      else resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode });
+    });
+    if (request.stdin !== undefined && request.stdin !== "ignore" && child.stdin) {
+      child.stdin.end(request.stdin);
+    }
+  });
+}
+
+function testSandboxManager(handler: TestWrap = async (command) => command) {
+  const wrapWithSandbox = vi.fn<TestWrap>(handler);
+  const manager: SandboxManagerLike & { wrapWithSandbox: ReturnType<typeof vi.fn<TestWrap>> } = {
+    initialize: vi.fn(async () => undefined),
+    reset: vi.fn(async () => undefined),
+    wrapWithSandbox,
+    execute: vi.fn(async (request: SandboxExecutionRequest) => {
+      const command = [request.program.executable, ...request.program.args]
+        .map(shellQuote)
+        .join(" ");
+      return runTestCommand(
+        await wrapWithSandbox(command, undefined, request.policy, request.signal),
+        request,
+      );
+    }),
+  };
+  return manager;
+}
+
 describe("sandbox integration", () => {
+  it("resolves Guardian tilde paths against an explicit trusted home", async () => {
+    const trustedHome = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-home-"));
+    const marker = join(trustedHome, "trusted-marker.txt");
+    await writeFile(marker, "trusted home");
+    try {
+      const operations = createSandboxedGuardianFileOperations(
+        testSandboxManager(),
+        undefined,
+        trustedHome,
+      );
+
+      await expect(operations.resolveReadPath("~/trusted-marker.txt", "/tmp")).resolves.toBe(
+        marker,
+      );
+    } finally {
+      await rm(trustedHome, { recursive: true, force: true });
+    }
+  });
+
   it("runs sandboxed Guardian read-only file operations without changing the parent manager", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-"));
     const file = join(directory, "external.txt");
     await writeFile(file, "Guardian-visible evidence");
     await chmod(file, 0o444);
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(
-        async (...[command]: Parameters<SandboxManagerLike["wrapWithSandbox"]>) => command,
-      ),
-    };
+    const manager = testSandboxManager();
     const operations = createSandboxedGuardianFileOperations(manager);
 
     await expect(operations.read.readFile(file)).resolves.toEqual(
@@ -56,11 +200,7 @@ describe("sandbox integration", () => {
   });
 
   it("binds a read-only command runner to a resolved executable and literal arguments", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const run = createSandboxedReadOnlyCommandRunner(manager, "node");
     const literalArgument = "spaces 'quotes' $(must-not-run)\nnext-line";
 
@@ -85,19 +225,13 @@ describe("sandbox integration", () => {
   });
 
   it("constructs a fresh Guardian config for every read-only command", async () => {
-    const configs: Array<NonNullable<Parameters<SandboxManagerLike["wrapWithSandbox"]>[2]>> = [];
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(
-        async (...[command, , config]: Parameters<SandboxManagerLike["wrapWithSandbox"]>) => {
-          if (!config?.filesystem) throw new Error("missing Guardian config");
-          configs.push(config);
-          if (configs.length === 1) config.filesystem.allowWrite.push("/parent-write-root");
-          return command;
-        },
-      ),
-    };
+    const configs: SandboxPolicy[] = [];
+    const manager = testSandboxManager(async (command, _shell, config) => {
+      if (!config?.filesystem) throw new Error("missing Guardian config");
+      configs.push(config);
+      if (configs.length === 1) config.filesystem.allowWrite.push("/parent-write-root");
+      return command;
+    });
     const run = createSandboxedReadOnlyCommandRunner(manager, "node");
 
     await run(["-e", ""]);
@@ -112,11 +246,7 @@ describe("sandbox integration", () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-permissions-"));
     const blockedDirectory = join(directory, "blocked");
     await mkdir(blockedDirectory);
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const operations = createSandboxedGuardianFileOperations(manager);
 
     await chmod(blockedDirectory, 0o000);
@@ -130,11 +260,7 @@ describe("sandbox integration", () => {
   });
 
   it("rejects aborted read-only commands after child cleanup", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const run = createSandboxedReadOnlyCommandRunner(manager, "node");
 
     const controller = new AbortController();
@@ -149,11 +275,7 @@ describe("sandbox integration", () => {
   });
 
   it("times out a hanging read-only helper at 30s and kills its process group", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const run = createSandboxedReadOnlyCommandRunner(manager, "node");
     const killSpy = vi.spyOn(process, "kill");
 
@@ -175,11 +297,7 @@ describe("sandbox integration", () => {
   });
 
   it("terminates a read-only command before stdout can exceed the Guardian bound", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const run = createSandboxedReadOnlyCommandRunner(manager, "node");
 
     const outcome = await run(["-e", "process.stdout.write('x'.repeat(6 * 1024 * 1024))"]).catch(
@@ -196,18 +314,14 @@ describe("sandbox integration", () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-permissions-guardian-read-bound-"));
     const file = join(directory, "large.txt");
     await writeFile(file, Buffer.alloc(5 * 1024 * 1024, 0x78));
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
 
     try {
       const operations = createSandboxedGuardianFileOperations(manager);
       const outcome = await operations.read.readFile(file).catch((error: unknown) => error);
       expect(outcome instanceof Error).toBe(true);
       if (outcome instanceof Error) {
-        expect(outcome.message).toMatch(/file.*Guardian byte bound/i);
+        expect(outcome.message).toMatch(/file.*reviewer byte bound/i);
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -222,11 +336,7 @@ describe("sandbox integration", () => {
         writeFile(join(directory, `${String(index).padStart(4, "0")}.txt`), ""),
       ),
     );
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
 
     try {
       const operations = createSandboxedGuardianFileOperations(manager);
@@ -272,9 +382,9 @@ describe("sandbox integration", () => {
     });
   });
 
-  it("does not grant $HOME as a workspace write root", () => {
+  it("resolves the configured workspace root without an OS-specific filter", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, homedir());
-    expect(runtime.filesystem.allowWrite).not.toContain(homedir());
+    expect(runtime.filesystem.allowWrite).toContain(homedir());
     expect(runtime.filesystem.allowWrite).toContain("/tmp");
     expect(runtime.filesystem.allowWrite).toContain("/private/tmp");
   });
@@ -309,6 +419,28 @@ describe("sandbox integration", () => {
 
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
     expect(runtime.filesystem.grantableDenyWrite).toBeUndefined();
+  });
+
+  it("keeps Git config and hooks hard-denied when the exact metadata root is released", () => {
+    const cwd = "/workspace/project";
+    const gitRoot = `${cwd}/.git`;
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd, undefined, [gitRoot]);
+
+    expect(runtime.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([gitRoot, `${gitRoot}/hooks`, `${gitRoot}/config`]),
+    );
+    expect(runtime.filesystem.grantableDenyWrite).toContain(gitRoot);
+
+    const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
+    expect(exact.filesystem.allowWrite).toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([`${gitRoot}/hooks`, `${gitRoot}/config`]),
+    );
+
+    const broad = withAdditionalWriteRoots(runtime, [cwd]);
+    expect(broad.filesystem.allowWrite).toContain(cwd);
+    expect(broad.filesystem.denyWrite).toContain(gitRoot);
   });
 
   it("expands macOS symlink aliases so /tmp rules apply to /private/tmp", () => {
@@ -363,11 +495,7 @@ describe("sandbox integration", () => {
   });
 
   it("executes only the command returned by the sandbox manager", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async () => "printf sandboxed"),
-    };
+    const manager = testSandboxManager(async () => "printf sandboxed");
     const output: Buffer[] = [];
 
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd());
@@ -378,7 +506,7 @@ describe("sandbox integration", () => {
     );
 
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
-      "printf unsandboxed",
+      expect.stringContaining("printf unsandboxed"),
       undefined,
       runtime,
       undefined,
@@ -388,11 +516,7 @@ describe("sandbox integration", () => {
   });
 
   it("gives bash a default host deadline when timeout is omitted", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async () => "true"),
-    };
+    const manager = testSandboxManager(async () => "true");
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
     try {
@@ -407,11 +531,7 @@ describe("sandbox integration", () => {
   });
 
   it("uses an explicit positive bash timeout instead of the default", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async () => "true"),
-    };
+    const manager = testSandboxManager(async () => "true");
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
     try {
@@ -428,11 +548,7 @@ describe("sandbox integration", () => {
   });
 
   it("gives native file operations their default host deadline", async () => {
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async () => "true"),
-    };
+    const manager = testSandboxManager(async () => "true");
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd());
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
@@ -451,11 +567,7 @@ describe("sandbox integration", () => {
   it("runs native file operations through the sandbox with one-call write roots", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-native-"));
     const path = join(cwd, "nested", "note.txt");
-    const manager = {
-      initialize: vi.fn(async () => undefined),
-      reset: vi.fn(async () => undefined),
-      wrapWithSandbox: vi.fn(async (command: string) => command),
-    };
+    const manager = testSandboxManager();
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd);
     const operations = createSandboxedFileOperations(manager, runtime, [path]);
 
@@ -503,11 +615,11 @@ describe("sandbox integration", () => {
     expect(requested.filesystem.grantableDenyWrite).not.toContain(agentsRoot);
   });
 
-  it("drops $HOME from additional write roots and keeps a nested file grant", () => {
+  it("preserves explicit additional roots and nested file grants", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
     const file = join(homedir(), ".pi", "agent", "models.json");
     const expanded = withAdditionalWriteRoots(runtime, [homedir(), file]);
-    expect(expanded.filesystem.allowWrite).not.toContain(homedir());
+    expect(expanded.filesystem.allowWrite).toContain(homedir());
     expect(expanded.filesystem.allowWrite).toContain(file);
   });
 });

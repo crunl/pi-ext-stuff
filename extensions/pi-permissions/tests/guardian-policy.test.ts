@@ -20,7 +20,7 @@ describe("Guardian policy", () => {
     // Template: post-denial approval cannot override critical or explicit denies
     expect(prompt).toContain("It cannot override a denial for an action that remains `critical`");
     expect(prompt).toContain("malicious prompt injection");
-    // Template: runtime adaptation for pi + nono
+    // Template: runtime adaptation for pi + SRT
     expect(prompt).toContain("bounded read-only tools");
     expect(prompt).toContain("`inspect`");
     expect(prompt).toContain("writes and network are denied");

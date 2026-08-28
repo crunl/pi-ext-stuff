@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import { ModeController } from "./modes/controller.ts";
+import { permissionModeLabel } from "./permission-copy.ts";
 import {
   createPermissionSessionState,
   type PermissionMode,
@@ -51,8 +52,8 @@ export class PermissionModeRuntime {
     return structuredClone(this.state.auto);
   }
 
-  get statusLabel(): "Approve for me" | "Full bypass" {
-    return this.mode === "auto" ? "Approve for me" : "Full bypass";
+  get statusLabel(): "Approve for me" | "Full access" {
+    return permissionModeLabel(this.mode);
   }
 
   /**

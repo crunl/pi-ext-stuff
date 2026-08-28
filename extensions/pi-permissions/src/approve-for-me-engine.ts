@@ -1,10 +1,13 @@
 import { relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
+import type { StructuredExecutionPlan } from "./execution-plan.ts";
+import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
+export type AdmissionRisk = "LOW" | "REVIEW" | "HARD";
 
 /** Ownership says which external execution Adapter is authoritative. */
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
@@ -21,13 +24,16 @@ export type AdmissionPlan =
   | {
       kind: "allow";
       requested?: readonly CapabilityRequestInput[];
+      execution?: StructuredExecutionPlan;
     }
   | {
       kind: "review";
       requested?: readonly CapabilityRequestInput[];
       review: "capability" | "action";
+      risk: AdmissionRisk;
       reason: string;
       summary?: string;
+      execution?: StructuredExecutionPlan;
     }
   | {
       kind: "deny";
@@ -80,6 +86,7 @@ export type RuntimeOutcome<T> =
 export interface ExecutionAttempt {
   readonly ordinal: 0 | 1;
   readonly lease: CapabilityLease;
+  readonly plan?: StructuredExecutionPlan;
 }
 
 export type InvocationExecutor<T> = (attempt: ExecutionAttempt) => Promise<RuntimeOutcome<T>>;
@@ -109,6 +116,7 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   requested: readonly CapabilityRequest[];
   source: "preview" | "runtime" | "permission-amendment" | "manual-retry";
   retryability?: "safe" | "uncertain";
+  risk?: AdmissionRisk;
   baseline: CapabilityLease;
   effective: CapabilityLease;
   transcript: readonly unknown[];
@@ -162,6 +170,16 @@ export interface AutoState {
   readonly paused: boolean;
 }
 
+export type ReviewEvent =
+  | { readonly status: "reviewing"; readonly call: InvocationCall }
+  | {
+      readonly status: "approved" | "denied";
+      readonly call: InvocationCall;
+      readonly rationale: string;
+    }
+  | { readonly status: "aborted" | "timed-out"; readonly call: InvocationCall }
+  | { readonly status: "failed"; readonly call: InvocationCall; readonly reason: string };
+
 export type PermissionErrorCode =
   | "aborted"
   | "no-active-turn"
@@ -202,6 +220,7 @@ export interface ApproveForMeEngineOptions<ReviewContext = undefined> {
   policy?: PermissionPolicy;
   onDenial?: (notice: DenialNotice) => void;
   onAutoStateChange?: (state: AutoState) => void;
+  onReviewEvent?: (event: ReviewEvent) => void;
   maxConsecutiveDenials?: number;
   denialWindowSize?: number;
   maxWindowDenials?: number;
@@ -240,6 +259,7 @@ interface RetryRecord {
   readonly call: InvocationCall;
   readonly ownership: InvocationOwnership;
   readonly requested: readonly CapabilityRequest[];
+  readonly risk?: AdmissionRisk;
   readonly rationale: string;
   readonly summary?: string;
 }
@@ -248,19 +268,22 @@ interface ReviewRequest {
   readonly source: GuardianReviewInput["source"];
   readonly requested: readonly CapabilityRequest[];
   readonly retryability?: "safe" | "uncertain";
+  readonly risk?: AdmissionRisk;
   readonly reason?: string;
   readonly summary?: string;
   readonly approvalOverride?: ApprovalOverride;
 }
 
 type ResolvedAdmission =
-  | { kind: "allow"; requested: CapabilityRequest[] }
+  | { kind: "allow"; requested: CapabilityRequest[]; execution?: StructuredExecutionPlan }
   | {
       kind: "review";
       requested: CapabilityRequest[];
       review: "capability" | "action";
+      risk: AdmissionRisk;
       reason: string;
       summary?: string;
+      execution?: StructuredExecutionPlan;
     }
   | { kind: "deny"; reason: string };
 
@@ -412,6 +435,30 @@ function normalizeRequests(
   return { ok: true, requests };
 }
 
+function normalizeExecutionPlan(raw: unknown, cwd: string): StructuredExecutionPlan | undefined {
+  if (!isRecord(raw) || raw.kind !== "git-init") return undefined;
+  if (typeof raw.executable !== "string") return undefined;
+  const executable = resolveTrustedSystemGitExecutable(raw.executable);
+  if (!executable) return undefined;
+  if (!Array.isArray(raw.args) || !raw.args.every((arg) => typeof arg === "string")) {
+    return undefined;
+  }
+  const args = raw.args;
+  if (
+    !(args.length === 1 && args[0] === "init") &&
+    !(args.length === 2 && args[0] === "init" && args[1] === ".")
+  ) {
+    return undefined;
+  }
+  if (typeof raw.cwd !== "string" || resolve(raw.cwd) !== resolve(cwd)) return undefined;
+  return {
+    kind: "git-init",
+    executable,
+    args: args.length === 1 ? ["init"] : ["init", "."],
+    cwd: resolve(raw.cwd),
+  };
+}
+
 function normalizeAdmission(
   raw: AdmissionPlan | undefined,
   cwd: string,
@@ -431,24 +478,40 @@ function normalizeAdmission(
   );
   if (!normalized.ok) return { ok: false };
   if (raw.kind === "allow") {
-    return { ok: true, admission: { kind: "allow", requested: normalized.requests } };
+    const execution =
+      raw.execution === undefined ? undefined : normalizeExecutionPlan(raw.execution, cwd);
+    if (raw.execution !== undefined && execution === undefined) return { ok: false };
+    return {
+      ok: true,
+      admission: {
+        kind: "allow",
+        requested: normalized.requests,
+        ...(execution === undefined ? {} : { execution }),
+      },
+    };
   }
   if (
     (raw.review !== "capability" && raw.review !== "action") ||
+    (raw.risk !== "LOW" && raw.risk !== "REVIEW" && raw.risk !== "HARD") ||
     typeof raw.reason !== "string" ||
     raw.reason.trim().length === 0 ||
     (raw.summary !== undefined && typeof raw.summary !== "string")
   ) {
     return { ok: false };
   }
+  const execution =
+    raw.execution === undefined ? undefined : normalizeExecutionPlan(raw.execution, cwd);
+  if (raw.execution !== undefined && execution === undefined) return { ok: false };
   return {
     ok: true,
     admission: {
       kind: "review",
       requested: normalized.requests,
       review: raw.review,
+      risk: raw.risk,
       reason: raw.reason,
       ...(raw.summary === undefined ? {} : { summary: raw.summary }),
+      ...(execution === undefined ? {} : { execution }),
     },
   };
 }
@@ -682,6 +745,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     request: Invocation<unknown, ReviewContext>,
     rationale: string,
     requested: readonly CapabilityRequest[],
+    risk?: AdmissionRisk,
     summary?: string,
   ): RetryHandle => {
     recordWindow(true);
@@ -698,6 +762,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       call: cloneInvocationCall(request.call),
       ownership: request.ownership,
       requested: [...requested],
+      ...(risk === undefined ? {} : { risk }),
       rationale,
       ...(summary === undefined ? {} : { summary }),
     });
@@ -769,17 +834,31 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     baseline: CapabilityLease,
     review: ReviewRequest,
   ): Promise<GuardianDecision | PermissionError> => {
-    if (state.snapshot.mode === "yolo") return { kind: "approve", rationale: "YOLO bypass" };
+    if (state.snapshot.mode === "yolo") {
+      return { kind: "approve", rationale: "Full access is active" };
+    }
     if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
     const guardian = options.guardian;
-    if (!guardian) return { code: "review-unavailable", reason: "Guardian adapter is unavailable" };
+    if (!guardian) {
+      const reason = "The configured reviewer is unavailable";
+      options.onReviewEvent?.({
+        status: "failed",
+        call: cloneInvocationCall(request.call),
+        reason,
+      });
+      return { code: "review-unavailable", reason };
+    }
     const controller = new AbortController();
     reviewControllers.add(controller);
     const signal = request.signal
       ? AbortSignal.any([request.signal, controller.signal])
       : controller.signal;
     try {
-      if (signal.aborted) return { code: "aborted", reason: "Operation aborted" };
+      if (signal.aborted) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        return { code: "aborted", reason: "Operation aborted" };
+      }
+      options.onReviewEvent?.({ status: "reviewing", call: cloneInvocationCall(request.call) });
       const decision = await guardian.review(
         {
           call: cloneInvocationCall(request.call),
@@ -787,6 +866,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           requested: review.requested,
           source: review.source,
           retryability: review.retryability,
+          risk: review.risk,
           baseline,
           effective: leaseWithRequests(state, request.ownership, review.requested),
           transcript: state.snapshot.transcript ?? [],
@@ -799,28 +879,55 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         },
         signal,
       );
-      if (!isCurrent(state))
+      if (!isCurrent(state)) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
         return { code: "stale-invocation", reason: "Permission context changed" };
-      if (signal.aborted) return { code: "aborted", reason: "Operation aborted" };
+      }
+      if (signal.aborted) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        return { code: "aborted", reason: "Operation aborted" };
+      }
       if (decision.kind !== "approve" && decision.kind !== "deny") {
         recordNonDenial();
-        return { code: "review-unavailable", reason: "Guardian returned an invalid decision" };
+        const reason = "The reviewer returned an invalid decision";
+        options.onReviewEvent?.({
+          status: "failed",
+          call: cloneInvocationCall(request.call),
+          reason,
+        });
+        return { code: "review-unavailable", reason };
       }
       if (decision.kind === "approve") recordNonDenial();
+      options.onReviewEvent?.({
+        status: decision.kind === "approve" ? "approved" : "denied",
+        call: cloneInvocationCall(request.call),
+        rationale: decision.rationale,
+      });
       return decision;
     } catch (error) {
-      if (!isCurrent(state))
+      if (!isCurrent(state)) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
         return { code: "stale-invocation", reason: "Permission context changed" };
-      if (request.signal?.aborted) return { code: "aborted", reason: "Operation aborted" };
-      if (controller.signal.aborted)
+      }
+      if (request.signal?.aborted) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        return { code: "aborted", reason: "Operation aborted" };
+      }
+      if (controller.signal.aborted) {
+        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
         return { code: "stale-invocation", reason: "Permission context changed" };
+      }
       const timeout = isTimeout(error);
       recordNonDenial();
+      const reason = timeout ? "Automatic approval review timed out" : errorMessage(error);
+      options.onReviewEvent?.(
+        timeout
+          ? { status: "timed-out", call: cloneInvocationCall(request.call) }
+          : { status: "failed", call: cloneInvocationCall(request.call), reason },
+      );
       return {
         code: timeout ? "review-timeout" : "review-unavailable",
-        reason: timeout
-          ? "Guardian review timed out"
-          : `Guardian review failed: ${errorMessage(error)}`,
+        reason,
       };
     } finally {
       reviewControllers.delete(controller);
@@ -853,6 +960,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     requested: readonly CapabilityRequest[],
     ordinal: 0 | 1,
     grant?: GrantRecord,
+    plan?: StructuredExecutionPlan,
   ): Promise<RuntimeOutcome<T> | ExecutionOutcome<T>> => {
     if (!isCurrent(state))
       return blocked({ code: "stale-invocation", reason: "Permission context changed" });
@@ -862,7 +970,11 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       ...(grant?.requested ?? []),
     ]);
     try {
-      const result = await request.executor({ ordinal, lease });
+      const result = await request.executor({
+        ordinal,
+        lease,
+        ...(plan === undefined ? {} : { plan }),
+      });
       if (!isCurrent(state)) {
         return blocked({ code: "stale-invocation", reason: "Permission context changed" });
       }
@@ -955,6 +1067,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         source: "runtime",
         requested: [normalized],
         retryability: outcome.retryability,
+        risk: "REVIEW",
         reason: outcome.detail,
       },
     );
@@ -965,6 +1078,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         request as Invocation<unknown, ReviewContext>,
         decision.rationale,
         [normalized],
+        "REVIEW",
       );
       return blocked(
         { code: "review-denied", reason: decision.rationale, request: normalized },
@@ -1150,6 +1264,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         {
           source: amendmentSource,
           requested: amendmentRequests,
+          risk: "REVIEW",
           reason: amendmentReason,
           summary: amendmentSummary,
           approvalOverride: amendmentApprovalOverride,
@@ -1162,6 +1277,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           request as Invocation<unknown, ReviewContext>,
           decision.rationale,
           amendmentRequests,
+          "REVIEW",
           amendmentReason,
         );
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
@@ -1222,6 +1338,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let forcedManualReview = admission.kind === "review" && admission.review === "action";
     let reviewReason = admission.kind === "review" ? admission.reason : undefined;
     let reviewSummary = admission.kind === "review" ? admission.summary : undefined;
+    let reviewRisk = admission.kind === "review" ? admission.risk : undefined;
     let approvalOverride: ApprovalOverride | undefined;
     if (armedRecord !== undefined) {
       const record = armedRecord.record;
@@ -1232,6 +1349,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       forcedManualReview = true;
       reviewReason = record.rationale;
       reviewSummary = record.summary;
+      reviewRisk = record.risk;
       approvalOverride = {
         denialId: armedRecord.denialId,
         actionFingerprint: record.fingerprint,
@@ -1253,6 +1371,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         {
           source: reviewSource,
           requested: reviewRequested,
+          risk: reviewRisk,
           reason: reviewReason,
           summary: reviewSummary,
           approvalOverride,
@@ -1265,6 +1384,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           request as Invocation<unknown, ReviewContext>,
           decision.rationale,
           reviewRequested,
+          reviewRisk,
           reviewSummary,
         );
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
@@ -1284,7 +1404,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           code: "stale-invocation",
           reason: "Exact capability grant no longer matches",
         });
-      const result = await executeAttempt(state, request, leaseRequested, 0, spent);
+      const result = await executeAttempt(
+        state,
+        request,
+        leaseRequested,
+        0,
+        spent,
+        admission.execution,
+      );
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
       if (result.kind === "completed") return result;
@@ -1297,7 +1424,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
 
-    const initial = await executeAttempt(state, request, leaseRequested, 0);
+    const initial = await executeAttempt(
+      state,
+      request,
+      leaseRequested,
+      0,
+      undefined,
+      admission.execution,
+    );
     if ("kind" in initial && (initial.kind === "blocked" || initial.kind === "failed"))
       return initial;
     if (initial.kind === "completed") return initial;
