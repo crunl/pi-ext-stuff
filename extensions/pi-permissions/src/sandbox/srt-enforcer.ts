@@ -4,12 +4,14 @@ import {
   type SandboxRuntimeConfig,
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
+import { hasGlobSyntax } from "../filesystem-policy.ts";
 import type {
   SandboxExecutionRequest,
   SandboxExecutionResult,
   SandboxManagerLike,
   SandboxPolicy,
 } from "../sandbox.ts";
+import { errorMessage } from "../unknown-value.ts";
 import { srtProcessCoordinator } from "./srt-coordinator.ts";
 
 export const SRT_ACTIVATION_TIMEOUT_MS = 15_000;
@@ -35,16 +37,8 @@ const processSandboxState: {
   initialized: boolean;
 } = { initialized: false };
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function sandboxUnavailable(reason: string): Error {
   return new Error(`pi-permissions sandbox unavailable: ${reason}`);
-}
-
-function containsGlobSyntax(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[") || value.includes("]");
 }
 
 export function assertSrtPolicySupported(
@@ -53,7 +47,7 @@ export function assertSrtPolicySupported(
 ): void {
   if (platform !== "linux") return;
   const unsupported = [...policy.filesystem.denyRead, ...policy.filesystem.denyWrite].filter(
-    containsGlobSyntax,
+    hasGlobSyntax,
   );
   if (unsupported.length > 0) {
     throw sandboxUnavailable(
@@ -266,7 +260,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           processSandboxState.initialized = false;
           processSandboxState.basePolicy = undefined;
           srtProcessCoordinator.markPoisoned();
-          throw error instanceof Error ? error : sandboxUnavailable(errorText(error));
+          throw error instanceof Error ? error : sandboxUnavailable(errorMessage(error));
         }
       },
       activation.signal,
@@ -289,7 +283,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           await this.resetSrt();
         } catch (error) {
           srtProcessCoordinator.markPoisoned();
-          throw sandboxUnavailable(errorText(error));
+          throw sandboxUnavailable(errorMessage(error));
         } finally {
           processSandboxState.initialized = false;
           processSandboxState.basePolicy = undefined;
@@ -329,7 +323,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
             }
           } catch (error) {
             srtProcessCoordinator.markPoisoned();
-            throw error instanceof Error ? error : sandboxUnavailable(errorText(error));
+            throw error instanceof Error ? error : sandboxUnavailable(errorMessage(error));
           }
           base = clonePolicy(request.policy);
           processSandboxState.basePolicy = base;
@@ -374,11 +368,11 @@ export class SrtSandboxManager implements SandboxManagerLike {
           }
         }
         if (lifecycleError && !bodyFailed) {
-          throw sandboxUnavailable(`SRT cleanup failed: ${errorText(lifecycleError)}`);
+          throw sandboxUnavailable(`SRT cleanup failed: ${errorMessage(lifecycleError)}`);
         }
         if (lifecycleError && bodyFailed) {
           throw sandboxUnavailable(
-            `SRT cleanup failed after command failure: ${errorText(lifecycleError)}`,
+            `SRT cleanup failed after command failure: ${errorMessage(lifecycleError)}`,
           );
         }
         if (bodyFailed) {

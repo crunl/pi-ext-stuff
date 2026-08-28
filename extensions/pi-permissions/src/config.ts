@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { isRecord } from "./unknown-value.ts";
+
 /**
  * Keys that existed before modes collapsed to auto|yolo and human prompts were
  * removed. They are still accepted (and ignored) so old config.json files keep
@@ -85,10 +87,6 @@ const efforts = new Set<NonNullable<PermissionsConfig["reviewer"]>["reasoningEff
   "high",
 ]);
 const actions = new Set<PermissionsConfig["rules"][number]["action"]>(["allow", "ask", "deny"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function expectString(value: unknown, path: string): string {
   if (typeof value !== "string") throw new ConfigError(`${path} must be a string`);

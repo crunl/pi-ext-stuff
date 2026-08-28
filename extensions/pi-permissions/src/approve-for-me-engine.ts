@@ -1,9 +1,11 @@
 import { relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
 import type { StructuredExecutionPlan } from "./execution-plan.ts";
+import { hasGlobSyntax } from "./filesystem-policy.ts";
 import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
+import { errorMessage, isRecord } from "./unknown-value.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
@@ -292,10 +294,6 @@ const DEFAULT_DENIAL_WINDOW_SIZE = 50;
 const DEFAULT_MAX_WINDOW_DENIALS = 10;
 const MAX_DENIAL_NOTICES = 10;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function clonePolicy(policy: SandboxPolicy | undefined): SandboxPolicy | undefined {
   return policy === undefined ? undefined : structuredClone(policy);
 }
@@ -342,10 +340,6 @@ function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
 function isPathWithin(root: string, path: string): boolean {
   const rel = relative(resolve(root), resolve(path));
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${"/"}`));
-}
-
-function hasGlobSyntax(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[") || value.includes("]");
 }
 
 function pathMatches(pattern: string, path: string): boolean {
@@ -666,10 +660,6 @@ function retryFingerprint(
     cwd: resolve(call.cwd),
     metadata: call.metadata,
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isTimeout(error: unknown): boolean {

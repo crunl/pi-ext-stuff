@@ -20,6 +20,7 @@ import { fingerprintValue } from "./config.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
+import { isRecord } from "./unknown-value.ts";
 
 /**
  * Trusted host data needed to turn an Engine review into the production
@@ -88,10 +89,6 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
     summary: decision.summary,
     ...(decision.executionPlan === undefined ? {} : { execution: decision.executionPlan }),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isTranscriptEntry(value: unknown): value is GuardianTranscriptEntry {

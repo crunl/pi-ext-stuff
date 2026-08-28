@@ -46,6 +46,10 @@ export function resolveSandboxDenyPattern(pattern: string, cwd: string): string 
   return resolve(cwd, pattern.includes("/") ? pattern : `**/${pattern}`);
 }
 
+export function hasGlobSyntax(value: string): boolean {
+  return value.includes("*") || value.includes("?") || value.includes("[") || value.includes("]");
+}
+
 function defaultAgentDir(): string {
   return resolve(homedir(), ".pi", "agent");
 }

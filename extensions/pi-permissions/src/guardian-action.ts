@@ -1,5 +1,7 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
+import { isRecord } from "./unknown-value.ts";
+
 export type GuardianAction =
   | {
       kind: "shell";
@@ -39,10 +41,6 @@ export type GuardianAction =
       arguments: Record<string, unknown>;
       cwd: string;
     };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function inputRecord(event: ToolCallEvent): Record<string, unknown> {
   return isRecord(event.input) ? event.input : {};

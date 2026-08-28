@@ -75,6 +75,7 @@ import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
+import { isRecord } from "./unknown-value.ts";
 
 export type GuardianPolicySource = (context: {
   cwd: string;
@@ -117,10 +118,6 @@ const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
 const ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE =
   "The active permission context is unavailable. Retry in the current task.";
 const guardianFallbackNoticeKeys = new Set<string>();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;

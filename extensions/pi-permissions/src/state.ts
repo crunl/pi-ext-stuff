@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fingerprintConfig, type PermissionsConfig } from "./config.ts";
+import { isRecord } from "./unknown-value.ts";
 
 export type PermissionMode = "auto" | "yolo";
 
@@ -21,10 +22,6 @@ type StateEntry = {
 
 export function isPermissionMode(value: unknown): value is PermissionMode {
   return value === "auto" || value === "yolo";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isSessionState(value: unknown): value is PermissionSessionState {

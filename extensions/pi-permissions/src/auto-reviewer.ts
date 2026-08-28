@@ -29,6 +29,7 @@ import {
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createSandboxedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
+import { errorMessage } from "./unknown-value.ts";
 
 export type { AutoReviewerContext } from "./auto-review-request.ts";
 export type {
@@ -81,10 +82,6 @@ const RETRYABLE_PROVIDER_CODES = new Set([
 ]);
 const RETRYABLE_PROVIDER_MESSAGE =
   /(?:^|\b)(?:server overloaded|internal server error|response stream connection failed|response stream disconnected|WebSocket stream closed before response\.completed)(?:\b|$)/i;
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function errorRecord(error: unknown): Record<string, unknown> | undefined {
   return typeof error === "object" && error !== null

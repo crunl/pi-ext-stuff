@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { isRecord } from "./unknown-value.ts";
 
 const additionalFileSystemPermissions = Type.Object(
   {
@@ -62,10 +63,6 @@ export const permissionedBashParameters = Type.Object(
 export type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
   | { ok: false; reason: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));

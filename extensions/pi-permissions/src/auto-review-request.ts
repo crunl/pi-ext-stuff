@@ -5,6 +5,7 @@ import { type GuardianAction, guardianActionFromToolCall } from "./guardian-acti
 import { renderGuardianSystemPrompt } from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
+import { isRecord } from "./unknown-value.ts";
 
 export type AutoReviewRisk = "low" | "medium" | "high" | "critical";
 export type AutoReviewUserAuthorization = "unknown" | "low" | "medium" | "high";
@@ -71,10 +72,6 @@ export const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX =
   "The user has manually approved a specific action that was previously `Rejected`.";
 
 export const AUTO_REVIEW_SYSTEM_PROMPT = renderGuardianSystemPrompt();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function serializeAction(
   request: Pick<AutoReviewRequest, "untrustedAction" | "permissionContext">,

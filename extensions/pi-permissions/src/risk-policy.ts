@@ -25,6 +25,7 @@ import {
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
+import { isRecord } from "./unknown-value.ts";
 
 export type RiskDecision =
   | { action: "allow"; risk: Risk; reason: string }
@@ -39,10 +40,6 @@ export type RiskDecision =
       executionPlan?: StructuredExecutionPlan;
     }
   | { action: "block"; risk: Risk; reason: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
