@@ -17,9 +17,8 @@
  * Rollout: selectors are floated per allowlist (constructor names) so each
  * one can be verified on a real terminal before being added.
  */
-import { visibleWidth } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui, locateEditor } from "./editor-float-panel.ts";
-import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
+import { FRAME_OVERHEAD, frameLines, padToWidth } from "./frame.ts";
 
 /**
  * Cross-jiti brand for selectors we own. constructor.name alone is brittle
@@ -108,7 +107,7 @@ export function installSelectorFloat(
       return originalRender(width);
     }
     const color = borderColor?.() ?? ((text: string) => text);
-    const framed = frameLines(padLines(rawLines, innerWidth), contentWidth, color);
+    const framed = frameLines(padToWidth(rawLines, innerWidth), contentWidth, color);
 
     const floated = panel.show(framed, {
       editorHeight: 0, // container collapses while the selector floats
@@ -122,11 +121,4 @@ export function installSelectorFloat(
   };
 
   return true;
-}
-
-function padLines(lines: string[], innerWidth: number): string[] {
-  return lines.map((line) => {
-    const fill = Math.max(0, innerWidth - visibleWidth(line));
-    return fill > 0 ? `${line}${" ".repeat(fill)}` : line;
-  });
 }

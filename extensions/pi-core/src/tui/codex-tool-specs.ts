@@ -1,13 +1,11 @@
-import { type AgentToolResult, getLanguageFromPath } from "@earendil-works/pi-coding-agent";
-import { createEditDiffBox } from "./edit-diff.ts";
-import { countNonEmptyLines } from "./tool-output.ts";
 import {
-  type CodexToolRendererSpec,
-  colorizeEditDiffSummary,
-  colorizeWriteSummary,
-  compactBashStatusSpacing,
-  summarizeEditDiff,
-} from "./tool-renderer.ts";
+  type AgentToolResult,
+  getLanguageFromPath,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { createEditDiffBox } from "./edit-diff.ts";
+import { countNonEmptyLines, toolResultText } from "./tool-output.ts";
+import type { CodexToolRendererSpec } from "./tool-renderer.ts";
 import { createWritePreviewFromArgs, type WritePreviewComponent } from "./write-preview.ts";
 
 /**
@@ -22,13 +20,41 @@ export function countWrittenLines(content: string): number {
   return normalized.endsWith("\n") ? lines - 1 : lines;
 }
 
-function textOutput(result: AgentToolResult<unknown>): string {
-  return result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+/** Collapse the blank line Pi prints before the final bash status line. */
+export function compactBashStatusSpacing(text: string): string {
+  return text.replace(
+    /\n{2,}(?=Command (?:exited with code \d+|timed out after [^\n]+ seconds|aborted)\s*$)/,
+    "\n",
+  );
+}
+
+export function summarizeEditDiff(result: AgentToolResult<unknown>): string | undefined {
+  const details = result.details as { diff?: unknown } | undefined;
+  if (typeof details?.diff !== "string") return undefined;
+
+  let additions = 0;
+  let deletions = 0;
+  for (const line of details.diff.split(/\r?\n/)) {
+    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+  }
+  return additions > 0 || deletions > 0 ? `+${additions} -${deletions}` : undefined;
+}
+
+export function colorizeEditDiffSummary(summary: string, theme: Theme): string {
+  const match = summary.match(/^(\+\d+)\s+(-\d+)$/);
+  if (!match) return theme.fg("dim", summary);
+  return `${theme.fg("success", match[1])} ${theme.fg("error", match[2])}`;
+}
+
+/** Colorize a collapsed summary that is a single positive count (e.g. write's +N lines). */
+export function colorizeWriteSummary(summary: string, theme: Theme): string {
+  return theme.fg("success", summary);
 }
 
 function countSummary(noun: string, plural = `${noun}s`) {
   return (result: AgentToolResult<unknown>): string | undefined => {
-    const count = countNonEmptyLines(textOutput(result));
+    const count = countNonEmptyLines(toolResultText(result));
     return count > 0 ? `${count} ${count === 1 ? noun : plural}` : undefined;
   };
 }

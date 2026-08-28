@@ -14,15 +14,19 @@
 
 export { applyAutocompleteAbove } from "./src/tui/autocomplete-above.ts";
 export { withCodexToolPresentation } from "./src/tui/codex-tool-presentation.ts";
+/**
+ * @deprecated Migration-compatibility surface: these piecewise spec/helper
+ * exports predate `withCodexToolPresentation`, which decorates a complete
+ * tool definition in one step. Retained for existing consumers; prefer the
+ * decorator for new code.
+ */
 export {
   codexBashToolSpec,
   codexEditToolSpec,
   codexWriteToolSpec,
-} from "./src/tui/codex-tool-specs.ts";
-export { createEditDiffBox } from "./src/tui/edit-diff.ts";
-export {
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
-  createCodexToolRendering,
   summarizeEditDiff,
-} from "./src/tui/tool-renderer.ts";
+} from "./src/tui/codex-tool-specs.ts";
+export { createEditDiffBox } from "./src/tui/edit-diff.ts";
+export { createCodexToolRendering } from "./src/tui/tool-renderer.ts";

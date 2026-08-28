@@ -22,8 +22,8 @@
  * Syntax highlighting is untouched: theme.highlightCode (when present)
  * still colors the code, we only replace the fence dressing.
  */
-import { Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { FRAME_OVERHEAD } from "./frame.ts";
+import { Markdown, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { FRAME_OVERHEAD, padLineToWidth } from "./frame.ts";
 
 interface CodeToken {
   type: string;
@@ -123,8 +123,7 @@ function renderCodeFrame(
   for (const contentLine of contentLines) {
     const wrapped = wrapTextWithAnsi(contentLine, innerWidth);
     for (const row of wrapped.length > 0 ? wrapped : [""]) {
-      const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(row)));
-      lines.push(`${left}${row}${fill}${right}`);
+      lines.push(`${left}${padLineToWidth(row, innerWidth)}${right}`);
     }
   }
 

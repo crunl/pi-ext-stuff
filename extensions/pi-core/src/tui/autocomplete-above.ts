@@ -1,9 +1,9 @@
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui } from "./editor-float-panel.ts";
-import { FRAME_OVERHEAD, frameLines } from "./frame.ts";
+import { FRAME_OVERHEAD, frameLines, padToWidth } from "./frame.ts";
 import { installSelectorFloat } from "./selector-float.ts";
-import { setSelectorNavAnchor } from "./selector-tab-nav.ts";
+import { SELECT_DOWN, SELECT_UP, setSelectorNavAnchor } from "./selector-tab-nav.ts";
 import { isInteractiveTui } from "./ui-guard.ts";
 
 /** Mirror of pi-tui AutocompleteItem (official contract). */
@@ -110,10 +110,7 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
     // Render the list narrower so the frame fits within contentWidth, then
     // pad each line to the frame's inner width before framing.
     const innerWidth = Math.max(1, contentWidth - FRAME_OVERHEAD);
-    const rawLines = list.render(innerWidth).map((line) => {
-      const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(line)));
-      return `${line}${fill}`;
-    });
+    const rawLines = padToWidth(list.render(innerWidth), innerWidth);
     const borderColor = internals.borderColor ?? ((text: string) => text);
     const listLines = frameLines(rawLines, contentWidth, borderColor);
 
@@ -152,8 +149,6 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   // entirely, giving uniform complete-without-sending. When nothing is
   // selected the guard falls through to the raw Enter (the upstream tab
   // branch would otherwise swallow it).
-  const SELECT_UP = "\x1b[A";
-  const SELECT_DOWN = "\x1b[B";
   const originalHandleInput = editor.handleInput?.bind(editor);
   patched.handleInput = (data: string): void => {
     const list = internals.autocompleteList;

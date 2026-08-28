@@ -23,8 +23,9 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { type FloatingTui, locateEditor } from "./editor-float-panel.ts";
 import { isInteractiveTui } from "./ui-guard.ts";
 
-const SELECT_UP = "\x1b[A";
-const SELECT_DOWN = "\x1b[B";
+/** Arrow sequences forwarded to SelectList's own up/down navigation. */
+export const SELECT_UP = "\x1b[A";
+export const SELECT_DOWN = "\x1b[B";
 
 /**
  * Cross-extension shared anchor. pi loads each extension through its own

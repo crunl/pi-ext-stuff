@@ -13,22 +13,23 @@ interface UiContext {
   };
 }
 
-/** "Working 111 tok/s" / "Working  50 tok/s" — a 3-wide, space-right-
- * aligned rate column so 2- and 3-digit rates don't make the line jitter;
- * the estimate marker (≈) counts toward the column width. */
+/** "Working 111 tok/s" / "Working  50 tok/s" — a RATE_COLUMN_WIDTH-wide,
+ * space-right-aligned rate column so 2- and 3-digit rates don't make the line
+ * jitter; the estimate marker (≈) counts toward the column width. */
+const RATE_COLUMN_WIDTH = 3;
+
 function formatWorkingMessage(snapshot: TokenRateSnapshot): string {
   const marker = snapshot.source === "estimated" ? "≈" : "";
-  const rate = `${marker}${snapshot.tokensPerSecond}`.padStart(3, " ");
+  const rate = `${marker}${snapshot.tokensPerSecond}`.padStart(RATE_COLUMN_WIDTH, " ");
   return `Working ${rate} tok/s`;
 }
 
 function isPureToolCallMessage(message: { content?: unknown }): boolean {
   const content = (message as { content?: unknown[] }).content;
   if (!Array.isArray(content) || content.length === 0) return false;
-  return content.every((c: unknown) => {
-    const type = (c as { type?: string } | null)?.type;
-    return type === "toolCall" || type === "tool_call";
-  });
+  // Pi message content parts use the camelCase "toolCall" type; the
+  // snake_case "tool_call" spelling only exists in extension event names.
+  return content.every((c: unknown) => (c as { type?: string } | null)?.type === "toolCall");
 }
 
 /** Adapter layer: tracks assistant streaming output and shows the token rate

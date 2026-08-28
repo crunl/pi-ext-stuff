@@ -1,10 +1,7 @@
 import { stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
-import {
-  compactBashStatusSpacing,
-  createCodexToolRendering,
-  summarizeEditDiff,
-} from "../src/tui/tool-renderer.ts";
+import { compactBashStatusSpacing, summarizeEditDiff } from "../src/tui/codex-tool-specs.ts";
+import { createCodexToolRendering } from "../src/tui/tool-renderer.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -398,26 +395,5 @@ describe("createCodexToolRendering", () => {
     );
 
     expect(result.render(80).join("\n")).toContain("oldText did not match");
-  });
-});
-
-describe("summarizeEditDiff", () => {
-  it("counts additions and deletions without counting diff headers", () => {
-    expect(
-      summarizeEditDiff({
-        content: [],
-        details: {
-          diff: [
-            "--- a/file.ts",
-            "+++ b/file.ts",
-            "@@ -1,2 +1,3 @@",
-            "-old",
-            "+new",
-            "+added",
-            " unchanged",
-          ].join("\n"),
-        },
-      } as any),
-    ).toBe("+2 -1");
   });
 });

@@ -61,6 +61,9 @@ const SELECT_LAYOUT = {
   maxPrimaryColumnWidth: 32,
 };
 
+/** Visible rows of the level list. */
+const EFFORT_LIST_ROWS = 10;
+
 /**
  * Settings-parity thinking picker. Marked floatable so selector-float lifts
  * it into EditorFloatPanel. Forwards input to the inner SelectList
@@ -97,7 +100,7 @@ export class EffortSelectorComponent extends Container {
 
     this.selectList = new SelectList(
       items,
-      Math.min(items.length, 10),
+      Math.min(items.length, EFFORT_LIST_ROWS),
       selectListTheme ?? getSelectListTheme(),
       SELECT_LAYOUT,
     );

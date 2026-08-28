@@ -1,4 +1,8 @@
-import { SettingsSelectorComponent } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SettingsManager, SettingsSelectorComponent } from "@earendil-works/pi-coding-agent";
 import { Editor, Markdown } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 
@@ -18,6 +22,8 @@ describe("Pi 0.84.1 compatibility seams", () => {
 
     expect(typeof editor.isShowingAutocomplete).toBe("function");
     expect(Object.hasOwn(runtime, "autocompleteList")).toBe(true);
+    // autocomplete-above mirrors the base Editor's padding math to align panels
+    expect(typeof editor.getPaddingX).toBe("function");
   });
 
   it("retains Markdown's token renderer and instance theme", () => {
@@ -31,5 +37,25 @@ describe("Pi 0.84.1 compatibility seams", () => {
 
   it("retains the exported settings-selector constructor identity", () => {
     expect(SettingsSelectorComponent.name).toBe("SettingsSelectorComponent");
+  });
+
+  it("retains SettingsManager.create for the canonical bash fallback", () => {
+    // canonical-tool-fallback recreates the host settings to feed Pi's
+    // canonical shell configuration into createBashToolDefinition.
+    const settings = SettingsManager.create(tmpdir(), tmpdir(), { projectTrusted: false });
+    expect(typeof settings.drainErrors).toBe("function");
+    expect(typeof settings.getShellPath).toBe("function");
+    expect(typeof settings.getShellCommandPrefix).toBe("function");
+  });
+
+  it("retains the canonical builtin source marker format", () => {
+    // canonical-tool-fallback identifies Pi's canonical bash/write/edit owners
+    // by sourceInfo.path === `<builtin:name>`. The marker is assembled at the
+    // host's registration call site, not behind a public API, so pin the
+    // emitted format in the bundled session source.
+    const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const sessionSource = join(dirname(entry), "core", "agent-session.js");
+    expect(existsSync(sessionSource)).toBe(true);
+    expect(readFileSync(sessionSource, "utf8")).toContain("<builtin:${");
   });
 });

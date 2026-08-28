@@ -1,8 +1,17 @@
+import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OutputPad } from "./output-padding.ts";
 
 const FIRST_PREFIX = "  └ ";
 const NEXT_PREFIX = "    ";
+
+/** Concatenate the text parts of a tool result (empty parts dropped). */
+export function toolResultText(result: AgentToolResult<unknown>): string {
+  return result.content
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .filter(Boolean)
+    .join("\n");
+}
 
 export function countNonEmptyLines(text: string): number {
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length;

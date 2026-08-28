@@ -9,7 +9,7 @@ import {
   type OutputPaddingSource,
   outputPaddingController,
 } from "./output-padding.ts";
-import { buildExpandedOutput, buildOutputPreview } from "./tool-output.ts";
+import { buildExpandedOutput, buildOutputPreview, toolResultText } from "./tool-output.ts";
 
 type CollapsedResult =
   | "hidden"
@@ -64,6 +64,9 @@ interface CodexToolRenderState<TPreviewState = unknown> {
 }
 
 const HEADER_WHITESPACE = /\s/u;
+
+/** Collapsed/expanded output row cap when a spec does not override it. */
+const DEFAULT_MAX_OUTPUT_ROWS = 5;
 
 /** Replace whitespace runs containing CR/LF with a visible break marker. */
 function collapseHeaderBreaks(text: string): string {
@@ -148,44 +151,6 @@ interface CodexToolRendering<TPreviewState = unknown> {
     theme: Theme,
     context: RenderContext<TPreviewState>,
   ) => Component;
-}
-
-function resultText(result: AgentToolResult<unknown>): string {
-  return result.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .filter(Boolean)
-    .join("\n");
-}
-
-export function compactBashStatusSpacing(text: string): string {
-  return text.replace(
-    /\n{2,}(?=Command (?:exited with code \d+|timed out after [^\n]+ seconds|aborted)\s*$)/,
-    "\n",
-  );
-}
-
-export function summarizeEditDiff(result: AgentToolResult<unknown>): string | undefined {
-  const details = result.details as { diff?: unknown } | undefined;
-  if (typeof details?.diff !== "string") return undefined;
-
-  let additions = 0;
-  let deletions = 0;
-  for (const line of details.diff.split(/\r?\n/)) {
-    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
-    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
-  }
-  return additions > 0 || deletions > 0 ? `+${additions} -${deletions}` : undefined;
-}
-
-export function colorizeEditDiffSummary(summary: string, theme: Theme): string {
-  const match = summary.match(/^(\+\d+)\s+(-\d+)$/);
-  if (!match) return theme.fg("dim", summary);
-  return `${theme.fg("success", match[1])} ${theme.fg("error", match[2])}`;
-}
-
-/** Colorize a collapsed summary that is a single positive count (e.g. write's +N lines). */
-export function colorizeWriteSummary(summary: string, theme: Theme): string {
-  return theme.fg("success", summary);
 }
 
 function headerText<TPreviewState = unknown>(
@@ -284,13 +249,14 @@ export function createCodexToolRendering<TPreviewState = unknown>(
         return spec.renderExpandedResult(result, context.args, theme, outputPad);
       }
 
-      const rawText = resultText(result);
+      const rawText = toolResultText(result);
       const text = spec.transformOutput ? spec.transformOutput(rawText) : rawText;
+      const maxRows = spec.maxOutputRows ?? DEFAULT_MAX_OUTPUT_ROWS;
       if (options.expanded && text.length > 0) {
         return new ToolOutputComponent(
           text,
           true,
-          spec.maxOutputRows ?? 5,
+          maxRows,
           (line) => theme.fg(context.isError ? "error" : "toolOutput", line),
           outputPad,
         );
@@ -299,7 +265,7 @@ export function createCodexToolRendering<TPreviewState = unknown>(
         return new ToolOutputComponent(
           text,
           false,
-          spec.maxOutputRows ?? 5,
+          maxRows,
           (line) => theme.fg("error", line),
           outputPad,
         );
@@ -308,7 +274,7 @@ export function createCodexToolRendering<TPreviewState = unknown>(
         return new ToolOutputComponent(
           text,
           false,
-          spec.maxOutputRows ?? 5,
+          maxRows,
           (line) => theme.fg("dim", line),
           outputPad,
         );

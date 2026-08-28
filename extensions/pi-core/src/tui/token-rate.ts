@@ -94,9 +94,26 @@ export type StreamHealth = "healthy" | "slow" | "stalled";
  * Ported from Plicerin/freecode `src/tui/speed.ts` — thresholds proven in
  * production for the same speedometer use-case.
  */
+const STALL_AFTER_IDLE_MS = 20_000;
+const STALL_AFTER_BURST_MS = 30_000;
+const STALL_BELOW_TPS = 2;
+const SLOW_AFTER_IDLE_MS = 5_000;
+const SLOW_AFTER_BURST_MS = 15_000;
+const SLOW_BELOW_TPS = 5;
+
 export function streamHealth(idleMs: number, burstMs: number, tps: number | null): StreamHealth {
-  if (idleMs >= 20_000 || (tps !== null && burstMs > 30_000 && tps < 2)) return "stalled";
-  if (idleMs >= 5_000 || (tps !== null && burstMs > 15_000 && tps < 5)) return "slow";
+  if (
+    idleMs >= STALL_AFTER_IDLE_MS ||
+    (tps !== null && burstMs > STALL_AFTER_BURST_MS && tps < STALL_BELOW_TPS)
+  ) {
+    return "stalled";
+  }
+  if (
+    idleMs >= SLOW_AFTER_IDLE_MS ||
+    (tps !== null && burstMs > SLOW_AFTER_BURST_MS && tps < SLOW_BELOW_TPS)
+  ) {
+    return "slow";
+  }
   return "healthy";
 }
 

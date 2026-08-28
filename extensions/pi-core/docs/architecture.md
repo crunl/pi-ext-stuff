@@ -10,7 +10,7 @@ layout or cross-extension contract changes.
 | `index.ts` | Package entry (`package.json` `pi.extensions`). Loads the register graph. |
 | `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-permissions, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
 | `src/register.ts` | Pure orchestration facade: calls every `register*` once, in order. |
-| `src/tools/index.ts` | `registerBuiltInTools`: activates the built-in read-only tools (grep/find/ls) at session start. |
+| `src/tools/index.ts` | `registerBuiltInTools`: activates every builtin tool found at session start (grep/find/ls alongside Pi's read/bash/edit/write defaults). |
 | `src/tui/*` | All rendering and UI state. Modules are named by concern; pure factories use `create*`, host patches use `apply*`/`install*`, extension hooks use `register*`. |
 
 ## Who registers what (tool registration is first-wins)
@@ -27,10 +27,9 @@ Exports (no side effects on import):
 
 - `applyAutocompleteAbove` — statusline
 - `withCodexToolPresentation` — pi-permissions; decorates a complete tool definition while preserving its execution and metadata
-- `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` — pi-permissions
 - `createEditDiffBox` — pi-permissions
-- `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `createCodexToolRendering` / `summarizeEditDiff` — pi-permissions
-- widget key constant `TOKEN_RATE_WIDGET_KEY` (via `src/tui/working-token-rate.ts`)
+- `createCodexToolRendering` — pi-permissions
+- `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` and `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `summarizeEditDiff` — pi-permissions migration compatibility; marked `@deprecated` in `standalone.ts`, prefer `withCodexToolPresentation` for new code
 
 Adding an export here is the only supported way to widen the contract.
 
@@ -58,7 +57,9 @@ Adding an export here is the only supported way to widen the contract.
   an API such as `registerToolRenderer(name, renderer)`, replace this Adapter
   with that host integration while keeping `withCodexToolPresentation` as the
   compatibility Seam for permission-owned definitions.
-- `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary).
+- `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary)
+  plus the per-tool summary helpers (bash status spacing compaction, edit-diff
+  count/colorize, write line-count colorize).
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)`.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its
   controller is shared through `globalThis`/`Symbol.for` so renderers imported
@@ -89,11 +90,12 @@ Adding an export here is the only supported way to widen the contract.
 
 ## Testing
 
-Flat `tests/*.test.ts` mirror `src/tui/*` by basename. Pure modules
-(`token-rate`, `tool-renderer`, `edit-diff`) are tested directly; host-patch
-modules (`built-in-tools`, `write-preview`, `ui-guard`, `tools/index`) are
-covered indirectly via the renderer tests and `register.test.ts`.
+Flat `tests/*.test.ts` mirror `src/tui/*` by basename. Every module with
+logic has a direct test; the only exception is the trivial `frame.ts`
+geometry helper, covered through the overlay and markdown renderer tests.
 `pi-api-compat.test.ts` intentionally pins the remaining private runtime seams:
-the autocomplete list used for above-editor placement and Markdown's
-code-token renderer/theme used for framed code blocks. It also pins the
-settings-selector constructor identity used by the selector allowlist.
+the Editor autocomplete fields and `getPaddingX` used for above-editor
+placement, Markdown's code-token renderer/theme used for framed code blocks,
+the settings-selector constructor identity used by the selector allowlist,
+the `SettingsManager.create` shape used by the canonical bash fallback, and
+the `<builtin:name>` source marker format emitted by the host.

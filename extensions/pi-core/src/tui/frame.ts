@@ -1,3 +1,5 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 /**
  * frame - shared rounded-frame decoration for floating panels.
  *
@@ -11,6 +13,17 @@
 
 /** Horizontal columns consumed by the frame: "│ " left + " │" right. */
 export const FRAME_OVERHEAD = 4;
+
+/** Pad one line with spaces to exactly `width` visible columns (ANSI-aware). */
+export function padLineToWidth(line: string, width: number): string {
+  const fill = Math.max(0, width - visibleWidth(line));
+  return fill > 0 ? `${line}${" ".repeat(fill)}` : line;
+}
+
+/** Pad every line to exactly `width` visible columns. */
+export function padToWidth(lines: string[], width: number): string[] {
+  return lines.map((line) => padLineToWidth(line, width));
+}
 
 /**
  * Wrap panel lines with a rounded top border and left/right verticals.
