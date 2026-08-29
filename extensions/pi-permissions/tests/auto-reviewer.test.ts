@@ -1,4 +1,4 @@
-import type { AssistantMessage, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -6,7 +6,8 @@ import {
   AUTO_REVIEW_SYSTEM_PROMPT,
 } from "../src/auto-review-request.ts";
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
-import { GuardianReviewSessionManager } from "../src/guardian-session.ts";
+import { fingerprintValue } from "../src/config.ts";
+import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
 
 const request = {
   toolCallId: "review-1",
@@ -63,6 +64,7 @@ const denyResponse = {
 } as any;
 
 const guardianSession = {
+  sessionId: "session-a",
   cwd: "/workspace",
   configFingerprint: "config-a",
 };
@@ -83,6 +85,22 @@ function messageText(message: {
     .filter((part) => part.type === "text")
     .map((part) => part.text ?? "")
     .join("");
+}
+
+function guardianSessionKey(tools: Tool[]): GuardianSessionKey {
+  return {
+    ...guardianSession,
+    provider: context.activeModel.provider,
+    model: context.activeModel.id,
+    reasoningEffort: "medium",
+    toolFingerprint: fingerprintValue(
+      tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
+    ),
+  };
 }
 
 describe("PiAutoReviewer", () => {
@@ -294,6 +312,67 @@ describe("PiAutoReviewer", () => {
     expect(messageText(secondContext.messages.at(-1))).toContain("pi-permissions");
   });
 
+  it("continues through multiple read-only tool rounds before accepting a final assessment", async () => {
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(assistantToolUse("read-call-1", "read", { path: "package.json" }))
+      .mockResolvedValueOnce(assistantToolUse("grep-call-1", "grep", { pattern: "pi-permissions" }))
+      .mockResolvedValueOnce(response);
+    const runtime = fakeGuardianRuntime([
+      toolResult("read-call-1", "read", '{"name":"pi-permissions"}'),
+      toolResult("grep-call-1", "grep", "src/auto-reviewer.ts"),
+    ]);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
+    });
+
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(runtime.execute).toHaveBeenCalledTimes(2);
+    const finalContext = complete.mock.calls[2]?.[1] as any;
+    const retainedText = finalContext.messages.map(messageText).join("\n");
+    expect(retainedText).toContain("pi-permissions");
+    expect(retainedText).toContain("src/auto-reviewer.ts");
+    expect(
+      complete.mock.calls.every(
+        (call) => call[2]?.sessionId === complete.mock.calls[0]?.[2]?.sessionId,
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed after the bounded number of read-only tool rounds", async () => {
+    const complete = vi.fn();
+    for (let index = 0; index < 9; index += 1) {
+      complete.mockResolvedValueOnce(
+        assistantToolUse(`read-call-${index}`, "read", { path: `file-${index}.txt` }),
+      );
+    }
+    const runtime = fakeGuardianRuntime(
+      Array.from({ length: 8 }, (_, index) =>
+        toolResult(`read-call-${index}`, "read", `evidence-${index}`),
+      ),
+    );
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "provider",
+      message: expect.stringContaining("exceeded 8 read-only tool rounds"),
+    });
+    expect(complete).toHaveBeenCalledTimes(9);
+    expect(runtime.execute).toHaveBeenCalledTimes(8);
+  });
+
   it("commits a tool-error review turn when Guardian denies after seeing the error", async () => {
     const toolUse = assistantToolUse("read-call-1", "read", { path: "missing.md" });
     const complete = vi.fn().mockResolvedValueOnce(toolUse).mockResolvedValueOnce(denyResponse);
@@ -315,23 +394,14 @@ describe("PiAutoReviewer", () => {
       decision: "deny",
     });
 
-    const next = sessions.open(
-      {
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: context.activeModel.provider,
-        model: context.activeModel.id,
-      },
-      "next review",
-      runtime.tools,
-    );
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
     const retainedText = next.context.messages.map(messageText).join("\n");
     expect(retainedText).toContain("File not found");
     expect(retainedText).toContain("Tool evidence shows the action is unsafe.");
     next.release();
   });
 
-  it("fails closed without committing when a read-only tool error is followed by allow", async () => {
+  it("treats a read-only tool error as evidence when Guardian still approves", async () => {
     const toolUse = assistantToolUse("read-call-1", "read", { path: "missing.md" });
     const complete = vi.fn().mockResolvedValueOnce(toolUse).mockResolvedValueOnce(response);
     const sessions = new GuardianReviewSessionManager();
@@ -348,24 +418,14 @@ describe("PiAutoReviewer", () => {
       () => runtime,
     );
 
-    await expect(reviewer.review(request, context)).rejects.toMatchObject({
-      kind: "provider",
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      decision: "approve",
     });
 
-    const next = sessions.open(
-      {
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: context.activeModel.provider,
-        model: context.activeModel.id,
-      },
-      "next review",
-      runtime.tools,
-    );
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
     const retainedText = next.context.messages.map(messageText).join("\n");
-    expect(retainedText).toBe("next review");
-    expect(retainedText).not.toContain("Read failed");
-    expect(retainedText).not.toContain("Authorized test command.");
+    expect(retainedText).toContain("Read failed");
+    expect(retainedText).toContain("Authorized test command.");
     next.release();
   });
 
@@ -409,15 +469,11 @@ describe("PiAutoReviewer", () => {
     await forkReviewer.review(request, context);
     await trunk;
 
+    const nextRuntime = fakeGuardianRuntime([]);
     const next = sessions.open(
-      {
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: context.activeModel.provider,
-        model: context.activeModel.id,
-      },
+      guardianSessionKey(nextRuntime.tools),
       "next review",
-      fakeGuardianRuntime([]).tools,
+      nextRuntime.tools,
     );
     const retainedText = next.context.messages.map(messageText).join("\n");
     expect(retainedText).toContain("Authorized test command.");
@@ -811,21 +867,19 @@ describe("PiAutoReviewer", () => {
       })
       .mockResolvedValueOnce(response);
     const sessions = new GuardianReviewSessionManager();
-    const reviewer = new PiAutoReviewer(complete as any, sessions, async () => {});
+    const runtime = fakeGuardianRuntime([]);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      sessions,
+      async () => {},
+      () => runtime,
+    );
 
     await expect(reviewer.review(request, context)).resolves.toMatchObject({
       decision: "approve",
     });
 
-    const next = sessions.open(
-      {
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: context.activeModel.provider,
-        model: context.activeModel.id,
-      },
-      "next review",
-    );
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
     const retained = next.context.messages.map(messageText);
     expect(complete).toHaveBeenCalledTimes(2);
     expect(next.sessionId).not.toContain("-fork-");
@@ -842,20 +896,13 @@ describe("PiAutoReviewer", () => {
     );
     const sleep = vi.fn(async () => {});
     const sessions = new GuardianReviewSessionManager();
-    const reviewer = new PiAutoReviewer(complete as any, sessions, sleep);
+    const runtime = fakeGuardianRuntime([]);
+    const reviewer = new PiAutoReviewer(complete as any, sessions, sleep, () => runtime);
 
     await expect(reviewer.review(request, context)).rejects.toMatchObject({
       kind: "provider",
     });
-    const next = sessions.open(
-      {
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: context.activeModel.provider,
-        model: context.activeModel.id,
-      },
-      "next review",
-    );
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
     expect(complete).toHaveBeenCalledTimes(3);
     expect(complete.mock.calls.every((call) => call[2]?.maxRetries === 0)).toBe(true);
     expect(sleep).toHaveBeenCalledTimes(2);

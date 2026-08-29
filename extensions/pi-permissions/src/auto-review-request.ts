@@ -32,6 +32,7 @@ export interface AutoReviewerContext {
   reviewer?: PermissionsConfig["reviewer"];
   guardianPolicy?: string;
   guardianSession: {
+    sessionId: string;
     cwd: string;
     configFingerprint: string;
   };

@@ -1,6 +1,5 @@
 {
   "version": 1,
-  "defaultMode": "default",
   "reviewer": {
     "provider": "openai-codex",
     "model": "gpt-5.6",

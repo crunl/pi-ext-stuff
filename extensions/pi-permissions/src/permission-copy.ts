@@ -1,11 +1,28 @@
 import type { PermissionError } from "./approve-for-me-engine.ts";
 import type { PermissionMode } from "./state.ts";
 
-export type ReviewPresentationEvent =
-  | { status: "reviewing" }
-  | { status: "approved" | "denied"; rationale: string }
-  | { status: "aborted" | "timed-out" }
-  | { status: "failed"; reason: string };
+export type ReviewStatus = "reviewing" | "approved" | "denied" | "aborted" | "timed-out" | "failed";
+
+/**
+ * The copy layer deliberately ignores review identity.  Identity is owned by
+ * the lifecycle presenter, while this function only maps an outcome to copy.
+ * `reviewId` stays optional so pure copy callers do not need to manufacture a
+ * lifecycle record.
+ */
+export interface ReviewPresentationEvent {
+  readonly reviewId?: string;
+  readonly status: ReviewStatus;
+  readonly rationale?: string;
+  readonly reason?: string;
+}
+
+export type ReviewPresentation =
+  | { kind: "silent" }
+  | {
+      kind: "notify";
+      label: "Permission denied" | "Review timed out" | "Review failed";
+      severity: "warning";
+    };
 
 export type PermissionNotice =
   | {
@@ -106,20 +123,20 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
   }
 }
 
-export function renderReviewEvent(event: ReviewPresentationEvent): string {
+export function projectReviewEvent(event: ReviewPresentationEvent): ReviewPresentation {
   switch (event.status) {
     case "reviewing":
-      return "Reviewing";
+      return { kind: "silent" };
     case "approved":
-      return `Automatic approval review approved: ${event.rationale}`;
+      return { kind: "silent" };
     case "denied":
-      return `Automatic approval review denied: ${event.rationale}`;
+      return { kind: "notify", label: "Permission denied", severity: "warning" };
     case "aborted":
-      return "Automatic approval review was aborted.";
+      return { kind: "silent" };
     case "timed-out":
-      return "Automatic approval review timed out while evaluating the requested approval.";
+      return { kind: "notify", label: "Review timed out", severity: "warning" };
     case "failed":
-      return `Automatic approval review failed: ${event.reason}`;
+      return { kind: "notify", label: "Review failed", severity: "warning" };
   }
 }
 

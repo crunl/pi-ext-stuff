@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   permissionModeLabel,
+  projectReviewEvent,
   renderPermissionErrorForAgent,
   renderPermissionNotice,
   renderPermissionSummary,
-  renderReviewEvent,
 } from "../src/permission-copy.ts";
 
 describe("permission copy", () => {
@@ -65,11 +65,29 @@ describe("permission copy", () => {
     ).toContain("Reason: Timed out after 5 seconds.");
   });
 
-  it("renders review lifecycle and circuit interruption without pause terminology", () => {
-    expect(renderReviewEvent({ status: "reviewing" })).toBe("Reviewing");
-    expect(renderReviewEvent({ status: "denied", rationale: "The action is too broad." })).toBe(
-      "Automatic approval review denied: The action is too broad.",
+  it("projects review lifecycle into concise UI instructions", () => {
+    expect(projectReviewEvent({ status: "reviewing" })).toEqual({ kind: "silent" });
+    expect(projectReviewEvent({ status: "approved", rationale: "Approved." })).toEqual({
+      kind: "silent",
+    });
+    expect(projectReviewEvent({ status: "aborted" })).toEqual({ kind: "silent" });
+    expect(projectReviewEvent({ status: "denied", rationale: "The action is too broad." })).toEqual(
+      {
+        kind: "notify",
+        label: "Permission denied",
+        severity: "warning",
+      },
     );
+    expect(projectReviewEvent({ status: "timed-out" })).toEqual({
+      kind: "notify",
+      label: "Review timed out",
+      severity: "warning",
+    });
+    expect(projectReviewEvent({ status: "failed", reason: "Provider unavailable." })).toEqual({
+      kind: "notify",
+      label: "Review failed",
+      severity: "warning",
+    });
     expect(
       renderPermissionNotice({
         kind: "review-circuit-interrupted",

@@ -6,10 +6,13 @@ const MAX_HISTORY_PAIRS = 8;
 const MAX_HISTORY_CHARACTERS = 24_000;
 
 export interface GuardianSessionKey {
+  sessionId: string;
   cwd: string;
   configFingerprint: string;
   provider: string;
   model: string;
+  reasoningEffort: string;
+  toolFingerprint: string;
 }
 
 export interface GuardianReviewLease {
@@ -30,10 +33,13 @@ type Trunk = {
 
 function keysMatch(left: GuardianSessionKey, right: GuardianSessionKey): boolean {
   return (
+    left.sessionId === right.sessionId &&
     left.cwd === right.cwd &&
     left.configFingerprint === right.configFingerprint &&
     left.provider === right.provider &&
-    left.model === right.model
+    left.model === right.model &&
+    left.reasoningEffort === right.reasoningEffort &&
+    left.toolFingerprint === right.toolFingerprint
   );
 }
 

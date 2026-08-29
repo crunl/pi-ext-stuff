@@ -5,10 +5,13 @@ import { AUTO_REVIEW_SYSTEM_PROMPT } from "../src/auto-review-request.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
 
 const key: GuardianSessionKey = {
+  sessionId: "session-a",
   cwd: "/workspace/project",
   configFingerprint: "config-a",
   provider: "openai-codex",
   model: "guardian",
+  reasoningEffort: "medium",
+  toolFingerprint: "tools-a",
 };
 
 const guardianTools = [
@@ -123,6 +126,9 @@ describe("GuardianReviewSessionManager", () => {
     ["configFingerprint", "config-b"],
     ["provider", "anthropic"],
     ["model", "guardian-v2"],
+    ["sessionId", "session-b"],
+    ["reasoningEffort", "high"],
+    ["toolFingerprint", "tools-b"],
   ] satisfies Array<[keyof GuardianSessionKey, string]>)(
     "creates a fresh trunk when %s changes",
     (field, value) => {

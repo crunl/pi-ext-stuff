@@ -7,7 +7,7 @@ import type {
   AutoReviewRequest,
   AutoReviewResult,
 } from "../src/auto-review-request.ts";
-import type { AutoReviewer } from "../src/auto-reviewer.ts";
+import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
 import {
   admissionPlanFromRiskDecision,
   createPiGuardianAdapter,
@@ -74,6 +74,7 @@ function guardianContext(
 ): PiGuardianReviewContext {
   return {
     event,
+    transcript: [{ role: "user", content: "Run the tests." }],
     autoReviewerContext,
     sandboxProfile: "workspace-write",
     sandboxEnabled: true,
@@ -171,6 +172,26 @@ describe("createPiGuardianAdapter", () => {
     const input = reviewInput({
       context: guardianContext({
         event: { ...event, toolCallId: "different-call" },
+      }),
+    });
+
+    await expect(adapter.review(input)).rejects.toThrow(/identity/);
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("rejects supplemental host metadata that differs from the Engine call", async () => {
+    const { reviewer, review } = createReviewer();
+    const adapter = createPiGuardianAdapter(reviewer);
+    const input = reviewInput({
+      call: {
+        id: "call-1",
+        tool: "bash",
+        input: { command: "npm test" },
+        cwd: "/workspace",
+        metadata: { account: "production" },
+      },
+      context: guardianContext({
+        event: { ...event, account: "staging" } as unknown as ToolCallEvent,
       }),
     });
 
@@ -281,6 +302,25 @@ describe("createPiGuardianAdapter", () => {
     expect(review.mock.calls[0]?.[2]).toBe(controller.signal);
   });
 
+  it("uses the immutable action-admission transcript snapshot", async () => {
+    const { reviewer, review } = createReviewer();
+    const adapter = createPiGuardianAdapter(reviewer);
+
+    await adapter.review(
+      reviewInput({
+        transcript: [{ role: "user", content: "Stale turn-start evidence." }],
+        context: guardianContext({
+          transcript: [{ role: "user", content: "Current action authorization." }],
+        }),
+      }),
+    );
+
+    const request = review.mock.calls[0]?.[0] as AutoReviewRequest | undefined;
+    expect(request?.untrustedTranscript).toEqual([
+      { role: "user", content: "Current action authorization." },
+    ]);
+  });
+
   it.each([
     ["approve" as const, "approve" as const],
     ["deny" as const, "deny" as const],
@@ -306,7 +346,25 @@ describe("createPiGuardianAdapter", () => {
     expect(onResult).toHaveBeenCalledWith(result);
   });
 
-  it("propagates reviewer errors unchanged to the Engine", async () => {
+  it("keeps the Guardian decision when the host result observer throws", async () => {
+    const result = reviewResult("approve");
+    const { reviewer } = createReviewer(result);
+    const adapter = createPiGuardianAdapter(reviewer);
+
+    await expect(
+      adapter.review(
+        reviewInput({
+          context: guardianContext({
+            onResult: () => {
+              throw new Error("review UI unavailable");
+            },
+          }),
+        }),
+      ),
+    ).resolves.toEqual({ kind: "approve", rationale: result.rationale });
+  });
+
+  it("maps reviewer failures into typed Guardian terminal outcomes", async () => {
     const error = new Error("review provider unavailable");
     const review = vi.fn<AutoReviewer["review"]>().mockRejectedValue(error);
     const reviewer: AutoReviewer = {
@@ -315,6 +373,15 @@ describe("createPiGuardianAdapter", () => {
     };
     const adapter = createPiGuardianAdapter(reviewer);
 
-    await expect(adapter.review(reviewInput())).rejects.toBe(error);
+    await expect(adapter.review(reviewInput())).resolves.toEqual({
+      kind: "failed",
+      reason: "review provider unavailable",
+    });
+
+    review.mockRejectedValueOnce(new AutoReviewerFailure("timeout", "review timed out"));
+    await expect(adapter.review(reviewInput())).resolves.toEqual({ kind: "timed-out" });
+
+    review.mockRejectedValueOnce(new AutoReviewerFailure("cancelled", "review cancelled"));
+    await expect(adapter.review(reviewInput())).resolves.toEqual({ kind: "cancelled" });
   });
 });

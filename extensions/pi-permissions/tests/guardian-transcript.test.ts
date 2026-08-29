@@ -36,21 +36,45 @@ describe("guardian transcript", () => {
     ]);
   });
 
-  it("caps entries at 4,000 characters and the transcript at 12,000 characters", () => {
+  it("applies separate bounded budgets to messages and tool evidence", () => {
     const bounded = boundGuardianTranscript([
       { role: "user", content: `first user ${"u".repeat(5_000)}` },
       ...Array.from({ length: 8 }, (_, index) => ({
         role: "assistant" as const,
         content: `assistant-${index}-${"a".repeat(5_000)}`,
       })),
+      ...Array.from({ length: 12 }, (_, index) => ({
+        role: "tool" as const,
+        toolName: "read",
+        content: `tool-${index}-${"t".repeat(2_000)}`,
+        isError: false,
+      })),
     ]);
 
     expect(bounded[0]).toMatchObject({ role: "user" });
-    expect(bounded.at(-1)?.content).toContain("assistant-7-");
+    expect(bounded.some((entry) => entry.content.includes("assistant-7-"))).toBe(true);
     expect(bounded.some((entry) => entry.content.includes("assistant-0-"))).toBe(false);
     expect(bounded.every((entry) => entry.role.length > 0)).toBe(true);
-    expect(bounded.every((entry) => entry.content.length <= 4_000)).toBe(true);
-    expect(bounded.map((entry) => entry.content).join("").length).toBeLessThanOrEqual(12_000);
+    expect(
+      bounded
+        .filter((entry) => entry.role !== "tool")
+        .every((entry) => entry.content.length <= 2_000),
+    ).toBe(true);
+    expect(
+      bounded
+        .filter((entry) => entry.role === "tool")
+        .every((entry) => entry.content.length <= 1_000),
+    ).toBe(true);
+    expect(
+      bounded
+        .filter((entry) => entry.role !== "tool")
+        .reduce((total, entry) => total + entry.content.length, 0),
+    ).toBeLessThanOrEqual(10_000);
+    expect(
+      bounded
+        .filter((entry) => entry.role === "tool")
+        .reduce((total, entry) => total + entry.content.length, 0),
+    ).toBeLessThanOrEqual(10_000);
     expect(bounded.some((entry) => entry.content.includes("[...]"))).toBe(true);
   });
 
@@ -71,18 +95,20 @@ describe("guardian transcript", () => {
 
   it("omits a cut entry when the remaining budget cannot fit the full truncation marker", () => {
     const bounded = boundGuardianTranscript([
-      { role: "user", content: "u".repeat(3_998) },
+      { role: "user", content: "u".repeat(2_000) },
       { role: "assistant", content: `oldest-${"x".repeat(100)}` },
-      { role: "assistant", content: "n".repeat(3_998) },
-      { role: "assistant", content: "z".repeat(4_000) },
+      ...Array.from({ length: 4 }, () => ({
+        role: "assistant" as const,
+        content: "n".repeat(1_999),
+      })),
     ]);
 
-    expect(bounded).toHaveLength(3);
+    expect(bounded).toHaveLength(5);
     expect(bounded.some((entry) => entry.content.includes("oldest"))).toBe(false);
     expect(bounded.every((entry) => !["[", "[.", "[..", "[..."].includes(entry.content))).toBe(
       true,
     );
-    expect(bounded.map((entry) => entry.content).join("").length).toBe(11_996);
+    expect(bounded.map((entry) => entry.content).join("").length).toBe(9_996);
   });
 
   it("never turns tool-result content into developer or user instructions", () => {

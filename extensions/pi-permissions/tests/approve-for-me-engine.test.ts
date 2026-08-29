@@ -6,9 +6,12 @@ import {
   type CapabilityRequestInput,
   createApproveForMeEngine,
   type ExecutionAttempt,
+  type GuardianDecision,
   type GuardianReviewInput,
   type Invocation,
+  type InvocationCall,
   type RetryHandle,
+  type ReviewEvent,
   type RuntimeOutcome,
 } from "../src/approve-for-me-engine.ts";
 
@@ -89,9 +92,7 @@ function reviewAdmission(
 }
 
 function createEngine(
-  review: (
-    request: GuardianReviewInput,
-  ) => Promise<{ kind: "approve" | "deny"; rationale: string }>,
+  review: (request: GuardianReviewInput) => Promise<GuardianDecision>,
   options: Parameters<typeof createApproveForMeEngine>[0] = {},
 ): { engine: ApproveForMeEngine; review: ReturnType<typeof vi.fn> } {
   const reviewMock = vi.fn(review);
@@ -105,6 +106,59 @@ function createEngine(
 }
 
 describe("ApproveForMeEngine public seam", () => {
+  it("emits independently identified review lifecycles without letting observers block execution", async () => {
+    const events: ReviewEvent[] = [];
+    const engine = createApproveForMeEngine({
+      guardian: {
+        review: async () => ({ kind: "approve" as const, rationale: "approved" }),
+      },
+      onReviewEvent: (event) => {
+        events.push(event);
+        if (event.status === "reviewing") throw new Error("observer unavailable");
+      },
+    });
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("ok"));
+
+    const [first, second] = await Promise.all([
+      turn.execute(
+        call(execute, {
+          call: {
+            id: "call-a",
+            tool: "bash",
+            input: { command: "printf a" },
+            cwd: "/workspace",
+          },
+          admission: reviewAdmission(),
+        }),
+      ),
+      turn.execute(
+        call(execute, {
+          call: {
+            id: "call-b",
+            tool: "bash",
+            input: { command: "printf b" },
+            cwd: "/workspace",
+          },
+          admission: reviewAdmission(),
+        }),
+      ),
+    ]);
+
+    expect(first).toMatchObject({ kind: "completed", value: "ok" });
+    expect(second).toMatchObject({ kind: "completed", value: "ok" });
+    const reviewing = events.filter((event) => event.status === "reviewing");
+    expect(reviewing).toHaveLength(2);
+    expect(new Set(reviewing.map((event) => event.reviewId)).size).toBe(2);
+    for (const event of reviewing) {
+      expect(
+        events.some(
+          (candidate) => candidate.reviewId === event.reviewId && candidate.status === "approved",
+        ),
+      ).toBe(true);
+    }
+  });
+
   it("runs a baseline call through the sandbox without reviewing it", async () => {
     const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
@@ -326,7 +380,7 @@ describe("ApproveForMeEngine public seam", () => {
           input: { command: "printf override" },
           cwd: "/workspace",
         },
-        admission: { kind: "allow" },
+        admission: reviewAdmission(),
         reviewContext,
         executor: vi.fn(async () => completed("retried")),
       }),
@@ -337,6 +391,78 @@ describe("ApproveForMeEngine public seam", () => {
       denialId: firstHandle?.token,
       actionFingerprint: expect.any(String),
     });
+  });
+
+  it("keeps an armed retry when the current admission capability scope changes", async () => {
+    const reviewed: Array<{
+      source: GuardianReviewInput["source"];
+      requested: readonly CapabilityRequest[];
+    }> = [];
+    const { engine } = createEngine(async (input) => {
+      reviewed.push({ source: input.source, requested: input.requested });
+      if (reviewed.length === 1) {
+        return { kind: "deny", rationale: "The original scope is denied." };
+      }
+      return { kind: "approve", rationale: "This review is approved." };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const originalAdmission = reviewAdmission([
+      { kind: "filesystem", operation: "write", path: "/outside/original.txt" },
+    ]);
+    const first = await turn.execute(
+      call(
+        vi.fn(async () => completed("never")),
+        { admission: originalAdmission },
+      ),
+    );
+    const retryHandle = first.kind === "blocked" ? first.retryHandle : undefined;
+    expect(retryHandle).toBeDefined();
+    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(true);
+
+    await expect(
+      turn.execute(
+        call(
+          vi.fn(async () => completed("different scope")),
+          {
+            call: {
+              id: "different-scope",
+              tool: "bash",
+              input: { command: "printf ok" },
+              cwd: "/workspace",
+            },
+            admission: reviewAdmission([
+              { kind: "filesystem", operation: "write", path: "/outside/different.txt" },
+            ]),
+          },
+        ),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "different scope" });
+    expect(reviewed[1]).toEqual({
+      source: "preview",
+      requested: [{ kind: "filesystem", operation: "write", path: "/outside/different.txt" }],
+    });
+
+    await expect(
+      turn.execute(
+        call(
+          vi.fn(async () => completed("exact scope")),
+          {
+            call: {
+              id: "exact-scope",
+              tool: "bash",
+              input: { command: "printf ok" },
+              cwd: "/workspace",
+            },
+            admission: originalAdmission,
+          },
+        ),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "exact scope" });
+    expect(reviewed[2]).toEqual({
+      source: "manual-retry",
+      requested: [{ kind: "filesystem", operation: "write", path: "/outside/original.txt" }],
+    });
+    expect(engine.listDenials()).toEqual([]);
   });
 
   it("emits auto state snapshots for turn reset, decisions, and circuit pause", async () => {
@@ -395,7 +521,7 @@ describe("ApproveForMeEngine public seam", () => {
     let reviewCount = 0;
     const { engine, review } = createEngine(async () => {
       reviewCount += 1;
-      if (reviewCount === 2) throw new Error("Guardian review timeout");
+      if (reviewCount === 2) return { kind: "timed-out" };
       return { kind: "deny", rationale: `Denied ${reviewCount}.` };
     });
     const turn = engine.beginTurn(snapshot());
@@ -508,10 +634,11 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("preserves hard deny rules while applying an approved one-shot grant", async () => {
-    const { engine, review } = createEngine(async () => ({
-      kind: "approve",
-      rationale: "reviewed",
-    }));
+    const sources: string[] = [];
+    const { engine, review } = createEngine(async (request) => {
+      sources.push(request.source);
+      return { kind: "approve", rationale: "reviewed" };
+    });
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async (attempt) => {
       expect(attempt.lease.policy?.filesystem.denyRead).toEqual(["/secret"]);
@@ -528,7 +655,44 @@ describe("ApproveForMeEngine public seam", () => {
     );
     expect(result.kind).toBe("blocked");
     if (result.kind === "blocked") expect(result.error.code).toBe("retry-denied");
-    expect(review).toHaveBeenCalledOnce();
+    expect(sources).toEqual(["preview", "runtime"]);
+    expect(review).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("escalates a distinct runtime capability after a reviewed static grant", async () => {
+    const sources: string[] = [];
+    const { engine, review } = createEngine(async (request) => {
+      sources.push(request.source);
+      return { kind: "approve", rationale: "reviewed" };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi
+      .fn()
+      .mockImplementationOnce(async (attempt) => {
+        expect(attempt.ordinal).toBe(0);
+        expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
+        return denied({ kind: "network", host: "api.other.org" });
+      })
+      .mockImplementationOnce(async (attempt) => {
+        expect(attempt.ordinal).toBe(1);
+        expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
+        expect(attempt.lease.policy?.network.allowedDomains).toContain("api.other.org");
+        return completed("retried");
+      });
+
+    await expect(
+      turn.execute(
+        call(execute, {
+          admission: reviewAdmission([
+            { kind: "filesystem", operation: "write", path: "/outside/result.txt" },
+          ]),
+        }),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "retried" });
+    expect(sources).toEqual(["preview", "runtime"]);
+    expect(review).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("blocks a denied preview without invoking the executor", async () => {
@@ -616,7 +780,7 @@ describe("ApproveForMeEngine public seam", () => {
               },
               cwd: "/workspace",
             },
-            admission: { kind: "allow" },
+            admission: reviewAdmission(),
           },
         ),
       ),
@@ -729,6 +893,7 @@ describe("ApproveForMeEngine public seam", () => {
             input: { command: "printf ok" },
             cwd: "/workspace",
           },
+          admission: reviewAdmission(),
         },
       ),
     );
@@ -807,6 +972,7 @@ describe("ApproveForMeEngine public seam", () => {
               cwd: "/workspace",
               metadata: originalMetadata,
             },
+            admission: reviewAdmission(),
           },
         ),
       ),
@@ -841,11 +1007,96 @@ describe("ApproveForMeEngine public seam", () => {
             input: { command: "printf ok" },
             cwd: "/workspace",
           },
+          admission: reviewAdmission(),
         },
       ),
     );
     expect(retried).toEqual({ kind: "completed", value: "retried" });
     expect(review).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an exact retry armed when the structured execution plan changes", async () => {
+    const sources: GuardianReviewInput["source"][] = [];
+    const { engine, review } = createEngine(async (request) => {
+      sources.push(request.source);
+      if (sources.length === 1) {
+        return { kind: "deny", rationale: "Review the exact Git initialization plan." };
+      }
+      return { kind: "approve", rationale: "This exact plan is acceptable." };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const originalAdmission: AdmissionPlan = {
+      kind: "review",
+      risk: "REVIEW",
+      requested: writeOutsidePreview(),
+      review: "capability",
+      reason: "The operation needs a capability outside the baseline lease.",
+      execution: {
+        kind: "git-init",
+        executable: "/usr/bin/git",
+        args: ["init"],
+        cwd: "/workspace",
+      },
+    };
+    const first = await turn.execute(
+      call(
+        vi.fn(async () => completed("never")),
+        { admission: originalAdmission },
+      ),
+    );
+    const retryHandle = first.kind === "blocked" ? first.retryHandle : undefined;
+    expect(retryHandle).toBeDefined();
+    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(true);
+
+    await expect(
+      turn.execute(
+        call(
+          vi.fn(async () => completed("different plan")),
+          {
+            call: {
+              id: "different-plan",
+              tool: "bash",
+              input: { command: "printf ok" },
+              cwd: "/workspace",
+            },
+            admission: {
+              kind: "review",
+              risk: "REVIEW",
+              requested: writeOutsidePreview(),
+              review: "capability",
+              reason: "The operation needs a capability outside the baseline lease.",
+              execution: {
+                kind: "git-init",
+                executable: "/usr/bin/git",
+                args: ["init", "."],
+                cwd: "/workspace",
+              },
+            },
+          },
+        ),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "different plan" });
+
+    await expect(
+      turn.execute(
+        call(
+          vi.fn(async () => completed("exact plan")),
+          {
+            call: {
+              id: "exact-plan",
+              tool: "bash",
+              input: { command: "printf ok" },
+              cwd: "/workspace",
+            },
+            admission: originalAdmission,
+          },
+        ),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "exact plan" });
+
+    expect(sources).toEqual(["preview", "preview", "manual-retry"]);
+    expect(review).toHaveBeenCalledTimes(3);
+    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(false);
   });
 
   it("arms a denied action after turn close and retries it in the next turn", async () => {
@@ -892,7 +1143,7 @@ describe("ApproveForMeEngine public seam", () => {
               cwd: "/workspace",
               metadata: { source: "same-action" },
             },
-            admission: { kind: "allow" },
+            admission: reviewAdmission(),
           },
         ),
       ),
@@ -948,7 +1199,7 @@ describe("ApproveForMeEngine public seam", () => {
               input: { command: "printf ok" },
               cwd: "/workspace",
             },
-            admission: { kind: "allow" },
+            admission: reviewAdmission(),
           },
         ),
       ),
@@ -1545,6 +1796,79 @@ describe("ApproveForMeEngine public seam", () => {
       value: "stable",
     });
     expect(review).not.toHaveBeenCalled();
+  });
+
+  it("uses one canonical action snapshot across policy, review, and execution", async () => {
+    let releasePolicy: (decision: { kind: "allow" }) => void = () => undefined;
+    const policyGate = new Promise<{ kind: "allow" }>((resolve) => {
+      releasePolicy = resolve;
+    });
+    const policy = vi.fn(
+      async (input: { call: InvocationCall; requested: readonly CapabilityRequest[] }) => {
+        (input.call.input as { command: string }).command = "mutated by policy";
+        (input.requested as CapabilityRequest[])[0] = {
+          kind: "filesystem",
+          operation: "write",
+          path: "/outside/policy-mutated.txt",
+        };
+        return policyGate;
+      },
+    );
+    const review = vi.fn(async (input: GuardianReviewInput) => {
+      expect(input.call.input).toEqual({ command: "printf safe" });
+      expect(input.requested).toEqual([
+        { kind: "filesystem", operation: "write", path: "/outside/original.txt" },
+      ]);
+      (input.call.input as { command: string }).command = "mutated by Guardian";
+      (input.requested as CapabilityRequest[])[0] = {
+        kind: "filesystem",
+        operation: "write",
+        path: "/outside/guardian-mutated.txt",
+      };
+      return { kind: "approve" as const, rationale: "The canonical action is approved." };
+    });
+    const engine = createApproveForMeEngine({ guardian: { review }, policy: { check: policy } });
+    const turn = engine.beginTurn(snapshot());
+    const mutableInput = { command: "printf safe" };
+    const mutableRequested: CapabilityRequestInput[] = [
+      { kind: "filesystem", operation: "write", path: "/outside/original.txt" },
+    ];
+    const mutableAdmission: Extract<AdmissionPlan, { kind: "review" }> = {
+      kind: "review",
+      risk: "REVIEW",
+      requested: mutableRequested,
+      review: "capability",
+      reason: "The operation needs a capability outside the baseline lease.",
+    };
+    const executor = vi.fn(async (attempt: ExecutionAttempt) => {
+      expect(attempt.call.input).toEqual({ command: "printf safe" });
+      expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/original.txt");
+      return completed("canonical");
+    });
+
+    const result = turn.execute(
+      call(executor, {
+        call: {
+          id: "canonical-action",
+          tool: "bash",
+          input: mutableInput,
+          cwd: "/workspace",
+        },
+        admission: mutableAdmission,
+      }),
+    );
+    await vi.waitFor(() => expect(policy).toHaveBeenCalledOnce());
+    mutableInput.command = "printf destructive";
+    mutableRequested[0] = {
+      kind: "filesystem",
+      operation: "write",
+      path: "/outside/changed.txt",
+    };
+    releasePolicy({ kind: "allow" });
+
+    await expect(result).resolves.toEqual({ kind: "completed", value: "canonical" });
+    expect(review).toHaveBeenCalledOnce();
+    expect(executor).toHaveBeenCalledOnce();
   });
 
   it("rejects an executor completion that arrives after invalidation", async () => {

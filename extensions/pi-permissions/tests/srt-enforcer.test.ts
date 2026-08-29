@@ -1,11 +1,12 @@
 import { lstat, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { SandboxRuntimeConfig, SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
 import { describe, expect, it } from "vitest";
 import { expandSymlinkAliases } from "../src/filesystem-policy.ts";
 import {
   assertSrtPolicySupported,
+  denialCapabilityFromViolationLine,
   type SrtRuntimeLike,
   SrtSandboxManager,
 } from "../src/sandbox/srt-enforcer.ts";
@@ -30,6 +31,8 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   readonly initialized: SandboxRuntimeConfig[] = [];
   readonly updated: SandboxRuntimeConfig[] = [];
   readonly wrapped: string[] = [];
+  readonly violationsByCommand = new Map<string, Array<{ line: string }>>();
+  lastWrapOptions: { commandId?: string; commandText?: string } | undefined;
   cleanupCalls = 0;
   activeWraps = 0;
   maxActiveWraps = 0;
@@ -50,8 +53,16 @@ class FakeSrtRuntime implements SrtRuntimeLike {
     return { errors: [], warnings: [] };
   }
 
-  async wrapWithSandboxArgv(command: string): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }> {
+  async wrapWithSandboxArgv(
+    command: string,
+    _binShell?: string,
+    _customConfig?: Partial<SandboxRuntimeConfig>,
+    _abortSignal?: AbortSignal,
+    _cwd?: string,
+    options?: { commandId?: string; commandText?: string },
+  ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }> {
     this.wrapped.push(command);
+    this.lastWrapOptions = options;
     this.activeWraps += 1;
     this.maxActiveWraps = Math.max(this.maxActiveWraps, this.activeWraps);
     if (this.wrapDelayMs > 0) {
@@ -74,6 +85,13 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   }
 
   async reset(): Promise<void> {}
+
+  getSandboxViolationStore(): SandboxViolationStore {
+    const byCommand = this.violationsByCommand;
+    return {
+      getViolationsForCommand: (command: string) => byCommand.get(command) ?? [],
+    } as unknown as SandboxViolationStore;
+  }
 }
 
 async function execute(
@@ -397,4 +415,87 @@ describe("Guardian environment seam", () => {
       }
     },
   );
+});
+
+describe("Runtime denial classification", () => {
+  it("maps authoritative denial lines to exact capabilities", () => {
+    expect(
+      denialCapabilityFromViolationLine(
+        "bash(20614) deny(1) file-write-create /private/tmp/out/new.txt",
+      ),
+    ).toEqual({ kind: "filesystem", operation: "write", path: "/private/tmp/out/new.txt" });
+    expect(
+      denialCapabilityFromViolationLine(
+        "deny network-outbound example.com:443 (host is not on the allow list)",
+      ),
+    ).toEqual({ kind: "network", host: "example.com" });
+  });
+
+  it("never escalates read denials or kernel noise", () => {
+    expect(
+      denialCapabilityFromViolationLine("cat(20655) deny(1) file-read-data /private/tmp/secret"),
+    ).toBeUndefined();
+    expect(
+      denialCapabilityFromViolationLine("bash(20441) deny(1) sysctl-read kern.iossupportversion"),
+    ).toBeUndefined();
+    expect(
+      denialCapabilityFromViolationLine(
+        "curl(20693) deny(1) mach-lookup com.apple.SystemConfiguration.configd",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("threads the invocation commandId into the sandbox wrap", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    await execute(manager, basePolicy(), { commandId: "call-42" });
+    expect(runtime.lastWrapOptions?.commandId).toBe("call-42");
+    await manager.reset();
+  });
+
+  it("returns the exact denied capability recorded for the invocation", async () => {
+    const runtime = new FakeSrtRuntime();
+    runtime.violationsByCommand.set("call-1", [
+      { line: "bash(1) deny(1) sysctl-read kern.iossupportversion" },
+      { line: "bash(2) deny(1) file-write-create /private/workspace/report.txt" },
+    ]);
+    runtime.violationsByCommand.set("other-call", [
+      { line: "bash(3) deny(1) file-write-create /elsewhere/file.txt" },
+    ]);
+    const manager = new SrtSandboxManager(runtime);
+
+    await expect(manager.classifyDenial("call-1")).resolves.toEqual({
+      kind: "filesystem",
+      operation: "write",
+      path: "/private/workspace/report.txt",
+    });
+    await manager.reset();
+  });
+
+  it("waits within the bounded drain for late denial events", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    setTimeout(() => {
+      runtime.violationsByCommand.set("call-late", [
+        { line: "deny network-outbound api.example.com:443 (host is not on the allow list)" },
+      ]);
+    }, 250);
+
+    await expect(manager.classifyDenial("call-late")).resolves.toEqual({
+      kind: "network",
+      host: "api.example.com",
+    });
+    await manager.reset();
+  });
+
+  it("fails closed when only noise violations exist", async () => {
+    const runtime = new FakeSrtRuntime();
+    runtime.violationsByCommand.set("call-noise", [
+      { line: "bash(1) deny(1) sysctl-read kern.iossupportversion" },
+    ]);
+    const manager = new SrtSandboxManager(runtime);
+
+    await expect(manager.classifyDenial("call-noise")).resolves.toBeUndefined();
+    await manager.reset();
+  }, 10_000);
 });

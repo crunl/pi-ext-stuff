@@ -4,13 +4,6 @@ import { join } from "node:path";
 
 import { isRecord } from "./unknown-value.ts";
 
-/**
- * Keys that existed before modes collapsed to auto|yolo and human prompts were
- * removed. They are still accepted (and ignored) so old config.json files keep
- * loading instead of failing validation.
- */
-const legacyIgnoredKeys = ["defaultMode", "approvalMode", "granularApproval"] as const;
-
 export interface PermissionsConfig {
   version: 1;
   reviewer?: {
@@ -121,14 +114,13 @@ function cloneConfig(config: PermissionsConfig): PermissionsConfig {
 
 function parseOverlay(input: unknown): PermissionsConfigOverlay {
   if (!isRecord(input)) throw new ConfigError("config must be an object");
-  rejectUnknownKeys(input, [...legacyIgnoredKeys, "version", "reviewer", "sandbox", "rules"], "");
+  rejectUnknownKeys(input, ["version", "reviewer", "sandbox", "rules"], "");
   const overlay: PermissionsConfigOverlay = {};
 
   if ("version" in input && input.version !== undefined) {
     if (input.version !== 1) throw new ConfigError("version must be 1");
     overlay.version = 1;
   }
-  // legacyIgnoredKeys are silently skipped here.
   if ("reviewer" in input && input.reviewer !== undefined) {
     if (!isRecord(input.reviewer)) throw new ConfigError("reviewer must be an object");
     const reviewer = input.reviewer;

@@ -87,6 +87,8 @@ export type RuntimeOutcome<T> =
 
 export interface ExecutionAttempt {
   readonly ordinal: 0 | 1;
+  /** Canonical action snapshot reviewed and fingerprinted by the Engine. */
+  readonly call: InvocationCall;
   readonly lease: CapabilityLease;
   readonly plan?: StructuredExecutionPlan;
 }
@@ -130,7 +132,10 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
 
 export type GuardianDecision =
   | { kind: "approve"; rationale: string }
-  | { kind: "deny"; rationale: string };
+  | { kind: "deny"; rationale: string }
+  | { kind: "timed-out" }
+  | { kind: "cancelled" }
+  | { kind: "failed"; reason: string };
 
 /** True external decision Adapter. It cannot mint or shape capabilities. */
 export interface GuardianAdapter<ReviewContext = undefined> {
@@ -173,14 +178,24 @@ export interface AutoState {
 }
 
 export type ReviewEvent =
-  | { readonly status: "reviewing"; readonly call: InvocationCall }
+  | { readonly status: "reviewing"; readonly reviewId: string; readonly call: InvocationCall }
   | {
       readonly status: "approved" | "denied";
+      readonly reviewId: string;
       readonly call: InvocationCall;
       readonly rationale: string;
     }
-  | { readonly status: "aborted" | "timed-out"; readonly call: InvocationCall }
-  | { readonly status: "failed"; readonly call: InvocationCall; readonly reason: string };
+  | {
+      readonly status: "aborted" | "timed-out";
+      readonly reviewId: string;
+      readonly call: InvocationCall;
+    }
+  | {
+      readonly status: "failed";
+      readonly reviewId: string;
+      readonly call: InvocationCall;
+      readonly reason: string;
+    };
 
 export type PermissionErrorCode =
   | "aborted"
@@ -260,7 +275,11 @@ interface RetryRecord {
   readonly fingerprint: string;
   readonly call: InvocationCall;
   readonly ownership: InvocationOwnership;
+  /** Capabilities the denied review would have granted. */
   readonly requested: readonly CapabilityRequest[];
+  /** Exact normalized admission scope observed for the denied action. */
+  readonly admissionRequested: readonly CapabilityRequest[];
+  readonly execution?: StructuredExecutionPlan;
   readonly risk?: AdmissionRisk;
   readonly rationale: string;
   readonly summary?: string;
@@ -298,6 +317,14 @@ function clonePolicy(policy: SandboxPolicy | undefined): SandboxPolicy | undefin
   return policy === undefined ? undefined : structuredClone(policy);
 }
 
+function cloneLease(lease: CapabilityLease): CapabilityLease {
+  const policy = clonePolicy(lease.policy);
+  return {
+    mode: lease.mode,
+    ...(policy === undefined ? {} : { policy }),
+  };
+}
+
 function cloneMetadata(metadata: unknown): unknown {
   if (metadata === undefined) return undefined;
   try {
@@ -321,6 +348,29 @@ function cloneInvocationCall(call: InvocationCall): InvocationCall {
     input,
     cwd: resolve(call.cwd),
     ...(metadata === undefined ? {} : { metadata }),
+  };
+}
+
+function cloneInvocation<T, ReviewContext>(
+  invocation: Invocation<T, ReviewContext>,
+): Invocation<T, ReviewContext> {
+  let admission: AdmissionPlan | undefined;
+  let intent: PermissionAmendment | undefined;
+  try {
+    admission =
+      invocation.admission === undefined ? undefined : structuredClone(invocation.admission);
+    intent = invocation.intent === undefined ? undefined : structuredClone(invocation.intent);
+  } catch {
+    throw new Error("Invocation authorization evidence must be structured-cloneable");
+  }
+  return {
+    ownership: invocation.ownership,
+    call: cloneInvocationCall(invocation.call),
+    ...(admission === undefined ? {} : { admission }),
+    ...(intent === undefined ? {} : { intent }),
+    reviewContext: invocation.reviewContext,
+    executor: invocation.executor,
+    ...(invocation.signal === undefined ? {} : { signal: invocation.signal }),
   };
 }
 
@@ -646,6 +696,9 @@ function retryFingerprint(
   state: TurnState,
   call: InvocationCall,
   ownership: InvocationOwnership,
+  grantScope: readonly CapabilityRequest[],
+  admissionScope: readonly CapabilityRequest[],
+  execution?: StructuredExecutionPlan,
 ): string {
   // A manually armed retry is a request to review the same action in the
   // next turn, not permission to replay the old tool-call envelope.  Keep the
@@ -659,13 +712,10 @@ function retryFingerprint(
     input: call.input,
     cwd: resolve(call.cwd),
     metadata: call.metadata,
+    grantScope,
+    admissionScope,
+    execution,
   });
-}
-
-function isTimeout(error: unknown): boolean {
-  if (error instanceof Error && /timeout|timed out/i.test(error.message)) return true;
-  if (isRecord(error) && typeof error.code === "string") return /timeout/i.test(error.code);
-  return false;
 }
 
 export function createApproveForMeEngine<ReviewContext = undefined>(
@@ -682,6 +732,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   const retryRecords = new Map<string, RetryRecord>();
   const denialNotices: DenialNotice[] = [];
   let armedRetry: { record: RetryRecord; denialId: string } | undefined;
+  let reviewSequence = 0;
   const reviewControllers = new Set<AbortController>();
   const inFlightCallIds = new Set<string>();
   const sessionNetworkHosts = new Set<string>();
@@ -714,6 +765,16 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     });
   };
 
+  const emitReviewEvent = (event: ReviewEvent | (() => ReviewEvent)): void => {
+    if (!options.onReviewEvent) return;
+    try {
+      options.onReviewEvent(typeof event === "function" ? event() : event);
+    } catch {
+      // Review lifecycle reporting is observational. A broken presenter or
+      // event subscriber must never alter authorization or execution.
+    }
+  };
+
   const recordNonDenial = (): void => {
     recordWindow(false);
     consecutiveDenials = 0;
@@ -733,10 +794,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   const recordDenial = (
     state: TurnState,
     request: Invocation<unknown, ReviewContext>,
-    rationale: string,
-    requested: readonly CapabilityRequest[],
-    risk?: AdmissionRisk,
-    summary?: string,
+    denial: {
+      readonly rationale: string;
+      readonly requested: readonly CapabilityRequest[];
+      readonly admissionRequested: readonly CapabilityRequest[];
+      readonly risk?: AdmissionRisk;
+      readonly summary?: string;
+      readonly execution?: StructuredExecutionPlan;
+    },
   ): RetryHandle => {
     recordWindow(true);
     consecutiveDenials += 1;
@@ -747,19 +812,32 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       circuitOpen = true;
     }
     emitAutoStateChange();
+    const frozenRequested = denial.requested.map((item) => structuredClone(item));
+    const frozenAdmissionRequested = denial.admissionRequested.map((item) => structuredClone(item));
+    const frozenExecution =
+      denial.execution === undefined ? undefined : structuredClone(denial.execution);
     const retryHandle = makeRetryHandle({
-      fingerprint: retryFingerprint(state, request.call, request.ownership),
+      fingerprint: retryFingerprint(
+        state,
+        request.call,
+        request.ownership,
+        frozenRequested,
+        frozenAdmissionRequested,
+        frozenExecution,
+      ),
       call: cloneInvocationCall(request.call),
       ownership: request.ownership,
-      requested: [...requested],
-      ...(risk === undefined ? {} : { risk }),
-      rationale,
-      ...(summary === undefined ? {} : { summary }),
+      requested: frozenRequested,
+      admissionRequested: frozenAdmissionRequested,
+      ...(frozenExecution === undefined ? {} : { execution: frozenExecution }),
+      ...(denial.risk === undefined ? {} : { risk: denial.risk }),
+      rationale: denial.rationale,
+      ...(denial.summary === undefined ? {} : { summary: denial.summary }),
     });
     const notice: DenialNotice = {
       call: cloneInvocationCall(request.call),
-      ...(summary === undefined ? {} : { summary }),
-      rationale,
+      ...(denial.summary === undefined ? {} : { summary: denial.summary }),
+      rationale: denial.rationale,
       handle: retryHandle,
     };
     denialNotices.push(notice);
@@ -809,7 +887,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   const policyCheck = async (request: PermissionPolicyCheck): Promise<PolicyCheckResult> => {
     if (!options.policy) return { kind: "allow" };
     try {
-      const decision = await options.policy.check(request);
+      const decision = await options.policy.check({
+        call: cloneInvocationCall(request.call),
+        ownership: request.ownership,
+        requested: request.requested.map((item) => structuredClone(item)),
+        phase: request.phase,
+      });
       if (decision.kind === "allow") return decision;
       if (decision.kind === "deny" && typeof decision.reason === "string") return decision;
       return { kind: "error", reason: "Permission policy returned an invalid decision" };
@@ -828,14 +911,21 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return { kind: "approve", rationale: "Full access is active" };
     }
     if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
+    const reviewId = `review-${++reviewSequence}`;
+    emitReviewEvent(() => ({
+      status: "reviewing",
+      reviewId,
+      call: cloneInvocationCall(request.call),
+    }));
     const guardian = options.guardian;
     if (!guardian) {
       const reason = "The configured reviewer is unavailable";
-      options.onReviewEvent?.({
+      emitReviewEvent(() => ({
         status: "failed",
+        reviewId,
         call: cloneInvocationCall(request.call),
         reason,
-      });
+      }));
       return { code: "review-unavailable", reason };
     }
     const controller = new AbortController();
@@ -845,21 +935,24 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       : controller.signal;
     try {
       if (signal.aborted) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "aborted", reason: "Operation aborted" };
       }
-      options.onReviewEvent?.({ status: "reviewing", call: cloneInvocationCall(request.call) });
       const decision = await guardian.review(
         {
           call: cloneInvocationCall(request.call),
           ownership: request.ownership,
-          requested: review.requested,
+          requested: review.requested.map((item) => structuredClone(item)),
           source: review.source,
           retryability: review.retryability,
           risk: review.risk,
-          baseline,
+          baseline: cloneLease(baseline),
           effective: leaseWithRequests(state, request.ownership, review.requested),
-          transcript: state.snapshot.transcript ?? [],
+          transcript: structuredClone(state.snapshot.transcript ?? []),
           reason: review.reason,
           summary: review.summary,
           context: request.reviewContext,
@@ -870,53 +963,102 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         signal,
       );
       if (!isCurrent(state)) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
       if (signal.aborted) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "aborted", reason: "Operation aborted" };
+      }
+      if (decision.kind === "cancelled") {
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
+        return { code: "aborted", reason: "Operation aborted" };
+      }
+      if (decision.kind === "timed-out") {
+        recordNonDenial();
+        emitReviewEvent(() => ({
+          status: "timed-out",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
+        return { code: "review-timeout", reason: "Automatic approval review timed out" };
+      }
+      if (decision.kind === "failed") {
+        recordNonDenial();
+        emitReviewEvent(() => ({
+          status: "failed",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+          reason: decision.reason,
+        }));
+        return { code: "review-unavailable", reason: decision.reason };
       }
       if (decision.kind !== "approve" && decision.kind !== "deny") {
         recordNonDenial();
         const reason = "The reviewer returned an invalid decision";
-        options.onReviewEvent?.({
+        emitReviewEvent(() => ({
           status: "failed",
+          reviewId,
           call: cloneInvocationCall(request.call),
           reason,
-        });
+        }));
         return { code: "review-unavailable", reason };
       }
       if (decision.kind === "approve") recordNonDenial();
-      options.onReviewEvent?.({
+      emitReviewEvent(() => ({
         status: decision.kind === "approve" ? "approved" : "denied",
+        reviewId,
         call: cloneInvocationCall(request.call),
         rationale: decision.rationale,
-      });
+      }));
       return decision;
     } catch (error) {
       if (!isCurrent(state)) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
       if (request.signal?.aborted) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "aborted", reason: "Operation aborted" };
       }
       if (controller.signal.aborted) {
-        options.onReviewEvent?.({ status: "aborted", call: cloneInvocationCall(request.call) });
+        emitReviewEvent(() => ({
+          status: "aborted",
+          reviewId,
+          call: cloneInvocationCall(request.call),
+        }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
-      const timeout = isTimeout(error);
       recordNonDenial();
-      const reason = timeout ? "Automatic approval review timed out" : errorMessage(error);
-      options.onReviewEvent?.(
-        timeout
-          ? { status: "timed-out", call: cloneInvocationCall(request.call) }
-          : { status: "failed", call: cloneInvocationCall(request.call), reason },
-      );
+      const reason = errorMessage(error);
+      emitReviewEvent(() => ({
+        status: "failed",
+        reviewId,
+        call: cloneInvocationCall(request.call),
+        reason,
+      }));
       return {
-        code: timeout ? "review-timeout" : "review-unavailable",
+        code: "review-unavailable",
         reason,
       };
     } finally {
@@ -962,6 +1104,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     try {
       const result = await request.executor({
         ordinal,
+        call: cloneInvocationCall(request.call),
         lease,
         ...(plan === undefined ? {} : { plan }),
       });
@@ -1005,6 +1148,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     request: Invocation<T, ReviewContext>,
     baseline: CapabilityLease,
     outcome: RuntimeOutcome<T>,
+    admissionRequested: readonly CapabilityRequest[],
+    execution?: StructuredExecutionPlan,
   ): Promise<ExecutionOutcome<T>> => {
     if (outcome.kind === "completed") return outcome;
     if (outcome.kind === "failed") return { kind: "failed", error: outcome.error };
@@ -1063,13 +1208,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     );
     if ("code" in decision) return blocked(decision, undefined);
     if (decision.kind === "deny") {
-      const retryHandle = recordDenial(
-        state,
-        request as Invocation<unknown, ReviewContext>,
-        decision.rationale,
-        [normalized],
-        "REVIEW",
-      );
+      const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
+        rationale: decision.rationale,
+        requested: [normalized],
+        admissionRequested,
+        risk: "REVIEW",
+        execution,
+      });
       return blocked(
         { code: "review-denied", reason: decision.rationale, request: normalized },
         retryHandle,
@@ -1086,7 +1231,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         code: "stale-invocation",
         reason: "Exact capability grant no longer matches",
       });
-    const retried = await executeAttempt(state, request, [normalized], 1, spent);
+    const retried = await executeAttempt(
+      state,
+      request,
+      [...admissionRequested, normalized],
+      1,
+      spent,
+    );
     if ("kind" in retried && (retried.kind === "blocked" || retried.kind === "failed"))
       return retried;
     if (retried.kind === "completed") return retried;
@@ -1188,13 +1339,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (hardPreview.kind === "deny")
       return blocked({ code: "policy-denied", reason: hardPreview.reason });
 
-    const armed = armedRetry;
-    const armedRecord =
-      armed !== undefined &&
-      armed.record.fingerprint === retryFingerprint(state, request.call, request.ownership)
-        ? armed
-        : undefined;
-
     if (request.intent) {
       const amendment = normalizeRequests(request.intent.requested, request.call.cwd);
       if (!amendment.ok || amendment.requests.length === 0) {
@@ -1233,6 +1377,19 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       let amendmentReason = request.intent.reason;
       let amendmentSummary: string | undefined;
       let amendmentApprovalOverride: ApprovalOverride | undefined;
+      const armed = armedRetry;
+      const armedRecord =
+        armed !== undefined &&
+        armed.record.fingerprint ===
+          retryFingerprint(
+            state,
+            request.call,
+            request.ownership,
+            armed.record.requested,
+            amendment.requests,
+          )
+          ? armed
+          : undefined;
       if (
         armedRecord !== undefined &&
         sameRequests(amendmentRequests, armedRecord.record.requested)
@@ -1262,14 +1419,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       );
       if ("code" in decision) return blocked(decision);
       if (decision.kind === "deny") {
-        const retryHandle = recordDenial(
-          state,
-          request as Invocation<unknown, ReviewContext>,
-          decision.rationale,
-          amendmentRequests,
-          "REVIEW",
-          amendmentReason,
-        );
+        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
+          rationale: decision.rationale,
+          requested: amendmentRequests,
+          admissionRequested: amendment.requests,
+          risk: "REVIEW",
+          summary: amendmentReason,
+        });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
       }
       const amended = await executeAttempt(state, request, amendmentRequests, 0);
@@ -1330,6 +1486,20 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let reviewSummary = admission.kind === "review" ? admission.summary : undefined;
     let reviewRisk = admission.kind === "review" ? admission.risk : undefined;
     let approvalOverride: ApprovalOverride | undefined;
+    const armed = armedRetry;
+    const armedRecord =
+      armed !== undefined &&
+      armed.record.fingerprint ===
+        retryFingerprint(
+          state,
+          request.call,
+          request.ownership,
+          armed.record.requested,
+          admission.requested,
+          admission.execution,
+        )
+        ? armed
+        : undefined;
     if (armedRecord !== undefined) {
       const record = armedRecord.record;
       consumeArmedRetry(armedRecord);
@@ -1369,14 +1539,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       );
       if ("code" in decision) return blocked(decision);
       if (decision.kind === "deny") {
-        const retryHandle = recordDenial(
-          state,
-          request as Invocation<unknown, ReviewContext>,
-          decision.rationale,
-          reviewRequested,
-          reviewRisk,
-          reviewSummary,
-        );
+        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
+          rationale: decision.rationale,
+          requested: reviewRequested,
+          admissionRequested: admission.requested,
+          risk: reviewRisk,
+          summary: reviewSummary,
+          execution: admission.execution,
+        });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
       }
       const grant: GrantRecord = {
@@ -1405,13 +1575,17 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
       if (result.kind === "completed") return result;
-      // A grant was already spent for this attempt. There is no second
-      // review/replay when enforcement denies it again.
-      return blocked({
-        code: "retry-denied",
-        reason: result.detail ?? "The granted invocation was denied by enforcement",
-        request: normalizeCapabilityRequest(result.request, request.call.cwd),
-      });
+      // The spent static grant is never replayed. A distinct capability that
+      // enforcement itself denied at runtime may still receive one fresh
+      // runtime review through the standard escalation path.
+      return handleRuntimeOutcome(
+        state,
+        request,
+        leaseWithRequests(state, request.ownership, leaseRequested),
+        result,
+        leaseRequested,
+        admission.execution,
+      );
     }
 
     const initial = await executeAttempt(
@@ -1425,24 +1599,37 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if ("kind" in initial && (initial.kind === "blocked" || initial.kind === "failed"))
       return initial;
     if (initial.kind === "completed") return initial;
-    return handleRuntimeOutcome(state, request, baseline, initial);
+    return handleRuntimeOutcome(
+      state,
+      request,
+      baseline,
+      initial,
+      admission.requested,
+      admission.execution,
+    );
   };
 
   const executeInvocation = async <T>(
     state: TurnState,
     request: Invocation<T, ReviewContext>,
   ): Promise<ExecutionOutcome<T>> => {
-    if (inFlightCallIds.has(request.call.id)) {
+    let canonicalRequest: Invocation<T, ReviewContext>;
+    try {
+      canonicalRequest = cloneInvocation(request);
+    } catch (error) {
+      return blocked({ code: "review-unavailable", reason: errorMessage(error) });
+    }
+    if (inFlightCallIds.has(canonicalRequest.call.id)) {
       return blocked({
         code: "concurrent-invocation",
         reason: "Another invocation owns this tool-call ID",
       });
     }
-    inFlightCallIds.add(request.call.id);
+    inFlightCallIds.add(canonicalRequest.call.id);
     try {
-      return await executeInvocationOwned(state, request);
+      return await executeInvocationOwned(state, canonicalRequest);
     } finally {
-      inFlightCallIds.delete(request.call.id);
+      inFlightCallIds.delete(canonicalRequest.call.id);
     }
   };
 
@@ -1457,7 +1644,17 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const record = retryRecords.get(handle.token);
     if (!record) return false;
     if (active && !active.closed) {
-      if (record.fingerprint !== retryFingerprint(active, record.call, record.ownership)) {
+      if (
+        record.fingerprint !==
+        retryFingerprint(
+          active,
+          record.call,
+          record.ownership,
+          record.requested,
+          record.admissionRequested,
+          record.execution,
+        )
+      ) {
         return false;
       }
     }

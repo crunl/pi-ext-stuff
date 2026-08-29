@@ -15,12 +15,12 @@ import {
   type AutoReviewResult,
   buildAutoReviewRequest,
 } from "./auto-review-request.ts";
-import type { AutoReviewer } from "./auto-reviewer.ts";
+import { type AutoReviewer, AutoReviewerFailure } from "./auto-reviewer.ts";
 import { fingerprintValue } from "./config.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
-import { isRecord } from "./unknown-value.ts";
+import { errorMessage, isRecord } from "./unknown-value.ts";
 
 /**
  * Trusted host data needed to turn an Engine review into the production
@@ -29,6 +29,7 @@ import { isRecord } from "./unknown-value.ts";
  */
 export interface PiGuardianReviewContext {
   event: ToolCallEvent;
+  transcript: readonly GuardianTranscriptEntry[];
   autoReviewerContext: AutoReviewerContext;
   sandboxProfile: "workspace-write" | "read-only";
   sandboxEnabled: boolean;
@@ -45,6 +46,15 @@ type PromptRiskDecision = Extract<RiskDecision, { action: "prompt" }>;
 
 const INVALID_GUARDIAN_IDENTITY =
   "pi-permissions: reviewer event identity does not match Engine invocation";
+
+export function toolCallEventMetadata(event: ToolCallEvent): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(event as unknown as Record<string, unknown>)) {
+    if (key === "type" || key === "toolCallId" || key === "toolName" || key === "input") continue;
+    metadata[key] = value;
+  }
+  return Object.keys(metadata).length === 0 ? undefined : metadata;
+}
 
 function requestedCapabilities(decision: Extract<RiskDecision, { action: "prompt" }>): {
   requested: CapabilityRequestInput[];
@@ -108,7 +118,7 @@ function isTranscriptEntry(value: unknown): value is GuardianTranscriptEntry {
 function transcriptFromEngine(
   input: GuardianReviewInput<PiGuardianReviewContext>,
 ): GuardianTranscriptEntry[] {
-  return input.transcript.filter(isTranscriptEntry);
+  return input.context.transcript.filter(isTranscriptEntry).map((entry) => ({ ...entry }));
 }
 
 function approvalOverrideFromEngine(
@@ -131,6 +141,8 @@ function assertEventMatchesCall(input: PiGuardianInput): void {
     event.toolCallId !== input.call.id ||
     event.toolName !== input.call.tool ||
     fingerprintValue(event.input) !== fingerprintValue(input.call.input) ||
+    fingerprintValue({ metadata: toolCallEventMetadata(event) }) !==
+      fingerprintValue({ metadata: input.call.metadata }) ||
     resolve(input.context.autoReviewerContext.guardianSession.cwd) !== resolve(input.call.cwd)
   ) {
     throw new Error(INVALID_GUARDIAN_IDENTITY);
@@ -229,8 +241,22 @@ export function createPiGuardianAdapter(
         transcriptFromEngine(input),
         approvalOverrideFromEngine(input),
       );
-      const result = await autoReviewer.review(request, input.context.autoReviewerContext, signal);
-      input.context.onResult?.(result);
+      let result: AutoReviewResult;
+      try {
+        result = await autoReviewer.review(request, input.context.autoReviewerContext, signal);
+      } catch (error) {
+        if (error instanceof AutoReviewerFailure) {
+          if (error.kind === "timeout") return { kind: "timed-out" };
+          if (error.kind === "cancelled") return { kind: "cancelled" };
+        }
+        return { kind: "failed", reason: errorMessage(error) };
+      }
+      try {
+        input.context.onResult?.(result);
+      } catch {
+        // Reviewer identity/status reporting is observational. A UI or event
+        // consumer must never turn an approval into an authorization failure.
+      }
       return result.decision === "approve"
         ? { kind: "approve", rationale: result.rationale }
         : { kind: "deny", rationale: result.rationale };

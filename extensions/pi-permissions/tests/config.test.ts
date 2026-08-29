@@ -54,14 +54,15 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig(JSON.parse(contents))).not.toThrow();
   });
 
-  it("accepts and ignores removed human-prompt keys for backward compatibility", () => {
-    const merged = validatePermissionsConfig({
-      version: 1,
-      defaultMode: "yolo",
-      approvalMode: "never",
-      granularApproval: { rules: false },
-    });
-    expect(merged).toEqual(DEFAULT_CONFIG);
+  it("rejects removed human-prompt keys instead of silently ignoring them", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        version: 1,
+        defaultMode: "yolo",
+        approvalMode: "never",
+        granularApproval: { rules: false },
+      }),
+    ).toThrow(/defaultMode is not allowed/);
   });
 
   it("produces stable fingerprints", () => {
@@ -124,11 +125,9 @@ describe("permissions config", () => {
   it("loads only plugin-local global configuration", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
       await writeJson(globalConfigPath(agentDir), {
-        defaultMode: "auto",
         sandbox: { network: { allowedDomains: ["github.com"] } },
       });
       await writeJson(join(cwd, ".pi", "permissions.json"), {
-        defaultMode: "default",
         sandbox: { network: { allowedDomains: ["attacker.invalid"] } },
       });
       const loaded = await loadPermissionsConfig(agentDir);
@@ -149,14 +148,11 @@ describe("permissions config", () => {
 
   it("ignores malformed project permission configuration", async () => {
     await withConfigRoots(async ({ agentDir, cwd }) => {
-      await writeJson(globalConfigPath(agentDir), { defaultMode: "default" });
       await mkdir(join(cwd, ".pi"), { recursive: true });
       await writeFile(join(cwd, ".pi", "permissions.json"), "{");
 
-      // The legacy defaultMode key is accepted but ignored (never merged).
       const loaded = await loadPermissionsConfig(agentDir);
       expect(loaded.config).toEqual(DEFAULT_CONFIG);
-      expect(loaded.config).not.toHaveProperty("defaultMode");
     });
   });
 

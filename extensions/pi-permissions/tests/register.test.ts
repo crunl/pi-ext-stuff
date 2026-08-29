@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AutoReviewRequest, AutoReviewResult } from "../src/auto-review-request.ts";
-import type { AutoReviewer } from "../src/auto-reviewer.ts";
+import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
 import { registerExtension } from "../src/register.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
 import type {
@@ -41,8 +41,10 @@ type BashFactoryOptions = { operations?: SandboxOperations };
 interface HarnessOptions {
   config?: Record<string, unknown>;
   hasUI?: boolean;
+  mode?: "tui" | "rpc" | "json" | "print";
   risk?: RiskOverride;
   review?: ReviewOverride;
+  eventBusError?: boolean;
   sandboxInitializeError?: Error;
   sandboxExecuteError?: Error;
   sandboxResetErrorAfter?: number;
@@ -84,6 +86,7 @@ interface Harness {
   sandboxBashExecute: ReturnType<typeof vi.fn>;
   setStatus: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
+  markToolCall: ReturnType<typeof vi.fn>;
   select: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   appendEntry: ReturnType<typeof vi.fn>;
@@ -91,6 +94,8 @@ interface Harness {
 }
 
 const tempDirectories: string[] = [];
+const REVIEW_STATUS_KEY = "pi-permissions-review";
+const REVIEW_ICON = "\u{F105E}";
 
 afterEach(async () => {
   const directories = tempDirectories.splice(0);
@@ -256,11 +261,16 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
 
   const setStatus = vi.fn();
   const notify = vi.fn();
+  const markToolCall = vi.fn();
   const select = vi.fn(async (_title: string, choices: string[]) => choices[0]);
   const abort = vi.fn();
   const appendEntry = vi.fn();
   const sendMessage = vi.fn();
-  const emit = vi.fn();
+  const emit = vi.fn((eventName: unknown) => {
+    if (options.eventBusError && eventName === "pi-permissions:review") {
+      throw new Error("review event observer unavailable");
+    }
+  });
 
   const pi = {
     on: (event: string, handler: (...args: unknown[]) => unknown) => handlers.set(event, handler),
@@ -282,6 +292,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const ui = {
     setStatus,
     notify,
+    markToolCall,
     select,
     confirm: vi.fn(async () => true),
     input: vi.fn(async () => undefined),
@@ -289,7 +300,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const context = {
     cwd,
     hasUI: options.hasUI ?? true,
-    mode: (options.hasUI ?? true) ? "tui" : "print",
+    mode: options.mode ?? ((options.hasUI ?? true) ? "tui" : "print"),
     isProjectTrusted: () => false,
     isIdle: () => true,
     sessionManager,
@@ -329,6 +340,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sandboxBashExecute,
     setStatus,
     notify,
+    markToolCall,
     select,
     abort,
     appendEntry,
@@ -493,6 +505,8 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
 
     await executeBash(app, "prompt-bash", "printf approved");
 
@@ -503,11 +517,50 @@ describe("Permission mode registration", () => {
       network: { allowedDomains: string[] };
     };
     expect(policy.network.allowedDomains).toContain(host);
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", "Reviewing");
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", undefined);
-    expect(app.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Automatic approval review approved"),
-      "info",
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).not.toHaveBeenCalled();
+    expect(app.markToolCall).toHaveBeenCalledOnce();
+    expect(app.markToolCall).toHaveBeenCalledWith("prompt-bash", {
+      icon: REVIEW_ICON,
+      color: "warning",
+    });
+  });
+
+  it("captures bash input before async risk review and executes only the canonical value", async () => {
+    const host = "api.example.com";
+    let releaseReview: (result: AutoReviewResult) => void = () => undefined;
+    const reviewGate = new Promise<AutoReviewResult>((resolve) => {
+      releaseReview = resolve;
+    });
+    const app = await makeHarness({
+      risk: (tool, input) => {
+        if (tool !== "bash") return undefined;
+        input.command = "mutated by risk evaluator";
+        return promptRisk({ networkHosts: [host] });
+      },
+      review: async () => reviewGate,
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const bash = app.tools.get("bash");
+    if (!bash) throw new Error("missing bash tool");
+    const params = { command: "printf safe" };
+    const execution = bash.execute("canonical-bash", params, undefined, undefined, app.context);
+    await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
+    params.command = "rm -rf /";
+    releaseReview(approved("The captured command is safe."));
+
+    await expect(execution).resolves.toMatchObject({ content: [] });
+    expect(app.reviewInputs[0]?.untrustedAction).toMatchObject({
+      kind: "shell",
+      command: "printf safe",
+    });
+    expect(app.sandboxBashExecute).toHaveBeenCalledWith(
+      "canonical-bash",
+      { command: "printf safe" },
+      undefined,
+      undefined,
     );
   });
 
@@ -518,6 +571,8 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
 
     await expect(executeBash(app, "denied-bash", "printf denied")).rejects.toMatchObject({
       code: "review-denied",
@@ -529,10 +584,109 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
-    expect(app.notify).toHaveBeenCalledWith(
-      "Automatic approval review denied: No shell access.",
-      "warning",
-    );
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).toHaveBeenCalledWith(`${REVIEW_ICON} Permission denied`, "warning");
+  });
+
+  it.each([
+    {
+      kind: "timeout",
+      failure: "review timed out",
+      code: "review-timeout",
+      label: "Review timed out",
+    },
+    {
+      kind: "provider",
+      failure: "review provider unavailable",
+      code: "review-unavailable",
+      label: "Review failed",
+    },
+  ] as const)("notifies on a $code review outcome", async ({ kind, failure, code, label }) => {
+    const app = await makeHarness({
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+      review: () => {
+        throw new AutoReviewerFailure(kind, failure);
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
+
+    await expect(executeBash(app, `${code}-bash`, "printf failed")).rejects.toMatchObject({ code });
+
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).toHaveBeenCalledTimes(1);
+    expect(app.notify).toHaveBeenCalledWith(`${REVIEW_ICON} ${label}`, "warning");
+  });
+
+  it("keeps an aborted review silent", async () => {
+    let releaseReview: (result: AutoReviewResult) => void = () => undefined;
+    const reviewGate = new Promise<AutoReviewResult>((resolveReview) => {
+      releaseReview = resolveReview;
+    });
+    const app = await makeHarness({
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+      review: async () => reviewGate,
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
+
+    const controller = new AbortController();
+    const pending = executeBash(app, "aborted-review", "printf aborted", controller.signal);
+    await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+
+    controller.abort();
+    releaseReview(approved());
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).not.toHaveBeenCalled();
+    expect(app.markToolCall).toHaveBeenCalledWith("aborted-review", {
+      icon: REVIEW_ICON,
+      color: "warning",
+    });
+  });
+
+  it("does not apply review UI presentation outside TUI mode", async () => {
+    const app = await makeHarness({
+      hasUI: true,
+      mode: "rpc",
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
+
+    await executeBash(app, "rpc-approval", "printf approved");
+
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).not.toHaveBeenCalled();
+    expect(app.markToolCall).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local review presenter independent from event-bus observers", async () => {
+    const app = await makeHarness({
+      eventBusError: true,
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+    app.notify.mockClear();
+
+    await executeBash(app, "event-bus-error", "printf approved");
+
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(app.notify).not.toHaveBeenCalled();
+    expect(app.markToolCall).toHaveBeenCalledWith("event-bus-error", {
+      icon: REVIEW_ICON,
+      color: "warning",
+    });
   });
 
   it("presents managed-tool policy evaluation failures without internal error codes", async () => {
@@ -762,6 +916,11 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
+    app.notify.mockImplementation((message: unknown) => {
+      if (String(message).includes("interrupting the turn")) {
+        throw new Error("notification UI unavailable");
+      }
+    });
 
     for (let index = 1; index <= 3; index += 1) {
       await expect(executeBash(app, `denial-${index}`, "printf denied")).rejects.toMatchObject({
@@ -806,7 +965,7 @@ describe("Permission mode registration", () => {
     await startAgent(app);
     const pending = executeBash(app, "stale-call", "printf stale");
     await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
-    expect(app.setStatus).toHaveBeenCalledWith("pi-permissions-review", "Reviewing");
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
 
     await invoke(app, "session_before_tree", { type: "session_before_tree" });
     releaseReview(approved());
@@ -815,7 +974,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-permissions-review", undefined);
+    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
   });
 
   it("rejects a pre-aborted managed bash execute before backend execution", async () => {

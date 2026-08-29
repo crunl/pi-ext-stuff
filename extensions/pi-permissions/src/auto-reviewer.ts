@@ -2,6 +2,7 @@ import type {
   Api,
   AssistantMessage,
   Context,
+  Message,
   Model,
   ProviderStreamOptions,
   TextContent,
@@ -18,10 +19,12 @@ import {
   renderAutoReviewPrompt,
   renderAutoReviewTrustedContext,
 } from "./auto-review-request.ts";
+import { fingerprintValue } from "./config.ts";
 import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
 import { resolveGuardianModel } from "./guardian-model.ts";
 import {
   GUARDIAN_REVIEW_MAX_ATTEMPTS,
+  GUARDIAN_REVIEW_MAX_TOOL_ROUNDS,
   GUARDIAN_REVIEW_TIMEOUT_MS,
   guardianRetryDelayMs,
   renderGuardianSystemPrompt,
@@ -310,16 +313,27 @@ export class PiAutoReviewer implements AutoReviewer {
     }
 
     const toolRuntime = this.createTools(context.guardianSession.cwd);
+    const reasoningEffort = context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING;
+    const toolFingerprint = fingerprintValue(
+      toolRuntime.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
+    );
     const systemPrompt = renderGuardianSystemPrompt(
       context.guardianPolicy,
       renderAutoReviewTrustedContext(request),
     );
     const lease = this.sessions.open(
       {
+        sessionId: context.guardianSession.sessionId,
         cwd: context.guardianSession.cwd,
         configFingerprint: context.guardianSession.configFingerprint,
         provider: model.provider,
         model: model.id,
+        reasoningEffort,
+        toolFingerprint,
       },
       renderAutoReviewPrompt(request),
       toolRuntime.tools,
@@ -327,128 +341,95 @@ export class PiAutoReviewer implements AutoReviewer {
     );
     const deadline = Date.now() + GUARDIAN_REVIEW_TIMEOUT_MS;
     try {
-      for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
-        if (callerSignal?.aborted) throw cancelledFailure();
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) throw timeoutFailure(guardianIdentity);
-        const deadlineSignal = AbortSignal.timeout(remainingMs);
-        const signal = callerSignal
-          ? AbortSignal.any([callerSignal, deadlineSignal])
-          : deadlineSignal;
+      reviewAttempts: for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
+        let attemptContext = lease.context;
+        const attemptMessages: Message[] = [];
+        let toolRounds = 0;
 
-        let response: AssistantMessage;
-        try {
-          response = await completeWithAbort(
-            this.invoke(model, lease.context, {
-              apiKey: auth.apiKey,
-              headers: auth.headers,
-              env: auth.env,
-              reasoningEffort: context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
-              timeoutMs: remainingMs,
-              maxRetries: 0,
-              cacheRetention: "none",
-              signal,
-              sessionId: lease.sessionId,
-            }),
-            signal,
-          );
-        } catch (error) {
+        for (;;) {
           if (callerSignal?.aborted) throw cancelledFailure();
-          assertRetryableRequestFailure(error, {
-            attempt,
-            timedOut: deadlineSignal.aborted || Date.now() >= deadline,
-            identity: guardianIdentity,
-          });
-          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
-          continue;
-        }
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) throw timeoutFailure(guardianIdentity);
+          const deadlineSignal = AbortSignal.timeout(remainingMs);
+          const signal = callerSignal
+            ? AbortSignal.any([callerSignal, deadlineSignal])
+            : deadlineSignal;
 
-        if (callerSignal?.aborted) throw cancelledFailure();
-        if (deadlineSignal.aborted || Date.now() >= deadline) {
-          throw timeoutFailure(guardianIdentity);
-        }
-        const toolCalls = assistantToolCalls(response);
-        if (toolCalls.length > 0 || response.stopReason === "toolUse") {
-          const toolUseResponse = response;
-          if (response.stopReason !== "toolUse" || toolCalls.length === 0) {
-            throw new AutoReviewerFailure(
-              "provider",
-              `Auto reviewer stopped with ${response.stopReason}`,
-              undefined,
-              guardianIdentity,
-            );
-          }
-
-          let toolResults: ToolResultMessage[];
-          try {
-            toolResults = await this.executeToolCalls(
-              toolRuntime,
-              toolCalls,
-              deadline,
-              guardianIdentity,
-              callerSignal,
-            );
-          } catch (error) {
-            if (error instanceof AutoReviewerFailure) throw error;
-            if (callerSignal?.aborted) throw cancelledFailure();
-            if (Date.now() >= deadline) throw timeoutFailure(guardianIdentity);
-            throw new AutoReviewerFailure(
-              "provider",
-              "Auto reviewer read-only tool execution failed",
-              { cause: error },
-              guardianIdentity,
-            );
-          }
-
-          const extendedContext = lease.extend([response, ...toolResults]);
-          if (callerSignal?.aborted) throw cancelledFailure();
-          const secondRemainingMs = deadline - Date.now();
-          if (secondRemainingMs <= 0) throw timeoutFailure(guardianIdentity);
-          const secondDeadlineSignal = AbortSignal.timeout(secondRemainingMs);
-          const secondSignal = callerSignal
-            ? AbortSignal.any([callerSignal, secondDeadlineSignal])
-            : secondDeadlineSignal;
-
+          let response: AssistantMessage;
           try {
             response = await completeWithAbort(
-              this.invoke(model, extendedContext, {
+              this.invoke(model, attemptContext, {
                 apiKey: auth.apiKey,
                 headers: auth.headers,
                 env: auth.env,
-                reasoningEffort: context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING,
-                timeoutMs: secondRemainingMs,
+                reasoningEffort,
+                timeoutMs: remainingMs,
                 maxRetries: 0,
                 cacheRetention: "none",
-                signal: secondSignal,
+                signal,
                 sessionId: lease.sessionId,
               }),
-              secondSignal,
+              signal,
             );
           } catch (error) {
             if (callerSignal?.aborted) throw cancelledFailure();
             assertRetryableRequestFailure(error, {
               attempt,
-              timedOut: secondDeadlineSignal.aborted || Date.now() >= deadline,
+              timedOut: deadlineSignal.aborted || Date.now() >= deadline,
               identity: guardianIdentity,
             });
             await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
-            continue;
+            continue reviewAttempts;
           }
 
           if (callerSignal?.aborted) throw cancelledFailure();
-          if (secondDeadlineSignal.aborted || Date.now() >= deadline) {
+          if (deadlineSignal.aborted || Date.now() >= deadline) {
             throw timeoutFailure(guardianIdentity);
           }
-          const finalToolCalls = assistantToolCalls(response);
-          if (finalToolCalls.length > 0 || response.stopReason === "toolUse") {
-            throw new AutoReviewerFailure(
-              "provider",
-              "Auto reviewer returned another tool-use response instead of a final assessment",
-              undefined,
-              guardianIdentity,
-            );
-          }
+          const toolCalls = assistantToolCalls(response);
+          if (toolCalls.length > 0 || response.stopReason === "toolUse") {
+            if (response.stopReason !== "toolUse" || toolCalls.length === 0) {
+              throw new AutoReviewerFailure(
+                "provider",
+                `Auto reviewer stopped with ${response.stopReason}`,
+                undefined,
+                guardianIdentity,
+              );
+            }
+            if (toolRounds >= GUARDIAN_REVIEW_MAX_TOOL_ROUNDS) {
+              throw new AutoReviewerFailure(
+                "provider",
+                `Auto reviewer exceeded ${GUARDIAN_REVIEW_MAX_TOOL_ROUNDS} read-only tool rounds without a final assessment`,
+                undefined,
+                guardianIdentity,
+              );
+            }
 
+            let toolResults: ToolResultMessage[];
+            try {
+              toolResults = await this.executeToolCalls(
+                toolRuntime,
+                toolCalls,
+                deadline,
+                guardianIdentity,
+                callerSignal,
+              );
+            } catch (error) {
+              if (error instanceof AutoReviewerFailure) throw error;
+              if (callerSignal?.aborted) throw cancelledFailure();
+              if (Date.now() >= deadline) throw timeoutFailure(guardianIdentity);
+              throw new AutoReviewerFailure(
+                "provider",
+                "Auto reviewer read-only tool execution failed",
+                { cause: error },
+                guardianIdentity,
+              );
+            }
+            attemptMessages.push(response, ...toolResults);
+            attemptContext = lease.extend(attemptMessages);
+            toolRounds += 1;
+            continue;
+          }
           if (response.stopReason !== "stop") {
             assertRetryableStop(
               new AutoReviewerFailure(
@@ -465,30 +446,18 @@ export class PiAutoReviewer implements AutoReviewer {
               },
             );
             await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
-            continue;
+            continue reviewAttempts;
           }
 
           const text = assistantText(response);
           try {
             const result = parseAutoReviewResult(text);
-            if (
-              result.decision === "approve" &&
-              toolResults.some((toolResult) => toolResult.isError)
-            ) {
-              throw new AutoReviewerFailure(
-                "provider",
-                "Auto reviewer cannot approve after a read-only reviewer tool error",
-                undefined,
-                guardianIdentity,
-              );
-            }
-            lease.commit([toolUseResponse, ...toolResults, response]);
+            lease.commit([...attemptMessages, response]);
             return {
               ...result,
               guardian: guardianIdentity,
             };
           } catch (error) {
-            if (error instanceof AutoReviewerFailure) throw error;
             const failure = new AutoReviewerFailure(
               "parse",
               `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
@@ -497,45 +466,8 @@ export class PiAutoReviewer implements AutoReviewer {
             );
             if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS) throw failure;
             await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
+            continue reviewAttempts;
           }
-          continue;
-        }
-        if (response.stopReason !== "stop") {
-          assertRetryableStop(
-            new AutoReviewerFailure(
-              "provider",
-              `Auto reviewer stopped with ${response.stopReason}`,
-              undefined,
-              guardianIdentity,
-            ),
-            {
-              attempt,
-              stopReason: response.stopReason,
-              errorMessage: response.errorMessage,
-              identity: guardianIdentity,
-            },
-          );
-          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
-          continue;
-        }
-
-        const text = assistantText(response);
-        try {
-          const result = parseAutoReviewResult(text);
-          lease.commit([response]);
-          return {
-            ...result,
-            guardian: guardianIdentity,
-          };
-        } catch (error) {
-          const failure = new AutoReviewerFailure(
-            "parse",
-            `Failed to parse Auto reviewer output: ${errorMessage(error)}`,
-            { cause: error },
-            guardianIdentity,
-          );
-          if (attempt >= GUARDIAN_REVIEW_MAX_ATTEMPTS) throw failure;
-          await waitBeforeRetry(this.sleep, attempt, deadline, guardianIdentity, callerSignal);
         }
       }
       throw new AutoReviewerFailure(

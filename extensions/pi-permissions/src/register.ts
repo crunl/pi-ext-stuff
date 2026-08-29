@@ -20,14 +20,6 @@ import {
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
-import {
-  type AdmissionPlan,
-  createApproveForMeEngine,
-  type Invocation,
-  type RuntimeOutcome,
-  type TurnHandle,
-  type TurnSnapshot,
-} from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   ConfigError,
@@ -53,21 +45,28 @@ import {
   renderPermissionErrorForAgent,
   renderPermissionNotice,
   renderPermissionSummary,
-  renderReviewEvent,
 } from "./permission-copy.ts";
 import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
 import { type PermissionExecutionSnapshot, PermissionSession } from "./permission-session.ts";
 import {
-  admissionPlanFromRiskDecision,
   createPiGuardianAdapter,
   type PiGuardianReviewContext,
+  toolCallEventMetadata,
 } from "./pi-approve-for-me-adapters.ts";
+import {
+  type PiAction,
+  type PiActionOutcome,
+  type PiExecutionOutcome,
+  PiPermissionsRuntime,
+  type PiTurnSnapshot,
+} from "./pi-permissions.ts";
 import { evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
   createSandboxRuntimeConfig,
+  looksLikeSandboxDenial,
   type SandboxManagerLike,
   type SandboxPolicy,
 } from "./sandbox.ts";
@@ -75,7 +74,7 @@ import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
-import { isRecord } from "./unknown-value.ts";
+import { errorMessage, isRecord } from "./unknown-value.ts";
 
 export type GuardianPolicySource = (context: {
   cwd: string;
@@ -203,48 +202,32 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let shortcutWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
-  let currentEngineContext: ExtensionContext | undefined;
-  let enginePauseNotified = false;
-  const engine = createApproveForMeEngine<PiGuardianReviewContext>({
+  const permissions = new PiPermissionsRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
-    onReviewEvent: (event) => {
+    reviewEventSink: (event) => {
       pi.events.emit("pi-permissions:review", event);
-      const ctx = currentEngineContext;
-      if (!ctx?.hasUI) return;
-      if (event.status === "reviewing") {
-        ctx.ui.setStatus("pi-permissions-review", renderReviewEvent(event));
-        return;
-      }
-      ctx.ui.setStatus("pi-permissions-review", undefined);
-      const severity =
-        event.status === "approved" || event.status === "aborted"
-          ? "info"
-          : event.status === "denied" || event.status === "timed-out"
-            ? "warning"
-            : "error";
-      ctx.ui.notify(renderReviewEvent(event), severity);
     },
-    onAutoStateChange: (state) => {
+    onAutoStateChange: (state, ctx, newlyPaused) => {
       modeRuntime?.applyAutoState(state);
-      if (!state.paused || enginePauseNotified) return;
-      const ctx = currentEngineContext;
-      if (!ctx) return;
-      enginePauseNotified = true;
+      if (!newlyPaused || !ctx) return;
       if (ctx.hasUI) {
-        ctx.ui.notify(
-          renderPermissionNotice({
-            kind: "review-circuit-interrupted",
-            consecutiveDenials: state.consecutiveDenials,
-            recentDenials: state.recentDenials,
-            windowSize: GUARDIAN_DENIAL_WINDOW_SIZE,
-          }),
-          "warning",
-        );
+        try {
+          ctx.ui.notify(
+            renderPermissionNotice({
+              kind: "review-circuit-interrupted",
+              consecutiveDenials: state.consecutiveDenials,
+              recentDenials: state.recentDenials,
+              windowSize: GUARDIAN_DENIAL_WINDOW_SIZE,
+            }),
+            "warning",
+          );
+        } catch {
+          // The circuit is an authorization control; UI reporting is best effort.
+        }
       }
       ctx.abort();
     },
   });
-  let engineTurn: TurnHandle<PiGuardianReviewContext> | undefined;
   let lastGuardianSelection:
     | {
         guardian: GuardianReviewIdentity;
@@ -272,22 +255,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
   };
 
-  const invalidateEngineContext = (reason: string): void => {
-    if (currentEngineContext?.hasUI) {
-      currentEngineContext.ui.setStatus("pi-permissions-review", undefined);
-    }
-    engine.invalidate(reason);
-    engineTurn = undefined;
-    currentEngineContext = undefined;
-    enginePauseNotified = false;
-  };
-
   const invalidatePermissionContext = (_reason: string): void => {
     autoReviewer.invalidateSession();
   };
 
   const resetBranchPermissionContext = (reason: string): void => {
-    invalidateEngineContext(reason);
+    permissions.invalidate(reason);
     session.bumpGeneration();
     cancelInFlightModeTransition();
     guardianTranscript = [];
@@ -385,7 +358,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const finishPermissionTurn = (reason: string): void => {
     const closingTurnId = session.finishTurn();
-    closeEngineTurn(reason);
+    permissions.closeTurn(reason);
     if (closingTurnId === undefined) return;
     if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
     invalidatePermissionContext(reason);
@@ -414,11 +387,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return `pi-permissions-session-${generation}`;
   };
 
-  const beginEngineTurn = (
+  const beginPermissionTurn = (
     ctx: ExtensionContext,
     executionSnapshot: PermissionExecutionSnapshot,
   ): void => {
-    const snapshot: TurnSnapshot = {
+    const snapshot: PiTurnSnapshot = {
       sessionId: stableSessionId(ctx, session.getGeneration()),
       turnId: executionSnapshot.turnId,
       mode: executionSnapshot.mode,
@@ -428,20 +401,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       sandboxReady: executionSnapshot.sandboxReady,
       transcript: currentGuardianTranscriptSnapshot(),
     };
-    currentEngineContext = ctx;
-    enginePauseNotified = false;
-    engineTurn = engine.beginTurn(snapshot);
-  };
-
-  const closeEngineTurn = (reason: string): void => {
-    const turn = engineTurn;
-    if (currentEngineContext?.hasUI) {
-      currentEngineContext.ui.setStatus("pi-permissions-review", undefined);
-    }
-    engineTurn = undefined;
-    currentEngineContext = undefined;
-    enginePauseNotified = false;
-    turn?.close(reason);
+    permissions.beginTurn(snapshot, ctx);
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
@@ -486,7 +446,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     activationFailure = undefined;
     configFailure = undefined;
     if (force) {
-      invalidateEngineContext("permission context changed");
+      permissions.invalidate("permission context changed");
       invalidatePermissionContext("permission context changed");
     }
     loaded = candidate;
@@ -700,15 +660,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
   type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
 
-  interface PreparedEngineExecution {
+  interface PreparedPermissionExecution {
     executionSnapshot: PermissionExecutionSnapshot;
     executionContext: EffectiveExecutionContext;
-    turn: TurnHandle<PiGuardianReviewContext>;
   }
 
-  const prepareEngineExecution = async (
+  const preparePermissionExecution = async (
     ctx: ExtensionContext,
-  ): Promise<PreparedEngineExecution> => {
+  ): Promise<PreparedPermissionExecution> => {
     const activationGeneration = session.getGeneration();
     await activateConfig(ctx, false, undefined, undefined, activationGeneration);
     assertActivationCurrent(activationGeneration);
@@ -720,19 +679,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (!executionContext) {
       throw new Error(ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE);
     }
-    if (!engineTurn) beginEngineTurn(ctx, executionSnapshot);
-    const turn = engineTurn;
-    if (!turn) throw new Error(ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE);
-    return { executionSnapshot, executionContext, turn };
+    if (!permissions.hasActiveTurn()) beginPermissionTurn(ctx, executionSnapshot);
+    if (!permissions.hasActiveTurn()) throw new Error(ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE);
+    return { executionSnapshot, executionContext };
   };
 
   const createPiGuardianReviewContext = (
     event: ToolCallEvent,
     executionContext: EffectiveExecutionContext,
     ctx: ExtensionContext,
+    transcript = currentGuardianTranscriptSnapshot(),
+    canonicalCwd = resolve(ctx.cwd),
   ): PiGuardianReviewContext => {
     const configFingerprint = fingerprintConfig(executionContext.config);
-    const guardianCwd = resolve(ctx.cwd);
+    const guardianCwd = canonicalCwd;
     const suppliedGuardianPolicy = options.guardianPolicySource?.({
       cwd: guardianCwd,
       configFingerprint,
@@ -743,12 +703,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         : validateGuardianPolicy(suppliedGuardianPolicy);
     return {
       event,
+      transcript,
       autoReviewerContext: {
         modelRegistry: ctx.modelRegistry,
         activeModel: ctx.model,
         reviewer: executionContext.config.reviewer,
         guardianPolicy,
         guardianSession: {
+          sessionId: stableSessionId(ctx, session.getGeneration()),
           cwd: guardianCwd,
           configFingerprint,
         },
@@ -780,27 +742,30 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           });
           if (!guardianFallbackNoticeKeys.has(noticeKey)) {
             guardianFallbackNoticeKeys.add(noticeKey);
-            ctx.ui.notify(
-              renderPermissionNotice({
-                kind: "reviewer-fallback",
-                preferredProvider: preferred?.provider ?? "configured",
-                preferredModel: preferred?.model ?? "reviewer",
-                activeProvider: guardian.provider,
-                activeModel: guardian.model,
-              }),
-              "warning",
-            );
+            try {
+              ctx.ui.notify(
+                renderPermissionNotice({
+                  kind: "reviewer-fallback",
+                  preferredProvider: preferred?.provider ?? "configured",
+                  preferredModel: preferred?.model ?? "reviewer",
+                  activeProvider: guardian.provider,
+                  activeModel: guardian.model,
+                }),
+                "warning",
+              );
+            } catch {
+              // Reviewer fallback reporting is observational.
+            }
           }
         }
       },
     };
   };
 
-  const executeEngineInvocation = async <T>(
-    turn: TurnHandle<PiGuardianReviewContext>,
-    invocation: Invocation<T, PiGuardianReviewContext>,
+  const executePermissionAction = async <T, Input = unknown>(
+    action: PiAction<T, PiGuardianReviewContext, Input>,
   ): Promise<T> => {
-    const outcome = await turn.execute(invocation);
+    const outcome: PiExecutionOutcome<T> = await permissions.submit(action);
     if (outcome.kind === "completed") return outcome.value;
     if (outcome.kind === "failed") {
       const reason = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
@@ -813,7 +778,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     throw error;
   };
 
-  const executeHostToolWithEngine = async (
+  const authorizeHostTool = async (
     event: ToolCallEvent,
     ctx: ExtensionContext,
   ): Promise<ToolCallEventResult | undefined> => {
@@ -824,9 +789,34 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       };
     }
 
-    let prepared: PreparedEngineExecution;
+    // Capture the host action before any asynchronous preparation or risk
+    // evaluation. Every later observer receives this immutable-at-ingress
+    // value instead of a mutable object owned by the host.
+    const actionSignal = ctx.signal;
+    const captured = permissions.captureAction({
+      id: event.toolCallId,
+      tool: event.toolName,
+      input: event.input,
+      cwd: resolve(ctx.cwd),
+      metadata: toolCallEventMetadata(event),
+    });
+    const { call } = captured;
+    const actionId = call.id;
+    const actionTool = call.tool;
+    const canonicalCwd = call.cwd;
+    const canonicalInput = call.input;
+    const canonicalEvent: ToolCallEvent = {
+      ...(isRecord(call.metadata) ? call.metadata : {}),
+      type: "tool_call",
+      toolCallId: actionId,
+      toolName: actionTool,
+      input: canonicalInput,
+    } as ToolCallEvent;
+    const capturedTranscript = currentGuardianTranscriptSnapshot();
+
+    let prepared: PreparedPermissionExecution;
     try {
-      prepared = await prepareEngineExecution(ctx);
+      prepared = await preparePermissionExecution(ctx);
     } catch (error: unknown) {
       if (isActivationSupersededError(error)) {
         return {
@@ -844,22 +834,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return reportPermissionSetupError(ctx, error);
     }
 
-    const { executionSnapshot, executionContext, turn } = prepared;
-    const requested = [
-      { kind: "external-tool" as const, provider: "pi-host", name: event.toolName },
-    ];
-    let admission: AdmissionPlan;
-    if (executionSnapshot.mode === "yolo") {
-      admission = { kind: "allow", requested };
-    } else {
-      let decision: RiskDecision;
+    const { executionSnapshot, executionContext } = prepared;
+    let risk: RiskDecision | undefined;
+    if (executionSnapshot.mode !== "yolo") {
       try {
-        decision = await riskEvaluator(
-          event.toolName,
-          event.input as Record<string, unknown>,
-          ctx.cwd,
+        risk = await riskEvaluator(
+          actionTool,
+          structuredClone(canonicalInput) as Record<string, unknown>,
+          canonicalCwd,
           executionContext.config,
-          defaultProtectedWritePaths(ctx.cwd, agentDir),
+          defaultProtectedWritePaths(canonicalCwd, agentDir),
         );
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -868,40 +852,26 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: renderPermissionErrorForAgent({ code: "policy-error", reason: message }),
         };
       }
-      const riskAdmission = admissionPlanFromRiskDecision(decision);
-      if (riskAdmission.kind === "deny") {
-        admission = riskAdmission;
-      } else if (riskAdmission.kind === "allow") {
-        admission = { kind: "allow", requested };
-      } else {
-        admission = {
-          kind: "review",
-          requested,
-          review: "action",
-          risk: riskAdmission.risk,
-          reason: riskAdmission.reason,
-          ...(riskAdmission.summary === undefined ? {} : { summary: riskAdmission.summary }),
-        };
-      }
     }
 
-    const invocation: Invocation<undefined, PiGuardianReviewContext> = {
-      ownership: "host-admission",
-      call: {
-        id: event.toolCallId,
-        tool: event.toolName,
-        input: event.input,
-        cwd: resolve(ctx.cwd),
-      },
-      admission,
-      reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
-      signal: ctx.signal,
-      executor: async (): Promise<RuntimeOutcome<undefined>> => ({
+    const action: PiAction<undefined, PiGuardianReviewContext> = {
+      captured,
+      kind: "host",
+      risk,
+      reviewContext: createPiGuardianReviewContext(
+        canonicalEvent,
+        executionContext,
+        ctx,
+        capturedTranscript,
+        canonicalCwd,
+      ),
+      signal: actionSignal,
+      execute: async (): Promise<PiActionOutcome<undefined>> => ({
         kind: "completed",
         value: undefined,
       }),
     };
-    const outcome = await turn.execute(invocation);
+    const outcome = await permissions.submit(action);
     if (outcome.kind === "completed") return;
     if (outcome.kind === "failed") {
       const message =
@@ -919,14 +889,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     input: Record<string, unknown>,
     ctx: ExtensionContext,
     executionContext: EffectiveExecutionContext,
+    cwd = ctx.cwd,
   ): Promise<RiskDecision> => {
     try {
+      const riskInput = structuredClone(input);
       return await riskEvaluator(
         tool,
-        input,
-        ctx.cwd,
+        riskInput,
+        cwd,
         executionContext.config,
-        defaultProtectedWritePaths(ctx.cwd, agentDir),
+        defaultProtectedWritePaths(cwd, agentDir),
       );
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -936,113 +908,148 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  const executeBashWithEngine = async (
+  type RuntimeDenialOutcome = Extract<PiActionOutcome<never>, { kind: "capability-denied" }>;
+
+  const runtimeDenialOutcome = async (
+    commandId: string,
+    evidence: string,
+  ): Promise<RuntimeDenialOutcome | undefined> => {
+    if (!looksLikeSandboxDenial(evidence)) return undefined;
+    const capability = await sandboxManager.classifyDenial?.(commandId);
+    if (!capability) return undefined;
+    const detail =
+      capability.kind === "network"
+        ? `Sandbox enforcement denied network access to ${capability.host} during execution`
+        : `Sandbox enforcement denied writing ${capability.path} during execution`;
+    return { kind: "capability-denied", request: capability, retryability: "safe", detail };
+  };
+
+  const executePermissionedBash = async (
     id: string,
     params: BashParams,
     signal: AbortSignal | undefined,
     onUpdate: BashOnUpdate,
     ctx: ExtensionContext,
   ): Promise<BashResult> => {
-    const { executionSnapshot, executionContext, turn } = await prepareEngineExecution(ctx);
+    const captured = permissions.captureAction({
+      id,
+      tool: "bash",
+      input: params,
+      cwd: resolve(ctx.cwd),
+    });
+    const { call } = captured;
+    const actionId = call.id;
+    const canonicalCwd = call.cwd;
+    const canonicalParams = call.input;
+    const capturedTranscript = currentGuardianTranscriptSnapshot();
+    const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
 
-    const admission =
+    const risk =
       executionSnapshot.mode === "yolo"
-        ? { kind: "allow" as const }
-        : admissionPlanFromRiskDecision(
-            await evaluateManagedRisk(
-              "bash",
-              params as Record<string, unknown>,
-              ctx,
-              executionContext,
-            ),
+        ? undefined
+        : await evaluateManagedRisk(
+            "bash",
+            canonicalParams as Record<string, unknown>,
+            ctx,
+            executionContext,
+            canonicalCwd,
           );
     const event: ToolCallEvent = {
       type: "tool_call",
-      toolCallId: id,
+      toolCallId: actionId,
       toolName: "bash",
-      input: params,
+      input: canonicalParams,
     };
-    const reviewContext = createPiGuardianReviewContext(event, executionContext, ctx);
-    const invocation: Invocation<BashResult, PiGuardianReviewContext> = {
-      ownership: "sandbox-owned",
-      call: {
-        id,
-        tool: "bash",
-        input: params,
-        cwd: resolve(ctx.cwd),
-      },
-      admission,
+    const reviewContext = createPiGuardianReviewContext(
+      event,
+      executionContext,
+      ctx,
+      capturedTranscript,
+      canonicalCwd,
+    );
+    const action: PiAction<BashResult, PiGuardianReviewContext, BashParams> = {
+      captured,
+      kind: "sandbox",
+      risk,
       reviewContext,
       signal,
-      executor: async ({ lease, plan }): Promise<RuntimeOutcome<BashResult>> => {
+      execute: async ({
+        mode,
+        policy,
+        plan,
+        call,
+        ordinal,
+      }): Promise<PiActionOutcome<BashResult>> => {
         try {
-          if (lease.mode === "unrestricted") {
+          if (mode === "unrestricted") {
             return {
               kind: "completed",
-              value: await bashToolFactory(ctx.cwd).execute(id, params, signal, onUpdate),
+              value: await bashToolFactory(canonicalCwd).execute(
+                call.id,
+                call.input,
+                signal,
+                onUpdate,
+              ),
             };
           }
-          if (lease.mode !== "sandboxed" || !lease.policy) {
+          if (mode !== "sandboxed" || !policy) {
             return {
               kind: "failed",
               error: new Error("Sandbox enforcement is unavailable for this action"),
             };
           }
-          const sandboxedBash = bashToolFactory(ctx.cwd, {
-            operations: createSandboxedBashOperations(
-              sandboxManager,
-              lease.policy,
-              plan?.kind === "git-init" ? { gitInitPlan: plan } : undefined,
-            ),
+          const sandboxedBash = bashToolFactory(canonicalCwd, {
+            operations: createSandboxedBashOperations(sandboxManager, policy, {
+              ...(plan?.kind === "git-init" ? { gitInitPlan: plan } : {}),
+              commandId: call.id,
+            }),
           });
           return {
             kind: "completed",
             value: await sandboxCoordinator.runShared(
-              () => sandboxedBash.execute(id, params, signal, onUpdate),
+              () => sandboxedBash.execute(call.id, call.input, signal, onUpdate),
               signal,
             ),
           };
         } catch (error: unknown) {
+          if (ordinal === 0 && mode === "sandboxed" && !signal?.aborted) {
+            const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
+            if (denied) return denied;
+          }
           return { kind: "failed", error };
         }
       },
     };
-    return executeEngineInvocation(turn, invocation);
+    return executePermissionAction(action);
   };
 
   type FileMutationParams = WriteParams | EditParams;
 
-  const admissionForFileMutation = async (
+  const riskForFileMutation = async (
     tool: "write" | "edit",
     params: FileMutationParams,
     executionSnapshot: PermissionExecutionSnapshot,
     executionContext: EffectiveExecutionContext,
     ctx: ExtensionContext,
-  ): Promise<AdmissionPlan> => {
-    if (executionSnapshot.mode === "yolo") return { kind: "allow" };
+    canonicalCwd: string,
+  ): Promise<RiskDecision | undefined> => {
+    if (executionSnapshot.mode === "yolo") return undefined;
     const decision = await evaluateManagedRisk(
       tool,
       params as Record<string, unknown>,
       ctx,
       executionContext,
+      canonicalCwd,
     );
-    const admission = admissionPlanFromRiskDecision(decision);
-    if (decision.action !== "prompt" || admission.kind !== "review") return admission;
-    const target = resolvePolicyPath(params.path, ctx.cwd);
-    const requested = admission.requested ?? [];
-    if (
-      requested.some(
-        (request) =>
-          request.kind === "filesystem" &&
-          request.operation === "write" &&
-          resolvePolicyPath(request.path, ctx.cwd) === target,
-      )
-    ) {
-      return admission;
+    if (decision.action !== "prompt") return decision;
+    const target = resolvePolicyPath(params.path, canonicalCwd);
+    const requested = decision.filesystemWriteRoots ?? [];
+    if (requested.some((path) => resolvePolicyPath(path, canonicalCwd) === target)) {
+      return decision;
     }
     return {
-      ...admission,
-      requested: [...requested, { kind: "filesystem", operation: "write", path: target }],
+      ...decision,
+      filesystemWriteRoots: [...requested, target],
     };
   };
 
@@ -1051,10 +1058,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     params: P,
     signal: AbortSignal | undefined,
     onUpdate: U,
-    ctx: ExtensionContext,
+    cwd: string,
   ) => Promise<R>;
 
-  const executeFileMutationWithEngine = async <P extends FileMutationParams, U, R>(
+  const executePermissionedFileMutation = async <P extends FileMutationParams, U, R>(
     tool: "write" | "edit",
     id: string,
     params: P,
@@ -1068,102 +1075,122 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       params: P,
       signal: AbortSignal | undefined,
       onUpdate: U,
-      ctx: ExtensionContext,
+      cwd: string,
     ) => Promise<R>,
   ): Promise<R> => {
-    const { executionSnapshot, executionContext, turn } = await prepareEngineExecution(ctx);
-    const admission = await admissionForFileMutation(
+    const captured = permissions.captureAction({
+      id,
       tool,
-      params,
+      input: params,
+      cwd: resolve(ctx.cwd),
+    });
+    const { call } = captured;
+    const actionId = call.id;
+    const actionTool = call.tool as "write" | "edit";
+    const canonicalCwd = call.cwd;
+    const canonicalParams = call.input;
+    const capturedTranscript = currentGuardianTranscriptSnapshot();
+    const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
+    const risk = await riskForFileMutation(
+      actionTool,
+      canonicalParams,
       executionSnapshot,
       executionContext,
       ctx,
+      canonicalCwd,
     );
     const event = {
       type: "tool_call" as const,
-      toolCallId: id,
-      toolName: tool,
-      input: params,
+      toolCallId: actionId,
+      toolName: actionTool,
+      input: canonicalParams,
     } as ToolCallEvent;
-    const invocation: Invocation<R, PiGuardianReviewContext> = {
-      ownership: "sandbox-owned",
-      call: {
-        id,
-        tool,
-        input: params,
-        cwd: resolve(ctx.cwd),
-      },
-      admission,
-      reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
+    const action: PiAction<R, PiGuardianReviewContext, P> = {
+      captured,
+      kind: "sandbox",
+      risk,
+      reviewContext: createPiGuardianReviewContext(
+        event,
+        executionContext,
+        ctx,
+        capturedTranscript,
+        canonicalCwd,
+      ),
       signal,
-      executor: async ({ lease }): Promise<RuntimeOutcome<R>> => {
+      execute: async ({ mode, policy, call, ordinal }): Promise<PiActionOutcome<R>> => {
         try {
-          if (lease.mode === "unrestricted") {
-            return { kind: "completed", value: await bare(id, params, signal, onUpdate, ctx) };
+          if (mode === "unrestricted") {
+            return {
+              kind: "completed",
+              value: await bare(call.id, call.input, signal, onUpdate, canonicalCwd),
+            };
           }
-          if (lease.mode !== "sandboxed" || !lease.policy) {
+          if (mode !== "sandboxed" || !policy) {
             return {
               kind: "failed",
               error: new Error("Sandbox enforcement is unavailable for this action"),
             };
           }
-          const policy = lease.policy;
           return {
             kind: "completed",
             value: await sandboxCoordinator.runShared(
-              () => sandboxed(policy, id, params, signal, onUpdate, ctx),
+              () => sandboxed(policy, call.id, call.input, signal, onUpdate, canonicalCwd),
               signal,
             ),
           };
         } catch (error: unknown) {
+          if (ordinal === 0 && mode === "sandboxed" && !signal?.aborted) {
+            const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
+            if (denied) return denied;
+          }
           return { kind: "failed", error };
         }
       },
     };
-    return executeEngineInvocation(turn, invocation);
+    return executePermissionAction(action);
   };
 
-  const executeWriteWithEngine = (
+  const executePermissionedWrite = (
     id: string,
     params: WriteParams,
     signal: AbortSignal | undefined,
     onUpdate: WriteOnUpdate,
     ctx: ExtensionContext,
   ): Promise<WriteResult> =>
-    executeFileMutationWithEngine(
+    executePermissionedFileMutation(
       "write",
       id,
       params,
       signal,
       onUpdate,
       ctx,
-      (callId, callParams, callSignal, callOnUpdate, callCtx) =>
-        createWriteTool(callCtx.cwd).execute(callId, callParams, callSignal, callOnUpdate),
-      (policy, callId, callParams, callSignal, callOnUpdate, callCtx) =>
-        createWriteTool(callCtx.cwd, {
-          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal),
+      (callId, callParams, callSignal, callOnUpdate, cwd) =>
+        createWriteTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
+      (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
+        createWriteTool(cwd, {
+          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal, callId),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
 
-  const executeEditWithEngine = (
+  const executePermissionedEdit = (
     id: string,
     params: EditParams,
     signal: AbortSignal | undefined,
     onUpdate: EditOnUpdate,
     ctx: ExtensionContext,
   ): Promise<EditResult> =>
-    executeFileMutationWithEngine(
+    executePermissionedFileMutation(
       "edit",
       id,
       params,
       signal,
       onUpdate,
       ctx,
-      (callId, callParams, callSignal, callOnUpdate, callCtx) =>
-        createEditTool(callCtx.cwd).execute(callId, callParams, callSignal, callOnUpdate),
-      (policy, callId, callParams, callSignal, callOnUpdate, callCtx) =>
-        createEditTool(callCtx.cwd, {
-          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal),
+      (callId, callParams, callSignal, callOnUpdate, cwd) =>
+        createEditTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
+      (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
+        createEditTool(cwd, {
+          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal, callId),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
 
@@ -1177,21 +1204,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",
-    execute: executeBashWithEngine,
+    execute: executePermissionedBash,
   });
 
   pi.registerTool({
     ...baseWrite,
     ...adoptHostTheme(codexWriteToolSpec),
     executionMode: "sequential",
-    execute: executeWriteWithEngine,
+    execute: executePermissionedWrite,
   });
 
   pi.registerTool({
     ...baseEdit,
     ...adoptHostTheme(codexEditToolSpec),
     executionMode: "sequential",
-    execute: executeEditWithEngine,
+    execute: executePermissionedEdit,
   });
 
   pi.registerTool({
@@ -1209,12 +1236,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
     async execute(id, params, _signal, _onUpdate, ctx) {
-      const { executionContext, turn } = await prepareEngineExecution(ctx);
+      const actionSignal = _signal;
+      const captured = permissions.captureAction({
+        id,
+        tool: "request_permissions",
+        input: params,
+        cwd: resolve(ctx.cwd),
+      });
+      const { call } = captured;
+      const actionId = call.id;
+      const canonicalCwd = call.cwd;
+      const canonicalParams = call.input;
+      const capturedTranscript = currentGuardianTranscriptSnapshot();
+      const { executionContext } = await preparePermissionExecution(ctx);
       const decision = await evaluateManagedRisk(
         "request_permissions",
-        params as Record<string, unknown>,
+        canonicalParams as Record<string, unknown>,
         ctx,
         executionContext,
+        canonicalCwd,
       );
       if (decision.action === "block") {
         const error = new Error(
@@ -1223,8 +1263,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         Object.assign(error, { code: "policy-denied", reason: decision.reason });
         throw error;
       }
-      const admission = admissionPlanFromRiskDecision(decision);
-      if (admission.kind !== "review" || !admission.requested || admission.requested.length === 0) {
+      if (
+        decision.action !== "prompt" ||
+        ((decision.networkHosts?.length ?? 0) === 0 &&
+          (decision.filesystemWriteRoots?.length ?? 0) === 0)
+      ) {
         const error = new Error(
           renderPermissionErrorForAgent({
             code: "policy-denied",
@@ -1237,35 +1280,33 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         });
         throw error;
       }
-      const requested = admission.requested;
-      const scope = params.scope === "session" ? "session" : "turn";
-      const reason = params.reason ?? decision.reason;
+      const scope = canonicalParams.scope === "session" ? "session" : "turn";
+      const reason = canonicalParams.reason ?? decision.reason;
       const event = {
         type: "tool_call" as const,
-        toolCallId: id,
+        toolCallId: actionId,
         toolName: "request_permissions",
-        input: params,
+        input: canonicalParams,
       } as ToolCallEvent;
-      const invocation: Invocation<WriteResult, PiGuardianReviewContext> = {
-        ownership: "permission-amendment",
-        call: {
-          id,
-          tool: "request_permissions",
-          input: params,
-          cwd: resolve(ctx.cwd),
-        },
-        admission,
-        intent: {
-          kind: "permission-amendment",
-          requested,
+      const action: PiAction<WriteResult, PiGuardianReviewContext, typeof canonicalParams> = {
+        captured,
+        kind: "permission-amendment",
+        risk: decision,
+        permission: {
           scope,
           reason,
         },
-        reviewContext: createPiGuardianReviewContext(event, executionContext, ctx),
-        signal: _signal,
-        executor: async ({ lease }): Promise<RuntimeOutcome<WriteResult>> => {
+        reviewContext: createPiGuardianReviewContext(
+          event,
+          executionContext,
+          ctx,
+          capturedTranscript,
+          canonicalCwd,
+        ),
+        signal: actionSignal,
+        execute: async ({ mode, policy }): Promise<PiActionOutcome<WriteResult>> => {
           try {
-            if (lease.mode === "unrestricted") {
+            if (mode === "unrestricted") {
               return {
                 kind: "completed",
                 value: {
@@ -1279,24 +1320,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 },
               };
             }
-            if (lease.mode !== "sandboxed" || !lease.policy) {
+            if (mode !== "sandboxed" || !policy) {
               return {
                 kind: "failed",
                 error: new Error("Sandbox enforcement is unavailable for this action"),
               };
             }
-            const grantedHosts = requested
-              .filter(
-                (request): request is Extract<typeof request, { kind: "network" }> =>
-                  request.kind === "network",
-              )
-              .map((request) => request.host);
-            const grantedRoots = requested
-              .filter(
-                (request): request is Extract<typeof request, { kind: "filesystem" }> =>
-                  request.kind === "filesystem" && request.operation === "write",
-              )
-              .map((request) => request.path);
+            const grantedHosts = [...(decision.networkHosts ?? [])];
+            const grantedRoots = [...(decision.filesystemWriteRoots ?? [])];
             return {
               kind: "completed",
               value: {
@@ -1316,7 +1347,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
         },
       };
-      return executeEngineInvocation(turn, invocation);
+      return executePermissionAction(action);
     },
   });
 
@@ -1401,7 +1432,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("session_shutdown", async () => {
-    invalidateEngineContext("session shutdown");
+    permissions.invalidate("session shutdown");
     session.bumpGeneration();
     cancelInFlightModeTransition();
     session.resetTurn();
@@ -1448,7 +1479,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
     modeRuntime?.beginAgentTurn();
     const executionSnapshot = captureExecutionSnapshot(startingTurnId);
-    if (executionSnapshot) beginEngineTurn(ctx, executionSnapshot);
+    if (executionSnapshot) beginPermissionTurn(ctx, executionSnapshot);
   });
 
   pi.on("agent_end", () => {
@@ -1473,7 +1504,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ) {
         return;
       }
-      return executeHostToolWithEngine(event, ctx);
+      return authorizeHostTool(event, ctx);
     },
   );
 
@@ -1499,41 +1530,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-ui" }), "warning");
         return;
       }
-      const denials = [...engine.listDenials()].reverse();
-      if (denials.length === 0) {
+      const recovery = await permissions.recoverDeniedAction(ctx.ui);
+      if (recovery.kind === "empty") {
         ctx.ui.notify(renderPermissionNotice({ kind: "approve-empty" }), "info");
         return;
       }
-      const choices = denials.map((denial, index) => {
-        const summary = (denial.summary ?? denial.call.tool)
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 120);
-        const rationale = denial.rationale.replace(/\s+/g, " ").trim().slice(0, 160);
-        return `${index + 1}. ${denial.call.tool}: ${summary} — ${rationale}`;
-      });
-      const choice = await ctx.ui.select("Auto-review denials", choices);
-      if (choice === undefined) return;
-      const selectedIndex = choices.indexOf(choice);
-      if (selectedIndex < 0) return;
-      const denial = denials[selectedIndex];
-      if (!denial) return;
-      if (!engine.armRetry(denial.handle)) {
-        ctx.ui.notify(renderPermissionNotice({ kind: "approve-stale" }), "warning");
+      if (recovery.kind !== "armed") {
+        if (recovery.kind === "stale") {
+          ctx.ui.notify(renderPermissionNotice({ kind: "approve-stale" }), "warning");
+        }
         return;
       }
       pi.sendMessage(
         {
           customType: "pi-permissions-auto-override",
-          content: renderExactRetryInstruction({
-            tool: denial.call.tool,
-            serializedInput: JSON.stringify(denial.call.input),
-            cwd: denial.call.cwd,
-            previousDenial: denial.rationale,
-          }),
+          content: renderExactRetryInstruction(recovery.dispatch),
           display: true,
           details: {
-            denialId: denial.handle.token,
+            denialId: recovery.dispatch.denialId,
           },
         },
         { triggerTurn: true },
@@ -1569,9 +1583,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           if (!transition && !beganDuringActiveTurn) {
             // Between turns and while idle there is no snapshot to preserve.
-            // Invalidate the current Engine/reviewer context before activation;
+            // Invalidate the current permission/reviewer context before activation;
             // active-turn transitions leave the snapshot untouched.
-            invalidateEngineContext(PERMISSION_MODE_CHANGED_REASON);
+            permissions.invalidate(PERMISSION_MODE_CHANGED_REASON);
             invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           }
           let runtime = modeRuntime;

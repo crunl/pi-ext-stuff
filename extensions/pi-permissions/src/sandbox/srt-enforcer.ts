@@ -6,6 +6,7 @@ import {
 } from "@anthropic-ai/sandbox-runtime";
 import { hasGlobSyntax } from "../filesystem-policy.ts";
 import type {
+  SandboxDenialCapability,
   SandboxExecutionRequest,
   SandboxExecutionResult,
   SandboxManagerLike,
@@ -20,6 +21,10 @@ const DEFAULT_STDOUT_BOUND = 16 * 1024 * 1024;
 const DEFAULT_STDERR_BOUND = 1 * 1024 * 1024;
 const POSIX_SHELL = "/bin/bash";
 
+/** Bounded wait for asynchronously-delivered denial events after a failure. */
+const DENIAL_DRAIN_TIMEOUT_MS = 1_000;
+const DENIAL_DRAIN_POLL_MS = 100;
+
 export type SrtRuntimeLike = Pick<
   typeof SrtManager,
   | "initialize"
@@ -29,7 +34,30 @@ export type SrtRuntimeLike = Pick<
   | "updateConfig"
   | "cleanupAfterCommand"
   | "reset"
+  | "getSandboxViolationStore"
 >;
+
+const FILE_WRITE_DENIAL = /\bdeny\(\d+\)\s+file-write-[a-z-]+\s+(\S+)/;
+const NETWORK_OUTBOUND_DENIAL = /\bdeny\s+network-outbound\s+(\S+)/;
+
+/**
+ * Map one authoritative denial line to the exact capability it proves.
+ * Read denials never escalate: denyRead is a protective boundary.
+ */
+export function denialCapabilityFromViolationLine(
+  line: string,
+): SandboxDenialCapability | undefined {
+  const write = line.match(FILE_WRITE_DENIAL);
+  if (write?.[1]) return { kind: "filesystem", operation: "write", path: write[1] };
+  const network = line.match(NETWORK_OUTBOUND_DENIAL);
+  if (network?.[1]) {
+    const target = network[1];
+    const portSplit = target.match(/^(.+):(\d+)$/);
+    const host = portSplit?.[1] && !portSplit[1].includes(":") ? portSplit[1] : target;
+    return { kind: "network", host };
+  }
+  return undefined;
+}
 
 /** State mirrors SRT's own process-global mutable singleton. */
 const processSandboxState: {
@@ -248,7 +276,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           if (dependency.errors.length > 0) {
             throw sandboxUnavailable(dependency.errors.join("; "));
           }
-          await this.runtime.initialize(toSrtConfig(snapshot));
+          await this.runtime.initialize(toSrtConfig(snapshot), undefined, true);
           if (activation.signal.aborted) {
             await this.resetSrt();
             throw new Error("aborted");
@@ -389,6 +417,28 @@ export class SrtSandboxManager implements SandboxManagerLike {
     );
   }
 
+  async classifyDenial(commandId: string): Promise<SandboxDenialCapability | undefined> {
+    if (srtProcessCoordinator.isPoisoned) return undefined;
+    let store: ReturnType<SrtRuntimeLike["getSandboxViolationStore"]>;
+    try {
+      store = this.runtime.getSandboxViolationStore();
+    } catch {
+      return undefined;
+    }
+    const deadline = Date.now() + DENIAL_DRAIN_TIMEOUT_MS;
+    for (;;) {
+      for (const violation of store.getViolationsForCommand(commandId)) {
+        const capability = denialCapabilityFromViolationLine(violation.line);
+        if (capability) return capability;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return undefined;
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(DENIAL_DRAIN_POLL_MS, remaining)),
+      );
+    }
+  }
+
   private async initializeSrt(config: SandboxPolicy, signal?: AbortSignal): Promise<void> {
     if (!this.runtime.isSupportedPlatform()) {
       throw sandboxUnavailable(`unsupported platform: ${process.platform}`);
@@ -401,7 +451,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
       throw sandboxUnavailable(dependency.errors.join("; "));
     }
     if (signal?.aborted) throw new Error("aborted");
-    await this.runtime.initialize(toSrtConfig(config));
+    await this.runtime.initialize(toSrtConfig(config), undefined, true);
   }
 
   private async resetSrt(): Promise<void> {

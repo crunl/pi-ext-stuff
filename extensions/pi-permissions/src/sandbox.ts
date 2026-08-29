@@ -75,6 +75,19 @@ export interface SandboxExecutionResult {
   exitCode: number | null;
 }
 
+/** The exact capability enforcement denied at runtime, when recoverable. */
+export type SandboxDenialCapability =
+  | { kind: "filesystem"; operation: "write"; path: string }
+  | { kind: "network"; host: string };
+
+const SANDBOX_DENIAL_MARKERS =
+  /operation not permitted|permission denied|read-only file system|sandbox denied|\bEPERM\b|\bEACCES\b|\bEROFS\b|connect tunnel failed/i;
+
+/** Cheap pre-filter only; the enforcement adapter's verdict is authoritative. */
+export function looksLikeSandboxDenial(text: string): boolean {
+  return SANDBOX_DENIAL_MARKERS.test(text);
+}
+
 export interface SandboxManagerLike {
   initialize(config: SandboxPolicy): Promise<void>;
   /**
@@ -85,6 +98,12 @@ export interface SandboxManagerLike {
   /** Atomically reset and install a new process-global sandbox policy. */
   activate?(config: SandboxPolicy): Promise<void>;
   reset(): Promise<void>;
+  /**
+   * After a failed execution, report the exact capability enforcement
+   * denied for this invocation, when the backend tracks authoritative
+   * denial events. Absence means no escalation is possible.
+   */
+  classifyDenial?(commandId: string): Promise<SandboxDenialCapability | undefined>;
 }
 
 export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
@@ -387,7 +406,7 @@ async function prepareGitInit(cwd: string, policy: SandboxPolicy): Promise<Prepa
 export function createSandboxedBashOperations(
   manager: SandboxManagerLike,
   customConfig?: SandboxPolicy,
-  options: { gitInitPlan?: GitInitExecutionPlan } = {},
+  options: { gitInitPlan?: GitInitExecutionPlan; commandId?: string } = {},
 ): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -436,6 +455,7 @@ export function createSandboxedBashOperations(
               : timeout > 0
                 ? timeout * 1000
                 : undefined,
+          ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
           onStdout: onData,
           onStderr: onData,
         });
@@ -988,6 +1008,7 @@ async function runSandboxedFileOperation(
   path: string,
   input?: string,
   signal?: AbortSignal,
+  commandId?: string,
 ): Promise<Buffer> {
   const result = await executeSandboxProgram(manager, {
     policy: config,
@@ -998,6 +1019,7 @@ async function runSandboxedFileOperation(
     signal,
     stdin: input === undefined ? "ignore" : input,
     timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,
+    ...(commandId === undefined ? {} : { commandId }),
   });
   if (result.exitCode !== 0) {
     throw new Error(
@@ -1014,18 +1036,28 @@ export function createSandboxedFileOperations(
   baseConfig: SandboxPolicy,
   writePaths: readonly string[] = [],
   signal?: AbortSignal,
+  commandId?: string,
 ): SandboxedFileOperations {
   const config = fileOperationConfig(baseConfig, writePaths);
   return {
     mkdir: async (path) => {
-      await runSandboxedFileOperation(manager, config, "mkdir", path, undefined, signal);
+      await runSandboxedFileOperation(manager, config, "mkdir", path, undefined, signal, commandId);
     },
     writeFile: async (path, content) => {
-      await runSandboxedFileOperation(manager, config, "write", path, content, signal);
+      await runSandboxedFileOperation(manager, config, "write", path, content, signal, commandId);
     },
-    readFile: (path) => runSandboxedFileOperation(manager, config, "read", path, undefined, signal),
+    readFile: (path) =>
+      runSandboxedFileOperation(manager, config, "read", path, undefined, signal, commandId),
     access: async (path) => {
-      await runSandboxedFileOperation(manager, config, "access", path, undefined, signal);
+      await runSandboxedFileOperation(
+        manager,
+        config,
+        "access",
+        path,
+        undefined,
+        signal,
+        commandId,
+      );
     },
   };
 }
