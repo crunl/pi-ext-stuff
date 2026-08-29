@@ -5,6 +5,7 @@
  * extension needs pi-core components without pulling the register graph
  * into its own jiti instance:
  *   - pi-permissions → withCodexToolPresentation / createCodexToolRendering / …
+ *   - permission UIs → markToolCall
  *   - statusline     → applyAutocompleteAbove
  *
  * Contract: importing this module (and anything it re-exports) runs no
@@ -29,4 +30,5 @@ export {
   summarizeEditDiff,
 } from "./src/tui/codex-tool-specs.ts";
 export { createEditDiffBox } from "./src/tui/edit-diff.ts";
+export { markToolCall, type ToolCallMark } from "./src/tui/tool-call-mark.ts";
 export { createCodexToolRendering } from "./src/tui/tool-renderer.ts";

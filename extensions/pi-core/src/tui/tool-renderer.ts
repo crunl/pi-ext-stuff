@@ -136,6 +136,11 @@ interface RenderContext<TPreviewState = unknown> {
   isError: boolean;
   /** Whether the result view is expanded (from ToolRenderContext). */
   expanded: boolean;
+  /** Present when the host owns the persistent leading mark for this call. */
+  toolCallMark?: {
+    readonly icon: string;
+    readonly color: "warning";
+  };
 }
 
 interface CodexToolRendering<TPreviewState = unknown> {
@@ -171,8 +176,10 @@ function headerText<TPreviewState = unknown>(
       ? `${theme.fg("dim", " · ")}${spec.formatSummary(state.summary, theme)}`
       : theme.fg("dim", ` · ${state.summary}`)
     : "";
-  const icon = spec.icon ?? "•";
-  return `${theme.fg(bulletColor, theme.bold(icon))} ${theme.bold(verb)}${suffix}${summary}`;
+  const icon = context.toolCallMark
+    ? ""
+    : `${theme.fg(bulletColor, theme.bold(spec.icon ?? "•"))} `;
+  return `${icon}${theme.bold(verb)}${suffix}${summary}`;
 }
 
 class ToolOutputComponent implements Component {

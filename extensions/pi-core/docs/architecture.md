@@ -29,6 +29,9 @@ Exports (no side effects on import):
 - `withCodexToolPresentation` — pi-permissions; decorates a complete tool definition while preserving its execution and metadata
 - `createEditDiffBox` — pi-permissions
 - `createCodexToolRendering` — pi-permissions
+- `markToolCall` / `ToolCallMark` — permission UIs; requests a persistent,
+  host-owned tool-row mark when the host supports the optional API and safely
+  returns `false` on older hosts
 - `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` and `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `summarizeEditDiff` — pi-permissions migration compatibility; marked `@deprecated` in `standalone.ts`, prefer `withCodexToolPresentation` for new code
 
 Adding an export here is the only supported way to widen the contract.
@@ -60,7 +63,12 @@ Adding an export here is the only supported way to widen the contract.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary)
   plus the per-tool summary helpers (bash status spacing compaction, edit-diff
   count/colorize, write line-count colorize).
-- `tool-renderer.ts` — generic `createCodexToolRendering(spec)`.
+- `tool-call-mark.ts` — side-effect-free compatibility adapter for Pi's
+  optional `ExtensionUIContext.markToolCall()` API. UI failures and older hosts
+  return `false`; authorization callers never depend on the result.
+- `tool-renderer.ts` — generic `createCodexToolRendering(spec)`. When the host
+  supplies `ToolRenderContext.toolCallMark`, the renderer yields its own icon
+  so the host-owned mark remains the single leading status icon.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its
   controller is shared through `globalThis`/`Symbol.for` so renderers imported
   by pi-permissions through a separate jiti instance see the same value.

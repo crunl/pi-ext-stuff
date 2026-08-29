@@ -27,6 +27,24 @@ function context(state: Record<string, unknown>, overrides: Record<string, unkno
 }
 
 describe("createCodexToolRendering", () => {
+  it("lets a host-owned tool-call mark replace the renderer icon", () => {
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+
+    const header = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context({}, { toolCallMark: { icon: "\u{F105E}", color: "warning" } }),
+    );
+
+    expect(header.render(80).join("\n").trim()).toBe("Running npm test");
+  });
+
   it("keeps whitespace-heavy headers within an interactive rendering budget", () => {
     const rendering = createCodexToolRendering(
       {
