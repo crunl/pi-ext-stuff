@@ -40,13 +40,9 @@ describe("permissions config", () => {
     expect(DEFAULT_CONFIG.sandbox.network.allowedDomains).toEqual([]);
   });
 
-  it("denies sensitive workspace files for reads and writes by default", () => {
-    expect(DEFAULT_CONFIG.sandbox.filesystem.denyRead).toEqual(
-      expect.arrayContaining([".env", ".env.*", "*.pem", "*.key"]),
-    );
-    expect(DEFAULT_CONFIG.sandbox.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([".env", ".env.*", "*.pem", "*.key"]),
-    );
+  it("matches Codex workspace-write without extra sensitive-file denials", () => {
+    expect(DEFAULT_CONFIG.sandbox.filesystem.denyRead).toEqual([]);
+    expect(DEFAULT_CONFIG.sandbox.filesystem.denyWrite).toEqual([]);
   });
 
   it("ships a schema-valid complete example config", async () => {

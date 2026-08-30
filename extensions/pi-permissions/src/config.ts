@@ -61,8 +61,9 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
     profile: "workspace-write",
     filesystem: {
       allowWrite: [".", "/tmp"],
-      denyRead: ["~/.ssh", "~/.aws", "~/.gnupg", ".env", ".env.*", "*.pem", "*.key"],
-      denyWrite: [".env", ".env.*", "*.pem", "*.key"],
+      // Match Codex workspace-write: extra sensitive-file carve-outs are opt-in.
+      denyRead: [],
+      denyWrite: [],
     },
     network: {
       allowedDomains: [],

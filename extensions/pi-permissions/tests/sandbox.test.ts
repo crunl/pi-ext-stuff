@@ -389,13 +389,13 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.allowWrite).toContain("/private/tmp");
   });
 
-  it("resolves workspace-relative paths before initializing the runtime", () => {
+  it("keeps Codex-style defaults while resolving protected workspace metadata", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
 
     expect(runtime.filesystem.allowWrite).toContain("/workspace/project");
-    expect(runtime.filesystem.denyRead).toContain("/workspace/project/**/.env");
-    expect(runtime.filesystem.denyRead).toContain("/workspace/project/**/.env.*");
-    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/**/*.key");
+    expect(runtime.filesystem.denyRead).toEqual([]);
+    expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/**/.env");
+    expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/**/*.key");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");

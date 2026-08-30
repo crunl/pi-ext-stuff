@@ -10,8 +10,8 @@
     "profile": "workspace-write",
     "filesystem": {
       "allowWrite": [".", "/tmp"],
-      "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg", ".env", ".env.*", "*.pem", "*.key"],
-      "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
+      "denyRead": [],
+      "denyWrite": []
     },
     "network": {
       "allowedDomains": [],
