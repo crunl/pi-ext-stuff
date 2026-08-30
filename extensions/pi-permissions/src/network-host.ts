@@ -1,5 +1,18 @@
 import { isIP } from "node:net";
 
+export function isValidNetworkCidr(value: string): boolean {
+  if (value.trim() !== value || /\s/.test(value)) return false;
+  const slash = value.lastIndexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return false;
+  const address = value.slice(0, slash);
+  const prefixText = value.slice(slash + 1);
+  if (!/^\d+$/.test(prefixText)) return false;
+  const prefix = Number(prefixText);
+  const family = isIP(address);
+  const maximum = family === 4 ? 32 : family === 6 ? 128 : 0;
+  return family !== 0 && Number.isInteger(prefix) && prefix >= 0 && prefix <= maximum;
+}
+
 export type GitRemoteTarget =
   | { kind: "host"; host: string }
   | { kind: "local" }
@@ -12,7 +25,17 @@ export function normalizeNetworkHost(value: string): string | undefined {
     .replace(/\.+$/, "")
     .toLowerCase();
   if (!host || /\s/.test(host)) return undefined;
-  if (isIP(host) !== 0) return host;
+  const family = isIP(host);
+  if (family === 4) return host;
+  if (family === 6) {
+    try {
+      // URL implements RFC 5952-style IPv6 compression and gives us one
+      // canonical identity for policy patterns, DNS answers, and tickets.
+      return new URL(`http://[${host}]/`).hostname.slice(1, -1).toLowerCase();
+    } catch {
+      return undefined;
+    }
+  }
   if (/^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$/i.test(host)) {
     return host;
   }
@@ -28,7 +51,8 @@ function isSpecialIpv4(host: string): boolean {
     (first === 100 && second >= 64 && second <= 127) ||
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && (second === 0 || second === 88 || second === 168)) ||
+    (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+    (first === 192 && second === 168) ||
     (first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) ||
     (first === 203 && second === 0 && third === 113) ||
     first >= 224
@@ -75,27 +99,16 @@ function isSpecialIp(host: string): boolean {
   const first = groups[0] ?? 0;
   const embeddedIpv4 =
     groups.slice(0, 6).every((group) => group === 0) ||
-    (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) ||
-    (groups[0] === 0x64 &&
-      groups[1] === 0xff9b &&
-      groups.slice(2, 6).every((group) => group === 0)) ||
-    (groups[0] === 0x64 &&
-      groups[1] === 0xff9b &&
-      groups[2] === 1 &&
-      groups.slice(3, 6).every((group) => group === 0))
+    (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff)
       ? ipv4FromGroups(groups, 6)
-      : groups[0] === 0x2002
-        ? ipv4FromGroups(groups, 1)
-        : undefined;
+      : undefined;
   return embeddedIpv4
     ? isSpecialIpv4(embeddedIpv4)
     : groups.every((group) => group === 0) ||
         (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
         (first & 0xfe00) === 0xfc00 ||
         (first & 0xffc0) === 0xfe80 ||
-        (first & 0xff00) === 0xff00 ||
-        (groups[0] === 0x2001 && groups[1] === 0x0db8) ||
-        (groups[0] === 0x2001 && groups[1] === 0x0002);
+        (first & 0xff00) === 0xff00;
 }
 
 function looksLikeAmbiguousNumericIp(host: string): boolean {

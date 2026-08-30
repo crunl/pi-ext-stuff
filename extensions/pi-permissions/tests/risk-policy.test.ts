@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
-import { evaluateRiskRequest } from "../src/risk-policy.ts";
+import { evaluateHostRiskRequest, evaluateRiskRequest } from "../src/risk-policy.ts";
 
 function config(overrides: Partial<PermissionsConfig> = {}): PermissionsConfig {
   return {
@@ -22,6 +22,28 @@ async function createGitDirectory(path: string, contents = ""): Promise<void> {
 }
 
 describe("Risk policy gate", () => {
+  it("leaves every host-owned tool to its owner unless a rule opts into review", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-host-"));
+
+    for (const [tool, input] of [
+      ["WebFetch", { url: "http://127.0.0.1/internal" }],
+      ["apply_patch", { path: "/outside/file", content: "updated" }],
+      ["powershell", { command: "Remove-Item -Recurse C:\\\\workspace" }],
+    ] as const) {
+      await expect(evaluateHostRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "LOW",
+      });
+    }
+
+    const configured = config({
+      rules: [{ action: "ask", tool: "WebFetch", pattern: "*example.com*" }],
+    });
+    await expect(
+      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+  });
+
   it("allows ordinary workspace reads and writes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
@@ -36,6 +58,16 @@ describe("Risk policy gate", () => {
     ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
+  it("allows routine host tools, including MCP-style direct tool names", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+
+    for (const tool of ["context7_resolve-library-id", "exa_web_search_exa", "tinyfish_search"]) {
+      await expect(
+        evaluateRiskRequest(tool, { query: "public docs" }, cwd, config()),
+      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    }
+  });
+
   it("allows ordinary writes in the extension package root", async () => {
     await expect(
       evaluateRiskRequest(
@@ -47,16 +79,17 @@ describe("Risk policy gate", () => {
     ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("blocks protected secrets without a one-off prompt", async () => {
+  it("does not add sensitive-file restrictions beyond Codex workspace-write", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
     for (const path of [".env", "nested/.env", "nested/.env.local", "nested/deploy.key"]) {
       await expect(evaluateRiskRequest("read", { path }, cwd, config())).resolves.toMatchObject({
-        action: "block",
+        action: "allow",
+        risk: "LOW",
       });
       await expect(
         evaluateRiskRequest("write", { path, content: "secret" }, cwd, config()),
-      ).resolves.toMatchObject({ action: "block" });
+      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
     }
   });
 
@@ -108,7 +141,7 @@ describe("Risk policy gate", () => {
     });
   });
 
-  it("prompts for external writes and dangerous Bash", async () => {
+  it("prompts for external writes and Codex-dangerous commands", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
     await expect(
@@ -142,7 +175,7 @@ describe("Risk policy gate", () => {
     }
   });
 
-  it("prompts for token-aware network commands and external mutations", async () => {
+  it("defers ordinary Bash network decisions to the runtime sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const cases = [
       [
@@ -162,11 +195,10 @@ describe("Risk policy gate", () => {
       ["npm install lodash", ["registry.npmjs.org"]],
     ] as const;
 
-    for (const [command, networkHosts] of cases) {
+    for (const [command] of cases) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "HARD",
-        networkHosts,
+        action: "allow",
+        risk: "LOW",
       });
     }
   });
@@ -174,16 +206,19 @@ describe("Risk policy gate", () => {
   it("does not mistake network option values for destination hosts", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
+    const configured = config({
+      rules: [{ action: "ask", tool: "bash", pattern: "curl *" }],
+    });
     await expect(
       evaluateRiskRequest(
         "bash",
         { command: "curl -X POST -H 'accept: application/json' https://example.com/api" },
         cwd,
-        config(),
+        configured,
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "LOW",
       networkHosts: ["example.com"],
     });
   });
@@ -199,7 +234,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "git push origin main" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "REVIEW",
       networkHosts: ["github.com"],
     });
   });
@@ -210,7 +245,7 @@ describe("Risk policy gate", () => {
     "command git push origin main",
     "sudo -u root git push origin main",
     "X=1 git push origin main",
-  ])("blocks a private Git pushurl for %s", async (command) => {
+  ])("defers a private Git pushurl to the runtime boundary for %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(
       join(cwd, ".git"),
@@ -223,14 +258,13 @@ describe("Risk policy gate", () => {
     );
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("Private"),
+      action: "prompt",
+      risk: "REVIEW",
     });
   });
 
   it.each(["git push origin HEAD:main", "git push --porcelain origin HEAD:main"])(
-    "uses the remote operand rather than a push refspec for %s",
+    "defers a private Git pushurl independently of the refspec for %s",
     async (command) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
       await createGitDirectory(
@@ -244,9 +278,8 @@ describe("Risk policy gate", () => {
       );
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("Private"),
+        action: "prompt",
+        risk: "REVIEW",
       });
     },
   );
@@ -255,30 +288,40 @@ describe("Risk policy gate", () => {
     "git push ssh://git@127.1/owner/repo.git HEAD:main",
     "git push git://2130706433/owner/repo.git HEAD:main",
     "git push 0x7f000001:owner/repo.git HEAD:main",
-  ])("blocks a private explicit Git remote operand in %s", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
-    await createGitDirectory(join(cwd, ".git"));
+  ])(
+    "defers a private explicit Git remote operand to the runtime boundary in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+      await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("Private"),
-    });
-  });
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+      });
+    },
+  );
 
   it.each([
     "git push --repo=ssh://git@127.1/owner/repo.git -- HEAD:main",
     "git fetch --multiple https://github.com/openai/codex.git ssh://git@127.1/owner/repo.git",
     "git submodule add -b main ssh://git@127.1/owner/repo.git child",
-    "git fetch ext::/tmp/network-helper",
-  ])("fails closed for a private or unsupported Git remote in %s", async (command) => {
+  ])("defers private Git network targets to the runtime boundary in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
+      action: "prompt",
+      risk: "REVIEW",
     });
+  });
+
+  it("keeps unsupported Git remote helpers statically blocked", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "git fetch ext::/tmp/network-helper" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
   });
 
   it.each([
@@ -294,7 +337,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "REVIEW",
       networkHosts,
     });
   });
@@ -312,7 +355,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "REVIEW",
       networkHosts: ["github.com"],
     });
   });
@@ -326,8 +369,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "git push ../local.git HEAD:main" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
-      networkHosts: undefined,
+      risk: "REVIEW",
       filesystemWriteRoots: [gitRoot],
     });
   });
@@ -366,7 +408,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "git fetch origin" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "REVIEW",
       networkHosts: ["github.com"],
     });
   });
@@ -387,19 +429,22 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "REVIEW",
       networkHosts: ["github.com"],
     });
   });
 
-  it("includes the requested public host in network approval", async () => {
+  it("includes the public host when an explicit rule requests approval", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const configured = config({
+      rules: [{ action: "ask", tool: "bash", pattern: "curl *" }],
+    });
 
     await expect(
-      evaluateRiskRequest("bash", { command: "curl https://example.com/docs" }, cwd, config()),
+      evaluateRiskRequest("bash", { command: "curl https://example.com/docs" }, cwd, configured),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
+      risk: "LOW",
       networkHosts: ["example.com"],
     });
   });
@@ -698,7 +743,7 @@ describe("Risk policy gate", () => {
     });
   });
 
-  it("blocks private shell network targets without offering approval", async () => {
+  it("defers private shell network targets to the sandbox boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
     const decision = await evaluateRiskRequest(
@@ -708,14 +753,25 @@ describe("Risk policy gate", () => {
       config(),
     );
 
-    expect(decision).toMatchObject({
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+  });
+
+  it("keeps private shell targets statically blocked when the sandbox is disabled", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const configured = config({
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        enabled: false,
+      },
+    });
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, configured),
+    ).resolves.toMatchObject({
       action: "block",
       risk: "HARD",
       reason: expect.stringContaining("Private"),
     });
-    if (decision.action === "block") {
-      expect(decision.reason).not.toContain("approval");
-    }
   });
 
   it("blocks private WebFetch targets without offering reviewer approval", async () => {
@@ -821,13 +877,13 @@ describe("Risk policy gate", () => {
     });
   });
 
-  it("applies deny, ask, and allow rules without allowing HARD bypass", async () => {
+  it("applies deny, ask, and allow rules without bypassing hard policy", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const rules: PermissionsConfig["rules"] = [
       { action: "deny", tool: "bash", pattern: "npm publish*" },
       { action: "ask", tool: "bash", pattern: "npm test*" },
       { action: "allow", tool: "bash", pattern: "npm run lint*" },
-      { action: "allow", tool: "bash", pattern: "rm *" },
+      { action: "allow", tool: "bash", pattern: "curl *" },
     ];
     const configured = config({ rules });
 
@@ -841,8 +897,23 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "npm run lint" }, cwd, configured),
     ).resolves.toMatchObject({ action: "allow" });
     await expect(
-      evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, configured),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+      evaluateRiskRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, configured),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+  });
+
+  it("keeps private targets out of sandboxed Bash pre-admission capability requests", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    const configured = config({ rules: [{ action: "ask", tool: "bash", pattern: "curl *" }] });
+
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "curl http://127.0.0.1/admin" },
+      cwd,
+      configured,
+    );
+
+    expect(decision).toMatchObject({ action: "prompt", risk: "LOW" });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it("summarizes requests without including write content", async () => {
@@ -881,7 +952,7 @@ describe("deletion sandbox boundary (stage 3)", () => {
     }
   });
 
-  it("escalates deletions that touch anything outside the sandbox roots", async () => {
+  it("defers outside-root deletion to the exact runtime sandbox denial", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
     for (const command of [
       "rm /etc/pi-permissions-outside.txt",
@@ -890,23 +961,23 @@ describe("deletion sandbox boundary (stage 3)", () => {
       "truncate -s 0 /etc/passwd",
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
+        action: "allow",
+        risk: "LOW",
       });
     }
   });
 
-  it("escalates deletions of protected metadata paths", async () => {
+  it("escalates protected metadata deletion but not ordinary workspace files", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm .git/HEAD" }, cwd, config()),
     ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm .env" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("keeps forced rm at HARD even inside the workspace", async () => {
+  it("reviews forced rm even when its target stays inside the workspace", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
@@ -966,7 +1037,7 @@ describe("request_permissions amendment decisions", () => {
 });
 
 describe("custom/MCP tool approvals (codex-aligned)", () => {
-  it("reviews external tools by default", async () => {
+  it("allows external tools by default", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-mcp-"));
     for (const [tool, input] of [
       ["gitee__create_issue", { title: "x" }],
@@ -974,29 +1045,29 @@ describe("custom/MCP tool approvals (codex-aligned)", () => {
       ["my_custom_tool", { query: "hello" }],
     ] as const) {
       await expect(evaluateRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
+        action: "allow",
+        risk: "LOW",
       });
     }
   });
 
-  it("allows external tools via exact-name or glob rules", async () => {
+  it("uses exact-name and glob rules to opt external tools into review", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-mcp-"));
-    const exact = config({ rules: [{ action: "allow", tool: "gitee__create_issue" }] });
+    const exact = config({ rules: [{ action: "ask", tool: "gitee__create_issue" }] });
     await expect(
       evaluateRiskRequest("gitee__create_issue", { title: "x" }, cwd, exact),
-    ).resolves.toMatchObject({ action: "allow" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
     await expect(
       evaluateRiskRequest("gitee__create_pr", { title: "y" }, cwd, exact),
-    ).resolves.toMatchObject({ action: "prompt" });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
 
-    const globbed = config({ rules: [{ action: "allow", tool: "mcp__*" }] });
+    const globbed = config({ rules: [{ action: "ask", tool: "mcp__*" }] });
     await expect(
       evaluateRiskRequest("mcp__github__get_issue", { owner: "a" }, cwd, globbed),
-    ).resolves.toMatchObject({ action: "allow" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
     await expect(
       evaluateRiskRequest("gitee__create_issue", { title: "x" }, cwd, globbed),
-    ).resolves.toMatchObject({ action: "prompt" });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
   it("keeps exact-name rules for built-in tools intact", async () => {

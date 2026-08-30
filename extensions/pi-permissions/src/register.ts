@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 
 import type {
@@ -20,6 +21,7 @@ import {
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
+import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   ConfigError,
@@ -33,13 +35,14 @@ import { defaultProtectedWritePaths, resolvePolicyPath } from "./filesystem-poli
 import { inspectRepositoryGitMetadata } from "./git-metadata.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
-import { createSandboxedGuardianToolRuntime } from "./guardian-tools.ts";
 import {
   appendGuardianTranscript,
   boundGuardianTranscript,
   type GuardianTranscriptEntry,
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
+import { NetworkBoundary } from "./network-boundary.ts";
+import { normalizeNetworkHost } from "./network-host.ts";
 import {
   renderExactRetryInstruction,
   renderPermissionErrorForAgent,
@@ -55,12 +58,20 @@ import {
 } from "./pi-approve-for-me-adapters.ts";
 import {
   type PiAction,
+  type PiActionCall,
   type PiActionOutcome,
   type PiExecutionOutcome,
   PiPermissionsRuntime,
   type PiTurnSnapshot,
 } from "./pi-permissions.ts";
-import { evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
+import {
+  createReviewResultRenderer,
+  createReviewStatusBridge,
+  plainReviewResultRenderer,
+  type ReviewPartialResult,
+  type ReviewRenderResult,
+} from "./review-renderer.ts";
+import { evaluateHostRiskRequest, evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 import {
   createSandboxedBashOperations,
@@ -68,6 +79,7 @@ import {
   createSandboxRuntimeConfig,
   looksLikeSandboxDenial,
   type SandboxManagerLike,
+  type SandboxNetworkAuthorize,
   type SandboxPolicy,
 } from "./sandbox.ts";
 import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
@@ -90,6 +102,7 @@ export interface RegisterExtensionOptions {
   guardianSessionManager?: GuardianReviewSessionManager;
   guardianPolicySource?: GuardianPolicySource;
   riskEvaluator?: typeof evaluateRiskRequest;
+  networkBoundary?: NetworkBoundary;
 }
 
 type ExecutablePermissionMode = PermissionMode;
@@ -183,17 +196,16 @@ function nextMode(mode: PermissionMode): PermissionMode {
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
   const sandboxManager = options.sandboxManager ?? new SrtSandboxManager();
+  const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
-  const riskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
+  const managedRiskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
+  const hostRiskEvaluator = options.riskEvaluator ?? evaluateHostRiskRequest;
   const autoReviewer =
-    options.autoReviewer ??
-    new PiAutoReviewer(undefined, options.guardianSessionManager, undefined, (cwd) =>
-      createSandboxedGuardianToolRuntime(cwd, sandboxManager),
-    );
+    options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
   let loadedKey: string | undefined;
   let configFailure: Error | undefined;
@@ -645,6 +657,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ) as unknown as Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">;
   }
 
+  function addReviewResultRenderer(
+    rendering: Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">,
+  ): Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult"> {
+    return {
+      ...rendering,
+      renderResult:
+        rendering.renderResult === undefined
+          ? undefined
+          : (createReviewResultRenderer(
+              rendering.renderResult as unknown as ReviewRenderResult,
+            ) as unknown as NonNullable<typeof rendering.renderResult>),
+    };
+  }
+
   // Per-tool concrete types derived from the base factories so strategy
   // bodies below stay cast-free.
   type BashInstance = ReturnType<typeof bashToolFactory>;
@@ -778,6 +804,63 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     throw error;
   };
 
+  const createSandboxNetworkAuthorizer =
+    (
+      call: PiActionCall,
+      policy: SandboxPolicy,
+      fallbackSignal?: AbortSignal,
+    ): SandboxNetworkAuthorize =>
+    async ({ host, port, signal }) => {
+      const activeSignal = signal ?? fallbackSignal;
+      if (
+        policy.network.deniedDomains.some((pattern) =>
+          matchesNetworkDomainPattern(pattern, host, port),
+        )
+      ) {
+        return { allowed: false, reason: "Network target is denied by sandbox policy" };
+      }
+      const normalizedHost = normalizeNetworkHost(host);
+      const exactLocalAllow =
+        normalizedHost !== undefined &&
+        (isIP(normalizedHost) !== 0 || normalizedHost === "localhost") &&
+        policy.network.allowedDomains.some((pattern) => {
+          const normalizedPattern = pattern.trim().toLowerCase();
+          return (
+            normalizedPattern !== "*" &&
+            !normalizedPattern.startsWith("*.") &&
+            matchesNetworkDomainPattern(pattern, host, port)
+          );
+        });
+      const endpoint = await networkBoundary.resolveEndpoint(
+        host,
+        port,
+        policy.network.trustedFakeIpRanges ?? [],
+        activeSignal,
+        {
+          allowLocalBinding: policy.network.allowLocalBinding === true,
+          allowExactLocalAllow: exactLocalAllow,
+        },
+      );
+      if (endpoint.kind === "deny") {
+        return { allowed: false, reason: endpoint.reason };
+      }
+      const decision = await permissions.authorizeCapability({
+        call,
+        capability: { kind: "network", host, port },
+        reason: "Network access requires approval",
+        summary: `${endpoint.endpoint.host}:${endpoint.endpoint.port}`,
+      });
+      if (decision.kind === "deny") {
+        return { allowed: false, reason: decision.error.reason };
+      }
+      if (activeSignal?.aborted) {
+        return { allowed: false, reason: "Operation aborted" };
+      }
+      // The Engine makes the authorization decision. The boundary contributes
+      // only the address-bound endpoint that the parent guard will consume.
+      return { allowed: true, endpoint: endpoint.endpoint };
+    };
+
   const authorizeHostTool = async (
     event: ToolCallEvent,
     ctx: ExtensionContext,
@@ -838,7 +921,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     let risk: RiskDecision | undefined;
     if (executionSnapshot.mode !== "yolo") {
       try {
-        risk = await riskEvaluator(
+        risk = await hostRiskEvaluator(
           actionTool,
           structuredClone(canonicalInput) as Record<string, unknown>,
           canonicalCwd,
@@ -893,7 +976,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): Promise<RiskDecision> => {
     try {
       const riskInput = structuredClone(input);
-      return await riskEvaluator(
+      return await managedRiskEvaluator(
         tool,
         riskInput,
         cwd,
@@ -916,11 +999,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): Promise<RuntimeDenialOutcome | undefined> => {
     if (!looksLikeSandboxDenial(evidence)) return undefined;
     const capability = await sandboxManager.classifyDenial?.(commandId);
-    if (!capability) return undefined;
-    const detail =
-      capability.kind === "network"
-        ? `Sandbox enforcement denied network access to ${capability.host} during execution`
-        : `Sandbox enforcement denied writing ${capability.path} during execution`;
+    // Network authorization happens before the connection through the SRT
+    // callback. A post-failure network denial is not replayable because it
+    // would reopen an entire command rather than authorize one connection.
+    if (capability?.kind !== "filesystem") return undefined;
+    const detail = `Sandbox enforcement denied writing ${capability.path} during execution`;
     return { kind: "capability-denied", request: capability, retryability: "safe", detail };
   };
 
@@ -967,12 +1050,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       capturedTranscript,
       canonicalCwd,
     );
+    const reviewBridge = createReviewStatusBridge(
+      onUpdate as unknown as (result: ReviewPartialResult) => void,
+      ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
+    );
     const action: PiAction<BashResult, PiGuardianReviewContext, BashParams> = {
       captured,
       kind: "sandbox",
       risk,
       reviewContext,
       signal,
+      reviewStatus: reviewBridge.binding,
       execute: async ({
         mode,
         policy,
@@ -988,7 +1076,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 call.id,
                 call.input,
                 signal,
-                onUpdate,
+                reviewBridge.onUpdate as BashOnUpdate,
               ),
             };
           }
@@ -1002,12 +1090,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             operations: createSandboxedBashOperations(sandboxManager, policy, {
               ...(plan?.kind === "git-init" ? { gitInitPlan: plan } : {}),
               commandId: call.id,
+              networkAuthorize: createSandboxNetworkAuthorizer(call, policy, signal),
             }),
           });
           return {
             kind: "completed",
             value: await sandboxCoordinator.runShared(
-              () => sandboxedBash.execute(call.id, call.input, signal, onUpdate),
+              () =>
+                sandboxedBash.execute(
+                  call.id,
+                  call.input,
+                  signal,
+                  reviewBridge.onUpdate as BashOnUpdate,
+                ),
               signal,
             ),
           };
@@ -1099,6 +1194,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ctx,
       canonicalCwd,
     );
+    const reviewBridge = createReviewStatusBridge(
+      onUpdate as unknown as (result: ReviewPartialResult) => void,
+      ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
+    );
     const event = {
       type: "tool_call" as const,
       toolCallId: actionId,
@@ -1117,12 +1216,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         canonicalCwd,
       ),
       signal,
+      reviewStatus: reviewBridge.binding,
       execute: async ({ mode, policy, call, ordinal }): Promise<PiActionOutcome<R>> => {
         try {
           if (mode === "unrestricted") {
             return {
               kind: "completed",
-              value: await bare(call.id, call.input, signal, onUpdate, canonicalCwd),
+              value: await bare(
+                call.id,
+                call.input,
+                signal,
+                reviewBridge.onUpdate as U,
+                canonicalCwd,
+              ),
             };
           }
           if (mode !== "sandboxed" || !policy) {
@@ -1134,7 +1240,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return {
             kind: "completed",
             value: await sandboxCoordinator.runShared(
-              () => sandboxed(policy, call.id, call.input, signal, onUpdate, canonicalCwd),
+              () =>
+                sandboxed(
+                  policy,
+                  call.id,
+                  call.input,
+                  signal,
+                  reviewBridge.onUpdate as U,
+                  canonicalCwd,
+                ),
               signal,
             ),
           };
@@ -1196,11 +1310,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseBash,
-    ...adoptHostTheme(codexBashToolSpec),
+    ...addReviewResultRenderer(adoptHostTheme(codexBashToolSpec)),
     label: "bash",
-    description: `${baseBash.description} When the active sandbox does not allow a required filesystem or network operation, request only the smallest exact permission needed and provide a concrete justification.`,
+    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and provide a concrete justification. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn- or session-scoped network grant.`,
     promptGuidelines: [
-      "When the active sandbox does not allow a required operation, request only the smallest exact permission needed and explain why.",
+      "When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and explain why. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn- or session-scoped network grant.",
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",
@@ -1209,14 +1323,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.registerTool({
     ...baseWrite,
-    ...adoptHostTheme(codexWriteToolSpec),
+    ...addReviewResultRenderer(adoptHostTheme(codexWriteToolSpec)),
     executionMode: "sequential",
     execute: executePermissionedWrite,
   });
 
   pi.registerTool({
     ...baseEdit,
-    ...adoptHostTheme(codexEditToolSpec),
+    ...addReviewResultRenderer(adoptHostTheme(codexEditToolSpec)),
     executionMode: "sequential",
     execute: executePermissionedEdit,
   });
@@ -1235,6 +1349,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }),
       scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
+    renderResult: createReviewResultRenderer(plainReviewResultRenderer) as unknown as NonNullable<
+      ToolDefinition<TSchema>["renderResult"]
+    >,
     async execute(id, params, _signal, _onUpdate, ctx) {
       const actionSignal = _signal;
       const captured = permissions.captureAction({
@@ -1288,6 +1405,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         toolName: "request_permissions",
         input: canonicalParams,
       } as ToolCallEvent;
+      const reviewBridge = createReviewStatusBridge(
+        _onUpdate as unknown as (result: ReviewPartialResult) => void,
+        ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
+      );
       const action: PiAction<WriteResult, PiGuardianReviewContext, typeof canonicalParams> = {
         captured,
         kind: "permission-amendment",
@@ -1304,6 +1425,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           canonicalCwd,
         ),
         signal: actionSignal,
+        reviewStatus: reviewBridge.binding,
         execute: async ({ mode, policy }): Promise<PiActionOutcome<WriteResult>> => {
           try {
             if (mode === "unrestricted") {

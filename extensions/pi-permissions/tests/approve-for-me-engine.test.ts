@@ -10,6 +10,7 @@ import {
   type GuardianReviewInput,
   type Invocation,
   type InvocationCall,
+  matchesNetworkDomainPattern,
   type RetryHandle,
   type ReviewEvent,
   type RuntimeOutcome,
@@ -106,6 +107,17 @@ function createEngine(
 }
 
 describe("ApproveForMeEngine public seam", () => {
+  it("matches network patterns with SRT's exact, wildcard, and port semantics", () => {
+    expect(matchesNetworkDomainPattern("example.com", "example.com", 443)).toBe(true);
+    expect(matchesNetworkDomainPattern("example.com", "api.example.com", 443)).toBe(false);
+    expect(matchesNetworkDomainPattern("*.example.com", "api.example.com", 443)).toBe(true);
+    expect(matchesNetworkDomainPattern("*.example.com", "example.com", 443)).toBe(false);
+    expect(matchesNetworkDomainPattern("example.com:443", "example.com", 443)).toBe(true);
+    expect(matchesNetworkDomainPattern("example.com:443", "example.com", 80)).toBe(false);
+    expect(matchesNetworkDomainPattern("[::1]", "::1", 443)).toBe(true);
+    expect(matchesNetworkDomainPattern("[2001:0db8::1]:443", "2001:db8::1", 443)).toBe(true);
+  });
+
   it("emits independently identified review lifecycles without letting observers block execution", async () => {
     const events: ReviewEvent[] = [];
     const engine = createApproveForMeEngine({
@@ -171,6 +183,170 @@ describe("ApproveForMeEngine public seam", () => {
 
     await expect(turn.execute(call(execute))).resolves.toEqual({ kind: "completed", value: "ok" });
     expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "approval",
+      guardian: async () => ({ kind: "approve" as const, rationale: "endpoint approved" }),
+      expectedCode: undefined,
+    },
+    {
+      label: "denial",
+      guardian: async () => ({ kind: "deny" as const, rationale: "endpoint denied" }),
+      expectedCode: "review-denied",
+    },
+    {
+      label: "review timeout",
+      guardian: async () => ({ kind: "timed-out" as const }),
+      expectedCode: "review-timeout",
+    },
+  ])(
+    "caches the inline reviewer terminal decision for one execution ($label)",
+    async ({ guardian, expectedCode }) => {
+      const { engine, review } = createEngine(guardian);
+      const turn = engine.beginTurn(snapshot());
+      const executor = vi.fn(async (attempt) => {
+        const request = {
+          call: attempt.call,
+          capability: { kind: "network" as const, host: "api.other.org", port: 443 },
+        };
+        const first = await turn.authorizeCapability(request);
+        const second = await turn.authorizeCapability(request);
+        expect(second).toEqual(first);
+        if (expectedCode === undefined) expect(first).toMatchObject({ kind: "allow" });
+        else expect(first).toMatchObject({ kind: "deny", error: { code: expectedCode } });
+        return completed("command continued");
+      });
+
+      await expect(turn.execute(call(executor))).resolves.toEqual({
+        kind: "completed",
+        value: "command continued",
+      });
+      expect(executor).toHaveBeenCalledOnce();
+      expect(review).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("allows an exact local address from the static policy without reviewer escalation", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: { allowedDomains: ["127.0.0.1"], deniedDomains: [] },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) =>
+      (
+        await turn.authorizeCapability({
+          call: attempt.call,
+          capability: { kind: "network", host: "127.0.0.1", port: 8080 },
+        })
+      ).kind === "allow"
+        ? completed("local")
+        : failed("local authorization unexpectedly denied"),
+    );
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "local",
+    });
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("lets allowLocalBinding send a private DNS capability through normal review", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "local target approved",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: { allowedDomains: [], deniedDomains: [], allowLocalBinding: true },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await turn.authorizeCapability({
+        call: attempt.call,
+        capability: { kind: "network", host: "router.internal", port: 80 },
+      });
+      return decision.kind === "allow"
+        ? completed("reviewed local")
+        : failed(decision.error.reason);
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "reviewed local",
+    });
+    expect(review).toHaveBeenCalledOnce();
+  });
+
+  it("keeps explicit network denies ahead of local-binding and static allows", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: {
+            allowedDomains: ["127.0.0.1"],
+            deniedDomains: ["127.0.0.1"],
+            allowLocalBinding: true,
+          },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await turn.authorizeCapability({
+        call: attempt.call,
+        capability: { kind: "network", host: "127.0.0.1", port: 8080 },
+      });
+      return decision.kind === "deny" ? completed(decision.error.code) : failed("must deny");
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "policy-denied",
+    });
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a wildcard as an exact local exception", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: { allowedDomains: ["*"], deniedDomains: [] },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await turn.authorizeCapability({
+        call: attempt.call,
+        capability: { kind: "network", host: "127.0.0.1", port: 8080 },
+      });
+      return decision.kind === "deny" ? completed(decision.error.code) : failed("must deny");
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "policy-denied",
+    });
     expect(review).not.toHaveBeenCalled();
   });
 
@@ -660,39 +836,33 @@ describe("ApproveForMeEngine public seam", () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
-  it("escalates a distinct runtime capability after a reviewed static grant", async () => {
+  it("does not replay a reviewed command after a mid-execution network denial", async () => {
     const sources: string[] = [];
     const { engine, review } = createEngine(async (request) => {
       sources.push(request.source);
       return { kind: "approve", rationale: "reviewed" };
     });
     const turn = engine.beginTurn(snapshot());
-    const execute = vi
-      .fn()
-      .mockImplementationOnce(async (attempt) => {
-        expect(attempt.ordinal).toBe(0);
-        expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
-        return denied({ kind: "network", host: "api.other.org" });
-      })
-      .mockImplementationOnce(async (attempt) => {
-        expect(attempt.ordinal).toBe(1);
-        expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
-        expect(attempt.lease.policy?.network.allowedDomains).toContain("api.other.org");
-        return completed("retried");
-      });
+    const execute = vi.fn().mockImplementationOnce(async (attempt) => {
+      expect(attempt.ordinal).toBe(0);
+      expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
+      return denied({ kind: "network", host: "api.other.org" });
+    });
 
-    await expect(
-      turn.execute(
-        call(execute, {
-          admission: reviewAdmission([
-            { kind: "filesystem", operation: "write", path: "/outside/result.txt" },
-          ]),
-        }),
-      ),
-    ).resolves.toEqual({ kind: "completed", value: "retried" });
-    expect(sources).toEqual(["preview", "runtime"]);
-    expect(review).toHaveBeenCalledTimes(2);
-    expect(execute).toHaveBeenCalledTimes(2);
+    const result = await turn.execute(
+      call(execute, {
+        admission: reviewAdmission([
+          { kind: "filesystem", operation: "write", path: "/outside/result.txt" },
+        ]),
+      }),
+    );
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: { code: "runtime-denied", reason: expect.stringContaining("before") },
+    });
+    expect(sources).toEqual(["preview"]);
+    expect(review).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("blocks a denied preview without invoking the executor", async () => {
@@ -2212,7 +2382,9 @@ describe("ApproveForMeEngine public seam", () => {
 
       expect(result.kind).toBe("blocked");
       if (result.kind === "blocked") {
-        expect(result.error.code).toBe("enforcement-unavailable");
+        expect(result.error.code).toBe(
+          testCase.request.kind === "network" ? "runtime-denied" : "enforcement-unavailable",
+        );
         expect(result.error.request).toEqual(testCase.request);
       }
       expect(executor).toHaveBeenCalledOnce();

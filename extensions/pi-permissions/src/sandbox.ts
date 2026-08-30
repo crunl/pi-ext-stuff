@@ -41,8 +41,33 @@ export interface SandboxPolicy {
   network: {
     allowedDomains: string[];
     deniedDomains: string[];
+    trustedFakeIpRanges?: string[];
+    allowLocalBinding?: boolean;
   };
 }
+
+export interface SandboxNetworkEndpoint {
+  readonly host: string;
+  readonly port: number;
+  /**
+   * DNS answers frozen by the parent boundary. The guard must try only these
+   * literals and must never resolve `host` again after authorization.
+   */
+  readonly addresses: readonly string[];
+}
+
+export interface SandboxNetworkAuthorization {
+  readonly allowed: boolean;
+  readonly endpoint?: SandboxNetworkEndpoint;
+  readonly reason?: string;
+}
+
+/** Authorization is evaluated by the Engine; the sandbox only transports it. */
+export type SandboxNetworkAuthorize = (input: {
+  host: string;
+  port: number;
+  signal?: AbortSignal;
+}) => Promise<SandboxNetworkAuthorization>;
 
 export interface SandboxProgram {
   executable: string;
@@ -67,6 +92,8 @@ export interface SandboxExecutionRequest {
   onStderr?: (chunk: Buffer) => void;
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
+  /** Per-command inline network authorization seam. */
+  networkAuthorize?: SandboxNetworkAuthorize;
 }
 
 export interface SandboxExecutionResult {
@@ -116,6 +143,8 @@ export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
     network: {
       allowedDomains: [],
       deniedDomains: [],
+      trustedFakeIpRanges: [],
+      allowLocalBinding: false,
     },
   };
 }
@@ -192,6 +221,8 @@ export function createSandboxRuntimeConfig(
     network: {
       allowedDomains: [...config.network.allowedDomains],
       deniedDomains: [...config.network.deniedDomains],
+      trustedFakeIpRanges: [...config.network.trustedFakeIpRanges],
+      allowLocalBinding: config.network.allowLocalBinding,
     },
   };
 }
@@ -406,7 +437,11 @@ async function prepareGitInit(cwd: string, policy: SandboxPolicy): Promise<Prepa
 export function createSandboxedBashOperations(
   manager: SandboxManagerLike,
   customConfig?: SandboxPolicy,
-  options: { gitInitPlan?: GitInitExecutionPlan; commandId?: string } = {},
+  options: {
+    gitInitPlan?: GitInitExecutionPlan;
+    commandId?: string;
+    networkAuthorize?: SandboxNetworkAuthorize;
+  } = {},
 ): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -433,9 +468,23 @@ export function createSandboxedBashOperations(
       const preparation = gitInitPlan
         ? await prepareGitInit(cwd, customConfig ?? createGuardianReadOnlySandboxConfig())
         : undefined;
+      const executionPolicy =
+        preparation?.policy ?? customConfig ?? createGuardianReadOnlySandboxConfig();
+      // SRT injects a private-target NO_PROXY set by default. When the
+      // sandbox-owned callback is active, local/private exceptions must still
+      // pass through the authenticated parent guard so its exact ticket and
+      // address binding remain authoritative. Preserve the caller's other
+      // environment values; allowLocalBinding controls whether the boundary
+      // approves those targets, not whether they bypass the guard. The SRT
+      // adapter also repeats this override inside
+      // the POSIX command because SRT bakes its own NO_PROXY values into the
+      // sandbox argv after the spawn environment is assembled.
+      const executionEnv = options.networkAuthorize
+        ? { ...(env ?? {}), NO_PROXY: "", no_proxy: "" }
+        : env;
       try {
         const result = await executeSandboxProgram(manager, {
-          policy: preparation?.policy ?? customConfig ?? createGuardianReadOnlySandboxConfig(),
+          policy: executionPolicy,
           program: gitInitPlan
             ? { executable: gitInitPlan.executable, args: gitInitPlan.args }
             : { executable: WRAP_SHELL, args: ["-c", command] },
@@ -446,7 +495,7 @@ export function createSandboxedBashOperations(
                 envMode: "replace" as const,
                 allowGitConfig: true,
               }
-            : { env }),
+            : { env: executionEnv }),
           signal,
           stdin: "ignore",
           timeoutMs:
@@ -456,6 +505,9 @@ export function createSandboxedBashOperations(
                 ? timeout * 1000
                 : undefined,
           ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
+          ...(options.networkAuthorize === undefined
+            ? {}
+            : { networkAuthorize: options.networkAuthorize }),
           onStdout: onData,
           onStderr: onData,
         });

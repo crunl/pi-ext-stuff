@@ -7,6 +7,8 @@ import {
   createApproveForMeEngine,
   type DenialNotice,
   type AdmissionPlan as EngineAdmissionPlan,
+  type CapabilityAuthorizationDecision as EngineCapabilityAuthorizationDecision,
+  type CapabilityAuthorizationRequest as EngineCapabilityAuthorizationRequest,
   type CapabilityRequestInput as EngineCapabilityRequestInput,
   type ExecutionAttempt as EngineExecutionAttempt,
   type PermissionAmendment as EnginePermissionAmendment,
@@ -23,7 +25,7 @@ import {
 import type { StructuredExecutionPlan } from "./execution-plan.ts";
 import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
 import type { ReviewUi } from "./review-presenter.ts";
-import { ReviewPresenter } from "./review-presenter.ts";
+import { ReviewPresenter, type ReviewStatusBinding } from "./review-presenter.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 
@@ -96,6 +98,8 @@ export interface PiAction<Result, ReviewContext = undefined, Input = unknown> {
   readonly permission?: PiPermissionRequest;
   readonly reviewContext: ReviewContext;
   readonly signal?: AbortSignal;
+  /** Receives transient reviewer state for this exact tool row. */
+  readonly reviewStatus?: ReviewStatusBinding;
   readonly execute: (attempt: PiExecutionAttempt<Input>) => Promise<PiActionOutcome<Result>>;
 }
 
@@ -190,7 +194,6 @@ export interface PiPermissionsOptions<ReviewContext = undefined> {
     context: ExtensionContext | undefined,
     newlyPaused: boolean,
   ) => void;
-  reviewIcon?: string;
 }
 
 export interface PiPermissions<ReviewContext = undefined> {
@@ -204,6 +207,11 @@ export interface PiPermissions<ReviewContext = undefined> {
   submit<Result, Input = unknown>(
     action: PiAction<Result, ReviewContext, Input>,
   ): Promise<PiExecutionOutcome<Result>>;
+  authorizeCapability(
+    request: Omit<EngineCapabilityAuthorizationRequest, "call"> & {
+      call: PiActionCall;
+    },
+  ): Promise<EngineCapabilityAuthorizationDecision>;
   captureAction<Input>(call: PiActionCall<Input>): PiCapturedAction<Input>;
   closeTurn(reason?: string): void;
   invalidate(reason: string): void;
@@ -245,9 +253,7 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
 
   constructor(options: PiPermissionsOptions<ReviewContext> = {}) {
     this.options = options;
-    this.presenter = new ReviewPresenter({
-      icon: options.reviewIcon,
-    });
+    this.presenter = new ReviewPresenter();
     this.engine = createApproveForMeEngine<ReviewContext>({
       guardian: options.guardian,
       policy: options.policy,
@@ -300,6 +306,9 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
       };
     }
     const capturedCall = action.captured.call;
+    const unbindReviewStatus = action.reviewStatus
+      ? this.presenter.bind(capturedCall.id, action.reviewStatus)
+      : undefined;
     const execute = action.execute;
     const admission = admissionForAction(action, capturedCall.tool);
     const intent = intentForAction(action, admission);
@@ -334,23 +343,53 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
         return toEngineRuntimeOutcome(outcome);
       },
     };
-    return fromEngineExecutionOutcome(await turn.execute(invocation));
+    try {
+      return fromEngineExecutionOutcome(await turn.execute(invocation));
+    } finally {
+      unbindReviewStatus?.();
+    }
+  }
+
+  async authorizeCapability(
+    request: Omit<EngineCapabilityAuthorizationRequest, "call"> & {
+      call: PiActionCall;
+    },
+  ): Promise<EngineCapabilityAuthorizationDecision> {
+    const turn = this.activeTurn;
+    if (!turn) {
+      return {
+        kind: "deny",
+        error: { code: "no-active-turn", reason: NO_ACTIVE_TURN.reason },
+      };
+    }
+    return turn.authorizeCapability({
+      ...request,
+      call: {
+        id: request.call.id,
+        tool: request.call.tool,
+        input: request.call.input,
+        cwd: resolve(request.call.cwd),
+        ...(request.call.metadata === undefined ? {} : { metadata: request.call.metadata }),
+      },
+    });
   }
 
   closeTurn(reason = "turn closed"): void {
     const turn = this.activeTurn;
+    const ui = reviewUi(this.currentContext);
     this.activeTurn = undefined;
     this.currentContext = undefined;
     this.circuitPauseNotified = false;
-    this.presenter.reset();
+    this.presenter.reset(ui);
     turn?.close(reason);
   }
 
   invalidate(reason: string): void {
+    const ui = reviewUi(this.currentContext);
     this.activeTurn = undefined;
     this.currentContext = undefined;
     this.circuitPauseNotified = false;
-    this.presenter.reset();
+    this.presenter.reset(ui);
     this.engine.invalidate(reason);
   }
 

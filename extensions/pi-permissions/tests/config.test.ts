@@ -38,6 +38,7 @@ describe("permissions config", () => {
     expect(DEFAULT_CONFIG.sandbox.enabled).toBe(true);
     expect(DEFAULT_CONFIG.sandbox.filesystem.allowWrite).toEqual([".", "/tmp"]);
     expect(DEFAULT_CONFIG.sandbox.network.allowedDomains).toEqual([]);
+    expect(DEFAULT_CONFIG.sandbox.network.deniedDomains).toEqual([]);
   });
 
   it("matches Codex workspace-write without extra sensitive-file denials", () => {
@@ -86,6 +87,41 @@ describe("permissions config", () => {
     expect(() =>
       validatePermissionsConfig({ rules: [{ action: "deny", tool: "bash", unknownRule: true }] }),
     ).toThrow(/rules\[0\]\.unknownRule/);
+  });
+
+  it("rejects malformed SRT network patterns and fake-IP ranges while loading", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: { network: { trustedFakeIpRanges: ["198.18.0.0/99"] } },
+      }),
+    ).toThrow(/trustedFakeIpRanges/);
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: { network: { trustedFakeIpRanges: ["198.18.0.0 /15"] } },
+      }),
+    ).toThrow(/trustedFakeIpRanges/);
+    expect(() =>
+      validatePermissionsConfig({ sandbox: { network: { deniedDomains: ["::1"] } } }),
+    ).toThrow(/deniedDomains/);
+    expect(() =>
+      validatePermissionsConfig({ sandbox: { network: { allowedDomains: ["*"] } } }),
+    ).toThrow(/allowedDomains/);
+    expect(() =>
+      validatePermissionsConfig({ sandbox: { network: { allowedDomains: ["*.com"] } } }),
+    ).toThrow(/allowedDomains/);
+    expect(
+      validatePermissionsConfig({
+        sandbox: {
+          network: {
+            allowedDomains: ["*.example.com:443"],
+            deniedDomains: ["[::1]:443", "*:22"],
+          },
+        },
+      }).sandbox.network,
+    ).toMatchObject({
+      allowedDomains: ["*.example.com:443"],
+      deniedDomains: ["[::1]:443", "*:22"],
+    });
   });
 
   it.each(["timeoutMs", "maxAttempts", "maxConsecutiveDenials"] as const)(

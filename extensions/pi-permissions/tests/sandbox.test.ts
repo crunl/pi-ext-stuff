@@ -16,7 +16,6 @@ import {
   DEFAULT_FILE_OPERATION_TIMEOUT_MS,
   type SandboxExecutionRequest,
   type SandboxExecutionResult,
-  type SandboxManagerLike,
   type SandboxPolicy,
   withAdditionalWriteRoots,
 } from "../src/sandbox.ts";
@@ -131,19 +130,18 @@ function runTestCommand(command: string, request: SandboxExecutionRequest) {
 
 function testSandboxManager(handler: TestWrap = async (command) => command) {
   const wrapWithSandbox = vi.fn<TestWrap>(handler);
-  const manager: SandboxManagerLike & { wrapWithSandbox: ReturnType<typeof vi.fn<TestWrap>> } = {
+  const execute = vi.fn(async (request: SandboxExecutionRequest) => {
+    const command = [request.program.executable, ...request.program.args].map(shellQuote).join(" ");
+    return runTestCommand(
+      await wrapWithSandbox(command, undefined, request.policy, request.signal),
+      request,
+    );
+  });
+  const manager = {
     initialize: vi.fn(async () => undefined),
     reset: vi.fn(async () => undefined),
     wrapWithSandbox,
-    execute: vi.fn(async (request: SandboxExecutionRequest) => {
-      const command = [request.program.executable, ...request.program.args]
-        .map(shellQuote)
-        .join(" ");
-      return runTestCommand(
-        await wrapWithSandbox(command, undefined, request.policy, request.signal),
-        request,
-      );
-    }),
+    execute,
   };
   return manager;
 }
@@ -360,6 +358,8 @@ describe("sandbox integration", () => {
       network: {
         allowedDomains: [],
         deniedDomains: [],
+        trustedFakeIpRanges: [],
+        allowLocalBinding: false,
       },
     });
 
@@ -378,6 +378,8 @@ describe("sandbox integration", () => {
       network: {
         allowedDomains: [],
         deniedDomains: [],
+        trustedFakeIpRanges: [],
+        allowLocalBinding: false,
       },
     });
   });
@@ -513,6 +515,59 @@ describe("sandbox integration", () => {
     );
     expect(Buffer.concat(output).toString()).toBe("sandboxed");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("forces local targets through the parent guard when inline network auth is active", async () => {
+    const manager = testSandboxManager(async () => "true");
+    const runtime: SandboxPolicy = {
+      ...createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd()),
+      network: {
+        ...createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd()).network,
+        allowLocalBinding: false,
+      },
+    };
+    const networkAuthorize = vi.fn(async () => ({ allowed: true }));
+
+    await createSandboxedBashOperations(manager, runtime, { networkAuthorize }).exec(
+      "true",
+      process.cwd(),
+      {
+        onData: () => undefined,
+        env: {
+          NO_PROXY: "localhost,internal.example",
+          no_proxy: "localhost,internal.example",
+          CUSTOM_TEST_ENV: "preserved",
+        },
+      },
+    );
+
+    const request = manager.execute.mock.calls[0]?.[0];
+    expect(request?.env).toMatchObject({
+      NO_PROXY: "",
+      no_proxy: "",
+      CUSTOM_TEST_ENV: "preserved",
+    });
+  });
+
+  it("routes local binding through the callback when explicit local binding is enabled", async () => {
+    const manager = testSandboxManager(async () => "true");
+    const runtime: SandboxPolicy = {
+      ...createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd()),
+      network: {
+        ...createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, process.cwd()).network,
+        allowLocalBinding: true,
+      },
+    };
+
+    await createSandboxedBashOperations(manager, runtime, {
+      networkAuthorize: async () => ({ allowed: true }),
+    }).exec("true", process.cwd(), {
+      onData: () => undefined,
+      env: { NO_PROXY: "localhost", no_proxy: "localhost" },
+    });
+
+    const request = manager.execute.mock.calls[0]?.[0];
+    expect(request?.env).toMatchObject({ NO_PROXY: "", no_proxy: "" });
   });
 
   it("gives bash a default host deadline when timeout is omitted", async () => {

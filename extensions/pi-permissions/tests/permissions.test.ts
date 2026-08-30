@@ -253,8 +253,10 @@ describe("narrow static risk contract", () => {
     "http://10.0.0.1/",
     "http://100.64.0.1/",
     "http://169.254.1.1/",
+    "http://192.0.0.1/",
     "http://192.0.2.1/",
     "http://198.18.0.1/",
+    "http://198.19.255.254/",
     "http://198.51.100.1/",
     "http://203.0.113.1/",
     "http://224.0.0.1/",
@@ -262,15 +264,24 @@ describe("narrow static risk contract", () => {
     "http://[::1]/",
     "http://[::127.0.0.1]/",
     "http://[::ffff:127.0.0.1]/",
-    "http://[64:ff9b::127.0.0.1]/",
-    "http://[64:ff9b:1::127.0.0.1]/",
-    "http://[2002:7f00:1::]/",
     "http://[fe80::1]/",
     "http://[ff00::1]/",
-    "http://[2001:db8::1]/",
-    "http://[2001:2::1]/",
   ])("makes special-use target %s hard", (url) => {
     expect(classifyRisk(normalizeToolCall("WebFetch", { url }, "/work/repo"))).toBe("HARD");
+  });
+
+  it.each([
+    "192.0.1.1",
+    "192.88.99.1",
+    "198.52.100.1",
+    "203.0.114.1",
+    "2001:db8::1",
+    "2001:2::1",
+    "2002:7f00:1::",
+    "64:ff9b::127.0.0.1",
+    "64:ff9b:1::127.0.0.1",
+  ])("keeps Codex-public target %s public", (host) => {
+    expect(isPublicNetworkHost(host)).toBe(true);
   });
 
   it("keeps ordinary workspace writes low", () => {

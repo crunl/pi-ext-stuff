@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { join } from "node:path";
-
+import { isValidNetworkCidr } from "./network-host.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export interface PermissionsConfig {
@@ -19,7 +20,14 @@ export interface PermissionsConfig {
       denyRead: string[];
       denyWrite: string[];
     };
-    network: { allowedDomains: string[]; deniedDomains: string[] };
+    network: {
+      allowedDomains: string[];
+      deniedDomains: string[];
+      /** CIDRs reserved for a user-managed TUN/fake-IP resolver. */
+      trustedFakeIpRanges: string[];
+      /** High privilege: SRT may allow local bind/inbound and loopback outbound. */
+      allowLocalBinding: boolean;
+    };
   };
   rules: Array<{ action: "allow" | "ask" | "deny"; tool: string; pattern?: string }>;
 }
@@ -42,6 +50,8 @@ export type PermissionsConfigOverlay = {
     network?: {
       allowedDomains?: string[];
       deniedDomains?: string[];
+      trustedFakeIpRanges?: string[];
+      allowLocalBinding?: boolean;
     };
   };
   rules?: PermissionsConfig["rules"];
@@ -67,7 +77,12 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
     },
     network: {
       allowedDomains: [],
-      deniedDomains: ["localhost", "127.0.0.1", "::1", "169.254.169.254"],
+      // The network boundary rejects private/special targets by default. Keep
+      // this list empty so an explicit exact local allow can model Codex's
+      // narrow exception without being shadowed by a built-in deny rule.
+      deniedDomains: [],
+      trustedFakeIpRanges: [],
+      allowLocalBinding: false,
     },
   },
   rules: [],
@@ -95,6 +110,67 @@ function expectBoolean(value: unknown, path: string): boolean {
 function expectStrings(value: unknown, path: string): string[] {
   if (!Array.isArray(value)) throw new ConfigError(`${path} must be an array of strings`);
   return value.map((entry, index) => expectString(entry, `${path}[${index}]`));
+}
+
+function expectNetworkCidrs(value: unknown, path: string): string[] {
+  return expectStrings(value, path).map((entry, index) => {
+    if (!isValidNetworkCidr(entry)) {
+      throw new ConfigError(`${path}[${index}] must be a valid CIDR range`);
+    }
+    return entry;
+  });
+}
+
+function validDomainPortSuffix(value: string): boolean {
+  return /^:[1-9][0-9]{0,4}$/.test(value) && Number(value.slice(1)) <= 65535;
+}
+
+/** Match SRT's domain-port grammar before activation, so malformed entries fail at load. */
+function isValidNetworkDomainPattern(value: string, allowDenyAll: boolean): boolean {
+  if (value.length === 0 || value.trim() !== value || /\s/.test(value)) return false;
+  let host = value;
+  if (value.startsWith("[")) {
+    const close = value.indexOf("]");
+    if (close < 0 || isIP(value.slice(1, close)) !== 6) return false;
+    host = value.slice(1, close);
+    const suffix = value.slice(close + 1);
+    return suffix === "" || validDomainPortSuffix(suffix);
+  }
+  const firstColon = value.indexOf(":");
+  if (firstColon >= 0) {
+    if (value.indexOf(":", firstColon + 1) >= 0) return false;
+    host = value.slice(0, firstColon);
+    if (!validDomainPortSuffix(value.slice(firstColon))) return false;
+  }
+  if (host === "*") return allowDenyAll;
+  if (host.includes("://") || host.includes("/") || host.includes(":")) return false;
+  if (isIP(host) === 4 || host === "localhost") return true;
+  if (host.startsWith("*.")) {
+    const domain = host.slice(2);
+    const parts = domain.split(".");
+    return (
+      parts.length >= 2 &&
+      domain.length > 0 &&
+      !domain.startsWith(".") &&
+      !domain.endsWith(".") &&
+      parts.every((part) => part.length > 0) &&
+      !domain.includes("*")
+    );
+  }
+  return host.includes(".") && !host.startsWith(".") && !host.endsWith(".") && !host.includes("*");
+}
+
+function expectNetworkDomainPatterns(
+  value: unknown,
+  path: string,
+  allowDenyAll: boolean,
+): string[] {
+  return expectStrings(value, path).map((entry, index) => {
+    if (!isValidNetworkDomainPattern(entry, allowDenyAll)) {
+      throw new ConfigError(`${path}[${index}] must be a valid SRT domain pattern`);
+    }
+    return entry;
+  });
 }
 
 function rejectUnknownKeys(
@@ -205,7 +281,7 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         throw new ConfigError("sandbox.network must be an object");
       rejectUnknownKeys(
         input.sandbox.network,
-        ["allowedDomains", "deniedDomains"],
+        ["allowedDomains", "deniedDomains", "trustedFakeIpRanges", "allowLocalBinding"],
         "sandbox.network",
       );
       const network: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["network"]> = {};
@@ -213,17 +289,35 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         "allowedDomains" in input.sandbox.network &&
         input.sandbox.network.allowedDomains !== undefined
       )
-        network.allowedDomains = expectStrings(
+        network.allowedDomains = expectNetworkDomainPatterns(
           input.sandbox.network.allowedDomains,
           "sandbox.network.allowedDomains",
+          false,
         );
       if (
         "deniedDomains" in input.sandbox.network &&
         input.sandbox.network.deniedDomains !== undefined
       )
-        network.deniedDomains = expectStrings(
+        network.deniedDomains = expectNetworkDomainPatterns(
           input.sandbox.network.deniedDomains,
           "sandbox.network.deniedDomains",
+          true,
+        );
+      if (
+        "trustedFakeIpRanges" in input.sandbox.network &&
+        input.sandbox.network.trustedFakeIpRanges !== undefined
+      )
+        network.trustedFakeIpRanges = expectNetworkCidrs(
+          input.sandbox.network.trustedFakeIpRanges,
+          "sandbox.network.trustedFakeIpRanges",
+        );
+      if (
+        "allowLocalBinding" in input.sandbox.network &&
+        input.sandbox.network.allowLocalBinding !== undefined
+      )
+        network.allowLocalBinding = expectBoolean(
+          input.sandbox.network.allowLocalBinding,
+          "sandbox.network.allowLocalBinding",
         );
       sandbox.network = network;
     }
@@ -270,6 +364,10 @@ function applyOverlay(
       config.sandbox.network.allowedDomains = [...overlay.sandbox.network.allowedDomains];
     if (overlay.sandbox.network?.deniedDomains !== undefined)
       config.sandbox.network.deniedDomains = [...overlay.sandbox.network.deniedDomains];
+    if (overlay.sandbox.network?.trustedFakeIpRanges !== undefined)
+      config.sandbox.network.trustedFakeIpRanges = [...overlay.sandbox.network.trustedFakeIpRanges];
+    if (overlay.sandbox.network?.allowLocalBinding !== undefined)
+      config.sandbox.network.allowLocalBinding = overlay.sandbox.network.allowLocalBinding;
   }
   if (overlay.rules !== undefined) config.rules = structuredClone(overlay.rules);
   return config;

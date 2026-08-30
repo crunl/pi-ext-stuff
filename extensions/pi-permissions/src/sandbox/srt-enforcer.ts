@@ -5,6 +5,7 @@ import {
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
 import { hasGlobSyntax } from "../filesystem-policy.ts";
+import { normalizeNetworkHost } from "../network-host.ts";
 import type {
   SandboxDenialCapability,
   SandboxExecutionRequest,
@@ -13,6 +14,7 @@ import type {
   SandboxPolicy,
 } from "../sandbox.ts";
 import { errorMessage } from "../unknown-value.ts";
+import { SandboxConnectGuard, shouldBypassParentProxy } from "./connect-guard.ts";
 import { srtProcessCoordinator } from "./srt-coordinator.ts";
 
 export const SRT_ACTIVATION_TIMEOUT_MS = 15_000;
@@ -24,6 +26,11 @@ const POSIX_SHELL = "/bin/bash";
 /** Bounded wait for asynchronously-delivered denial events after a failure. */
 const DENIAL_DRAIN_TIMEOUT_MS = 1_000;
 const DENIAL_DRAIN_POLL_MS = 100;
+
+// SRT's manager is process-global. Keep one extension-owned parent guard next
+// to that singleton so two registrations cannot start with different guards
+// and then hand tickets to the wrong listener.
+const processConnectGuard = new SandboxConnectGuard();
 
 export type SrtRuntimeLike = Pick<
   typeof SrtManager,
@@ -63,6 +70,9 @@ export function denialCapabilityFromViolationLine(
 const processSandboxState: {
   basePolicy?: SandboxPolicy;
   initialized: boolean;
+  networkAuthorize?: SandboxExecutionRequest["networkAuthorize"];
+  networkSignal?: AbortSignal;
+  connectGuard?: SandboxConnectGuard;
 } = { initialized: false };
 
 function sandboxUnavailable(reason: string): Error {
@@ -84,7 +94,11 @@ export function assertSrtPolicySupported(
   }
 }
 
-function toSrtConfig(policy: SandboxPolicy, allowGitConfig = false): SandboxRuntimeConfig {
+function toSrtConfig(
+  policy: SandboxPolicy,
+  allowGitConfig = false,
+  connectGuard?: SandboxConnectGuard,
+): SandboxRuntimeConfig {
   assertSrtPolicySupported(policy);
   return {
     filesystem: {
@@ -94,10 +108,52 @@ function toSrtConfig(policy: SandboxPolicy, allowGitConfig = false): SandboxRunt
       ...(allowGitConfig ? { allowGitConfig: true } : {}),
     },
     network: {
-      allowedDomains: [...policy.network.allowedDomains],
+      // The callback is the sole authorization seam in production. Keeping
+      // SRT's own allow list empty forces every unlisted request through the
+      // same Engine decision and lets the parent guard bind a DNS answer.
+      allowedDomains: connectGuard ? [] : [...policy.network.allowedDomains],
       deniedDomains: [...policy.network.deniedDomains],
+      ...(policy.network.allowLocalBinding === undefined
+        ? {}
+        : { allowLocalBinding: policy.network.allowLocalBinding }),
+      ...(connectGuard?.parentProxyUrl
+        ? {
+            parentProxy: {
+              http: connectGuard.parentProxyUrl,
+              https: connectGuard.parentProxyUrl,
+              noProxy: "",
+            },
+          }
+        : {}),
     },
   };
+}
+
+async function askNetwork(params: { host: string; port?: number }): Promise<boolean> {
+  if (params.port === undefined || !Number.isInteger(params.port)) return false;
+  const authorization = await processSandboxState.networkAuthorize?.({
+    host: params.host,
+    port: params.port,
+    signal: processSandboxState.networkSignal,
+  });
+  if (!authorization?.allowed || !authorization.endpoint) return false;
+  if (processSandboxState.networkSignal?.aborted) return false;
+  const requestedHost = normalizeNetworkHost(params.host);
+  const endpointHost = normalizeNetworkHost(authorization.endpoint.host);
+  if (
+    !requestedHost ||
+    !endpointHost ||
+    requestedHost !== endpointHost ||
+    authorization.endpoint.port !== params.port
+  ) {
+    return false;
+  }
+  // SRT's parent-proxy seam unconditionally bypasses its parent for loopback
+  // destinations. The approved endpoint is still validated above (and
+  // localhost is restricted to frozen loopback DNS answers by NetworkBoundary),
+  // but no guard ticket can be consumed on this third-party runtime path.
+  if (shouldBypassParentProxy(requestedHost, undefined)) return true;
+  return processSandboxState.connectGuard?.issue(authorization.endpoint) ?? false;
 }
 
 function clonePolicy(policy: SandboxPolicy): SandboxPolicy {
@@ -112,11 +168,26 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function serializeProgram(program: SandboxExecutionRequest["program"]): string {
+function serializeProgram(
+  program: SandboxExecutionRequest["program"],
+  options: { forceProxyForLocalTargets?: boolean } = {},
+): string {
   if (!isAbsolute(program.executable)) {
     throw sandboxUnavailable(`program executable must be absolute: ${program.executable}`);
   }
-  return [program.executable, ...program.args].map(shellQuote).join(" ");
+  const command = [program.executable, ...program.args].map(shellQuote).join(" ");
+  // On POSIX, SRT bakes its private-target NO_PROXY list into the outer
+  // sandbox command (`--setenv` on bwrap / env assignments on seatbelt).
+  // A request.env override therefore cannot reach the actual tool. Prefix
+  // the tool itself with empty assignments whenever the sandbox-owned
+  // callback is active, so every local/private target (including the
+  // explicit allowLocalBinding mode) traverses the authenticated parent
+  // guard. Windows intentionally removes NO_PROXY from its child overlay,
+  // so there is no equivalent prefix there.
+  if (options.forceProxyForLocalTargets && process.platform !== "win32") {
+    return `NO_PROXY="" no_proxy="" ${command}`;
+  }
+  return command;
 }
 
 function killProcessTree(child: ChildProcess): void {
@@ -251,7 +322,18 @@ function deadlineSignal(
  * safely quoted command string before returning a spawn argv.
  */
 export class SrtSandboxManager implements SandboxManagerLike {
-  constructor(private readonly runtime: SrtRuntimeLike = SrtManager) {}
+  private readonly connectGuard: SandboxConnectGuard | undefined;
+
+  constructor(
+    private readonly runtime: SrtRuntimeLike = SrtManager,
+    connectGuard?: SandboxConnectGuard,
+  ) {
+    // Test doubles may inject a guard to exercise the seam. The real SRT
+    // singleton must always use the one process-owned guard: a second Pi
+    // registration must not close or mint tickets for another registration's
+    // listener while the coordinator serializes the shared runtime.
+    this.connectGuard = runtime === SrtManager ? processConnectGuard : connectGuard;
+  }
 
   async initialize(config: SandboxPolicy): Promise<void> {
     await this.activate(config);
@@ -276,7 +358,13 @@ export class SrtSandboxManager implements SandboxManagerLike {
           if (dependency.errors.length > 0) {
             throw sandboxUnavailable(dependency.errors.join("; "));
           }
-          await this.runtime.initialize(toSrtConfig(snapshot), undefined, true);
+          await this.connectGuard?.start();
+          processSandboxState.connectGuard = this.connectGuard;
+          await this.runtime.initialize(
+            toSrtConfig(snapshot, false, this.connectGuard),
+            askNetwork,
+            true,
+          );
           if (activation.signal.aborted) {
             await this.resetSrt();
             throw new Error("aborted");
@@ -285,8 +373,14 @@ export class SrtSandboxManager implements SandboxManagerLike {
           processSandboxState.initialized = true;
           srtProcessCoordinator.clearPoison();
         } catch (error) {
+          await this.connectGuard?.close().catch(() => undefined);
+          if (processSandboxState.connectGuard === this.connectGuard) {
+            processSandboxState.connectGuard = undefined;
+          }
           processSandboxState.initialized = false;
           processSandboxState.basePolicy = undefined;
+          processSandboxState.networkAuthorize = undefined;
+          processSandboxState.networkSignal = undefined;
           srtProcessCoordinator.markPoisoned();
           throw error instanceof Error ? error : sandboxUnavailable(errorMessage(error));
         }
@@ -295,6 +389,8 @@ export class SrtSandboxManager implements SandboxManagerLike {
       () => {
         processSandboxState.initialized = false;
         processSandboxState.basePolicy = undefined;
+        processSandboxState.networkAuthorize = undefined;
+        processSandboxState.networkSignal = undefined;
         srtProcessCoordinator.markPoisoned();
         return new Error(
           activation.timedOut() ? `timeout:${SRT_ACTIVATION_TIMEOUT_MS / 1000}` : "aborted",
@@ -313,8 +409,14 @@ export class SrtSandboxManager implements SandboxManagerLike {
           srtProcessCoordinator.markPoisoned();
           throw sandboxUnavailable(errorMessage(error));
         } finally {
+          await this.connectGuard?.close().catch(() => undefined);
+          if (processSandboxState.connectGuard === this.connectGuard) {
+            processSandboxState.connectGuard = undefined;
+          }
           processSandboxState.initialized = false;
           processSandboxState.basePolicy = undefined;
+          processSandboxState.networkAuthorize = undefined;
+          processSandboxState.networkSignal = undefined;
         }
       },
       activation.signal,
@@ -322,6 +424,8 @@ export class SrtSandboxManager implements SandboxManagerLike {
         srtProcessCoordinator.markPoisoned();
         processSandboxState.initialized = false;
         processSandboxState.basePolicy = undefined;
+        processSandboxState.networkAuthorize = undefined;
+        processSandboxState.networkSignal = undefined;
         return new Error(
           activation.timedOut() ? `timeout:${SRT_ACTIVATION_TIMEOUT_MS / 1000}` : "aborted",
         );
@@ -339,75 +443,102 @@ export class SrtSandboxManager implements SandboxManagerLike {
         if (srtProcessCoordinator.isPoisoned) {
           throw sandboxUnavailable("executor is poisoned after a previous cleanup failure");
         }
-        let base = processSandboxState.basePolicy;
-        if (!processSandboxState.initialized || !base) {
-          try {
-            await this.initializeSrt(request.policy, signal);
-            if (signal.aborted) {
-              processSandboxState.initialized = false;
-              processSandboxState.basePolicy = undefined;
-              await this.resetSrt();
-              throw new Error("aborted");
-            }
-          } catch (error) {
-            srtProcessCoordinator.markPoisoned();
-            throw error instanceof Error ? error : sandboxUnavailable(errorMessage(error));
-          }
-          base = clonePolicy(request.policy);
-          processSandboxState.basePolicy = base;
-          processSandboxState.initialized = true;
-        }
-        if (signal.aborted) throw new Error("aborted");
-        const derived = clonePolicy(request.policy);
-        assertSrtPolicySupported(derived);
-        const changed = !samePolicy(base, derived);
-        let bodyError: unknown;
-        let bodyFailed = false;
-        let result: SandboxExecutionResult | undefined;
-        let lifecycleError: unknown;
+        const previousNetworkAuthorize = processSandboxState.networkAuthorize;
+        const previousNetworkSignal = processSandboxState.networkSignal;
+        processSandboxState.networkAuthorize = request.networkAuthorize;
+        processSandboxState.networkSignal = signal;
+        this.connectGuard?.resetExecution();
         try {
-          if (changed || request.allowGitConfig) {
-            this.runtime.updateConfig(toSrtConfig(derived, request.allowGitConfig === true));
-          }
-          const command = serializeProgram(request.program);
-          const wrapped = await this.runtime.wrapWithSandboxArgv(
-            command,
-            POSIX_SHELL,
-            undefined,
-            signal,
-            request.cwd,
-            {
-              ...(request.commandId === undefined ? {} : { commandId: request.commandId }),
-              ...(request.commandText === undefined ? {} : { commandText: request.commandText }),
-            },
-          );
           if (signal.aborted) throw new Error("aborted");
-          result = await executeWrappedArgv(wrapped, request, signal);
-        } catch (error) {
-          bodyError = error;
-          bodyFailed = true;
-        } finally {
-          try {
-            this.runtime.cleanupAfterCommand();
-            if (changed || request.allowGitConfig) this.runtime.updateConfig(toSrtConfig(base));
-          } catch (error) {
-            lifecycleError = error;
-            srtProcessCoordinator.markPoisoned();
+          let base = processSandboxState.basePolicy;
+          if (!processSandboxState.initialized || !base) {
+            try {
+              await this.initializeSrt(request.policy, signal);
+              if (signal.aborted) {
+                processSandboxState.initialized = false;
+                processSandboxState.basePolicy = undefined;
+                await this.resetSrt();
+                throw new Error("aborted");
+              }
+            } catch (error) {
+              srtProcessCoordinator.markPoisoned();
+              throw error instanceof Error ? error : sandboxUnavailable(errorMessage(error));
+            }
+            base = clonePolicy(request.policy);
+            processSandboxState.basePolicy = base;
+            processSandboxState.initialized = true;
           }
+          const derived = clonePolicy(request.policy);
+          assertSrtPolicySupported(derived);
+          const changed = !samePolicy(base, derived);
+          let bodyError: unknown;
+          let bodyFailed = false;
+          let result: SandboxExecutionResult | undefined;
+          let lifecycleError: unknown;
+          try {
+            if (changed || request.allowGitConfig) {
+              this.runtime.updateConfig(
+                toSrtConfig(derived, request.allowGitConfig === true, this.connectGuard),
+              );
+            }
+            const command = serializeProgram(request.program, {
+              forceProxyForLocalTargets: request.networkAuthorize !== undefined,
+            });
+            const wrapped = await this.runtime.wrapWithSandboxArgv(
+              command,
+              POSIX_SHELL,
+              undefined,
+              signal,
+              request.cwd,
+              {
+                ...(request.commandId === undefined ? {} : { commandId: request.commandId }),
+                ...(request.commandText === undefined ? {} : { commandText: request.commandText }),
+              },
+            );
+            if (signal.aborted) throw new Error("aborted");
+            result = await executeWrappedArgv(wrapped, request, signal);
+          } catch (error) {
+            bodyError = error;
+            bodyFailed = true;
+          } finally {
+            // Cleanup and policy restoration are independent obligations. A
+            // cleanup throw must not skip restore, and either failure poisons
+            // the singleton for the next execution.
+            try {
+              this.runtime.cleanupAfterCommand();
+            } catch (error) {
+              lifecycleError = error;
+              srtProcessCoordinator.markPoisoned();
+            }
+            if (changed || request.allowGitConfig) {
+              try {
+                this.runtime.updateConfig(toSrtConfig(base, false, this.connectGuard));
+              } catch (error) {
+                lifecycleError ??= error;
+                srtProcessCoordinator.markPoisoned();
+              }
+            }
+          }
+          if (lifecycleError && !bodyFailed) {
+            throw sandboxUnavailable(`SRT cleanup failed: ${errorMessage(lifecycleError)}`);
+          }
+          if (lifecycleError && bodyFailed) {
+            throw sandboxUnavailable(
+              `SRT cleanup failed after command failure: ${errorMessage(lifecycleError)}`,
+            );
+          }
+          if (bodyFailed) {
+            throw bodyError;
+          }
+          if (!result) throw sandboxUnavailable("SRT executor returned no result");
+          return result;
+        } finally {
+          // This finally is intentionally outside initialization and command
+          // cleanup. It cannot be skipped by either initialize or restore.
+          processSandboxState.networkAuthorize = previousNetworkAuthorize;
+          processSandboxState.networkSignal = previousNetworkSignal;
+          this.connectGuard?.resetExecution();
         }
-        if (lifecycleError && !bodyFailed) {
-          throw sandboxUnavailable(`SRT cleanup failed: ${errorMessage(lifecycleError)}`);
-        }
-        if (lifecycleError && bodyFailed) {
-          throw sandboxUnavailable(
-            `SRT cleanup failed after command failure: ${errorMessage(lifecycleError)}`,
-          );
-        }
-        if (bodyFailed) {
-          throw bodyError;
-        }
-        if (!result) throw sandboxUnavailable("SRT executor returned no result");
-        return result;
       },
       signal,
       () => {
@@ -450,12 +581,30 @@ export class SrtSandboxManager implements SandboxManagerLike {
     if (dependency.errors.length > 0) {
       throw sandboxUnavailable(dependency.errors.join("; "));
     }
-    if (signal?.aborted) throw new Error("aborted");
-    await this.runtime.initialize(toSrtConfig(config), undefined, true);
+    try {
+      if (signal?.aborted) throw new Error("aborted");
+      await this.connectGuard?.start();
+      processSandboxState.connectGuard = this.connectGuard;
+      await this.runtime.initialize(
+        toSrtConfig(config, false, this.connectGuard),
+        askNetwork,
+        true,
+      );
+    } catch (error) {
+      await this.connectGuard?.close().catch(() => undefined);
+      if (processSandboxState.connectGuard === this.connectGuard) {
+        processSandboxState.connectGuard = undefined;
+      }
+      throw error;
+    }
   }
 
   private async resetSrt(): Promise<void> {
     this.runtime.cleanupAfterCommand();
     await this.runtime.reset();
+    await this.connectGuard?.close();
+    if (processSandboxState.connectGuard === this.connectGuard) {
+      processSandboxState.connectGuard = undefined;
+    }
   }
 }

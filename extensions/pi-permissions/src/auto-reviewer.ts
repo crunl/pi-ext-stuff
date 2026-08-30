@@ -30,8 +30,7 @@ import {
   renderGuardianSystemPrompt,
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
-import { createSandboxedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
-import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
+import { createIsolatedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
 import { errorMessage } from "./unknown-value.ts";
 
 export type { AutoReviewerContext } from "./auto-review-request.ts";
@@ -253,7 +252,7 @@ async function waitBeforeRetry(
 }
 
 function defaultGuardianToolRuntime(cwd: string): GuardianToolRuntime {
-  return createSandboxedGuardianToolRuntime(cwd, new SrtSandboxManager());
+  return createIsolatedGuardianToolRuntime(cwd);
 }
 
 export class PiAutoReviewer implements AutoReviewer {
@@ -325,20 +324,34 @@ export class PiAutoReviewer implements AutoReviewer {
       context.guardianPolicy,
       renderAutoReviewTrustedContext(request),
     );
-    const lease = this.sessions.open(
-      {
-        sessionId: context.guardianSession.sessionId,
-        cwd: context.guardianSession.cwd,
-        configFingerprint: context.guardianSession.configFingerprint,
-        provider: model.provider,
-        model: model.id,
-        reasoningEffort,
-        toolFingerprint,
-      },
-      renderAutoReviewPrompt(request),
-      toolRuntime.tools,
-      systemPrompt,
-    );
+    const closeToolRuntime = async (): Promise<void> => {
+      try {
+        await toolRuntime.close?.();
+      } catch {
+        // Reviewer worker cleanup is observational after the lease is
+        // released; an already-dead worker is fail-closed for its next call.
+      }
+    };
+    let lease: ReturnType<GuardianReviewSessionManager["open"]>;
+    try {
+      lease = this.sessions.open(
+        {
+          sessionId: context.guardianSession.sessionId,
+          cwd: context.guardianSession.cwd,
+          configFingerprint: context.guardianSession.configFingerprint,
+          provider: model.provider,
+          model: model.id,
+          reasoningEffort,
+          toolFingerprint,
+        },
+        renderAutoReviewPrompt(request),
+        toolRuntime.tools,
+        systemPrompt,
+      );
+    } catch (error) {
+      await closeToolRuntime();
+      throw error;
+    }
     const deadline = Date.now() + GUARDIAN_REVIEW_TIMEOUT_MS;
     try {
       reviewAttempts: for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
@@ -478,6 +491,7 @@ export class PiAutoReviewer implements AutoReviewer {
       );
     } finally {
       lease.release();
+      await closeToolRuntime();
     }
   }
 

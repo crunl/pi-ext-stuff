@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
 import type { StructuredExecutionPlan } from "./execution-plan.ts";
@@ -118,7 +119,7 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   call: InvocationCall;
   ownership: InvocationOwnership;
   requested: readonly CapabilityRequest[];
-  source: "preview" | "runtime" | "permission-amendment" | "manual-retry";
+  source: "preview" | "runtime" | "inline" | "permission-amendment" | "manual-retry";
   retryability?: "safe" | "uncertain";
   risk?: AdmissionRisk;
   baseline: CapabilityLease;
@@ -178,23 +179,31 @@ export interface AutoState {
 }
 
 export type ReviewEvent =
-  | { readonly status: "reviewing"; readonly reviewId: string; readonly call: InvocationCall }
+  | {
+      readonly status: "reviewing";
+      readonly reviewId: string;
+      readonly call: InvocationCall;
+      readonly displaySummary?: string;
+    }
   | {
       readonly status: "approved" | "denied";
       readonly reviewId: string;
       readonly call: InvocationCall;
       readonly rationale: string;
+      readonly displaySummary?: string;
     }
   | {
       readonly status: "aborted" | "timed-out";
       readonly reviewId: string;
       readonly call: InvocationCall;
+      readonly displaySummary?: string;
     }
   | {
       readonly status: "failed";
       readonly reviewId: string;
       readonly call: InvocationCall;
       readonly reason: string;
+      readonly displaySummary?: string;
     };
 
 export type PermissionErrorCode =
@@ -245,8 +254,22 @@ export interface ApproveForMeEngineOptions<ReviewContext = undefined> {
 
 export interface TurnHandle<ReviewContext = undefined> {
   execute<T>(request: Invocation<T, ReviewContext>): Promise<ExecutionOutcome<T>>;
+  authorizeCapability(
+    request: CapabilityAuthorizationRequest,
+  ): Promise<CapabilityAuthorizationDecision>;
   close(reason?: string): void;
 }
+
+export interface CapabilityAuthorizationRequest {
+  readonly call: InvocationCall;
+  readonly capability: CapabilityRequestInput;
+  readonly reason?: string;
+  readonly summary?: string;
+}
+
+export type CapabilityAuthorizationDecision =
+  | { readonly kind: "allow"; readonly capability: CapabilityRequest }
+  | { readonly kind: "deny"; readonly error: PermissionError };
 
 export interface ApproveForMeEngine<ReviewContext = undefined> {
   beginTurn(snapshot: TurnSnapshot): TurnHandle<ReviewContext>;
@@ -293,6 +316,16 @@ interface ReviewRequest {
   readonly reason?: string;
   readonly summary?: string;
   readonly approvalOverride?: ApprovalOverride;
+}
+
+interface InFlightAttempt<ReviewContext> {
+  readonly callFingerprint: string;
+  readonly call: InvocationCall;
+  readonly ownership: InvocationOwnership;
+  readonly reviewContext: ReviewContext;
+  readonly baseline: CapabilityLease;
+  readonly signal?: AbortSignal;
+  readonly inlineDecisions: Map<string, CapabilityAuthorizationDecision>;
 }
 
 type ResolvedAdmission =
@@ -399,11 +432,78 @@ function pathMatches(pattern: string, path: string): boolean {
   return isPathWithin(pattern, path);
 }
 
-function hostMatches(pattern: string, host: string): boolean {
-  return host === pattern || host.endsWith(`.${pattern}`);
+function splitDomainPatternPort(pattern: string): { host: string; port?: number } {
+  const value = pattern.trim();
+  if (value.startsWith("[")) {
+    const close = value.indexOf("]");
+    if (close >= 0) {
+      const host = value.slice(1, close);
+      const suffix = value.slice(close + 1);
+      if (suffix === "") {
+        return { host: normalizeNetworkHost(host) ?? host };
+      }
+      const match = /^:([1-9][0-9]{0,4})$/.exec(suffix);
+      const port = match ? Number(match[1]) : undefined;
+      return port !== undefined && port <= 65535
+        ? { host: normalizeNetworkHost(host) ?? host, port }
+        : { host: value };
+    }
+  }
+  const lastColon = value.lastIndexOf(":");
+  if (lastColon >= 0 && value.indexOf(":") === lastColon) {
+    const match = /^([1-9][0-9]{0,4})$/.exec(value.slice(lastColon + 1));
+    const port = match ? Number(match[1]) : undefined;
+    if (port !== undefined && port <= 65535) {
+      return { host: value.slice(0, lastColon), port };
+    }
+  }
+  return { host: normalizeNetworkHost(value) ?? value };
 }
 
-function normalizeCapabilityRequest(raw: unknown, cwd: string): CapabilityRequest | undefined {
+export function matchesNetworkDomainPattern(pattern: string, host: string, port?: number): boolean {
+  const parsed = splitDomainPatternPort(pattern);
+  if (parsed.port !== undefined && parsed.port !== port) return false;
+  const candidate = normalizeNetworkHost(host) ?? host.trim().toLowerCase();
+  const domain = normalizeNetworkHost(parsed.host) ?? parsed.host.toLowerCase();
+  if (domain === "*") return true;
+  if (domain.startsWith("*.")) {
+    if (isIP(normalizeNetworkHost(candidate) ?? candidate) !== 0) return false;
+    return candidate.endsWith(`.${domain.slice(2)}`);
+  }
+  return candidate === domain;
+}
+
+function exactLocalNetworkAllow(
+  policy: SandboxPolicy | undefined,
+  host: string,
+  port: number | undefined,
+): boolean {
+  if (!policy) return false;
+  const normalizedHost = normalizeNetworkHost(host);
+  if (!normalizedHost) return false;
+  if (isIP(normalizedHost) === 0 && normalizedHost !== "localhost") return false;
+  return policy.network.allowedDomains.some((pattern) => {
+    const normalizedPattern = pattern.trim().toLowerCase();
+    // A wildcard is never an exact local exception. In particular, an
+    // accidentally broad `*` must not turn loopback into an implicit grant.
+    if (normalizedPattern === "*" || normalizedPattern.startsWith("*.")) return false;
+    return matchesNetworkDomainPattern(pattern, normalizedHost, port);
+  });
+}
+
+function localNetworkAllowed(
+  policy: SandboxPolicy | undefined,
+  host: string,
+  port: number | undefined,
+): boolean {
+  return policy?.network.allowLocalBinding === true || exactLocalNetworkAllow(policy, host, port);
+}
+
+function normalizeCapabilityRequest(
+  raw: unknown,
+  cwd: string,
+  options: { allowPrivateNetwork?: boolean } = {},
+): CapabilityRequest | undefined {
   if (!isRecord(raw) || typeof raw.kind !== "string") return undefined;
   if (raw.kind === "filesystem") {
     if (raw.operation !== "read" && raw.operation !== "write") return undefined;
@@ -414,7 +514,7 @@ function normalizeCapabilityRequest(raw: unknown, cwd: string): CapabilityReques
   if (raw.kind === "network") {
     if (typeof raw.host !== "string") return undefined;
     const host = normalizeNetworkHost(raw.host);
-    if (!host || !isPublicNetworkHost(host)) return undefined;
+    if (!host || (!options.allowPrivateNetwork && !isPublicNetworkHost(host))) return undefined;
     const port = raw.port;
     if (
       port !== undefined &&
@@ -572,11 +672,21 @@ function requestCovered(lease: CapabilityLease, request: CapabilityRequest): boo
     return policy.filesystem.allowWrite.some((root) => isPathWithin(root, request.path));
   }
   if (request.kind === "network") {
-    if (policy.network.deniedDomains.some((pattern) => hostMatches(pattern, request.host)))
-      return false;
-    return policy.network.allowedDomains.some((pattern) => hostMatches(pattern, request.host));
+    if (networkPolicyDenies(policy, request)) return false;
+    return policy.network.allowedDomains.some((pattern) =>
+      matchesNetworkDomainPattern(pattern, request.host, request.port),
+    );
   }
   return false;
+}
+
+function networkPolicyDenies(policy: SandboxPolicy, request: CapabilityRequest): boolean {
+  return (
+    request.kind === "network" &&
+    policy.network.deniedDomains.some((pattern) =>
+      matchesNetworkDomainPattern(pattern, request.host, request.port),
+    )
+  );
 }
 
 function sandboxCanEnforce(request: CapabilityRequest): boolean {
@@ -735,6 +845,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   let reviewSequence = 0;
   const reviewControllers = new Set<AbortController>();
   const inFlightCallIds = new Set<string>();
+  const inFlightAttempts = new Map<string, InFlightAttempt<ReviewContext>>();
+  const inlineCapabilityReviews = new Map<string, Promise<CapabilityAuthorizationDecision>>();
   const sessionNetworkHosts = new Set<string>();
   const sessionWriteRoots: string[] = [];
   const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
@@ -755,6 +867,18 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (denialWindow.length > denialWindowSize) {
       denialWindow.splice(0, denialWindow.length - denialWindowSize);
     }
+  };
+
+  const recordDenialStats = (): void => {
+    recordWindow(true);
+    consecutiveDenials += 1;
+    if (
+      consecutiveDenials >= maxConsecutiveDenials ||
+      denialWindow.filter(Boolean).length >= maxWindowDenials
+    ) {
+      circuitOpen = true;
+    }
+    emitAutoStateChange();
   };
 
   const emitAutoStateChange = (): void => {
@@ -803,15 +927,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       readonly execution?: StructuredExecutionPlan;
     },
   ): RetryHandle => {
-    recordWindow(true);
-    consecutiveDenials += 1;
-    if (
-      consecutiveDenials >= maxConsecutiveDenials ||
-      denialWindow.filter(Boolean).length >= maxWindowDenials
-    ) {
-      circuitOpen = true;
-    }
-    emitAutoStateChange();
+    recordDenialStats();
     const frozenRequested = denial.requested.map((item) => structuredClone(item));
     const frozenAdmissionRequested = denial.admissionRequested.map((item) => structuredClone(item));
     const frozenExecution =
@@ -870,6 +986,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const wasActive = active === state;
     state.closed = true;
     state.grants.clear();
+    inFlightAttempts.clear();
     state.turnNetworkHosts.clear();
     state.turnWriteRoots.length = 0;
     if (wasActive) {
@@ -912,10 +1029,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
     if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
     const reviewId = `review-${++reviewSequence}`;
+    const displaySummary = review.summary?.trim() || undefined;
     emitReviewEvent(() => ({
       status: "reviewing",
       reviewId,
       call: cloneInvocationCall(request.call),
+      ...(displaySummary === undefined ? {} : { displaySummary }),
     }));
     const guardian = options.guardian;
     if (!guardian) {
@@ -925,6 +1044,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reviewId,
         call: cloneInvocationCall(request.call),
         reason,
+        ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return { code: "review-unavailable", reason };
     }
@@ -939,6 +1059,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
       }
@@ -967,6 +1088,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
@@ -975,6 +1097,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
       }
@@ -992,6 +1115,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "timed-out",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-timeout", reason: "Automatic approval review timed out" };
       }
@@ -1002,6 +1126,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           reviewId,
           call: cloneInvocationCall(request.call),
           reason: decision.reason,
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-unavailable", reason: decision.reason };
       }
@@ -1013,6 +1138,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           reviewId,
           call: cloneInvocationCall(request.call),
           reason,
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-unavailable", reason };
       }
@@ -1022,6 +1148,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reviewId,
         call: cloneInvocationCall(request.call),
         rationale: decision.rationale,
+        ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return decision;
     } catch (error) {
@@ -1030,6 +1157,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
@@ -1038,6 +1166,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
       }
@@ -1046,6 +1175,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
       }
@@ -1056,6 +1186,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reviewId,
         call: cloneInvocationCall(request.call),
         reason,
+        ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return {
         code: "review-unavailable",
@@ -1101,10 +1232,21 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       ...requested,
       ...(grant?.requested ?? []),
     ]);
+    const attemptCall = cloneInvocationCall(request.call);
+    const inFlightAttempt: InFlightAttempt<ReviewContext> = {
+      callFingerprint: callFingerprint(state, attemptCall, request.ownership),
+      call: attemptCall,
+      ownership: request.ownership,
+      reviewContext: request.reviewContext,
+      baseline: cloneLease(lease),
+      inlineDecisions: new Map<string, CapabilityAuthorizationDecision>(),
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    };
+    inFlightAttempts.set(attemptCall.id, inFlightAttempt);
     try {
       const result = await request.executor({
         ordinal,
-        call: cloneInvocationCall(request.call),
+        call: attemptCall,
         lease,
         ...(plan === undefined ? {} : { plan }),
       });
@@ -1120,6 +1262,10 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       if (!isCurrent(state))
         return blocked({ code: "stale-invocation", reason: "Permission context changed" });
       return { kind: "failed", error };
+    } finally {
+      if (inFlightAttempts.get(attemptCall.id) === inFlightAttempt) {
+        inFlightAttempts.delete(attemptCall.id);
+      }
     }
   };
 
@@ -1158,6 +1304,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return blocked({
         code: "runtime-denied",
         reason: "Runtime denial did not contain a valid capability request",
+      });
+    }
+    if (normalized.kind === "network") {
+      return blocked({
+        code: "runtime-denied",
+        reason: "Network authorization must happen before the connection attempt",
+        request: normalized,
       });
     }
     if (!runtimeCapabilitySupported(request.ownership, normalized)) {
@@ -1302,6 +1455,27 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
     if (
+      admission.requested.some((item) => item.kind === "network" && !isPublicNetworkHost(item.host))
+    ) {
+      return blocked({
+        code: "policy-denied",
+        reason: "Private or special-use network target is blocked",
+      });
+    }
+    if (
+      admission.requested.some(
+        (item) =>
+          item.kind === "network" &&
+          state.snapshot.baseSandboxPolicy !== undefined &&
+          networkPolicyDenies(state.snapshot.baseSandboxPolicy, item),
+      )
+    ) {
+      return blocked({
+        code: "policy-denied",
+        reason: "Network target is denied by sandbox policy",
+      });
+    }
+    if (
       state.snapshot.mode === "auto" &&
       request.ownership === "sandbox-owned" &&
       admission.requested.some(
@@ -1353,6 +1527,19 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         return blocked({
           code: "enforcement-unavailable",
           reason: "Permission amendments support only filesystem and network capabilities",
+        });
+      }
+      if (
+        amendment.requests.some(
+          (item) =>
+            item.kind === "network" &&
+            state.snapshot.baseSandboxPolicy !== undefined &&
+            networkPolicyDenies(state.snapshot.baseSandboxPolicy, item),
+        )
+      ) {
+        return blocked({
+          code: "policy-denied",
+          reason: "Network target is denied by sandbox policy",
         });
       }
       if (
@@ -1633,6 +1820,188 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
   };
 
+  const authorizeInlineCapability = async (
+    state: TurnState,
+    input: CapabilityAuthorizationRequest,
+  ): Promise<CapabilityAuthorizationDecision> => {
+    if (!isCurrent(state)) {
+      return {
+        kind: "deny",
+        error: { code: "stale-invocation", reason: "Permission context changed" },
+      };
+    }
+    const attempt = inFlightAttempts.get(input.call.id);
+    if (
+      !attempt ||
+      attempt.callFingerprint !== callFingerprint(state, input.call, attempt.ownership)
+    ) {
+      return {
+        kind: "deny",
+        error: {
+          code: "stale-invocation",
+          reason: "Inline authorization does not match the active execution attempt",
+        },
+      };
+    }
+    const signal = attempt.signal;
+    if (signal?.aborted) {
+      return { kind: "deny", error: { code: "aborted", reason: "Operation aborted" } };
+    }
+    const normalized = normalizeCapabilityRequest(input.capability, attempt.call.cwd, {
+      // Normalize private targets as well so the Engine can apply the
+      // Codex-compatible exact-local/allowLocalBinding policy below and
+      // return the precise policy-denied reason instead of “invalid”.
+      allowPrivateNetwork: true,
+    });
+    if (!normalized) {
+      return {
+        kind: "deny",
+        error: { code: "policy-denied", reason: "Inline capability request is invalid" },
+      };
+    }
+    if (state.snapshot.mode === "yolo") return { kind: "allow", capability: normalized };
+    if (
+      normalized.kind === "network" &&
+      !isPublicNetworkHost(normalized.host) &&
+      !localNetworkAllowed(attempt.baseline.policy, normalized.host, normalized.port)
+    ) {
+      return {
+        kind: "deny",
+        error: {
+          code: "policy-denied",
+          reason: "Private or special-use network target is blocked",
+          request: normalized,
+        },
+      };
+    }
+    if (
+      attempt.ownership !== "sandbox-owned" ||
+      normalized.kind !== "network" ||
+      normalized.port === undefined
+    ) {
+      return {
+        kind: "deny",
+        error: {
+          code: "enforcement-unavailable",
+          reason: "The execution adapter cannot authorize this inline capability",
+          request: normalized,
+        },
+      };
+    }
+    const baseline = cloneLease(attempt.baseline);
+    if (baseline.policy && networkPolicyDenies(baseline.policy, normalized)) {
+      return {
+        kind: "deny",
+        error: {
+          code: "policy-denied",
+          reason: "Network target is denied by sandbox policy",
+          request: normalized,
+        },
+      };
+    }
+    const policy = await policyCheck({
+      call: attempt.call,
+      ownership: attempt.ownership,
+      requested: [normalized],
+      phase: "runtime",
+    });
+    if (!isCurrent(state)) {
+      return {
+        kind: "deny",
+        error: { code: "stale-invocation", reason: "Permission context changed" },
+      };
+    }
+    if (signal?.aborted) {
+      return { kind: "deny", error: { code: "aborted", reason: "Operation aborted" } };
+    }
+    if (policy.kind === "error") {
+      return { kind: "deny", error: { code: "policy-error", reason: policy.reason } };
+    }
+    if (policy.kind === "deny") {
+      return {
+        kind: "deny",
+        error: { code: "policy-denied", reason: policy.reason, request: normalized },
+      };
+    }
+    if (requestCovered(baseline, normalized)) {
+      return { kind: "allow", capability: normalized };
+    }
+
+    const capabilityKey = requestKey(normalized);
+    const cached = attempt.inlineDecisions.get(capabilityKey);
+    if (cached) return cached;
+    const key = `${state.generation}:${attempt.call.id}:${capabilityKey}`;
+    const existing = inlineCapabilityReviews.get(key);
+    if (existing) return existing;
+    const pending = (async (): Promise<CapabilityAuthorizationDecision> => {
+      const decision = await runReview(
+        state,
+        {
+          ownership: attempt.ownership,
+          call: cloneInvocationCall(attempt.call),
+          reviewContext: attempt.reviewContext,
+          signal,
+          executor: async () => ({
+            kind: "failed",
+            error: new Error("inline review cannot execute"),
+          }),
+        },
+        baseline,
+        {
+          source: "inline",
+          requested: [normalized],
+          retryability: "safe",
+          risk: "REVIEW",
+          reason: input.reason ?? "Network access requires approval",
+          summary:
+            normalized.kind === "network"
+              ? `${normalized.host}:${normalized.port ?? 443}`
+              : input.summary,
+        },
+      );
+      if ("code" in decision) {
+        const denied: CapabilityAuthorizationDecision = { kind: "deny", error: decision };
+        if (decision.code !== "aborted" && decision.code !== "stale-invocation") {
+          attempt.inlineDecisions.set(capabilityKey, denied);
+        }
+        return denied;
+      }
+      if (decision.kind === "approve") {
+        const allowed: CapabilityAuthorizationDecision = { kind: "allow", capability: normalized };
+        attempt.inlineDecisions.set(capabilityKey, allowed);
+        return allowed;
+      }
+      if (decision.kind !== "deny") {
+        const unavailable: CapabilityAuthorizationDecision = {
+          kind: "deny",
+          error: { code: "review-unavailable", reason: "The reviewer returned no decision" },
+        };
+        attempt.inlineDecisions.set(capabilityKey, unavailable);
+        return unavailable;
+      }
+      // Inline network denials are final for this connection attempt. They do
+      // not mint a replay handle: there is no safe whole-command replay after
+      // a mid-execution denial.
+      recordDenialStats();
+      const denied: CapabilityAuthorizationDecision = {
+        kind: "deny",
+        error: {
+          code: "review-denied",
+          reason: decision.rationale,
+          request: normalized,
+        },
+      };
+      attempt.inlineDecisions.set(capabilityKey, denied);
+      return denied;
+    })();
+    inlineCapabilityReviews.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (inlineCapabilityReviews.get(key) === pending) inlineCapabilityReviews.delete(key);
+    }
+  };
+
   const listDenials = (): readonly DenialNotice[] =>
     denialNotices.map((notice) => ({
       ...notice,
@@ -1703,6 +2072,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     active = state;
     const handle: TurnHandle<ReviewContext> = {
       execute: <T>(request: Invocation<T, ReviewContext>) => executeInvocation(state, request),
+      authorizeCapability: (request) => authorizeInlineCapability(state, request),
       close: (reason = "turn closed") => closeState(state, reason),
     };
     return handle;

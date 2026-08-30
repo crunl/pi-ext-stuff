@@ -1,39 +1,51 @@
-import { markToolCall } from "../../pi-core/standalone.ts";
 import { projectReviewEvent, type ReviewPresentationEvent } from "./permission-copy.ts";
 
 export interface ReviewPresenterEvent extends Omit<ReviewPresentationEvent, "reviewId"> {
   readonly reviewId: string;
   readonly call: {
     readonly id: string;
+    readonly tool: string;
+    readonly input: unknown;
   };
+  /** A domain-owned, already bounded label for the operation under review. */
+  readonly displaySummary?: string;
 }
 
 export interface ReviewUi {
+  /** Retained for host compatibility; review status no longer uses the footer. */
+  setStatus(key: string, text: string | undefined): void;
   notify(message: string, severity: "info" | "warning" | "error"): void;
-  markToolCall?: (
-    toolCallId: string,
-    mark: { readonly icon: string; readonly color: "warning" },
-  ) => void;
 }
 
-export interface ReviewPresenterOptions {
-  icon?: string;
+export interface ReviewStatusBinding {
+  setReviewStatus(status: string | undefined): void;
+  notify?(message: string, severity: "info" | "warning" | "error"): void;
 }
 
-const DEFAULT_REVIEW_ICON = "\u{F105E}";
+/** Kept as a stable compatibility export for integrations that used the key. */
+export const REVIEW_STATUS_KEY = "pi-permissions-review";
+
+export const REVIEW_STATUS_ICON = "\u{F105E}";
+const MAX_STATUS_DETAIL_LENGTH = 96;
+
+function compact(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= MAX_STATUS_DETAIL_LENGTH) return normalized;
+  return `${normalized.slice(0, MAX_STATUS_DETAIL_LENGTH - 1)}…`;
+}
+
+export function reviewStatusText(detail: string): string {
+  return `${REVIEW_STATUS_ICON} Reviewing approval request · ${compact(detail)}`;
+}
 
 /**
- * Tracks review lifecycle identity and projects only exceptional terminal
- * outcomes into TUI notifications. In-progress and approved reviews remain
- * silent, so routine approval work never occupies the footer.
+ * Owns review lifecycle, while the tool adapter owns the actual row projection.
+ * A review never writes to the footer: bindings receive a transient status and
+ * clear it on every terminal event. Only exceptional outcomes notify.
  */
 export class ReviewPresenter {
-  private readonly pending = new Map<string, true>();
-  private readonly icon: string;
-
-  constructor(options: ReviewPresenterOptions = {}) {
-    this.icon = options.icon ?? DEFAULT_REVIEW_ICON;
-  }
+  private readonly pending = new Map<string, { callId: string; detail: string }>();
+  private readonly bindings = new Map<string, Set<ReviewStatusBinding>>();
 
   get pendingCount(): number {
     return this.pending.size;
@@ -43,31 +55,87 @@ export class ReviewPresenter {
     return this.pending.has(reviewId);
   }
 
-  /**
-   * Accept one lifecycle event.  Rendering is best effort: a broken UI must
-   * never change the authorization result or prevent cleanup of state.
-   */
+  bind(callId: string, binding: ReviewStatusBinding): () => void {
+    const entries = this.bindings.get(callId) ?? new Set<ReviewStatusBinding>();
+    entries.add(binding);
+    this.bindings.set(callId, entries);
+    this.safeSetReviewStatus(binding, this.statusForCall(callId));
+    return () => {
+      const current = this.bindings.get(callId);
+      if (!current) return;
+      this.safeSetReviewStatus(binding, undefined);
+      current.delete(binding);
+      if (current.size === 0) this.bindings.delete(callId);
+    };
+  }
+
   accept(event: ReviewPresenterEvent, ui?: ReviewUi): void {
     if (event.status === "reviewing") {
-      this.pending.set(event.reviewId, true);
-      if (ui) {
-        markToolCall(ui, event.call.id, { icon: this.icon, color: "warning" });
-      }
+      const detail = compact(event.displaySummary?.trim() || event.call.tool);
+      this.pending.set(event.reviewId, { callId: event.call.id, detail });
+      this.projectCall(event.call.id);
       return;
     }
 
-    // Ignore terminal events for a review that was reset or already finished.
-    // This is what keeps delayed events from an old turn from resurfacing.
-    if (!this.pending.delete(event.reviewId)) return;
+    const entry = this.pending.get(event.reviewId);
+    if (!entry) return;
+    this.pending.delete(event.reviewId);
+    this.projectCall(entry.callId);
 
     const presentation = projectReviewEvent(event);
     if (presentation.kind === "notify") {
-      this.safeNotify(ui, `${this.icon} ${presentation.label}`, presentation.severity);
+      const notified = this.notifyBound(entry.callId, presentation.label, presentation.severity);
+      if (!notified) this.safeNotify(ui, presentation.label, presentation.severity);
     }
   }
 
-  reset(): void {
+  reset(_ui?: ReviewUi): void {
+    const callIds = new Set([...this.pending.values()].map((entry) => entry.callId));
     this.pending.clear();
+    for (const callId of callIds) this.projectCall(callId);
+  }
+
+  private statusForCall(callId: string): string | undefined {
+    const details = [...this.pending.values()]
+      .filter((entry) => entry.callId === callId)
+      .map((entry) => entry.detail);
+    if (details.length === 0) return undefined;
+    if (details.length === 1) return reviewStatusText(details[0] ?? "tool");
+    return reviewStatusText(`${details.length} requests · ${details.slice(0, 2).join("; ")}`);
+  }
+
+  private projectCall(callId: string): void {
+    const status = this.statusForCall(callId);
+    for (const binding of this.bindings.get(callId) ?? []) {
+      this.safeSetReviewStatus(binding, status);
+    }
+  }
+
+  private notifyBound(
+    callId: string,
+    message: string,
+    severity: "info" | "warning" | "error",
+  ): boolean {
+    const bindings = this.bindings.get(callId);
+    let notified = false;
+    for (const binding of bindings ?? []) {
+      if (typeof binding.notify !== "function") continue;
+      notified = true;
+      try {
+        binding.notify(message, severity);
+      } catch {
+        // TUI reporting is observational.
+      }
+    }
+    return notified;
+  }
+
+  private safeSetReviewStatus(binding: ReviewStatusBinding, status: string | undefined): void {
+    try {
+      binding.setReviewStatus(status);
+    } catch {
+      // TUI output is observational and must not affect authorization.
+    }
   }
 
   private safeNotify(
@@ -75,7 +143,7 @@ export class ReviewPresenter {
     message: string,
     severity: "info" | "warning" | "error",
   ): void {
-    if (!ui) return;
+    if (!ui || message.length === 0) return;
     try {
       ui.notify(message, severity);
     } catch {

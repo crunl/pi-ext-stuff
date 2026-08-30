@@ -24,8 +24,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+  createGuardianWorkerClient,
+  type GuardianWorkerClientOptions,
+} from "./guardian-worker-client.ts";
+import {
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
+  type SandboxExecutionRequest,
   type SandboxedCommandResult,
   type SandboxManagerLike,
 } from "./sandbox.ts";
@@ -276,6 +281,8 @@ export type GuardianToolFactory = (cwd: string) => PiAgentTool[];
 export interface GuardianToolRuntime {
   readonly tools: LlmTool[];
   execute(toolCall: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>;
+  /** Release the isolated evidence worker, if this runtime owns one. */
+  close?(): Promise<void>;
 }
 
 function executableRgPath(candidate: string | undefined): string | undefined {
@@ -885,4 +892,51 @@ export function createSandboxedGuardianToolRuntime(
   } as PiAgentTool;
 
   return createGuardianToolRuntime(cwd, () => [readTool, grepTool, findTool, lsTool, inspectTool]);
+}
+
+export interface IsolatedGuardianToolRuntimeOptions extends GuardianWorkerClientOptions {
+  resolveRgPath?: () => string | undefined;
+  /** Trusted host home used only for resolving Guardian's `~` paths. */
+  trustedHome?: string;
+}
+
+/**
+ * Build the same Guardian evidence surface behind an OS process boundary.
+ *
+ * The in-process SRT manager is a process-global singleton. An inline network
+ * approval can therefore call a Guardian while the main invocation owns SRT's
+ * coordinator and deadlock. This adapter gives the existing, bounded
+ * Guardian implementation a manager whose only execution path is the
+ * self-contained worker process; no SRT API is touched in the host process.
+ */
+export function createIsolatedGuardianToolRuntime(
+  cwd: string,
+  options: IsolatedGuardianToolRuntimeOptions = {},
+): GuardianToolRuntime {
+  const client = createGuardianWorkerClient(options);
+  const workerManager: SandboxManagerLike = {
+    initialize: async () => undefined,
+    reset: () => client.close(),
+    execute: (request: SandboxExecutionRequest) =>
+      client.execute({
+        program: request.program,
+        cwd: request.cwd ?? cwd,
+        signal: request.signal,
+        timeoutMs: request.timeoutMs,
+        commandId: request.commandId,
+        commandText: request.commandText,
+        maxStdoutBytes: request.maxStdoutBytes,
+        maxStderrBytes: request.maxStderrBytes,
+      }),
+  };
+  const runtime = createSandboxedGuardianToolRuntime(cwd, workerManager, {
+    resolveRgPath: options.resolveRgPath,
+    trustedHome: options.trustedHome,
+  });
+  return Object.freeze({
+    ...runtime,
+    close: async (): Promise<void> => {
+      await client.close();
+    },
+  });
 }

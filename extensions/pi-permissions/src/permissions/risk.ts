@@ -58,6 +58,15 @@ const gitMutationSubcommands = new Set([
   "update-ref",
   "worktree",
 ]);
+const gitSubmoduleMutationActions = new Set([
+  "absorbgitdirs",
+  "add",
+  "deinit",
+  "set-branch",
+  "set-url",
+  "sync",
+  "update",
+]);
 const packageNetworkSubcommands = new Set([
   "add",
   "audit",
@@ -497,7 +506,9 @@ function parseGitInvocation(segment: CommandSegment): GitInvocation | undefined 
             argument === "--file" ||
             argument.startsWith("--file="),
         )
-      : subcommand !== undefined && gitMutationSubcommands.has(subcommand);
+      : subcommand === "submodule"
+        ? commandArguments.some((argument) => gitSubmoduleMutationActions.has(argument))
+        : subcommand !== undefined && gitMutationSubcommands.has(subcommand);
   return {
     segment,
     kind: "git",
@@ -651,7 +662,7 @@ export function normalizeToolCall(
         ? "read"
         : ["write", "edit", "apply_patch"].includes(lowerTool)
           ? "write"
-          : command
+          : new Set(["bash", "powershell"]).has(lowerTool) && command
             ? "execute"
             : "external";
   return {
@@ -1138,6 +1149,11 @@ function isDangerousSegment(segment: CommandSegment): boolean {
     return parseCommandSegments(action).some(isDangerousSegment);
   }
   return isDangerousWords([segment.executable, ...segment.args]);
+}
+
+/** Matches Codex's pre-sandbox dangerous-command gate. */
+export function shellCommandIsDangerous(command: string): boolean {
+  return parseCommandSegments(command).some(isDangerousSegment);
 }
 
 /** Deletion commands whose targets are checked against the sandbox write roots. */

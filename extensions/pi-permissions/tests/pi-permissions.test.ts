@@ -26,7 +26,6 @@ function testUi() {
   return {
     setStatus: vi.fn((_: string, __: string | undefined): void => undefined),
     notify: vi.fn((_: string, __: "info" | "warning" | "error"): void => undefined),
-    markToolCall: vi.fn(),
     select: vi.fn(async (_: string, choices: string[]) => choices[0]),
   };
 }
@@ -99,11 +98,6 @@ describe("PiPermissionsRuntime facade", () => {
     expect(events[0]).toMatch(/^review-\d+:reviewing$/);
     expect(events[1]).toMatch(/^review-\d+:approved$/);
     expect(ui.setStatus).not.toHaveBeenCalled();
-    expect(ui.markToolCall).toHaveBeenCalledOnce();
-    expect(ui.markToolCall).toHaveBeenCalledWith("evented", {
-      icon: "\u{F105E}",
-      color: "warning",
-    });
     runtime.invalidate("test reset");
     expect(runtime.hasActiveTurn()).toBe(false);
   });

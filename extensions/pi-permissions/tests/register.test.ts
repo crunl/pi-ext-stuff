@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AutoReviewRequest, AutoReviewResult } from "../src/auto-review-request.ts";
 import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
+import { NetworkBoundary } from "../src/network-boundary.ts";
 import { registerExtension } from "../src/register.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
 import type {
+  SandboxDenialCapability,
   SandboxExecutionRequest,
   SandboxExecutionResult,
   SandboxPolicy,
@@ -47,6 +49,9 @@ interface HarnessOptions {
   eventBusError?: boolean;
   sandboxInitializeError?: Error;
   sandboxExecuteError?: Error;
+  sandboxDenial?: SandboxDenialCapability;
+  sandboxNetworkAttempt?: { host: string; port: number };
+  sandboxNetworkAnswers?: Record<string, readonly string[]>;
   sandboxResetErrorAfter?: number;
 }
 
@@ -76,6 +81,7 @@ interface Harness {
     initialize: ReturnType<typeof vi.fn>;
     wrapWithSandbox: ReturnType<typeof vi.fn>;
     execute: ReturnType<typeof vi.fn>;
+    classifyDenial: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   sandboxCoordinator: {
@@ -86,7 +92,6 @@ interface Harness {
   sandboxBashExecute: ReturnType<typeof vi.fn>;
   setStatus: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
-  markToolCall: ReturnType<typeof vi.fn>;
   select: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   appendEntry: ReturnType<typeof vi.fn>;
@@ -94,8 +99,9 @@ interface Harness {
 }
 
 const tempDirectories: string[] = [];
-const REVIEW_STATUS_KEY = "pi-permissions-review";
-const REVIEW_ICON = "\u{F105E}";
+function reviewStatusCalls(app: Pick<Harness, "setStatus">): unknown[][] {
+  return app.setStatus.mock.calls;
+}
 
 afterEach(async () => {
   const directories = tempDirectories.splice(0);
@@ -182,8 +188,10 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const wrapWithSandbox = vi.fn(
     async (command: string, _shell?: string, _config?: unknown, _signal?: AbortSignal) => command,
   );
+  let executeOrdinal = 0;
   const execute = vi.fn(
     async (request: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
+      executeOrdinal += 1;
       if (options.sandboxExecuteError) throw options.sandboxExecuteError;
       await wrapWithSandbox(
         [request.program.executable, ...request.program.args].map(shellQuote).join(" "),
@@ -191,9 +199,26 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
         request.policy as SandboxPolicy,
         request.signal,
       );
+      if (options.sandboxNetworkAttempt && request.networkAuthorize) {
+        const authorization = await request.networkAuthorize({
+          ...options.sandboxNetworkAttempt,
+          signal: request.signal,
+        });
+        if (!authorization.allowed) {
+          const stderr = Buffer.from("connect tunnel failed: sandbox denied\n");
+          request.onStderr?.(stderr);
+          return { stdout: Buffer.alloc(0), stderr, exitCode: 1 };
+        }
+      }
+      if (options.sandboxDenial && executeOrdinal === 1) {
+        const stderr = Buffer.from("connect tunnel failed: sandbox denied\n");
+        request.onStderr?.(stderr);
+        return { stdout: Buffer.alloc(0), stderr, exitCode: 1 };
+      }
       return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
     },
   );
+  const classifyDenial = vi.fn(async () => options.sandboxDenial);
   let resetOrdinal = 0;
   const reset = vi.fn(async () => {
     resetOrdinal += 1;
@@ -204,7 +229,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       throw new Error("timeout:5");
     }
   });
-  const sandboxManager = { initialize, wrapWithSandbox, execute, reset };
+  const sandboxManager = { initialize, wrapWithSandbox, execute, classifyDenial, reset };
 
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
@@ -231,11 +256,16 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     ) => {
       if (factoryOptions?.operations) {
         sandboxBashExecute(id, params, signal, onUpdate);
-        await factoryOptions.operations.exec(params.command, toolCwd, {
-          onData: () => undefined,
+        const output: Buffer[] = [];
+        const result = await factoryOptions.operations.exec(params.command, toolCwd, {
+          onData: (data) => output.push(data),
           signal,
           timeout: params.timeout,
         });
+        if (result.exitCode !== 0 && result.exitCode !== null) {
+          const message = Buffer.concat(output).toString("utf8").trimEnd();
+          throw new Error(`${message}\n\nCommand exited with code ${result.exitCode}`);
+        }
         return { content: [], details: undefined };
       }
       return bareBashExecute(id, params, signal, onUpdate);
@@ -261,7 +291,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
 
   const setStatus = vi.fn();
   const notify = vi.fn();
-  const markToolCall = vi.fn();
   const select = vi.fn(async (_title: string, choices: string[]) => choices[0]);
   const abort = vi.fn();
   const appendEntry = vi.fn();
@@ -292,11 +321,13 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const ui = {
     setStatus,
     notify,
-    markToolCall,
     select,
     confirm: vi.fn(async () => true),
     input: vi.fn(async () => undefined),
   };
+  const networkBoundary = new NetworkBoundary({
+    resolveHost: async (host) => options.sandboxNetworkAnswers?.[host] ?? ["93.184.216.34"],
+  });
   const context = {
     cwd,
     hasUI: options.hasUI ?? true,
@@ -320,6 +351,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sandboxCoordinator: sandboxCoordinator as never,
     autoReviewer,
     riskEvaluator: riskEvaluator as never,
+    networkBoundary,
   });
 
   return {
@@ -340,7 +372,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sandboxBashExecute,
     setStatus,
     notify,
-    markToolCall,
     select,
     abort,
     appendEntry,
@@ -517,13 +548,103 @@ describe("Permission mode registration", () => {
       network: { allowedDomains: string[] };
     };
     expect(policy.network.allowedDomains).toContain(host);
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
     expect(app.notify).not.toHaveBeenCalled();
-    expect(app.markToolCall).toHaveBeenCalledOnce();
-    expect(app.markToolCall).toHaveBeenCalledWith("prompt-bash", {
-      icon: REVIEW_ICON,
-      color: "warning",
+  });
+
+  it("reviews Bash network access at the exact boundary without replaying the command", async () => {
+    const host = "api.example.com";
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxNetworkAttempt: { host, port: 443 },
     });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+
+    await executeBash(app, "runtime-network", "curl https://api.example.com/data");
+
+    expect(app.riskEvaluator).toHaveBeenCalledOnce();
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkHosts).toEqual([host]);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    expect(reviewStatusCalls(app)).toHaveLength(0);
+  });
+
+  it("defers a default private Bash target to the runtime boundary", async () => {
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxNetworkAttempt: { host: "127.0.0.1", port: 80 },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeBash(app, "private-network", "curl http://127.0.0.1/admin"),
+    ).rejects.toThrow("sandbox denied");
+
+    // Static risk evaluation admitted the command; the single sandbox
+    // execution reached the connection boundary and was denied there.
+    expect(app.riskEvaluator).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it("allows an exact local literal without invoking the reviewer", async () => {
+    const app = await makeHarness({
+      config: { sandbox: { network: { allowedDomains: ["127.0.0.1"] } } },
+      risk: () => lowRisk(),
+      sandboxNetworkAttempt: { host: "127.0.0.1", port: 80 },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(executeBash(app, "exact-local", "curl http://127.0.0.1/admin")).resolves.toEqual({
+      content: [],
+      details: undefined,
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  it("sends a private DNS answer through normal runtime review when local binding is enabled", async () => {
+    const host = "router.internal";
+    const app = await makeHarness({
+      config: { sandbox: { network: { allowLocalBinding: true } } },
+      risk: () => lowRisk(),
+      sandboxNetworkAttempt: { host, port: 80 },
+      sandboxNetworkAnswers: { [host]: ["192.168.1.20"] },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(executeBash(app, "local-binding", `curl http://${host}/admin`)).resolves.toEqual({
+      content: [],
+      details: undefined,
+    });
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkHosts).toEqual([host]);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  it("reviews an outside Bash write only after the sandbox reports the exact path", async () => {
+    const path = "/opt/pi-permissions-runtime-denial/result.txt";
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxDenial: { kind: "filesystem", operation: "write", path },
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.setStatus.mockClear();
+
+    await executeBash(app, "runtime-write", `truncate -s 0 ${path}`);
+
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(path);
+    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(2);
+    const retryPolicy = app.sandboxManager.execute.mock.calls[1]?.[0].policy as SandboxPolicy;
+    expect(retryPolicy.filesystem.allowWrite).toContain(path);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
   });
 
   it("captures bash input before async risk review and executes only the canonical value", async () => {
@@ -584,8 +705,8 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
-    expect(app.notify).toHaveBeenCalledWith(`${REVIEW_ICON} Permission denied`, "warning");
+    expect(reviewStatusCalls(app)).toHaveLength(0);
+    expect(app.notify).toHaveBeenCalledWith("Permission denied", "warning");
   });
 
   it.each([
@@ -615,9 +736,9 @@ describe("Permission mode registration", () => {
 
     await expect(executeBash(app, `${code}-bash`, "printf failed")).rejects.toMatchObject({ code });
 
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
     expect(app.notify).toHaveBeenCalledTimes(1);
-    expect(app.notify).toHaveBeenCalledWith(`${REVIEW_ICON} ${label}`, "warning");
+    expect(app.notify).toHaveBeenCalledWith(label, "warning");
   });
 
   it("keeps an aborted review silent", async () => {
@@ -637,18 +758,14 @@ describe("Permission mode registration", () => {
     const controller = new AbortController();
     const pending = executeBash(app, "aborted-review", "printf aborted", controller.signal);
     await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
 
     controller.abort();
     releaseReview(approved());
 
     await expect(pending).rejects.toMatchObject({ code: "aborted" });
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
     expect(app.notify).not.toHaveBeenCalled();
-    expect(app.markToolCall).toHaveBeenCalledWith("aborted-review", {
-      icon: REVIEW_ICON,
-      color: "warning",
-    });
   });
 
   it("does not apply review UI presentation outside TUI mode", async () => {
@@ -664,9 +781,8 @@ describe("Permission mode registration", () => {
 
     await executeBash(app, "rpc-approval", "printf approved");
 
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
     expect(app.notify).not.toHaveBeenCalled();
-    expect(app.markToolCall).not.toHaveBeenCalled();
   });
 
   it("keeps the local review presenter independent from event-bus observers", async () => {
@@ -681,12 +797,8 @@ describe("Permission mode registration", () => {
 
     await executeBash(app, "event-bus-error", "printf approved");
 
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
     expect(app.notify).not.toHaveBeenCalled();
-    expect(app.markToolCall).toHaveBeenCalledWith("event-bus-error", {
-      icon: REVIEW_ICON,
-      color: "warning",
-    });
   });
 
   it("presents managed-tool policy evaluation failures without internal error codes", async () => {
@@ -711,8 +823,7 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
-    const outsideDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-register-outside-"));
-    tempDirectories.push(outsideDirectory);
+    const outsideDirectory = "/opt/pi-permissions-register-outside";
     const target = resolve(outsideDirectory, "result.txt");
 
     await executeWrite(app, "outside-write", target, "approved");
@@ -963,9 +1074,10 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
+    app.setStatus.mockClear();
     const pending = executeBash(app, "stale-call", "printf stale");
     await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
 
     await invoke(app, "session_before_tree", { type: "session_before_tree" });
     releaseReview(approved());
@@ -974,7 +1086,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
-    expect(app.setStatus.mock.calls.filter(([key]) => key === REVIEW_STATUS_KEY)).toHaveLength(0);
+    expect(reviewStatusCalls(app)).toHaveLength(0);
   });
 
   it("rejects a pre-aborted managed bash execute before backend execution", async () => {

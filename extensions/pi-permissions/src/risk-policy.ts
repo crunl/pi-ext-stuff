@@ -7,7 +7,6 @@ import {
   readRepositoryRemoteHosts,
 } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";
-import { rmArgsIncludeForce } from "./permissions/dangerous-commands.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
@@ -21,6 +20,7 @@ import {
   type Risk,
   shellCommandCanGrantGitMetadata,
   shellCommandInitializesCurrentDirectory,
+  shellCommandIsDangerous,
   shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
@@ -104,6 +104,44 @@ function pathOperation(operation: string): "read" | "write" | undefined {
   if (operation === "read") return "read";
   if (operation === "write") return "write";
   return undefined;
+}
+
+/**
+ * Host-owned tools keep their owner's approval and enforcement semantics.
+ * pi-permissions only contributes explicit user rules at this boundary.
+ */
+export async function evaluateHostRiskRequest(
+  tool: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  config: PermissionsConfig,
+): Promise<RiskDecision> {
+  const rule = matchRules(
+    {
+      tool,
+      operation: "external",
+      input,
+      cwd,
+      resolvedPaths: [],
+    },
+    config.rules,
+  );
+  if (rule?.action === "deny") {
+    return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
+  }
+  if (rule?.action === "ask") {
+    return {
+      action: "prompt",
+      risk: "REVIEW",
+      reason: "Approval required by permissions rule",
+      summary: summarize(tool, input),
+    };
+  }
+  return {
+    action: "allow",
+    risk: "LOW",
+    reason: rule?.action === "allow" ? "Allowed by permissions rule" : "Host tool policy",
+  };
 }
 
 export async function evaluateRiskRequest(
@@ -202,7 +240,24 @@ export async function evaluateRiskRequest(
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
   }
-  if (request.networkTargets?.some((host) => !isPublicNetworkHost(host))) {
+  if (request.operation === "external") {
+    if (rule?.action === "ask") {
+      return {
+        action: "prompt",
+        risk: "REVIEW",
+        reason: "Approval required by permissions rule",
+        summary: summarize(tool, input),
+      };
+    }
+    return {
+      action: "allow",
+      risk: "LOW",
+      reason: rule?.action === "allow" ? "Allowed by permissions rule" : "Host tool policy",
+    };
+  }
+  const sandboxedBashNetwork =
+    config.sandbox.enabled && request.operation === "execute" && tool.toLowerCase() === "bash";
+  if (request.networkTargets?.some((host) => !isPublicNetworkHost(host)) && !sandboxedBashNetwork) {
     return {
       action: "block",
       risk: "HARD",
@@ -215,13 +270,16 @@ export async function evaluateRiskRequest(
     cwd,
     protectedWritePaths ? [...protectedWritePaths] : undefined,
   );
-  let risk = classifyRisk(
-    request,
-    false,
-    [],
-    filesystem.protectedWritePaths,
-    filesystem.allowWrite,
-  );
+  // Bash is executed inside the active sandbox. Static policy identifies
+  // capabilities that must be granted before execution (for example Git
+  // metadata); network effects are authorized at the SRT connection boundary
+  // so one approved endpoint never turns into a whole-command replay.
+  let risk =
+    request.operation === "execute" && tool.toLowerCase() === "bash" && config.sandbox.enabled
+      ? command !== undefined && shellCommandIsDangerous(command)
+        ? "HARD"
+        : "LOW"
+      : classifyRisk(request, false, [], filesystem.protectedWritePaths, filesystem.allowWrite);
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
 
   const allowWrite = [...filesystem.allowWrite];
@@ -229,10 +287,8 @@ export async function evaluateRiskRequest(
     const segments = request.commandSegments ?? parseCommandSegments(command);
     for (const segment of segments) {
       if (!deletionExecutables.has(segment.executable)) continue;
-      if (segment.executable === "rm" && rmArgsIncludeForce(segment.args)) continue;
       const targets = deletionTargets(segment);
       if (targets.length === 0) continue;
-      let allAllowed = true;
       for (const target of targets) {
         const decision = await isPathAllowed(target, {
           cwd,
@@ -242,13 +298,15 @@ export async function evaluateRiskRequest(
           protectedWritePaths: filesystem.protectedWritePaths,
           operation: "write",
         });
-        if (!decision.allowed) {
-          allAllowed = false;
+        // Ordinary outside-root writes are discovered by the real sandbox and
+        // reviewed with its exact denial. Static policy only catches hard
+        // protected-path carve-outs before execution.
+        if (!decision.allowed && decision.reason !== "write path is outside allowed roots") {
+          risk = "REVIEW";
           break;
         }
       }
-      if (!allAllowed) {
-        risk = "REVIEW";
+      if (risk !== "LOW") {
         break;
       }
     }
@@ -279,6 +337,15 @@ export async function evaluateRiskRequest(
 
   const promptedByRule = rule?.action === "ask";
   const wouldPrompt = promptedByRule || risk !== "LOW";
+  // A sandboxed Bash command with a private literal is admitted as an action,
+  // then authorized by the SRT connection boundary. Do not turn that target
+  // into a host-wide capability in the pre-execution admission plan: the
+  // Engine intentionally accepts only public network capabilities here, and
+  // the runtime callback is the authority for local/private endpoints.
+  const requestedNetworkHosts =
+    request.operation === "execute" && request.networkTargets?.length
+      ? request.networkTargets.filter(isPublicNetworkHost)
+      : [];
 
   // ── escalation gate ────────────────────────────────────────────────────
   if (wouldPrompt) {
@@ -287,10 +354,7 @@ export async function evaluateRiskRequest(
       risk,
       reason: promptedByRule ? "Approval required by permissions rule" : `${risk} operation`,
       summary: summarize(tool, input),
-      networkHosts:
-        request.operation === "execute" && request.networkTargets?.length
-          ? [...request.networkTargets]
-          : undefined,
+      ...(requestedNetworkHosts.length > 0 ? { networkHosts: requestedNetworkHosts } : {}),
       filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
       justification: additionalWriteRoots.justification,
       ...(executionPlan === undefined ? {} : { executionPlan }),
