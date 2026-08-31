@@ -5,6 +5,29 @@ export const MAX_RECENT_GUARDIAN_DENIALS = 10;
 export const GUARDIAN_DENIAL_WINDOW_SIZE = 50;
 export const MAX_GUARDIAN_POLICY_CHARACTERS = 16_000;
 
+export type GuardianRiskLevel = "low" | "medium" | "high" | "critical";
+export type GuardianUserAuthorization = "unknown" | "low" | "medium" | "high";
+
+/** Enforce only policy conclusions derivable from the structured assessment.
+ * Scope and tenant-specific rules remain part of Guardian's outcome judgment. */
+export function guardianPolicyFloorViolation(assessment: {
+  outcome: "allow" | "deny";
+  riskLevel: GuardianRiskLevel;
+  userAuthorization: GuardianUserAuthorization;
+}): string | undefined {
+  if (assessment.outcome === "deny") return undefined;
+  if (assessment.riskLevel === "critical") {
+    return "critical risk cannot be allowed";
+  }
+  if (
+    assessment.riskLevel === "high" &&
+    (assessment.userAuthorization === "unknown" || assessment.userAuthorization === "low")
+  ) {
+    return "high risk requires user authorization of at least medium";
+  }
+  return undefined;
+}
+
 // Adapted from openai/codex at 88f776588f5e73467e7659c268f8358a9a2378b6:
 // codex-rs/core/src/guardian/{policy_template.md,policy.md,prompt.rs},
 // with two runtime-specific sections adapted to pi's runtime (SRT sandbox +

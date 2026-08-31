@@ -95,22 +95,35 @@ describe("auto review result", () => {
   });
 
   it.each([
-    {
-      outcome: "allow",
-      risk_level: "high",
-      user_authorization: "unknown",
-      rationale: "Policy selected allow.",
-    },
-    {
-      outcome: "allow",
-      risk_level: "critical",
-      user_authorization: "low",
-      rationale: "Policy selected allow.",
-    },
-  ])("leaves policy consistency to Guardian for $risk_level", (payload) => {
+    ["high/unknown", { outcome: "allow", risk_level: "high", user_authorization: "unknown" }],
+    ["high/low", { outcome: "allow", risk_level: "high", user_authorization: "low" }],
+    ["critical/low", { outcome: "allow", risk_level: "critical", user_authorization: "low" }],
+    ["critical/high", { outcome: "allow", risk_level: "critical", user_authorization: "high" }],
+  ])("rejects a policy-inconsistent allow assessment: %s", (_name, payload) => {
+    expect(() => parseAutoReviewResult(JSON.stringify(payload))).toThrow(
+      /invalid reviewer output/i,
+    );
+  });
+
+  it("rejects a policy-inconsistent assessment recovered from surrounding prose", () => {
+    expect(() =>
+      parseAutoReviewResult(
+        'assessment: {"outcome":"allow","risk_level":"critical","user_authorization":"high"}',
+      ),
+    ).toThrow(/invalid reviewer output/i);
+  });
+
+  it.each([
+    ["high/medium allow", { outcome: "allow", risk_level: "high", user_authorization: "medium" }],
+    ["high/high allow", { outcome: "allow", risk_level: "high", user_authorization: "high" }],
+    ["critical deny", { outcome: "deny", risk_level: "critical", user_authorization: "unknown" }],
+    ["high deny", { outcome: "deny", risk_level: "high", user_authorization: "low" }],
+    ["medium allow", { outcome: "allow", risk_level: "medium", user_authorization: "unknown" }],
+  ])("accepts a policy-consistent assessment: %s", (_name, payload) => {
     expect(parseAutoReviewResult(JSON.stringify(payload))).toMatchObject({
-      decision: "approve",
+      decision: payload.outcome === "allow" ? "approve" : "deny",
       risk: payload.risk_level,
+      userAuthorization: payload.user_authorization,
     });
   });
 

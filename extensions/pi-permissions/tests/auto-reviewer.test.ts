@@ -772,7 +772,7 @@ describe("PiAutoReviewer", () => {
     ).rejects.toMatchObject({ kind: "parse" });
   });
 
-  it("returns a high-risk allow response without retrying it as a parse failure", async () => {
+  it("retries a policy-inconsistent allow and commits only the valid response", async () => {
     const highRiskAllow = {
       ...response,
       content: [
@@ -787,8 +787,11 @@ describe("PiAutoReviewer", () => {
         },
       ],
     };
-    const complete = vi.fn(async () => highRiskAllow);
-    const reviewer = new PiAutoReviewer(complete as any);
+    const complete = vi.fn().mockResolvedValueOnce(highRiskAllow).mockResolvedValueOnce(response);
+    const sessions = new GuardianReviewSessionManager();
+    const runtime = fakeGuardianRuntime([]);
+    const sleep = vi.fn(async () => {});
+    const reviewer = new PiAutoReviewer(complete as any, sessions, sleep, () => runtime);
     const context = {
       guardianSession,
       guardianEvidenceScope,
@@ -800,9 +803,47 @@ describe("PiAutoReviewer", () => {
 
     await expect(reviewer.review(request, context)).resolves.toMatchObject({
       decision: "approve",
-      risk: "high",
+      risk: "low",
     });
-    expect(complete).toHaveBeenCalledOnce();
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
+    const retained = next.context.messages.map(messageText);
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(retained).toContain(response.content[0].text);
+    expect(retained).not.toContain(highRiskAllow.content[0].text);
+    next.release();
+  });
+
+  it("fails closed after three policy-inconsistent allow responses", async () => {
+    const highRiskAllow = {
+      ...response,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            risk_level: "critical",
+            user_authorization: "high",
+            outcome: "allow",
+            rationale: "Policy selected allow.",
+          }),
+        },
+      ],
+    };
+    const complete = vi.fn(async () => highRiskAllow);
+    const sessions = new GuardianReviewSessionManager();
+    const runtime = fakeGuardianRuntime([]);
+    const sleep = vi.fn(async () => {});
+    const reviewer = new PiAutoReviewer(complete as any, sessions, sleep, () => runtime);
+
+    await expect(reviewer.review(request, context)).rejects.toMatchObject({
+      kind: "parse",
+      message: expect.stringContaining("critical risk cannot be allowed"),
+    });
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(next.context.messages.map(messageText)).toEqual(["next review"]);
+    next.release();
   });
 
   it("reports caller cancellation without converting it to a timeout", async () => {

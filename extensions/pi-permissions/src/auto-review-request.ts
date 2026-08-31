@@ -3,13 +3,18 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
-import { renderGuardianSystemPrompt } from "./guardian-policy.ts";
+import {
+  type GuardianRiskLevel,
+  type GuardianUserAuthorization,
+  guardianPolicyFloorViolation,
+  renderGuardianSystemPrompt,
+} from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import { isRecord } from "./unknown-value.ts";
 
-export type AutoReviewRisk = "low" | "medium" | "high" | "critical";
-export type AutoReviewUserAuthorization = "unknown" | "low" | "medium" | "high";
+export type AutoReviewRisk = GuardianRiskLevel;
+export type AutoReviewUserAuthorization = GuardianUserAuthorization;
 
 export interface AutoReviewResult {
   decision: "approve" | "deny";
@@ -285,6 +290,14 @@ export function parseAutoReviewResult(text: string): AutoReviewResult {
   const decision = parsed.outcome === "allow" ? "approve" : "deny";
   const risk = (parsed.risk_level ?? (decision === "approve" ? "low" : "high")) as AutoReviewRisk;
   const userAuthorization = (parsed.user_authorization ?? "unknown") as AutoReviewUserAuthorization;
+  const policyViolation = guardianPolicyFloorViolation({
+    outcome: parsed.outcome,
+    riskLevel: risk,
+    userAuthorization,
+  });
+  if (policyViolation !== undefined) {
+    throw new Error(`Invalid reviewer output: ${policyViolation}`);
+  }
   const rationale =
     typeof parsed.rationale === "string" && parsed.rationale.trim().length > 0
       ? parsed.rationale
