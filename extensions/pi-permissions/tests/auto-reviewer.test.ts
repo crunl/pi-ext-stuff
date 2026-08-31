@@ -4,10 +4,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
   AUTO_REVIEW_SYSTEM_PROMPT,
+  boundAutoReviewerParentInstructions,
+  MAX_GUARDIAN_PARENT_INSTRUCTION_CHARACTERS,
 } from "../src/auto-review-request.ts";
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { fingerprintValue } from "../src/config.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
+import { createGuardianEvidenceScope, type SandboxPolicy } from "../src/sandbox.ts";
 
 const request = {
   toolCallId: "review-1",
@@ -23,7 +26,7 @@ const request = {
     filesystemWriteRoots: ["/workspace"],
     filesystemDenyRead: [],
     filesystemDenyWrite: [],
-    requestedNetworkHosts: [],
+    requestedNetworkTargets: [],
     allowedNetworkHosts: [],
     deniedNetworkHosts: [],
     staticRisk: "REVIEW",
@@ -69,8 +72,18 @@ const guardianSession = {
   configFingerprint: "config-a",
 };
 
+const guardianParentPolicy: SandboxPolicy = {
+  filesystem: { allowWrite: ["/workspace"], denyRead: [], denyWrite: [] },
+  network: { allowedDomains: [], deniedDomains: [] },
+};
+const guardianEvidenceScope = createGuardianEvidenceScope(
+  guardianSession.cwd,
+  guardianParentPolicy,
+);
+
 const context = {
   guardianSession,
+  guardianEvidenceScope,
   modelRegistry: {
     getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "token" })),
   } as any,
@@ -93,13 +106,14 @@ function guardianSessionKey(tools: Tool[]): GuardianSessionKey {
     provider: context.activeModel.provider,
     model: context.activeModel.id,
     reasoningEffort: "medium",
-    toolFingerprint: fingerprintValue(
-      tools.map((tool) => ({
+    toolFingerprint: fingerprintValue({
+      authorityFingerprint: guardianEvidenceScope.authorityFingerprint,
+      tools: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
       })),
-    ),
+    }),
   };
 }
 
@@ -123,6 +137,54 @@ describe("PiAutoReviewer", () => {
     expect(complete).toHaveBeenCalledOnce();
   });
 
+  it("binds host-only evidence authority to the runtime without exposing it to the model", async () => {
+    const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
+    const runtime = fakeGuardianRuntime([]);
+    const createTools = vi.fn(() => runtime);
+    const scopedAuthority = createGuardianEvidenceScope(guardianSession.cwd, {
+      ...guardianParentPolicy,
+      filesystem: {
+        ...guardianParentPolicy.filesystem,
+        denyRead: ["/host-only-secret"],
+      },
+    });
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      undefined,
+      createTools,
+    );
+
+    await reviewer.review(request, {
+      ...context,
+      guardianEvidenceScope: scopedAuthority,
+    });
+
+    expect(createTools).toHaveBeenCalledWith(scopedAuthority);
+    expect(JSON.stringify(complete.mock.calls[0]?.[1])).not.toContain("host-only-secret");
+  });
+
+  it("fails the review when the evidence runtime cannot close cleanly", async () => {
+    const sessions = new GuardianReviewSessionManager();
+    const runtime = {
+      ...fakeGuardianRuntime([]),
+      close: vi.fn(async () => {
+        throw new Error("sandbox reset failed");
+      }),
+    };
+    const reviewer = new PiAutoReviewer(
+      vi.fn(async () => response) as any,
+      sessions,
+      undefined,
+      () => runtime,
+    );
+
+    await expect(reviewer.review(request, context)).rejects.toThrow(/sandbox reset failed/i);
+    const next = sessions.open(guardianSessionKey(runtime.tools), "next review", runtime.tools);
+    expect(next.context.messages.map(messageText)).toEqual(["next review"]);
+    next.release();
+  });
+
   it("uses configured Guardian metadata and bounded options", async () => {
     const configuredModel = { provider: "openai-codex", id: "reviewer" } as any;
     const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
@@ -135,6 +197,7 @@ describe("PiAutoReviewer", () => {
     await expect(
       reviewer.review(request, {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
@@ -207,6 +270,65 @@ describe("PiAutoReviewer", () => {
     expect(reviewContext.systemPrompt).toBe(AUTO_REVIEW_SYSTEM_PROMPT);
   });
 
+  it("passes only bounded AGENTS parent instructions through the trusted system channel", async () => {
+    const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
+    const reviewer = new PiAutoReviewer(complete as any);
+
+    await reviewer.review(request, {
+      ...context,
+      parentInstructions: [
+        {
+          path: "/workspace/AGENTS.md",
+          content: "Run the requested checks before approving.",
+        },
+        {
+          path: "/workspace/notes.md",
+          content: "This is not a trusted parent instruction.",
+        },
+        {
+          path: "relative/AGENTS.md",
+          content: "This path is not host-authoritative.",
+        },
+        {
+          path: `/${"a".repeat(4_096)}/AGENTS.md`,
+          content: "This path must not bypass the prompt bound.",
+        },
+      ],
+    });
+
+    const reviewContext = complete.mock.calls[0]?.[1] as any;
+    expect(reviewContext.systemPrompt).toContain("# Trusted Parent Project Instructions");
+    expect(reviewContext.systemPrompt).toContain("/workspace/AGENTS.md");
+    expect(reviewContext.systemPrompt).toContain("Run the requested checks before approving.");
+    expect(reviewContext.systemPrompt).not.toContain("notes.md");
+    expect(reviewContext.systemPrompt).not.toContain("relative/AGENTS.md");
+    expect(reviewContext.systemPrompt).not.toContain("This path must not bypass the prompt bound.");
+    expect(
+      reviewContext.systemPrompt.indexOf("# Trusted Parent Project Instructions"),
+    ).toBeLessThan(
+      reviewContext.systemPrompt.indexOf("You are judging one planned coding-agent action."),
+    );
+    expect(
+      reviewContext.systemPrompt.indexOf("You are judging one planned coding-agent action."),
+    ).toBeLessThan(reviewContext.systemPrompt.indexOf("When read-only evidence tools are exposed"));
+  });
+
+  it("truncates the final AGENTS file at the shared parent-instruction budget", () => {
+    const bounded = boundAutoReviewerParentInstructions([
+      {
+        path: "/workspace/AGENTS.md",
+        content: `prefix-${"x".repeat(40_000)}-tail-marker`,
+      },
+    ]);
+
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0]?.content).toContain("prefix-");
+    expect(bounded[0]?.content).not.toContain("tail-marker");
+    expect((bounded[0]?.path.length ?? 0) + (bounded[0]?.content.length ?? 0)).toBeLessThanOrEqual(
+      MAX_GUARDIAN_PARENT_INSTRUCTION_CHARACTERS,
+    );
+  });
+
   it("places an exact retry authorization in the trusted system channel", async () => {
     const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
     const reviewer = new PiAutoReviewer(complete as any);
@@ -264,6 +386,7 @@ describe("PiAutoReviewer", () => {
 
     await reviewer.review(request, {
       guardianSession,
+      guardianEvidenceScope,
       modelRegistry,
       activeModel,
     });
@@ -429,6 +552,51 @@ describe("PiAutoReviewer", () => {
     next.release();
   });
 
+  it("does not reuse retained evidence across different Guardian authorities", async () => {
+    const firstResponse = {
+      ...response,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            outcome: "allow",
+            rationale: "Evidence visible only under the first authority.",
+          }),
+        },
+      ],
+    } as any;
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(firstResponse)
+      .mockImplementationOnce(async (_model, reviewContext) => {
+        expect(reviewContext.messages.map(messageText).join("\n")).not.toContain(
+          "Evidence visible only under the first authority.",
+        );
+        return response;
+      });
+    const runtime = fakeGuardianRuntime([]);
+    const reviewer = new PiAutoReviewer(
+      complete as any,
+      new GuardianReviewSessionManager(),
+      async () => {},
+      () => runtime,
+    );
+
+    await reviewer.review(request, context);
+    await reviewer.review(request, {
+      ...context,
+      guardianEvidenceScope: createGuardianEvidenceScope(guardianSession.cwd, {
+        ...guardianParentPolicy,
+        filesystem: {
+          ...guardianParentPolicy.filesystem,
+          denyRead: ["/narrower-authority"],
+        },
+      }),
+    });
+
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
   it("fails closed when Guardian requests a non-runtime tool", async () => {
     const complete = vi.fn().mockResolvedValueOnce(assistantToolUse("write-call-1", "write", {}));
     const runtime = fakeGuardianRuntime([], new Error("Guardian tool write is not available"));
@@ -547,6 +715,7 @@ describe("PiAutoReviewer", () => {
     await expect(
       reviewer.review(request, {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry: {
           find: () => undefined,
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
@@ -574,6 +743,7 @@ describe("PiAutoReviewer", () => {
     await expect(
       reviewer.review(request, {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry: { find: () => undefined } as any,
         activeModel: undefined,
         reviewer: {
@@ -593,6 +763,7 @@ describe("PiAutoReviewer", () => {
     await expect(
       malformed.review(request, {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry: {
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
         } as any,
@@ -620,6 +791,7 @@ describe("PiAutoReviewer", () => {
     const reviewer = new PiAutoReviewer(complete as any);
     const context = {
       guardianSession,
+      guardianEvidenceScope,
       modelRegistry: {
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
       } as any,
@@ -647,6 +819,7 @@ describe("PiAutoReviewer", () => {
       request,
       {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry: {
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
         } as any,
@@ -676,6 +849,7 @@ describe("PiAutoReviewer", () => {
       request,
       {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
@@ -710,6 +884,7 @@ describe("PiAutoReviewer", () => {
     await expect(
       reviewer.review(request, {
         guardianSession,
+        guardianEvidenceScope,
         modelRegistry,
         activeModel,
         reviewer: {
@@ -737,6 +912,7 @@ describe("PiAutoReviewer", () => {
 
     const pending = reviewer.review(request, {
       guardianSession,
+      guardianEvidenceScope,
       modelRegistry: {
         find: () => ({ provider: "openai", id: "main" }),
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),

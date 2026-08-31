@@ -8,7 +8,8 @@ import {
   type DenialNotice,
   type AdmissionPlan as EngineAdmissionPlan,
   type CapabilityAuthorizationDecision as EngineCapabilityAuthorizationDecision,
-  type CapabilityAuthorizationRequest as EngineCapabilityAuthorizationRequest,
+  type CapabilityAuthorizationInput as EngineCapabilityAuthorizationInput,
+  type CapabilityRejectionInput as EngineCapabilityRejectionInput,
   type CapabilityRequestInput as EngineCapabilityRequestInput,
   type ExecutionAttempt as EngineExecutionAttempt,
   type PermissionAmendment as EnginePermissionAmendment,
@@ -20,6 +21,7 @@ import {
   type PermissionError,
   type PermissionPolicy,
   type ReviewEvent,
+  type RuntimeDenialPolicy,
   type TurnHandle,
 } from "./approve-for-me-engine.ts";
 import type { StructuredExecutionPlan } from "./execution-plan.ts";
@@ -38,7 +40,6 @@ export type PiActionKind = "sandbox" | "host" | "permission-amendment";
 export type PiCapabilityRequest = EngineCapabilityRequestInput;
 
 export interface PiPermissionRequest {
-  scope: "turn" | "session";
   reason?: string;
 }
 
@@ -71,11 +72,17 @@ export interface PiCapturedAction<Input = unknown> {
 
 /** The only execution capability shape visible to a Pi adapter. */
 export interface PiExecutionAttempt<Input = unknown> {
-  readonly ordinal: 0 | 1;
   readonly call: PiActionCall<Input>;
   readonly mode: "sandboxed" | "host-admitted" | "unrestricted";
   readonly policy?: SandboxPolicy;
   readonly plan?: StructuredExecutionPlan;
+  readonly signal: AbortSignal;
+  readonly authorizeCapability: (
+    request: EngineCapabilityAuthorizationInput,
+  ) => Promise<EngineCapabilityAuthorizationDecision>;
+  readonly rejectCapability: (
+    request: EngineCapabilityRejectionInput,
+  ) => EngineCapabilityAuthorizationDecision;
 }
 
 export type PiActionOutcome<T> =
@@ -83,7 +90,6 @@ export type PiActionOutcome<T> =
   | {
       kind: "capability-denied";
       request: PiCapabilityRequest;
-      retryability: "safe" | "uncertain";
       detail?: string;
     }
   | { kind: "failed"; error: unknown };
@@ -96,6 +102,8 @@ export interface PiAction<Result, ReviewContext = undefined, Input = unknown> {
   /** Static risk evidence captured for this exact action, when applicable. */
   readonly risk?: RiskDecision;
   readonly permission?: PiPermissionRequest;
+  /** Trusted adapter declaration for post-start filesystem denial handling. */
+  readonly runtimeDenialPolicy?: RuntimeDenialPolicy;
   readonly reviewContext: ReviewContext;
   readonly signal?: AbortSignal;
   /** Receives transient reviewer state for this exact tool row. */
@@ -107,12 +115,14 @@ export interface PiPermissionError {
   readonly code: PermissionError["code"];
   readonly reason: string;
   readonly request?: PiCapabilityRequest;
+  readonly effectsMayHaveOccurred?: true;
+  readonly retryAttempted?: true;
 }
 
 export type PiExecutionOutcome<T> =
   | { kind: "completed"; value: T }
   | { kind: "blocked"; error: PiPermissionError }
-  | { kind: "failed"; error: unknown };
+  | { kind: "failed"; error: unknown; effectsMayHaveOccurred?: true };
 
 function toEngineRuntimeOutcome<T>(outcome: PiActionOutcome<T>): EngineRuntimeOutcome<T> {
   if (outcome.kind === "completed") return outcome;
@@ -129,6 +139,10 @@ function fromEngineExecutionOutcome<T>(outcome: ExecutionOutcome<T>): PiExecutio
       code: outcome.error.code,
       reason: outcome.error.reason,
       ...(outcome.error.request === undefined ? {} : { request: outcome.error.request }),
+      ...(outcome.error.effectsMayHaveOccurred === true
+        ? { effectsMayHaveOccurred: true as const }
+        : {}),
+      ...(outcome.error.retryAttempted === true ? { retryAttempted: true as const } : {}),
     },
   };
 }
@@ -167,7 +181,6 @@ function intentForAction(
   return {
     kind: "permission-amendment",
     requested,
-    scope: action.permission.scope,
     reason:
       action.permission.reason ?? (admission?.kind === "review" ? admission.reason : undefined),
   };
@@ -207,11 +220,6 @@ export interface PiPermissions<ReviewContext = undefined> {
   submit<Result, Input = unknown>(
     action: PiAction<Result, ReviewContext, Input>,
   ): Promise<PiExecutionOutcome<Result>>;
-  authorizeCapability(
-    request: Omit<EngineCapabilityAuthorizationRequest, "call"> & {
-      call: PiActionCall;
-    },
-  ): Promise<EngineCapabilityAuthorizationDecision>;
   captureAction<Input>(call: PiActionCall<Input>): PiCapturedAction<Input>;
   closeTurn(reason?: string): void;
   invalidate(reason: string): void;
@@ -323,11 +331,13 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
       },
       ...(admission === undefined ? {} : { admission }),
       ...(intent === undefined ? {} : { intent }),
+      ...(action.runtimeDenialPolicy === undefined
+        ? {}
+        : { runtimeDenialPolicy: action.runtimeDenialPolicy }),
       reviewContext: action.reviewContext,
       signal: action.signal,
       executor: async (attempt: EngineExecutionAttempt) => {
         const context: PiExecutionAttempt<Input> = {
-          ordinal: attempt.ordinal,
           call: {
             id: attempt.call.id,
             tool: attempt.call.tool,
@@ -338,6 +348,9 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
           mode: attempt.lease.mode,
           ...(attempt.lease.policy === undefined ? {} : { policy: attempt.lease.policy }),
           ...(attempt.plan === undefined ? {} : { plan: attempt.plan }),
+          signal: attempt.signal,
+          authorizeCapability: attempt.authorizeCapability,
+          rejectCapability: attempt.rejectCapability,
         };
         const outcome = await execute(context);
         return toEngineRuntimeOutcome(outcome);
@@ -348,30 +361,6 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
     } finally {
       unbindReviewStatus?.();
     }
-  }
-
-  async authorizeCapability(
-    request: Omit<EngineCapabilityAuthorizationRequest, "call"> & {
-      call: PiActionCall;
-    },
-  ): Promise<EngineCapabilityAuthorizationDecision> {
-    const turn = this.activeTurn;
-    if (!turn) {
-      return {
-        kind: "deny",
-        error: { code: "no-active-turn", reason: NO_ACTIVE_TURN.reason },
-      };
-    }
-    return turn.authorizeCapability({
-      ...request,
-      call: {
-        id: request.call.id,
-        tool: request.call.tool,
-        input: request.call.input,
-        cwd: resolve(request.call.cwd),
-        ...(request.call.metadata === undefined ? {} : { metadata: request.call.metadata }),
-      },
-    });
   }
 
   closeTurn(reason = "turn closed"): void {

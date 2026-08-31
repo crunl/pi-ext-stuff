@@ -12,10 +12,12 @@ import type {
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
+import { fingerprintValue } from "./config.ts";
 import type { GitInitExecutionPlan } from "./execution-plan.ts";
 import {
   createFilesystemPolicy,
   expandSymlinkAliases,
+  hasGlobSyntax,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
 import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
@@ -44,6 +46,96 @@ export interface SandboxPolicy {
     trustedFakeIpRanges?: string[];
     allowLocalBinding?: boolean;
   };
+}
+
+/**
+ * Trusted, immutable evidence authority for one Guardian review.
+ *
+ * It deliberately carries only the part of the parent policy that remains
+ * meaningful after intersecting it with Guardian's fixed read-only,
+ * zero-write, zero-network profile. It is never included in the model prompt.
+ */
+export interface GuardianEvidenceScope {
+  readonly cwd: string;
+  readonly denyRead: readonly string[];
+  readonly authorityFingerprint: string;
+}
+
+function guardianAuthorityFingerprint(cwd: string, denyRead: readonly string[]): string {
+  return fingerprintValue({
+    cwd,
+    denyRead,
+    allowWrite: [],
+    network: "denied",
+  });
+}
+
+function normalizedGuardianDenyRead(denyRead: readonly string[]): string[] {
+  if (!Array.isArray(denyRead)) throw new Error("Guardian evidence denyRead must be an array");
+  const normalized = denyRead.map((entry) => {
+    if (typeof entry !== "string" || entry.length === 0 || !isAbsolute(entry)) {
+      throw new Error("Guardian evidence denyRead entries must be non-empty absolute paths");
+    }
+    return entry;
+  });
+  if (process.platform === "linux" && normalized.some(hasGlobSyntax)) {
+    throw new Error("Guardian evidence cannot enforce glob denyRead entries on Linux");
+  }
+  return [...new Set(normalized)].sort();
+}
+
+/** Derive Guardian authority from the exact parent lease, never from a grant. */
+export function createGuardianEvidenceScope(
+  cwd: string,
+  parentPolicy: SandboxPolicy,
+): GuardianEvidenceScope {
+  if (!parentPolicy || typeof parentPolicy !== "object") {
+    throw new Error("Guardian evidence requires an exact parent sandbox policy");
+  }
+  const resolvedCwd = resolve(cwd);
+  const denyRead = Object.freeze(normalizedGuardianDenyRead(parentPolicy.filesystem.denyRead));
+  return Object.freeze({
+    cwd: resolvedCwd,
+    denyRead,
+    authorityFingerprint: guardianAuthorityFingerprint(resolvedCwd, denyRead),
+  });
+}
+
+/**
+ * Evidence ceiling for host-admission reviews when the main sandbox is
+ * disabled. Host tools are not given a synthetic execution sandbox; this
+ * policy only records the least-authority Guardian profile (zero writes and
+ * zero network) while preserving the parent process's unrestricted read
+ * authority through an empty denyRead set.
+ */
+export function createGuardianEvidencePolicyCeiling(): SandboxPolicy {
+  return {
+    filesystem: {
+      allowWrite: [],
+      denyRead: [],
+      denyWrite: [],
+    },
+    network: {
+      allowedDomains: [],
+      deniedDomains: ["*"],
+      trustedFakeIpRanges: [],
+      allowLocalBinding: false,
+    },
+  };
+}
+
+/** Validate and defensively copy authority received across an internal seam. */
+export function copyGuardianEvidenceScope(scope: GuardianEvidenceScope): GuardianEvidenceScope {
+  if (!scope || typeof scope !== "object" || !isAbsolute(scope.cwd)) {
+    throw new Error("Guardian evidence scope is invalid");
+  }
+  const cwd = resolve(scope.cwd);
+  const denyRead = Object.freeze(normalizedGuardianDenyRead(scope.denyRead));
+  const authorityFingerprint = guardianAuthorityFingerprint(cwd, denyRead);
+  if (scope.authorityFingerprint !== authorityFingerprint) {
+    throw new Error("Guardian evidence authority fingerprint does not match its scope");
+  }
+  return Object.freeze({ cwd, denyRead, authorityFingerprint });
 }
 
 export interface SandboxNetworkEndpoint {
@@ -133,16 +225,30 @@ export interface SandboxManagerLike {
   classifyDenial?(commandId: string): Promise<SandboxDenialCapability | undefined>;
 }
 
-export function createGuardianReadOnlySandboxConfig(): SandboxPolicy {
+export function createGuardianReadOnlySandboxConfig(scope: GuardianEvidenceScope): SandboxPolicy {
+  const trustedScope = copyGuardianEvidenceScope(scope);
   return {
     filesystem: {
       allowWrite: [],
-      denyRead: [],
+      denyRead: [...trustedScope.denyRead],
       denyWrite: [],
     },
     network: {
       allowedDomains: [],
-      deniedDomains: [],
+      deniedDomains: ["*"],
+      trustedFakeIpRanges: [],
+      allowLocalBinding: false,
+    },
+  };
+}
+
+/** Conservative fallback used only when a caller omits an explicit policy. */
+function createDefaultSandboxConfig(): SandboxPolicy {
+  return {
+    filesystem: { allowWrite: [], denyRead: [], denyWrite: [] },
+    network: {
+      allowedDomains: [],
+      deniedDomains: ["*"],
       trustedFakeIpRanges: [],
       allowLocalBinding: false,
     },
@@ -466,10 +572,9 @@ export function createSandboxedBashOperations(
       }
 
       const preparation = gitInitPlan
-        ? await prepareGitInit(cwd, customConfig ?? createGuardianReadOnlySandboxConfig())
+        ? await prepareGitInit(cwd, customConfig ?? createDefaultSandboxConfig())
         : undefined;
-      const executionPolicy =
-        preparation?.policy ?? customConfig ?? createGuardianReadOnlySandboxConfig();
+      const executionPolicy = preparation?.policy ?? customConfig ?? createDefaultSandboxConfig();
       // SRT injects a private-target NO_PROXY set by default. When the
       // sandbox-owned callback is active, local/private exceptions must still
       // pass through the authenticated parent guard so its exact ticket and
@@ -622,12 +727,14 @@ export function gitInitializationEnvironment(
 export function createSandboxedReadOnlyCommandRunner(
   manager: SandboxManagerLike,
   executable: GuardianReadOnlyExecutable,
+  evidenceScope: GuardianEvidenceScope,
 ): (args: readonly string[], signal?: AbortSignal) => Promise<SandboxedCommandResult> {
   const resolvedExecutable = guardianReadOnlyExecutablePath(executable);
+  const trustedScope = copyGuardianEvidenceScope(evidenceScope);
   return async (args, signal) => {
     if (signal?.aborted) throw new Error("aborted");
     return executeSandboxProgram(manager, {
-      policy: createGuardianReadOnlySandboxConfig(),
+      policy: createGuardianReadOnlySandboxConfig(trustedScope),
       program: { executable: resolvedExecutable, args },
       env: guardianEnvironment(),
       envMode: "replace",
@@ -962,10 +1069,11 @@ export interface SandboxedGuardianFileOperations {
 
 export function createSandboxedGuardianFileOperations(
   manager: SandboxManagerLike,
+  evidenceScope: GuardianEvidenceScope,
   signal?: AbortSignal,
   trustedHome: string = homedir(),
 ): SandboxedGuardianFileOperations {
-  const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+  const run = createSandboxedReadOnlyCommandRunner(manager, "node", evidenceScope);
   const runFileOperation = async (
     operation: GuardianFileOperation,
     path: string,

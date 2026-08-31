@@ -77,16 +77,36 @@ function renderFailureReason(reason: string): string {
 
 export function renderPermissionErrorForAgent(error: PermissionError): string {
   const reason = renderFailureReason(error.reason);
+  const effectsMayHaveOccurred = error.effectsMayHaveOccurred === true;
   switch (error.code) {
     case "review-denied":
       return [
         "This action was rejected due to unacceptable risk.",
         `Reason: ${reason}`,
+        ...(effectsMayHaveOccurred
+          ? [
+              "Execution had already started; earlier effects may have occurred. Do not replay it blindly.",
+            ]
+          : []),
         "The agent must not attempt to achieve the same outcome through a workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative, or if the user explicitly approves the action after being informed of the risk. Otherwise, stop and ask the user.",
       ].join("\n");
     case "review-timeout":
+      if (effectsMayHaveOccurred) {
+        return [
+          "The automatic permission approval review timed out after execution had started.",
+          `Reason: ${reason}`,
+          "The execution was stopped, but earlier effects may have occurred. Inspect the result before considering any retry. Do not replay it blindly.",
+        ].join("\n");
+      }
       return "The automatic permission approval review did not finish before its deadline. Do not assume the action is unsafe based on the timeout alone. You may retry once, or ask the user for guidance or explicit approval.";
     case "review-unavailable":
+      if (effectsMayHaveOccurred) {
+        return [
+          "Automatic approval review could not produce a decision after execution had started.",
+          `Reason: ${reason}`,
+          "The execution was stopped, but earlier effects may have occurred. Inspect the result before considering any retry. Do not replay it blindly.",
+        ].join("\n");
+      }
       return [
         "Automatic approval review could not produce a decision. The action was not run.",
         `Reason: ${reason}`,
@@ -96,30 +116,58 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
       return [
         "This action is blocked by the active permission policy.",
         `Reason: ${reason}`,
+        ...(effectsMayHaveOccurred
+          ? [
+              "Execution had already started; earlier effects may have occurred. Do not replay it blindly.",
+            ]
+          : []),
         "This restriction cannot be overridden through Auto-review.",
       ].join("\n");
     case "policy-error":
+      if (effectsMayHaveOccurred) {
+        return `The active permission policy failed while execution was in progress. Earlier effects may have occurred; inspect the result before considering a retry.\nReason: ${reason}`;
+      }
       return `The active permission policy could not evaluate this action. The action was not run.\nReason: ${reason}`;
     case "enforcement-unavailable":
+      if (effectsMayHaveOccurred) {
+        return `Sandbox enforcement could not verify the requested action after execution started. Earlier effects may have occurred; inspect the result before considering a retry.\nReason: ${reason}`;
+      }
       return `Sandbox enforcement could not verify that the requested action stayed within the approved scope. The action was not run.\nReason: ${reason}`;
     case "runtime-denied":
+      if (effectsMayHaveOccurred) {
+        return [
+          "Sandbox enforcement denied a capability during execution.",
+          ...(error.retryAttempted === true
+            ? [
+                "One reviewed retry already ran and was also denied; no further automatic replay is available. Earlier effects may have occurred; inspect the result before considering any retry.",
+              ]
+            : [
+                "Earlier effects may have occurred; inspect the result before considering any retry. Do not replay it blindly.",
+              ]),
+          `Reason: ${reason}`,
+        ].join("\n");
+      }
       return `Sandbox enforcement denied the requested capability. The action was not run.\nReason: ${reason}`;
-    case "retry-denied":
-      return `The exact retry authorization is no longer valid. The action was not run.\nReason: ${reason}`;
-    case "retry-uncertain":
-      return `The exact retry could not be verified safely. The action was not run.\nReason: ${reason}`;
     case "circuit-open":
       return "Automatic approval review is unavailable for this turn because too many approval requests were denied. Stop and ask the user before attempting another boundary-crossing action.";
     case "aborted":
+      if (effectsMayHaveOccurred) {
+        return "Permission handling was aborted after execution started. Earlier effects may have occurred; inspect the result before considering a retry.";
+      }
       return "Permission handling was aborted before the action could run.";
     case "no-active-turn":
       return "No active permission turn is available. Retry in the active task.";
     case "stale-invocation":
+      if (effectsMayHaveOccurred) {
+        return "The permission context changed after execution started. Earlier effects may have occurred; inspect the result before considering a retry.";
+      }
       return "The permission context changed before this action could run. Retry in the current task context.";
     case "concurrent-invocation":
       return "Another permission-controlled action is already in progress. Retry after it finishes.";
     case "execution-failed":
-      return `The permitted action failed during execution.\nReason: ${reason}`;
+      return effectsMayHaveOccurred
+        ? `The permitted action failed during execution. Earlier effects may have occurred; inspect the result before considering any retry.\nReason: ${reason}`
+        : `The permitted action failed during execution.\nReason: ${reason}`;
   }
 }
 

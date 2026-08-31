@@ -203,40 +203,43 @@ describe("Risk policy gate", () => {
     }
   });
 
-  it("does not mistake network option values for destination hosts", async () => {
+  it("does not pregrant a parsed destination when a rule requests approval", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
 
     const configured = config({
       rules: [{ action: "ask", tool: "bash", pattern: "curl *" }],
     });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "curl -X POST -H 'accept: application/json' https://example.com/api" },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "curl -X POST -H 'accept: application/json' https://example.com/api" },
+      cwd,
+      configured,
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "LOW",
-      networkHosts: ["example.com"],
     });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
-  it("infers the approved host for git operations from the repository remote", async () => {
+  it("keeps a Git remote on the exact runtime connection boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(
       join(cwd, ".git"),
       '[remote "origin"]\n\turl = git@github.com:openai/codex.git\n',
     );
 
-    await expect(
-      evaluateRiskRequest("bash", { command: "git push origin main" }, cwd, config()),
-    ).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git push origin main" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "REVIEW",
-      networkHosts: ["github.com"],
     });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it.each([
@@ -325,39 +328,39 @@ describe("Risk policy gate", () => {
   });
 
   it.each([
-    ["git push --repo=ssh://git@github.com/openai/codex.git -- HEAD:main", ["github.com"]],
-    [
-      "git fetch --multiple https://github.com/openai/codex.git ssh://git@gitlab.com/openai/codex.git",
-      ["github.com", "gitlab.com"],
-    ],
-    ["git submodule add -b main ssh://git@github.com/openai/codex.git child", ["github.com"]],
-  ] as const)("preserves public Git remote operands in %s", async (command, networkHosts) => {
+    "git push --repo=ssh://git@github.com/openai/codex.git -- HEAD:main",
+    "git fetch --multiple https://github.com/openai/codex.git ssh://git@gitlab.com/openai/codex.git",
+    "git submodule add -b main ssh://git@github.com/openai/codex.git child",
+  ] as const)(
+    "defers public Git remote operands to the runtime boundary in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+
+      const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
+      expect(decision).toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+      });
+      expect(decision).not.toHaveProperty("networkHosts");
+    },
+  );
+
+  it("defers a public SSH Git remote to the runtime boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git push ssh://git@github.com/openai/codex.git HEAD:main" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "REVIEW",
-      networkHosts,
     });
-  });
-
-  it("keeps a public SSH Git remote explicit", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
-    await createGitDirectory(join(cwd, ".git"));
-
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "git push ssh://git@github.com/openai/codex.git HEAD:main" },
-        cwd,
-        config(),
-      ),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-      networkHosts: ["github.com"],
-    });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it("keeps a local Git remote operand out of network policy", async () => {
@@ -392,7 +395,7 @@ describe("Risk policy gate", () => {
     });
   });
 
-  it("uses only the public fetch URL for Git fetch", async () => {
+  it("defers a public fetch URL to the runtime boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(
       join(cwd, ".git"),
@@ -404,13 +407,17 @@ describe("Risk policy gate", () => {
       ].join("\n"),
     );
 
-    await expect(
-      evaluateRiskRequest("bash", { command: "git fetch origin" }, cwd, config()),
-    ).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git fetch origin" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "REVIEW",
-      networkHosts: ["github.com"],
     });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it("does not mistake a fetch refspec for the remote operand", async () => {
@@ -420,33 +427,36 @@ describe("Risk policy gate", () => {
       '[remote "origin"]\n\turl = git@github.com:openai/codex.git\n',
     );
 
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "git fetch --prune origin HEAD:refs/remotes/origin/main" },
-        cwd,
-        config(),
-      ),
-    ).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git fetch --prune origin HEAD:refs/remotes/origin/main" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "REVIEW",
-      networkHosts: ["github.com"],
     });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
-  it("includes the public host when an explicit rule requests approval", async () => {
+  it("does not turn an explicit action review into a whole-command network grant", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const configured = config({
       rules: [{ action: "ask", tool: "bash", pattern: "curl *" }],
     });
 
-    await expect(
-      evaluateRiskRequest("bash", { command: "curl https://example.com/docs" }, cwd, configured),
-    ).resolves.toMatchObject({
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "curl https://example.com/docs" },
+      cwd,
+      configured,
+    );
+    expect(decision).toMatchObject({
       action: "prompt",
       risk: "LOW",
-      networkHosts: ["example.com"],
     });
+    expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it("requests one-call Git metadata access for agent Git mutations", async () => {
@@ -461,13 +471,17 @@ describe("Risk policy gate", () => {
       risk: "REVIEW",
       filesystemWriteRoots: [gitRoot],
     });
-    await expect(
-      evaluateRiskRequest("bash", { command: "gh pr checkout 123" }, cwd, config()),
-    ).resolves.toMatchObject({
+    const ghDecision = await evaluateRiskRequest(
+      "bash",
+      { command: "gh pr checkout 123" },
+      cwd,
+      config(),
+    );
+    expect(ghDecision).toMatchObject({
       action: "prompt",
-      networkHosts: ["api.github.com", "github.com", "uploads.github.com"],
       filesystemWriteRoots: [gitRoot],
     });
+    expect(ghDecision).not.toHaveProperty("networkHosts");
     for (const command of [
       "git commit -m 'document input > output'",
       'git commit -m "document bash support"',

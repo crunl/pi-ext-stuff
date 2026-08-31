@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox.ts";
 
 /**
  * The Guardian worker is deliberately a process boundary.  In particular,
@@ -17,7 +18,10 @@ export const GUARDIAN_WORKER_MAX_REQUEST_BYTES = 256 * 1024;
 export const GUARDIAN_WORKER_MAX_STDERR_BYTES = 64 * 1024;
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL("./guardian-worker.mjs", import.meta.url));
-const WORKER_SHUTDOWN_TIMEOUT_MS = 1_000;
+const WORKER_TERMINATE_WAIT_MS = 1_000;
+// SRT 0.0.74's reset bridge may take up to 1.5s. Keep graceful shutdown
+// separate from hard request cancellation and leave bounded recovery margin.
+const WORKER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const MAX_ID_LENGTH = 128;
 
 export interface GuardianWorkerProgram {
@@ -62,14 +66,23 @@ export class GuardianWorkerAbortError extends Error {
   }
 }
 
-export class GuardianWorkerTimeoutError extends Error {
+/** A worker/transport/SRT lifecycle failure that must abort the review. */
+export class GuardianWorkerInfrastructureError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "GuardianWorkerInfrastructureError";
+    if (cause !== undefined) Object.assign(this, { cause });
+  }
+}
+
+export class GuardianWorkerTimeoutError extends GuardianWorkerInfrastructureError {
   constructor(timeoutMs: number) {
     super(`Guardian worker request timed out after ${timeoutMs}ms`);
     this.name = "GuardianWorkerTimeoutError";
   }
 }
 
-export class GuardianWorkerProtocolError extends Error {
+export class GuardianWorkerProtocolError extends GuardianWorkerInfrastructureError {
   constructor(message: string) {
     super(`Guardian worker protocol error: ${message}`);
     this.name = "GuardianWorkerProtocolError";
@@ -77,8 +90,10 @@ export class GuardianWorkerProtocolError extends Error {
 }
 
 type WorkerRequest = {
-  type: "execute" | "cancel" | "shutdown";
+  type: "bootstrap" | "execute" | "cancel" | "shutdown";
   id?: string;
+  evidenceScope?: GuardianEvidenceScope;
+  authorityFingerprint?: string;
   cwd?: string;
   program?: GuardianWorkerProgram;
   timeoutMs?: number;
@@ -127,6 +142,18 @@ function workerEnvironment(): NodeJS.ProcessEnv {
 
 function killProcessGroup(child: ChildProcess): void {
   if (!child.pid) return;
+  if (process.platform === "win32") {
+    // The isolated Guardian evidence surface is intentionally not exposed on
+    // Windows until the worker -> runner tree can be proven safe to kill.
+    // Keep this direct fallback for defensive cleanup if a worker is already
+    // present (for example, a future caller bypasses that platform gate).
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The worker already exited.
+    }
+    return;
+  }
   try {
     process.kill(-child.pid, "SIGKILL");
   } catch {
@@ -192,19 +219,24 @@ function isWorkerResponse(value: unknown): value is WorkerResponse {
  * so no detached SRT child or pending request can survive the review.
  */
 export class GuardianWorkerClient {
+  private readonly evidenceScope: GuardianEvidenceScope;
   private readonly workerPath: string;
   private readonly timeoutMs: number;
   private readonly maxFrameBytes: number;
   private readonly spawnProcess: GuardianWorkerSpawn;
   private child?: ChildProcess;
+  private starting?: Promise<ChildProcess>;
   private output = "";
   private stderrBytes = 0;
   private sequence = 0;
   private closed = false;
   private closing?: Promise<void>;
+  private terminalFailure?: GuardianWorkerInfrastructureError;
+  private terminalFailureReported = false;
   private readonly pending = new Map<string, PendingRequest>();
 
-  constructor(options: GuardianWorkerClientOptions = {}) {
+  constructor(evidenceScope: GuardianEvidenceScope, options: GuardianWorkerClientOptions = {}) {
+    this.evidenceScope = copyGuardianEvidenceScope(evidenceScope);
     this.workerPath = options.workerPath ?? DEFAULT_WORKER_PATH;
     this.timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS);
     this.maxFrameBytes = Math.min(
@@ -217,6 +249,7 @@ export class GuardianWorkerClient {
 
   async execute(request: GuardianWorkerExecutionRequest): Promise<GuardianWorkerExecutionResult> {
     if (this.closed) throw new GuardianWorkerProtocolError("client is closed");
+    if (this.terminalFailure) throw this.terminalFailure;
     if (request.signal?.aborted) throw new GuardianWorkerAbortError();
     if (!request.cwd || typeof request.cwd !== "string") {
       throw new GuardianWorkerProtocolError("missing working directory");
@@ -255,6 +288,7 @@ export class GuardianWorkerClient {
       timeoutMs: boundedTimeout(request.timeoutMs, this.timeoutMs),
       ...(request.commandId === undefined ? {} : { commandId: request.commandId }),
       ...(request.commandText === undefined ? {} : { commandText: request.commandText }),
+      authorityFingerprint: this.evidenceScope.authorityFingerprint,
       maxStdoutBytes,
       maxStderrBytes,
     });
@@ -306,6 +340,10 @@ export class GuardianWorkerClient {
   }
 
   private async ensureChild(): Promise<ChildProcess> {
+    // `startChild()` assigns `this.child` before its bootstrap ACK arrives.
+    // Share that pending promise first so concurrent first executions cannot
+    // write an execute frame ahead of the fixed evidence scope.
+    if (this.starting) return this.starting;
     if (
       this.child &&
       !this.child.killed &&
@@ -314,13 +352,30 @@ export class GuardianWorkerClient {
     ) {
       return this.child;
     }
-    const child = this.spawnProcess(process.execPath, [this.workerPath], {
-      cwd: dirname(this.workerPath),
-      detached: true,
-      shell: false,
-      env: workerEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    this.starting = this.startChild();
+    try {
+      return await this.starting;
+    } finally {
+      this.starting = undefined;
+    }
+  }
+
+  private async startChild(): Promise<ChildProcess> {
+    let child: ChildProcess;
+    try {
+      child = this.spawnProcess(process.execPath, [this.workerPath], {
+        cwd: dirname(this.workerPath),
+        detached: true,
+        shell: false,
+        env: workerEnvironment(),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      throw new GuardianWorkerInfrastructureError(
+        `worker process failed to start: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    }
     this.child = child;
     this.output = "";
     this.stderrBytes = 0;
@@ -335,10 +390,65 @@ export class GuardianWorkerClient {
         new GuardianWorkerProtocolError(`worker process failed: ${error.message}`),
       );
     });
-    child.once("close", () => {
+    child.once("close", (exitCode, signalCode) => {
       if (this.child !== child) return;
+      // The close event is the last safe point at which the detached PGID is
+      // known. Kill it before forgetting the ChildProcess so descendants
+      // cannot outlive an unexpected worker crash.
+      killProcessGroup(child);
       this.child = undefined;
-      this.rejectPending(new GuardianWorkerProtocolError("worker process exited"));
+      // closeInternal() marks the client closed before writing the shutdown
+      // frame. A test double (or a very fast child) may emit `close`
+      // synchronously before the close() promise has been assigned.
+      if (this.closed || this.closing) return;
+      const detail =
+        signalCode === null
+          ? exitCode === null
+            ? "without an exit status"
+            : `with exit code ${exitCode}`
+          : `with signal ${signalCode}`;
+      const failure = new GuardianWorkerInfrastructureError(
+        `worker process exited unexpectedly ${detail}`,
+      );
+      this.latchFailure(failure);
+      this.rejectPending(failure);
+    });
+    const id = `b-${++this.sequence}`;
+    const requestFrame = frame({
+      type: "bootstrap",
+      id,
+      evidenceScope: this.evidenceScope,
+    });
+    if (
+      Buffer.byteLength(requestFrame) >
+      Math.min(this.maxFrameBytes, GUARDIAN_WORKER_MAX_REQUEST_BYTES)
+    ) {
+      const error = new GuardianWorkerProtocolError("bootstrap exceeds the worker bound");
+      await this.terminate(error);
+      throw error;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const pending: PendingRequest = {
+        resolve: () => resolve(),
+        reject,
+        onAbort: () => undefined,
+        maxStdoutBytes: 1,
+        maxStderrBytes: 1,
+      };
+      pending.timer = setTimeout(() => {
+        void this.cancelAndTerminate(id, new GuardianWorkerTimeoutError(this.timeoutMs));
+      }, this.timeoutMs);
+      this.pending.set(id, pending);
+      try {
+        if (!child.stdin || child.stdin.destroyed) {
+          throw new GuardianWorkerProtocolError("worker stdin is unavailable");
+        }
+        child.stdin.write(requestFrame);
+      } catch (error) {
+        void this.terminate(
+          error instanceof Error ? error : new GuardianWorkerProtocolError(String(error)),
+        );
+      }
     });
     return child;
   }
@@ -389,7 +499,18 @@ export class GuardianWorkerClient {
     this.pending.delete(response.id);
     this.cleanupPending(pending);
     if (response.type === "error") {
-      pending.reject(new GuardianWorkerProtocolError(response.error || "worker request failed"));
+      const failure = new GuardianWorkerInfrastructureError(
+        response.error || "worker request failed",
+      );
+      this.latchFailure(failure);
+      pending.reject(failure);
+      this.terminalFailureReported = true;
+      // The worker has already started its own bounded shutdown/reset after
+      // reporting an infrastructure error. Give that reset a chance to run;
+      // closeInternal() still force-kills the detached process group if it
+      // hangs or exits unsuccessfully.
+      this.rejectPending(failure);
+      void this.close().catch(() => undefined);
       return;
     }
     try {
@@ -409,6 +530,7 @@ export class GuardianWorkerClient {
       }
       pending.resolve({ stdout, stderr, exitCode: response.exitCode ?? null });
     } catch (error) {
+      this.terminalFailureReported = true;
       pending.reject(error);
       void this.terminate(error);
     }
@@ -420,11 +542,18 @@ export class GuardianWorkerClient {
   }
 
   private rejectPending(error: unknown): void {
+    if (this.terminalFailure && error === this.terminalFailure && this.pending.size > 0) {
+      this.terminalFailureReported = true;
+    }
     for (const pending of this.pending.values()) {
       this.cleanupPending(pending);
       pending.reject(error);
     }
     this.pending.clear();
+  }
+
+  private latchFailure(error: GuardianWorkerInfrastructureError): void {
+    this.terminalFailure ??= error;
   }
 
   private async cancelAndTerminate(id: string, error: Error): Promise<void> {
@@ -442,13 +571,29 @@ export class GuardianWorkerClient {
   }
 
   private async terminate(error: unknown): Promise<void> {
+    const failure =
+      error instanceof GuardianWorkerInfrastructureError
+        ? error
+        : new GuardianWorkerInfrastructureError(
+            error instanceof Error ? error.message : String(error),
+            error,
+          );
+    // Caller cancellation is an expected end of a review, not a poisoned
+    // worker state. Timeouts and every transport/protocol failure remain
+    // terminal because the worker process has been killed.
+    if (!(error instanceof GuardianWorkerAbortError)) this.latchFailure(failure);
+    const rejection =
+      error instanceof GuardianWorkerAbortError || error instanceof GuardianWorkerTimeoutError
+        ? error
+        : failure;
+    if (this.pending.size > 0 && rejection === error) this.terminalFailureReported = true;
     const child = this.child;
     if (!child) {
-      this.rejectPending(error);
+      this.rejectPending(rejection);
       return;
     }
     this.child = undefined;
-    this.rejectPending(error);
+    this.rejectPending(rejection);
     killProcessGroup(child);
     await new Promise<void>((resolve) => {
       if (child.exitCode !== null || child.signalCode !== null) {
@@ -456,7 +601,7 @@ export class GuardianWorkerClient {
         return;
       }
       child.once("close", () => resolve());
-      setTimeout(resolve, WORKER_SHUTDOWN_TIMEOUT_MS);
+      setTimeout(resolve, WORKER_TERMINATE_WAIT_MS);
     });
   }
 
@@ -464,20 +609,40 @@ export class GuardianWorkerClient {
     this.closed = true;
     const child = this.child;
     if (!child) {
-      this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
+      this.rejectPending(
+        this.terminalFailure ?? new GuardianWorkerAbortError("Guardian worker closed"),
+      );
+      if (this.terminalFailure && !this.terminalFailureReported) throw this.terminalFailure;
       return;
     }
+    let closeError: Error | undefined;
     await new Promise<void>((resolve) => {
       let finished = false;
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
-      const finish = (): void => {
+      let onClose:
+        | ((exitCode: number | null, signalCode: NodeJS.Signals | null) => void)
+        | undefined;
+      const finish = (
+        exitCode: number | null = child.exitCode,
+        signalCode: NodeJS.Signals | null = child.signalCode,
+      ): void => {
         if (finished) return;
         finished = true;
         if (fallbackTimer) clearTimeout(fallbackTimer);
-        child.removeListener("close", finish);
+        if (onClose) child.removeListener("close", onClose);
+        if (signalCode !== null) {
+          closeError = new GuardianWorkerInfrastructureError(
+            `worker shutdown failed with signal ${signalCode}`,
+          );
+        } else if (exitCode !== null && exitCode !== 0) {
+          closeError = new GuardianWorkerInfrastructureError(
+            `worker shutdown failed with exit code ${exitCode}`,
+          );
+        }
         resolve();
       };
-      child.once("close", finish);
+      onClose = (exitCode, signalCode): void => finish(exitCode, signalCode);
+      child.once("close", onClose);
       fallbackTimer = setTimeout(() => {
         if (child.exitCode !== null || child.signalCode !== null || this.child !== child) {
           finish();
@@ -485,6 +650,8 @@ export class GuardianWorkerClient {
         }
         this.child = undefined;
         this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
+        closeError = new GuardianWorkerInfrastructureError("worker did not shut down cleanly");
+        this.latchFailure(new GuardianWorkerInfrastructureError(closeError.message, closeError));
         finish();
         killProcessGroup(child);
       }, WORKER_SHUTDOWN_TIMEOUT_MS);
@@ -503,13 +670,30 @@ export class GuardianWorkerClient {
         }
       }
     });
-    this.child = undefined;
+    // If the process reported an exit code but its `close` event has not
+    // arrived yet, the startChild listener may have intentionally deferred
+    // cleanup. Retain the identity check and kill the group before dropping
+    // it; never use a stale PID after the child reference is gone.
+    if (this.child === child) {
+      killProcessGroup(child);
+      this.child = undefined;
+    }
     this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
+    if (closeError) {
+      this.latchFailure(
+        closeError instanceof GuardianWorkerInfrastructureError
+          ? closeError
+          : new GuardianWorkerInfrastructureError(closeError.message, closeError),
+      );
+      throw closeError;
+    }
+    if (this.terminalFailure && !this.terminalFailureReported) throw this.terminalFailure;
   }
 }
 
 export function createGuardianWorkerClient(
+  evidenceScope: GuardianEvidenceScope,
   options: GuardianWorkerClientOptions = {},
 ): GuardianWorkerClient {
-  return new GuardianWorkerClient(options);
+  return new GuardianWorkerClient(evidenceScope, options);
 }

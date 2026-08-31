@@ -16,6 +16,7 @@ import {
   SrtSandboxManager,
 } from "../src/sandbox/srt-enforcer.ts";
 import {
+  createGuardianEvidenceScope,
   createSandboxedBashOperations,
   createSandboxedReadOnlyCommandRunner,
   type SandboxExecutionRequest,
@@ -545,7 +546,11 @@ describe("Guardian environment seam", () => {
         return { stdout: Buffer.from("ok"), stderr: Buffer.alloc(0), exitCode: 0 };
       },
     };
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(
+      manager,
+      "node",
+      createGuardianEvidenceScope(process.cwd(), basePolicy()),
+    );
     await run(["-e", "process.stdout.write('ok')"]);
 
     expect(request?.envMode).toBe("replace");

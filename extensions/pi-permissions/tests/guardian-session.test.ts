@@ -263,6 +263,29 @@ describe("GuardianReviewSessionManager", () => {
 
     expect(next.context.messages.map(messageText)).toEqual(["current request"]);
   });
+
+  it("counts tool-call arguments against the history character bound", () => {
+    const manager = new GuardianReviewSessionManager();
+    const oversized = manager.open(key, "oversized tool request");
+    oversized.commit([
+      {
+        ...assistantToolCall("oversized-tool", "read"),
+        content: [
+          {
+            type: "toolCall",
+            id: "oversized-tool",
+            name: "read",
+            arguments: { path: "x".repeat(24_000) },
+          },
+        ],
+      },
+    ]);
+    oversized.release();
+
+    const next = manager.open(key, "current request");
+
+    expect(next.context.messages.map(messageText)).toEqual(["current request"]);
+  });
 });
 
 function assistant(text: string): AssistantMessage {

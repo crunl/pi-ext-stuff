@@ -69,11 +69,8 @@ function failed(error: unknown): RuntimeOutcome<unknown> {
   return { kind: "failed", error };
 }
 
-function denied(
-  request: CapabilityRequest,
-  retryability: "safe" | "uncertain" = "safe",
-): RuntimeOutcome<unknown> {
-  return { kind: "capability-denied", request, retryability };
+function denied(request: CapabilityRequest): RuntimeOutcome<unknown> {
+  return { kind: "capability-denied", request };
 }
 
 function writeOutsidePreview(): CapabilityRequestInput[] {
@@ -175,7 +172,6 @@ describe("ApproveForMeEngine public seam", () => {
     const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async (attempt) => {
-      expect(attempt.ordinal).toBe(0);
       expect(attempt.lease.mode).toBe("sandboxed");
       expect(attempt.lease.policy?.filesystem.allowWrite).toEqual(["/workspace"]);
       return completed("ok");
@@ -202,32 +198,72 @@ describe("ApproveForMeEngine public seam", () => {
       guardian: async () => ({ kind: "timed-out" as const }),
       expectedCode: "review-timeout",
     },
+    {
+      label: "review unavailable",
+      guardian: async () => ({ kind: "failed" as const, reason: "reviewer unavailable" }),
+      expectedCode: "review-unavailable",
+    },
   ])(
-    "caches the inline reviewer terminal decision for one execution ($label)",
+    "reviews sequential inline requests independently and aborts on terminal denial ($label)",
     async ({ guardian, expectedCode }) => {
       const { engine, review } = createEngine(guardian);
       const turn = engine.beginTurn(snapshot());
       const executor = vi.fn(async (attempt) => {
         const request = {
-          call: attempt.call,
           capability: { kind: "network" as const, host: "api.other.org", port: 443 },
         };
-        const first = await turn.authorizeCapability(request);
-        const second = await turn.authorizeCapability(request);
-        expect(second).toEqual(first);
-        if (expectedCode === undefined) expect(first).toMatchObject({ kind: "allow" });
-        else expect(first).toMatchObject({ kind: "deny", error: { code: expectedCode } });
+        const first = await attempt.authorizeCapability(request);
+        const second = await attempt.authorizeCapability(request);
+        for (const decision of [first, second]) {
+          if (expectedCode === undefined) expect(decision).toMatchObject({ kind: "allow" });
+          else expect(decision).toMatchObject({ kind: "deny", error: { code: expectedCode } });
+        }
+        expect(attempt.signal.aborted).toBe(expectedCode !== undefined);
         return completed("command continued");
       });
 
-      await expect(turn.execute(call(executor))).resolves.toEqual({
-        kind: "completed",
-        value: "command continued",
-      });
+      const result = await turn.execute(call(executor));
+      if (expectedCode === undefined) {
+        expect(result).toEqual({ kind: "completed", value: "command continued" });
+      } else {
+        expect(result).toMatchObject({ kind: "blocked", error: { code: expectedCode } });
+      }
       expect(executor).toHaveBeenCalledOnce();
-      expect(review).toHaveBeenCalledOnce();
+      expect(review).toHaveBeenCalledTimes(expectedCode === undefined ? 2 : 1);
     },
   );
+
+  it("coalesces concurrent inline reviews for the same pending capability", async () => {
+    let releaseReview: (() => void) | undefined;
+    const reviewGate = new Promise<void>((resolve) => {
+      releaseReview = resolve;
+    });
+    const { engine, review } = createEngine(async () => {
+      await reviewGate;
+      return { kind: "approve", rationale: "endpoint approved" };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const executor = vi.fn(async (attempt) => {
+      const request = {
+        capability: { kind: "network" as const, host: "api.other.org", port: 443 },
+      };
+      const first = attempt.authorizeCapability(request);
+      const second = attempt.authorizeCapability(request);
+      releaseReview?.();
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        { kind: "allow", capability: request.capability },
+        { kind: "allow", capability: request.capability },
+      ]);
+      return completed("command continued");
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "command continued",
+    });
+    expect(executor).toHaveBeenCalledOnce();
+    expect(review).toHaveBeenCalledOnce();
+  });
 
   it("allows an exact local address from the static policy without reviewer escalation", async () => {
     const { engine, review } = createEngine(async () => ({
@@ -244,8 +280,7 @@ describe("ApproveForMeEngine public seam", () => {
     );
     const executor = vi.fn(async (attempt) =>
       (
-        await turn.authorizeCapability({
-          call: attempt.call,
+        await attempt.authorizeCapability({
           capability: { kind: "network", host: "127.0.0.1", port: 8080 },
         })
       ).kind === "allow"
@@ -274,8 +309,7 @@ describe("ApproveForMeEngine public seam", () => {
       }),
     );
     const executor = vi.fn(async (attempt) => {
-      const decision = await turn.authorizeCapability({
-        call: attempt.call,
+      const decision = await attempt.authorizeCapability({
         capability: { kind: "network", host: "router.internal", port: 80 },
       });
       return decision.kind === "allow"
@@ -308,18 +342,90 @@ describe("ApproveForMeEngine public seam", () => {
       }),
     );
     const executor = vi.fn(async (attempt) => {
-      const decision = await turn.authorizeCapability({
-        call: attempt.call,
+      const decision = await attempt.authorizeCapability({
         capability: { kind: "network", host: "127.0.0.1", port: 8080 },
       });
       return decision.kind === "deny" ? completed(decision.error.code) : failed("must deny");
     });
 
-    await expect(turn.execute(call(executor))).resolves.toEqual({
-      kind: "completed",
-      value: "policy-denied",
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "policy-denied" },
     });
     expect(review).not.toHaveBeenCalled();
+  });
+
+  it("latches an authoritative adapter rejection and aborts the whole attempt", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    let signal: AbortSignal | undefined;
+    const executor = vi.fn(async (attempt: ExecutionAttempt) => {
+      signal = attempt.signal;
+      const decision = attempt.rejectCapability({
+        capability: { kind: "network", host: "denied.example.org", port: 443 },
+        reason: "Network target is denied by sandbox policy",
+      });
+      expect(decision).toMatchObject({
+        kind: "deny",
+        error: {
+          code: "policy-denied",
+          reason: "Network target is denied by sandbox policy",
+          request: { kind: "network", host: "denied.example.org", port: 443 },
+          effectsMayHaveOccurred: true,
+        },
+      });
+      expect(attempt.signal.aborted).toBe(true);
+      return completed("adapter ignored the abort");
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "policy-denied",
+        reason: "Network target is denied by sandbox policy",
+        effectsMayHaveOccurred: true,
+      },
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("preserves an inline reviewer denial when the turn closes during executor drain", async () => {
+    let releaseDrain: (() => void) | undefined;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const { engine } = createEngine(async () => ({
+      kind: "deny",
+      rationale: "The endpoint is not authorized.",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    let decisionCode: string | undefined;
+    const executor = vi.fn(async (attempt: ExecutionAttempt) => {
+      const decision = await attempt.authorizeCapability({
+        capability: { kind: "network", host: "api.other.org", port: 443 },
+      });
+      if (decision.kind === "deny") decisionCode = decision.error.code;
+      await drain;
+      return completed("late completion");
+    });
+    const result = turn.execute(call(executor));
+    await vi.waitFor(() => expect(decisionCode).toBe("review-denied"));
+
+    turn.close("user closed the turn");
+    releaseDrain?.();
+
+    await expect(result).resolves.toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "review-denied",
+        reason: "The endpoint is not authorized.",
+        effectsMayHaveOccurred: true,
+      },
+    });
   });
 
   it("does not treat a wildcard as an exact local exception", async () => {
@@ -336,16 +442,15 @@ describe("ApproveForMeEngine public seam", () => {
       }),
     );
     const executor = vi.fn(async (attempt) => {
-      const decision = await turn.authorizeCapability({
-        call: attempt.call,
+      const decision = await attempt.authorizeCapability({
         capability: { kind: "network", host: "127.0.0.1", port: 8080 },
       });
       return decision.kind === "deny" ? completed(decision.error.code) : failed("must deny");
     });
 
-    await expect(turn.execute(call(executor))).resolves.toEqual({
-      kind: "completed",
-      value: "policy-denied",
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "policy-denied" },
     });
     expect(review).not.toHaveBeenCalled();
   });
@@ -739,7 +844,6 @@ describe("ApproveForMeEngine public seam", () => {
     });
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async (attempt) => {
-      expect(attempt.ordinal).toBe(0);
       expect(attempt.lease.policy?.filesystem.allowWrite).toEqual([
         "/workspace",
         "/outside/result.txt",
@@ -830,10 +934,10 @@ describe("ApproveForMeEngine public seam", () => {
       }),
     );
     expect(result.kind).toBe("blocked");
-    if (result.kind === "blocked") expect(result.error.code).toBe("retry-denied");
-    expect(sources).toEqual(["preview", "runtime"]);
-    expect(review).toHaveBeenCalledTimes(2);
-    expect(execute).toHaveBeenCalledTimes(2);
+    if (result.kind === "blocked") expect(result.error.code).toBe("runtime-denied");
+    expect(sources).toEqual(["preview"]);
+    expect(review).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("does not replay a reviewed command after a mid-execution network denial", async () => {
@@ -844,7 +948,6 @@ describe("ApproveForMeEngine public seam", () => {
     });
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn().mockImplementationOnce(async (attempt) => {
-      expect(attempt.ordinal).toBe(0);
       expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
       return denied({ kind: "network", host: "api.other.org" });
     });
@@ -984,42 +1087,270 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("reviews a safe runtime denial and retries the exact invocation once", async () => {
-    const { engine, review } = createEngine(async (request) => {
-      expect(request.source).toBe("runtime");
-      expect(request.retryability).toBe("safe");
-      return { kind: "approve", rationale: "The command needs this output path." };
+  it("blocks a runtime filesystem denial without review or replay", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review runtime denial",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () =>
+      denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" }),
+    );
+
+    const result = await turn.execute(call(execute));
+    expect(result).toMatchObject({ kind: "blocked", error: { code: "runtime-denied" } });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("blocks every runtime filesystem denial without replay", async () => {
+    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () =>
+      denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" }),
+    );
+
+    const result = await turn.execute(call(execute));
+    expect(result.kind).toBe("blocked");
+    if (result.kind === "blocked") expect(result.error.code).toBe("runtime-denied");
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("reviews and retries a native file mutation runtime denial exactly once", async () => {
+    const { engine, review } = createEngine(async (input) => {
+      expect(input.source).toBe("inline");
+      expect(input.requested).toEqual([
+        { kind: "filesystem", operation: "write", path: "/outside/result.txt" },
+      ]);
+      expect(input.baseline.policy?.filesystem.allowWrite).toContain("/approved/result.txt");
+      expect(input.effective.policy?.filesystem.allowWrite).toEqual(
+        expect.arrayContaining(["/approved/result.txt", "/outside/result.txt"]),
+      );
+      return { kind: "approve", rationale: "The exact file operation is acceptable." };
     });
     const turn = engine.beginTurn(snapshot());
-    const execute = vi
-      .fn()
-      .mockResolvedValueOnce(
-        denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" }),
-      )
-      .mockImplementationOnce(async (attempt) => {
-        expect(attempt.ordinal).toBe(1);
-        expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
-        return completed("retried");
-      });
+    let executions = 0;
+    const execute = vi.fn(async (attempt) => {
+      executions += 1;
+      if (executions === 2) {
+        expect(attempt.lease.policy?.filesystem.allowWrite).toEqual(
+          expect.arrayContaining(["/approved/result.txt", "/outside/result.txt"]),
+        );
+      }
+      return executions === 1
+        ? denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" })
+        : completed("retried");
+    });
 
-    await expect(turn.execute(call(execute))).resolves.toEqual({
-      kind: "completed",
-      value: "retried",
+    await expect(
+      turn.execute(
+        call(execute, {
+          call: {
+            id: "native-write-retry",
+            tool: "write",
+            input: { path: "/outside/result.txt", content: "updated" },
+            cwd: "/workspace",
+          },
+          admission: {
+            kind: "allow",
+            requested: [{ kind: "filesystem", operation: "write", path: "/approved/result.txt" }],
+          },
+          runtimeDenialPolicy: "review-and-retry",
+        }),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "retried" });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(review).toHaveBeenCalledOnce();
+  });
+
+  it("does not re-review a runtime denial already covered by the first lease", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review an enforcement drift",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const deniedWrite = {
+      kind: "filesystem" as const,
+      operation: "write" as const,
+      path: "/workspace/result.txt",
+    };
+    const execute = vi.fn(async () => denied(deniedWrite));
+
+    const result = await turn.execute(
+      call(execute, {
+        call: {
+          id: "native-write-covered-denial",
+          tool: "write",
+          input: { path: deniedWrite.path, content: "updated" },
+          cwd: "/workspace",
+        },
+        runtimeDenialPolicy: "review-and-retry",
+      }),
+    );
+
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "enforcement-unavailable",
+        request: deniedWrite,
+        effectsMayHaveOccurred: true,
+      },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("does not review a retry that the sandbox policy cannot represent", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review an ungrantable deny",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const deniedWrite = {
+      kind: "filesystem" as const,
+      operation: "write" as const,
+      path: "/secret/result.txt",
+    };
+    const execute = vi.fn(async () => denied(deniedWrite));
+
+    const result = await turn.execute(
+      call(execute, {
+        call: {
+          id: "native-write-ungrantable-denial",
+          tool: "write",
+          input: { path: deniedWrite.path, content: "updated" },
+          cwd: "/workspace",
+        },
+        runtimeDenialPolicy: "review-and-retry",
+      }),
+    );
+
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "enforcement-unavailable",
+        request: deniedWrite,
+        effectsMayHaveOccurred: true,
+      },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("keeps a runtime denial eligible for an exact manual retry", async () => {
+    const { engine, review } = createEngine(async (input) => {
+      if (input.source === "inline") return { kind: "deny", rationale: "Review it manually." };
+      expect(input.source).toBe("manual-retry");
+      return { kind: "approve", rationale: "The exact retry is approved." };
+    });
+    const first = engine.beginTurn(snapshot());
+    const deniedWrite = {
+      kind: "filesystem" as const,
+      operation: "write" as const,
+      path: "/outside/result.txt",
+    };
+    const firstResult = await first.execute(
+      call(
+        vi.fn(async () => denied(deniedWrite)),
+        {
+          call: {
+            id: "runtime-denial-manual-retry-1",
+            tool: "write",
+            input: { path: deniedWrite.path, content: "updated" },
+            cwd: "/workspace",
+          },
+          runtimeDenialPolicy: "review-and-retry",
+        },
+      ),
+    );
+    expect(firstResult.kind).toBe("blocked");
+    const retryHandle = firstResult.kind === "blocked" ? firstResult.retryHandle : undefined;
+    expect(retryHandle).toBeDefined();
+    first.close();
+    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(true);
+
+    const second = engine.beginTurn(snapshot({ turnId: "turn-2" }));
+    await expect(
+      second.execute(
+        call(
+          vi.fn(async () => completed("retried")),
+          {
+            call: {
+              id: "runtime-denial-manual-retry-2",
+              tool: "write",
+              input: { path: deniedWrite.path, content: "updated" },
+              cwd: "/workspace",
+            },
+            runtimeDenialPolicy: "review-and-retry",
+          },
+        ),
+      ),
+    ).resolves.toEqual({ kind: "completed", value: "retried" });
+    expect(review).toHaveBeenCalledTimes(2);
+  });
+
+  it("makes a second native file mutation denial terminal", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "Approve one exact retry.",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const deniedWrite = {
+      kind: "filesystem" as const,
+      operation: "write" as const,
+      path: "/outside/result.txt",
+    };
+    const execute = vi.fn(async () => denied(deniedWrite));
+
+    const result = await turn.execute(
+      call(execute, {
+        call: {
+          id: "native-write-second-denial",
+          tool: "edit",
+          input: { path: "/outside/result.txt", oldText: "before", newText: "after" },
+          cwd: "/workspace",
+        },
+        runtimeDenialPolicy: "review-and-retry",
+      }),
+    );
+
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "runtime-denied",
+        request: deniedWrite,
+        effectsMayHaveOccurred: true,
+        retryAttempted: true,
+      },
     });
     expect(execute).toHaveBeenCalledTimes(2);
     expect(review).toHaveBeenCalledOnce();
   });
 
-  it("fails closed on an uncertain runtime denial and does not replay it", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+  it("keeps network runtime denial terminal even for a retry-capable adapter", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review a connection replay",
+    }));
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async () =>
-      denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" }, "uncertain"),
+      denied({ kind: "network", host: "api.example.com", port: 443 }),
     );
 
-    const result = await turn.execute(call(execute));
-    expect(result.kind).toBe("blocked");
-    if (result.kind === "blocked") expect(result.error.code).toBe("retry-uncertain");
+    const result = await turn.execute(
+      call(execute, {
+        call: {
+          id: "native-network-no-retry",
+          tool: "write",
+          input: { path: "/outside/result.txt", content: "not network" },
+          cwd: "/workspace",
+        },
+        runtimeDenialPolicy: "review-and-retry",
+      }),
+    );
+
+    expect(result).toMatchObject({ kind: "blocked", error: { code: "runtime-denied" } });
     expect(execute).toHaveBeenCalledOnce();
     expect(review).not.toHaveBeenCalled();
   });
@@ -1460,14 +1791,13 @@ describe("ApproveForMeEngine public seam", () => {
     expect(engine.armRetry(firstHandle as RetryHandle)).toBe(false);
   });
 
-  it("keeps only explicit permission amendments in the sticky world across turns", async () => {
-    const { engine, review } = createEngine(async (request) => {
-      expect(request.source).toBe("permission-amendment");
-      return { kind: "approve", rationale: "Explicitly requested." };
-    });
+  it("keeps explicit permission amendments within the current turn", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "Explicitly requested.",
+    }));
     const first = engine.beginTurn(snapshot());
-    const amendmentExecutor = vi.fn(async (attempt) => {
-      expect(attempt.ordinal).toBe(0);
+    const amendmentExecutor = vi.fn(async () => {
       return completed("granted");
     });
     await expect(
@@ -1477,7 +1807,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
             reason: "Need generated output.",
           },
         }),
@@ -1486,21 +1815,18 @@ describe("ApproveForMeEngine public seam", () => {
     first.close();
 
     const second = engine.beginTurn(snapshot({ turnId: "turn-2" }));
-    const later = vi.fn(async (attempt) => {
-      expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/outside/result.txt");
-      return completed("later");
-    });
+    const later = vi.fn(async () => completed("later"));
     await expect(second.execute(call(later, { admission: reviewAdmission() }))).resolves.toEqual({
       kind: "completed",
       value: "later",
     });
-    expect(review).toHaveBeenCalledOnce();
+    expect(review).toHaveBeenCalledTimes(2);
   });
 
-  it("applies exact grantable deny semantics to session amendments", async () => {
+  it("applies exact grantable deny semantics to turn amendments", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
-      rationale: "The explicit session amendment is approved.",
+      rationale: "The explicit turn amendment is approved.",
     }));
     const policy = {
       filesystem: {
@@ -1532,7 +1858,6 @@ describe("ApproveForMeEngine public seam", () => {
                 { kind: "filesystem", operation: "write", path: "/workspace/.git" },
                 { kind: "filesystem", operation: "write", path: "/workspace/.agents" },
               ],
-              scope: "session",
             },
           },
         ),
@@ -1547,11 +1872,11 @@ describe("ApproveForMeEngine public seam", () => {
       second.execute(
         call(
           vi.fn(async (attempt) => {
-            expect(attempt.lease.policy?.filesystem.allowWrite).toEqual([
+            expect(attempt.lease.policy?.filesystem.allowWrite).toEqual([]);
+            expect(attempt.lease.policy?.filesystem.denyWrite).toEqual([
               "/workspace/.git",
               "/workspace/.agents",
             ]);
-            expect(attempt.lease.policy?.filesystem.denyWrite).toEqual(["/workspace/.agents"]);
             return completed("carried");
           }),
           { admission: { kind: "allow" } },
@@ -1588,7 +1913,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
           },
         },
       ),
@@ -1615,7 +1939,6 @@ describe("ApproveForMeEngine public seam", () => {
             intent: {
               kind: "permission-amendment",
               requested: [{ kind: "filesystem", operation: "write", path: "/outside/other.txt" }],
-              scope: "session",
             },
           },
         ),
@@ -1637,7 +1960,6 @@ describe("ApproveForMeEngine public seam", () => {
             intent: {
               kind: "permission-amendment",
               requested: writeOutsidePreview(),
-              scope: "session",
             },
           },
         ),
@@ -1648,7 +1970,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(engine.armRetry(retryHandle as RetryHandle)).toBe(false);
   });
 
-  it("skips capability review for session-covered requests but still reviews actions", async () => {
+  it("re-reviews turn-covered requests while still reviewing actions", async () => {
     const { engine, review } = createEngine(async (request) => {
       if (request.source === "permission-amendment") {
         return { kind: "approve", rationale: "Explicitly requested." };
@@ -1668,7 +1990,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
           },
         },
       ),
@@ -1684,7 +2005,7 @@ describe("ApproveForMeEngine public seam", () => {
         ),
       ),
     ).resolves.toEqual({ kind: "completed", value: "covered" });
-    expect(review).toHaveBeenCalledOnce();
+    expect(review).toHaveBeenCalledTimes(2);
 
     await expect(
       second.execute(
@@ -1702,10 +2023,10 @@ describe("ApproveForMeEngine public seam", () => {
         ),
       ),
     ).resolves.toEqual({ kind: "completed", value: "action" });
-    expect(review).toHaveBeenCalledTimes(2);
+    expect(review).toHaveBeenCalledTimes(3);
   });
 
-  it("clears sticky permissions on session/config invalidation", async () => {
+  it("clears turn permissions on session/config invalidation", async () => {
     const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "yes" }));
     const first = engine.beginTurn(snapshot());
     await first.execute(
@@ -1716,7 +2037,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
             reason: "Need it.",
           },
         },
@@ -1770,7 +2090,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
           },
         },
       ),
@@ -1811,23 +2130,17 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).toHaveBeenCalledOnce();
   });
 
-  it("reviews and retries an exact host-admission external-tool denial once", async () => {
+  it("blocks a host-admission runtime denial without replay", async () => {
     const requested = { kind: "external-tool" as const, provider: "mail", name: "send" };
-    const { engine, review } = createEngine(async (input) => {
-      expect(input.ownership).toBe("host-admission");
-      expect(input.source).toBe("runtime");
-      expect(input.requested).toEqual([requested]);
-      return { kind: "approve", rationale: "The exact external operation is approved." };
-    });
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review runtime denial",
+    }));
     const turn = engine.beginTurn(snapshot({ baseSandboxPolicy: undefined, sandboxReady: false }));
-    const executor = vi
-      .fn()
-      .mockResolvedValueOnce(denied(requested))
-      .mockImplementationOnce(async (attempt) => {
-        expect(attempt.ordinal).toBe(1);
-        expect(attempt.lease.mode).toBe("host-admitted");
-        return completed("retried host operation");
-      });
+    const executor = vi.fn(async (attempt) => {
+      expect(attempt.lease.mode).toBe("host-admitted");
+      return denied(requested);
+    });
 
     await expect(
       turn.execute(
@@ -1842,9 +2155,9 @@ describe("ApproveForMeEngine public seam", () => {
           admission: { kind: "allow", requested: [requested] },
         }),
       ),
-    ).resolves.toEqual({ kind: "completed", value: "retried host operation" });
-    expect(executor).toHaveBeenCalledTimes(2);
-    expect(review).toHaveBeenCalledOnce();
+    ).resolves.toMatchObject({ kind: "blocked", error: { code: "runtime-denied" } });
+    expect(executor).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("bypasses Guardian and sandbox in yolo mode", async () => {
@@ -1917,7 +2230,6 @@ describe("ApproveForMeEngine public seam", () => {
           intent: {
             kind: "permission-amendment",
             requested: writeOutsidePreview(),
-            scope: "session",
           },
         }),
       ),
@@ -2334,7 +2646,7 @@ describe("ApproveForMeEngine public seam", () => {
     }
   });
 
-  it("fails closed on unsupported runtime capabilities before runtime review", async () => {
+  it("fails closed on unsupported runtime capabilities without reviewer escalation", async () => {
     const cases: Array<{
       ownership: Invocation<unknown>["ownership"];
       request: CapabilityRequest;
@@ -2405,7 +2717,6 @@ describe("ApproveForMeEngine public seam", () => {
         intent: {
           kind: "permission-amendment",
           requested: writeOutsidePreview(),
-          scope: "turn",
         },
       }),
     );

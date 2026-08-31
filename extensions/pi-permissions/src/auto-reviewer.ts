@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type {
   Api,
   AssistantMessage,
@@ -16,6 +17,7 @@ import {
   type AutoReviewRequest,
   type AutoReviewResult,
   parseAutoReviewResult,
+  renderAutoReviewParentInstructions,
   renderAutoReviewPrompt,
   renderAutoReviewTrustedContext,
 } from "./auto-review-request.ts";
@@ -31,6 +33,7 @@ import {
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createIsolatedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
+import type { GuardianEvidenceScope } from "./sandbox.ts";
 import { errorMessage } from "./unknown-value.ts";
 
 export type { AutoReviewerContext } from "./auto-review-request.ts";
@@ -44,9 +47,14 @@ export interface AutoReviewer {
   invalidateSession(): void;
   review(
     request: AutoReviewRequest,
-    context: AutoReviewerContext,
+    context: TrustedAutoReviewerContext,
     signal?: AbortSignal,
   ): Promise<AutoReviewResult>;
+}
+
+/** Host-only review context. Evidence authority is never rendered to the model. */
+export interface TrustedAutoReviewerContext extends AutoReviewerContext {
+  readonly guardianEvidenceScope: GuardianEvidenceScope;
 }
 
 type Complete = (
@@ -56,7 +64,7 @@ type Complete = (
 ) => Promise<AssistantMessage>;
 
 type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
-type GuardianToolRuntimeFactory = (cwd: string) => GuardianToolRuntime;
+type GuardianToolRuntimeFactory = (scope: GuardianEvidenceScope) => GuardianToolRuntime;
 
 const DEFAULT_REVIEW_REASONING = "medium";
 const RETRYABLE_PROVIDER_STATUSES = new Set([500, 502, 503, 504]);
@@ -251,8 +259,8 @@ async function waitBeforeRetry(
   if (Date.now() >= deadline) throw timeoutFailure(guardian);
 }
 
-function defaultGuardianToolRuntime(cwd: string): GuardianToolRuntime {
-  return createIsolatedGuardianToolRuntime(cwd);
+function defaultGuardianToolRuntime(scope: GuardianEvidenceScope): GuardianToolRuntime {
+  return createIsolatedGuardianToolRuntime(scope);
 }
 
 export class PiAutoReviewer implements AutoReviewer {
@@ -269,7 +277,7 @@ export class PiAutoReviewer implements AutoReviewer {
 
   async review(
     request: AutoReviewRequest,
-    context: AutoReviewerContext,
+    context: TrustedAutoReviewerContext,
     callerSignal?: AbortSignal,
   ): Promise<AutoReviewResult> {
     if (callerSignal?.aborted) {
@@ -311,26 +319,36 @@ export class PiAutoReviewer implements AutoReviewer {
       throw cancelledFailure();
     }
 
-    const toolRuntime = this.createTools(context.guardianSession.cwd);
+    if (resolve(context.guardianEvidenceScope.cwd) !== resolve(context.guardianSession.cwd)) {
+      throw new AutoReviewerFailure(
+        "unavailable",
+        "Guardian evidence scope does not match the review session",
+        undefined,
+        guardianIdentity,
+      );
+    }
+    const toolRuntime = this.createTools(context.guardianEvidenceScope);
     const reasoningEffort = context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING;
-    const toolFingerprint = fingerprintValue(
-      toolRuntime.tools.map((tool) => ({
+    const toolFingerprint = fingerprintValue({
+      authorityFingerprint: context.guardianEvidenceScope.authorityFingerprint,
+      tools: toolRuntime.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
       })),
-    );
+    });
+    const trustedContext = [
+      renderAutoReviewTrustedContext(request),
+      renderAutoReviewParentInstructions(context.parentInstructions),
+    ]
+      .filter((value): value is string => value !== undefined)
+      .join("\n\n");
     const systemPrompt = renderGuardianSystemPrompt(
       context.guardianPolicy,
-      renderAutoReviewTrustedContext(request),
+      trustedContext.length > 0 ? trustedContext : undefined,
     );
     const closeToolRuntime = async (): Promise<void> => {
-      try {
-        await toolRuntime.close?.();
-      } catch {
-        // Reviewer worker cleanup is observational after the lease is
-        // released; an already-dead worker is fail-closed for its next call.
-      }
+      await toolRuntime.close?.();
     };
     let lease: ReturnType<GuardianReviewSessionManager["open"]>;
     try {
@@ -353,6 +371,7 @@ export class PiAutoReviewer implements AutoReviewer {
       throw error;
     }
     const deadline = Date.now() + GUARDIAN_REVIEW_TIMEOUT_MS;
+    let pendingCommitMessages: Message[] | undefined;
     try {
       reviewAttempts: for (let attempt = 1; attempt <= GUARDIAN_REVIEW_MAX_ATTEMPTS; attempt += 1) {
         let attemptContext = lease.context;
@@ -465,7 +484,10 @@ export class PiAutoReviewer implements AutoReviewer {
           const text = assistantText(response);
           try {
             const result = parseAutoReviewResult(text);
-            lease.commit([...attemptMessages, response]);
+            // Keep the successful turn provisional until the evidence runtime
+            // has closed cleanly. A cleanup/reset failure must not persist an
+            // approval or its evidence in the next review's session trunk.
+            pendingCommitMessages = [...attemptMessages, response];
             return {
               ...result,
               guardian: guardianIdentity,
@@ -490,8 +512,12 @@ export class PiAutoReviewer implements AutoReviewer {
         guardianIdentity,
       );
     } finally {
-      lease.release();
-      await closeToolRuntime();
+      try {
+        await closeToolRuntime();
+        if (pendingCommitMessages) lease.commit(pendingCommitMessages);
+      } finally {
+        lease.release();
+      }
     }
   }
 

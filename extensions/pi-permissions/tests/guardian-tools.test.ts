@@ -16,16 +16,26 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createGuardianToolRuntime,
+  createIsolatedGuardianToolRuntime,
   createSandboxedGuardianToolRuntime,
   type GuardianToolFactory,
 } from "../src/guardian-tools.ts";
+import { GuardianWorkerInfrastructureError } from "../src/guardian-worker-client.ts";
 import {
+  createGuardianEvidenceScope,
   createGuardianReadOnlySandboxConfig,
   type SandboxExecutionRequest,
   type SandboxExecutionResult,
   type SandboxManagerLike,
   type SandboxPolicy,
 } from "../src/sandbox.ts";
+
+function guardianEvidenceScope(cwd: string, denyRead: readonly string[] = []) {
+  return createGuardianEvidenceScope(cwd, {
+    filesystem: { allowWrite: [cwd], denyRead: [...denyRead], denyWrite: [] },
+    network: { allowedDomains: [], deniedDomains: [] },
+  });
+}
 
 type PiGuardianToolFactory = (cwd: string) => ReturnType<typeof createReadOnlyTools>;
 
@@ -375,13 +385,65 @@ describe("createGuardianToolRuntime", () => {
 });
 
 describe("createSandboxedGuardianToolRuntime sandbox boundary", () => {
+  it("does not expose Guardian evidence tools on Windows until worker cleanup is reliable", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-win32-tools-");
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const manager = passThroughSandboxManager();
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
+      resolveRgPath: () => undefined,
+    });
+
+    expect(runtime.tools.map((tool) => tool.name)).toEqual([]);
+    await expect(
+      runtime.execute({
+        type: "toolCall",
+        id: "inspect-win32",
+        name: "inspect",
+        arguments: { command: "echo unsupported" },
+      }),
+    ).rejects.toThrow(/not available/i);
+    expect(manager.execute).not.toHaveBeenCalled();
+  });
+
+  it("does not create an isolated Guardian worker on Windows", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-win32-isolated-");
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+    const runtime = createIsolatedGuardianToolRuntime(guardianEvidenceScope(cwd));
+
+    expect(runtime.tools).toEqual([]);
+    await expect(runtime.close?.()).resolves.toBeUndefined();
+  });
+
+  it("fails closed when the evidence authority drifts", async () => {
+    const cwd = await temporaryDirectory("pi-guardian-authority-drift-");
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), {
+      initialize: async () => undefined,
+      reset: async () => undefined,
+      execute: () => {
+        throw new GuardianWorkerInfrastructureError(
+          "Guardian evidence sandbox policy drifted from its fixed authority",
+        );
+      },
+    });
+
+    await expect(
+      runtime.execute({
+        type: "toolCall",
+        id: "authority-drift",
+        name: "inspect",
+        arguments: { command: "printf evidence" },
+      }),
+    ).rejects.toThrow(/policy drifted/i);
+  });
+
   it("sends unresolved read paths into the sandbox before filesystem probing", async () => {
     const cwd = await temporaryDirectory("pi-guardian-parent-read-probe-");
     const requestedPath = join(cwd, "Capture 1 PM.txt");
     const parentVisibleVariant = join(cwd, "Capture 1\u202fPM.txt");
     await writeFile(parentVisibleVariant, "sandbox-only evidence\n");
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => undefined,
     });
 
@@ -405,9 +467,13 @@ describe("createSandboxedGuardianToolRuntime sandbox boundary", () => {
     const file = join(cwd, "large.txt");
     const precedingLines = 1_100_000;
     await writeFile(file, `${"skip\n".repeat(precedingLines)}target\n`);
-    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
-      resolveRgPath: () => undefined,
-    });
+    const runtime = createSandboxedGuardianToolRuntime(
+      guardianEvidenceScope(cwd),
+      passThroughSandboxManager(),
+      {
+        resolveRgPath: () => undefined,
+      },
+    );
 
     const result = await runtime.execute({
       type: "toolCall",
@@ -431,9 +497,13 @@ describe("createSandboxedGuardianToolRuntime sandbox boundary", () => {
     const cwd = await temporaryDirectory(`pi-guardian-${name}-abort-`);
     const markerPath = join(cwd, `${name}.pid`);
     const rgPath = await fakeRg(cwd, "setInterval(() => {}, 1_000);\n");
-    const runtime = createSandboxedGuardianToolRuntime(cwd, hangingSandboxManager(markerPath), {
-      resolveRgPath: () => rgPath,
-    });
+    const runtime = createSandboxedGuardianToolRuntime(
+      guardianEvidenceScope(cwd),
+      hangingSandboxManager(markerPath),
+      {
+        resolveRgPath: () => rgPath,
+      },
+    );
     const controller = new AbortController();
     const execution = runtime.execute(
       {
@@ -490,7 +560,7 @@ if (args.includes("--files")) {
 `,
     );
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -570,7 +640,8 @@ if (args.includes("--files")) {
   it("runs inspect through the Guardian read-only sandbox", async () => {
     const cwd = await temporaryDirectory("pi-guardian-inspect-");
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager);
+    const scope = guardianEvidenceScope(cwd, [join(cwd, "secret")]);
+    const runtime = createSandboxedGuardianToolRuntime(scope, manager);
     const controller = new AbortController();
 
     const result = await runtime.execute(
@@ -591,13 +662,13 @@ if (args.includes("--files")) {
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       expect.stringContaining("/bin/bash"),
       undefined,
-      createGuardianReadOnlySandboxConfig(),
+      createGuardianReadOnlySandboxConfig(scope),
       controller.signal,
     );
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       expect.stringContaining("printf inspect-ok"),
       undefined,
-      createGuardianReadOnlySandboxConfig(),
+      createGuardianReadOnlySandboxConfig(scope),
       controller.signal,
     );
   });
@@ -626,7 +697,7 @@ process.stdout.write([
     );
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -660,9 +731,13 @@ for (let index = 0; index < 4_000; index++) {
 }
 `,
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
-      resolveRgPath: () => rgPath,
-    });
+    const runtime = createSandboxedGuardianToolRuntime(
+      guardianEvidenceScope(cwd),
+      passThroughSandboxManager(),
+      {
+        resolveRgPath: () => rgPath,
+      },
+    );
 
     const result = await runtime.execute({
       type: "toolCall",
@@ -701,9 +776,13 @@ setTimeout(() => {
 }, 20);
 `,
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
-      resolveRgPath: () => rgPath,
-    });
+    const runtime = createSandboxedGuardianToolRuntime(
+      guardianEvidenceScope(cwd),
+      passThroughSandboxManager(),
+      {
+        resolveRgPath: () => rgPath,
+      },
+    );
 
     const result = await runtime.execute({
       type: "toolCall",
@@ -722,7 +801,7 @@ setTimeout(() => {
     const cwd = await temporaryDirectory("pi-guardian-missing-rg-");
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => undefined,
     });
 
@@ -751,7 +830,7 @@ setTimeout(() => {
   it("rejects a non-rg executable from the sandbox resolver boundary", async () => {
     const cwd = await temporaryDirectory("pi-guardian-untrusted-resolver-");
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => process.execPath,
     });
 
@@ -777,7 +856,7 @@ setTimeout(() => {
     await chmod(malformed, 0o755);
     await symlink(malformed, alias);
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => alias,
     });
 
@@ -805,7 +884,7 @@ setTimeout(() => {
     await symlink(target, alias);
     const canonical = await realpath(target);
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => alias,
     });
 
@@ -862,7 +941,7 @@ for (const [type, lineNumber, text] of [
 `,
     );
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -944,7 +1023,7 @@ for (const [type, lineNumber, text] of [
         ? "printf 'large context file read blocked' >&2; exit 2"
         : command,
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -981,9 +1060,13 @@ process.stdout.write(JSON.stringify({
 }) + "\\n");
 `,
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
-      resolveRgPath: () => rgPath,
-    });
+    const runtime = createSandboxedGuardianToolRuntime(
+      guardianEvidenceScope(cwd),
+      passThroughSandboxManager(),
+      {
+        resolveRgPath: () => rgPath,
+      },
+    );
 
     const result = await runtime.execute({
       type: "toolCall",
@@ -1006,7 +1089,7 @@ process.exit(2);
 `,
     );
     const manager = passThroughSandboxManager();
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -1031,7 +1114,7 @@ process.exit(2);
     manager.wrapWithSandbox.mockResolvedValueOnce(
       "printf 'sandbox permission denied' >&2; exit 13",
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => rgPath,
     });
 
@@ -1059,7 +1142,7 @@ process.exit(2);
     manager.wrapWithSandbox.mockImplementation(
       async () => "printf 'authorization: guardian-secret' >&2; exit 17",
     );
-    const runtime = createSandboxedGuardianToolRuntime(cwd, manager, {
+    const runtime = createSandboxedGuardianToolRuntime(guardianEvidenceScope(cwd), manager, {
       resolveRgPath: () => undefined,
     });
 
@@ -1086,9 +1169,13 @@ process.exit(2);
     "rejects unavailable sandbox Guardian tool %s",
     async (name) => {
       const cwd = await temporaryDirectory(`pi-guardian-${name}-`);
-      const runtime = createSandboxedGuardianToolRuntime(cwd, passThroughSandboxManager(), {
-        resolveRgPath: () => undefined,
-      });
+      const runtime = createSandboxedGuardianToolRuntime(
+        guardianEvidenceScope(cwd),
+        passThroughSandboxManager(),
+        {
+          resolveRgPath: () => undefined,
+        },
+      );
 
       await expect(
         runtime.execute({

@@ -15,6 +15,14 @@ export type AdmissionRisk = "LOW" | "REVIEW" | "HARD";
 /** Ownership says which external execution Adapter is authoritative. */
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
 
+/**
+ * Trusted adapter policy for a capability denial discovered after execution
+ * has started. The default is terminal; only an adapter which can prove that
+ * its runtime boundary is safe to re-enter may opt into one fresh review and
+ * retry (the Engine, not the executor, owns that one-shot transition).
+ */
+export type RuntimeDenialPolicy = "terminal" | "review-and-retry";
+
 export interface InvocationCall {
   id: string;
   tool: string;
@@ -81,17 +89,30 @@ export type RuntimeOutcome<T> =
   | {
       kind: "capability-denied";
       request: CapabilityRequestInput;
-      retryability: "safe" | "uncertain";
       detail?: string;
     }
-  | { kind: "failed"; error: unknown };
+  | { kind: "failed"; error: unknown; effectsMayHaveOccurred?: true };
 
 export interface ExecutionAttempt {
-  readonly ordinal: 0 | 1;
   /** Canonical action snapshot reviewed and fingerprinted by the Engine. */
   readonly call: InvocationCall;
   readonly lease: CapabilityLease;
   readonly plan?: StructuredExecutionPlan;
+  /** The signal owned by this execution attempt, including caller cancellation. */
+  readonly signal: AbortSignal;
+  /**
+   * Authorize a capability at an execution boundary. The call identity is
+   * bound by the Engine and cannot be supplied or replaced by an Adapter.
+   */
+  readonly authorizeCapability: (
+    request: CapabilityAuthorizationInput,
+  ) => Promise<CapabilityAuthorizationDecision>;
+  /**
+   * Report an authoritative capability boundary rejection from the execution
+   * adapter. The Engine latches the exact denial and aborts this whole
+   * attempt; this does not invoke Guardian review or mint a retry.
+   */
+  readonly rejectCapability: (request: CapabilityRejectionInput) => CapabilityAuthorizationDecision;
 }
 
 export type InvocationExecutor<T> = (attempt: ExecutionAttempt) => Promise<RuntimeOutcome<T>>;
@@ -99,7 +120,6 @@ export type InvocationExecutor<T> = (attempt: ExecutionAttempt) => Promise<Runti
 export interface PermissionAmendment {
   kind: "permission-amendment";
   requested: readonly CapabilityRequestInput[];
-  scope: "turn" | "session";
   reason?: string;
 }
 
@@ -110,6 +130,8 @@ export interface Invocation<T, ReviewContext = undefined> {
   admission?: AdmissionPlan;
   /** Only ownership=permission-amendment may supply this field. */
   intent?: PermissionAmendment;
+  /** Static adapter declaration; never inferred from an executor outcome. */
+  runtimeDenialPolicy?: RuntimeDenialPolicy;
   reviewContext: ReviewContext;
   executor: InvocationExecutor<T>;
   signal?: AbortSignal;
@@ -119,8 +141,7 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   call: InvocationCall;
   ownership: InvocationOwnership;
   requested: readonly CapabilityRequest[];
-  source: "preview" | "runtime" | "inline" | "permission-amendment" | "manual-retry";
-  retryability?: "safe" | "uncertain";
+  source: "preview" | "inline" | "permission-amendment" | "manual-retry";
   risk?: AdmissionRisk;
   baseline: CapabilityLease;
   effective: CapabilityLease;
@@ -216,8 +237,6 @@ export type PermissionErrorCode =
   | "review-timeout"
   | "review-unavailable"
   | "runtime-denied"
-  | "retry-denied"
-  | "retry-uncertain"
   | "circuit-open"
   | "concurrent-invocation"
   | "enforcement-unavailable"
@@ -227,12 +246,16 @@ export interface PermissionError {
   code: PermissionErrorCode;
   reason: string;
   request?: CapabilityRequest;
+  /** True when the executor had started and earlier effects may exist. */
+  effectsMayHaveOccurred?: true;
+  /** True when the Engine already performed its one permitted reviewed retry. */
+  retryAttempted?: true;
 }
 
 export type ExecutionOutcome<T> =
   | { kind: "completed"; value: T }
   | { kind: "blocked"; error: PermissionError; retryHandle?: RetryHandle }
-  | { kind: "failed"; error: unknown };
+  | { kind: "failed"; error: unknown; effectsMayHaveOccurred?: true };
 
 export interface DenialNotice {
   readonly call: InvocationCall;
@@ -254,17 +277,17 @@ export interface ApproveForMeEngineOptions<ReviewContext = undefined> {
 
 export interface TurnHandle<ReviewContext = undefined> {
   execute<T>(request: Invocation<T, ReviewContext>): Promise<ExecutionOutcome<T>>;
-  authorizeCapability(
-    request: CapabilityAuthorizationRequest,
-  ): Promise<CapabilityAuthorizationDecision>;
   close(reason?: string): void;
 }
 
-export interface CapabilityAuthorizationRequest {
-  readonly call: InvocationCall;
+export interface CapabilityAuthorizationInput {
   readonly capability: CapabilityRequestInput;
   readonly reason?: string;
-  readonly summary?: string;
+}
+
+export interface CapabilityRejectionInput {
+  readonly capability: CapabilityRequestInput;
+  readonly reason: string;
 }
 
 export type CapabilityAuthorizationDecision =
@@ -281,8 +304,6 @@ export interface ApproveForMeEngine<ReviewContext = undefined> {
 interface TurnState {
   readonly generation: number;
   readonly snapshot: TurnSnapshot;
-  readonly sessionNetworkHosts: Set<string>;
-  readonly sessionWriteRoots: string[];
   readonly turnNetworkHosts: Set<string>;
   readonly turnWriteRoots: string[];
   readonly grants: Map<string, GrantRecord>;
@@ -311,21 +332,32 @@ interface RetryRecord {
 interface ReviewRequest {
   readonly source: GuardianReviewInput["source"];
   readonly requested: readonly CapabilityRequest[];
-  readonly retryability?: "safe" | "uncertain";
   readonly risk?: AdmissionRisk;
   readonly reason?: string;
   readonly summary?: string;
+  /** Override the derived post-review lease for a retry of an existing attempt. */
+  readonly effective?: CapabilityLease;
   readonly approvalOverride?: ApprovalOverride;
 }
 
+interface RuntimeAttemptContext {
+  /** The exact capability requests used by the first execution attempt. */
+  readonly requested: readonly CapabilityRequest[];
+  /** The original admission scope used to construct the first attempt. */
+  readonly admissionRequested: readonly CapabilityRequest[];
+  /** The immutable effective lease observed by that attempt. */
+  readonly lease: CapabilityLease;
+  readonly plan?: StructuredExecutionPlan;
+}
+
 interface InFlightAttempt<ReviewContext> {
-  readonly callFingerprint: string;
   readonly call: InvocationCall;
   readonly ownership: InvocationOwnership;
   readonly reviewContext: ReviewContext;
   readonly baseline: CapabilityLease;
-  readonly signal?: AbortSignal;
-  readonly inlineDecisions: Map<string, CapabilityAuthorizationDecision>;
+  readonly controller: AbortController;
+  readonly signal: AbortSignal;
+  terminalError?: PermissionError;
 }
 
 type ResolvedAdmission =
@@ -356,6 +388,10 @@ function cloneLease(lease: CapabilityLease): CapabilityLease {
     mode: lease.mode,
     ...(policy === undefined ? {} : { policy }),
   };
+}
+
+function withExecutionEffects(error: PermissionError): PermissionError {
+  return error.effectsMayHaveOccurred === true ? error : { ...error, effectsMayHaveOccurred: true };
 }
 
 function cloneMetadata(metadata: unknown): unknown {
@@ -389,6 +425,14 @@ function cloneInvocation<T, ReviewContext>(
 ): Invocation<T, ReviewContext> {
   let admission: AdmissionPlan | undefined;
   let intent: PermissionAmendment | undefined;
+  const runtimeDenialPolicy = invocation.runtimeDenialPolicy;
+  if (
+    runtimeDenialPolicy !== undefined &&
+    runtimeDenialPolicy !== "terminal" &&
+    runtimeDenialPolicy !== "review-and-retry"
+  ) {
+    throw new Error("Invocation runtime denial policy is invalid");
+  }
   try {
     admission =
       invocation.admission === undefined ? undefined : structuredClone(invocation.admission);
@@ -401,6 +445,7 @@ function cloneInvocation<T, ReviewContext>(
     call: cloneInvocationCall(invocation.call),
     ...(admission === undefined ? {} : { admission }),
     ...(intent === undefined ? {} : { intent }),
+    ...(runtimeDenialPolicy === undefined ? {} : { runtimeDenialPolicy }),
     reviewContext: invocation.reviewContext,
     executor: invocation.executor,
     ...(invocation.signal === undefined ? {} : { signal: invocation.signal }),
@@ -755,12 +800,10 @@ function leaseWithRequests(
   if (ownership === "host-admission") return { mode: "host-admitted" };
   const policy = clonePolicy(state.snapshot.baseSandboxPolicy);
   if (!policy) return { mode: "sandboxed" };
-  const sessionHosts = [...state.sessionNetworkHosts];
   const turnHosts = [...state.turnNetworkHosts];
-  const sessionRoots = [...state.sessionWriteRoots];
   const turnRoots = [...state.turnWriteRoots];
-  const extraHosts = [...sessionHosts, ...turnHosts];
-  const extraRoots = [...sessionRoots, ...turnRoots];
+  const extraHosts = [...turnHosts];
+  const extraRoots = [...turnRoots];
   for (const request of requested) {
     if (request.kind === "network") extraHosts.push(request.host);
     if (request.kind === "filesystem" && request.operation === "write") {
@@ -773,6 +816,26 @@ function leaseWithRequests(
   // Keep ownership in the call, not in the lease. The Adapter sees the same
   // immutable policy shape for sandbox-owned and permission-amendment calls.
   return { mode: "sandboxed", policy };
+}
+
+function leaseWithAdditionalRequests(
+  lease: CapabilityLease,
+  requested: readonly CapabilityRequest[],
+): CapabilityLease {
+  const next = cloneLease(lease);
+  if (next.mode !== "sandboxed" || next.policy === undefined) return next;
+  const extraHosts: string[] = [];
+  const extraRoots: string[] = [];
+  for (const request of requested) {
+    if (request.kind === "network") extraHosts.push(request.host);
+    if (request.kind === "filesystem" && request.operation === "write") {
+      extraRoots.push(request.path);
+    }
+  }
+  appendUnique(next.policy.network.allowedDomains, extraHosts);
+  appendUnique(next.policy.filesystem.allowWrite, extraRoots);
+  releaseExactGrantableWriteDenies(next.policy, extraRoots);
+  return next;
 }
 
 function invocationFingerprint(
@@ -847,8 +910,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   const inFlightCallIds = new Set<string>();
   const inFlightAttempts = new Map<string, InFlightAttempt<ReviewContext>>();
   const inlineCapabilityReviews = new Map<string, Promise<CapabilityAuthorizationDecision>>();
-  const sessionNetworkHosts = new Set<string>();
-  const sessionWriteRoots: string[] = [];
   const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
   const denialWindowSize = options.denialWindowSize ?? DEFAULT_DENIAL_WINDOW_SIZE;
   const maxWindowDenials = options.maxWindowDenials ?? DEFAULT_MAX_WINDOW_DENIALS;
@@ -981,11 +1042,23 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     reviewControllers.clear();
   };
 
+  const abortAttempts = (reason: string): void => {
+    const error = withExecutionEffects({
+      code: "stale-invocation",
+      reason: "Permission context changed",
+    });
+    for (const attempt of inFlightAttempts.values()) {
+      attempt.terminalError ??= error;
+      attempt.controller.abort(new Error(reason));
+    }
+  };
+
   const closeState = (state: TurnState, reason: string): void => {
     if (state.closed) return;
     const wasActive = active === state;
     state.closed = true;
     state.grants.clear();
+    if (wasActive) abortAttempts(reason);
     inFlightAttempts.clear();
     state.turnNetworkHosts.clear();
     state.turnWriteRoots.length = 0;
@@ -1069,10 +1142,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           ownership: request.ownership,
           requested: review.requested.map((item) => structuredClone(item)),
           source: review.source,
-          retryability: review.retryability,
           risk: review.risk,
           baseline: cloneLease(baseline),
-          effective: leaseWithRequests(state, request.ownership, review.requested),
+          effective:
+            review.effective === undefined
+              ? leaseWithRequests(state, request.ownership, review.requested)
+              : cloneLease(review.effective),
           transcript: structuredClone(state.snapshot.transcript ?? []),
           reason: review.reason,
           summary: review.summary,
@@ -1217,51 +1292,124 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     return grant;
   };
 
+  const denyAttempt = (
+    attempt: InFlightAttempt<ReviewContext>,
+    error: PermissionError,
+  ): CapabilityAuthorizationDecision => {
+    attempt.terminalError ??= withExecutionEffects(error);
+    attempt.controller.abort(new Error(attempt.terminalError.reason));
+    return { kind: "deny", error: attempt.terminalError };
+  };
+
+  const rejectInlineCapability = (
+    state: TurnState,
+    callId: string,
+    input: CapabilityRejectionInput,
+  ): CapabilityAuthorizationDecision => {
+    if (!isCurrent(state)) {
+      return {
+        kind: "deny",
+        error: { code: "stale-invocation", reason: "Permission context changed" },
+      };
+    }
+    const attempt = inFlightAttempts.get(callId);
+    if (!attempt) {
+      return {
+        kind: "deny",
+        error: {
+          code: "stale-invocation",
+          reason: "Capability rejection does not match the active execution attempt",
+        },
+      };
+    }
+    if (attempt.signal.aborted) {
+      return {
+        kind: "deny",
+        error:
+          attempt.terminalError ??
+          withExecutionEffects({
+            code: "aborted",
+            reason: "Operation aborted",
+          }),
+      };
+    }
+    const normalized = normalizeCapabilityRequest(input.capability, attempt.call.cwd, {
+      allowPrivateNetwork: true,
+    });
+    if (!normalized) {
+      return denyAttempt(attempt, {
+        code: "policy-denied",
+        reason: "Capability boundary reported an invalid request",
+      });
+    }
+    return denyAttempt(attempt, {
+      code: "policy-denied",
+      reason: input.reason.trim() || "Capability boundary denied the request",
+      request: normalized,
+    });
+  };
+
   const executeAttempt = async <T>(
     state: TurnState,
     request: Invocation<T, ReviewContext>,
     requested: readonly CapabilityRequest[],
-    ordinal: 0 | 1,
     grant?: GrantRecord,
     plan?: StructuredExecutionPlan,
+    leaseOverride?: CapabilityLease,
   ): Promise<RuntimeOutcome<T> | ExecutionOutcome<T>> => {
     if (!isCurrent(state))
       return blocked({ code: "stale-invocation", reason: "Permission context changed" });
     if (request.signal?.aborted) return blocked({ code: "aborted", reason: "Operation aborted" });
-    const lease = leaseWithRequests(state, request.ownership, [
-      ...requested,
-      ...(grant?.requested ?? []),
-    ]);
+    const lease =
+      leaseOverride ??
+      leaseWithRequests(state, request.ownership, [...requested, ...(grant?.requested ?? [])]);
     const attemptCall = cloneInvocationCall(request.call);
+    const controller = new AbortController();
+    const signal = request.signal
+      ? AbortSignal.any([request.signal, controller.signal])
+      : controller.signal;
     const inFlightAttempt: InFlightAttempt<ReviewContext> = {
-      callFingerprint: callFingerprint(state, attemptCall, request.ownership),
       call: attemptCall,
       ownership: request.ownership,
       reviewContext: request.reviewContext,
       baseline: cloneLease(lease),
-      inlineDecisions: new Map<string, CapabilityAuthorizationDecision>(),
-      ...(request.signal === undefined ? {} : { signal: request.signal }),
+      controller,
+      signal,
     };
     inFlightAttempts.set(attemptCall.id, inFlightAttempt);
     try {
       const result = await request.executor({
-        ordinal,
         call: attemptCall,
         lease,
         ...(plan === undefined ? {} : { plan }),
+        signal,
+        authorizeCapability: (input) => authorizeInlineCapability(state, attemptCall.id, input),
+        rejectCapability: (input) => rejectInlineCapability(state, attemptCall.id, input),
       });
+      if (inFlightAttempt.terminalError) return blocked(inFlightAttempt.terminalError);
       if (!isCurrent(state)) {
-        return blocked({ code: "stale-invocation", reason: "Permission context changed" });
+        return blocked(
+          withExecutionEffects({ code: "stale-invocation", reason: "Permission context changed" }),
+        );
       }
-      if (request.signal?.aborted) {
-        return blocked({ code: "aborted", reason: "Operation aborted" });
+      if (signal.aborted) {
+        return blocked(withExecutionEffects({ code: "aborted", reason: "Operation aborted" }));
+      }
+      if (result.kind === "failed") {
+        return { kind: "failed", error: result.error, effectsMayHaveOccurred: true };
       }
       return result;
     } catch (error) {
-      if (request.signal?.aborted) return blocked({ code: "aborted", reason: "Operation aborted" });
+      if (inFlightAttempt.terminalError) return blocked(inFlightAttempt.terminalError);
+      if (request.signal?.aborted)
+        return blocked(withExecutionEffects({ code: "aborted", reason: "Operation aborted" }));
       if (!isCurrent(state))
-        return blocked({ code: "stale-invocation", reason: "Permission context changed" });
-      return { kind: "failed", error };
+        return blocked(
+          withExecutionEffects({ code: "stale-invocation", reason: "Permission context changed" }),
+        );
+      if (signal.aborted)
+        return blocked(withExecutionEffects({ code: "aborted", reason: "Operation aborted" }));
+      return { kind: "failed", error, effectsMayHaveOccurred: true };
     } finally {
       if (inFlightAttempts.get(attemptCall.id) === inFlightAttempt) {
         inFlightAttempts.delete(attemptCall.id);
@@ -1273,52 +1421,55 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     state: TurnState,
     request: Invocation<T, ReviewContext>,
   ): Promise<ExecutionOutcome<T>> => {
-    const outcome = await executeAttempt(state, request, [], 0);
+    const outcome = await executeAttempt(state, request, []);
     if (outcome.kind === "blocked") return outcome;
-    if (outcome.kind === "failed") return { kind: "failed", error: outcome.error };
+    if (outcome.kind === "failed") return outcome;
     if (outcome.kind === "completed") return outcome;
     const normalized = normalizeCapabilityRequest(outcome.request, request.call.cwd);
-    return blocked({
-      code: outcome.retryability === "uncertain" ? "retry-uncertain" : "runtime-denied",
-      reason:
-        outcome.detail ??
-        (outcome.retryability === "uncertain"
-          ? "Runtime denial may have committed an effect; replay is disabled"
-          : "Unrestricted execution reported a capability denial"),
-      ...(normalized === undefined ? {} : { request: normalized }),
-    });
+    return blocked(
+      withExecutionEffects({
+        code: "runtime-denied",
+        reason: outcome.detail ?? "Unrestricted execution reported a capability denial",
+        ...(normalized === undefined ? {} : { request: normalized }),
+      }),
+    );
   };
 
   const handleRuntimeOutcome = async <T>(
     state: TurnState,
     request: Invocation<T, ReviewContext>,
-    baseline: CapabilityLease,
     outcome: RuntimeOutcome<T>,
-    admissionRequested: readonly CapabilityRequest[],
-    execution?: StructuredExecutionPlan,
+    attempt: RuntimeAttemptContext,
+    allowRetry = true,
   ): Promise<ExecutionOutcome<T>> => {
     if (outcome.kind === "completed") return outcome;
-    if (outcome.kind === "failed") return { kind: "failed", error: outcome.error };
+    if (outcome.kind === "failed") return outcome;
     const normalized = normalizeCapabilityRequest(outcome.request, request.call.cwd);
     if (!normalized) {
-      return blocked({
-        code: "runtime-denied",
-        reason: "Runtime denial did not contain a valid capability request",
-      });
+      return blocked(
+        withExecutionEffects({
+          code: "runtime-denied",
+          reason: "Runtime denial did not contain a valid capability request",
+        }),
+      );
     }
     if (normalized.kind === "network") {
-      return blocked({
-        code: "runtime-denied",
-        reason: "Network authorization must happen before the connection attempt",
-        request: normalized,
-      });
+      return blocked(
+        withExecutionEffects({
+          code: "runtime-denied",
+          reason: "Network authorization must happen before the connection attempt",
+          request: normalized,
+        }),
+      );
     }
     if (!runtimeCapabilitySupported(request.ownership, normalized)) {
-      return blocked({
-        code: "enforcement-unavailable",
-        reason: "The execution adapter cannot enforce this runtime capability",
-        request: normalized,
-      });
+      return blocked(
+        withExecutionEffects({
+          code: "enforcement-unavailable",
+          reason: "The execution adapter cannot enforce this runtime capability",
+          request: normalized,
+        }),
+      );
     }
     const runtimePolicy = await policyCheck({
       call: request.call,
@@ -1327,78 +1478,137 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       phase: "runtime",
     });
     if (!isCurrent(state))
-      return blocked({ code: "stale-invocation", reason: "Permission context changed" });
-    if (request.signal?.aborted) return blocked({ code: "aborted", reason: "Operation aborted" });
-    if (runtimePolicy.kind === "error")
-      return blocked({ code: "policy-error", reason: runtimePolicy.reason, request: normalized });
-    if (runtimePolicy.kind === "deny")
-      return blocked({ code: "policy-denied", reason: runtimePolicy.reason, request: normalized });
-    if (outcome.retryability !== "safe") {
-      return blocked({
-        code: "retry-uncertain",
-        reason: outcome.detail ?? "Runtime denial may have committed an effect; replay is disabled",
-        request: normalized,
-      });
-    }
-    if (requestCovered(baseline, normalized)) {
-      return blocked({
-        code: "runtime-denied",
-        reason: "Enforcement denied a capability already in the effective lease",
-        request: normalized,
-      });
-    }
-    const decision = await runReview(
-      state,
-      request as Invocation<unknown, ReviewContext>,
-      baseline,
-      {
-        source: "runtime",
-        requested: [normalized],
-        retryability: outcome.retryability,
-        risk: "REVIEW",
-        reason: outcome.detail,
-      },
-    );
-    if ("code" in decision) return blocked(decision, undefined);
-    if (decision.kind === "deny") {
-      const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
-        rationale: decision.rationale,
-        requested: [normalized],
-        admissionRequested,
-        risk: "REVIEW",
-        execution,
-      });
       return blocked(
-        { code: "review-denied", reason: decision.rationale, request: normalized },
-        retryHandle,
+        withExecutionEffects({ code: "stale-invocation", reason: "Permission context changed" }),
+      );
+    if (request.signal?.aborted)
+      return blocked(withExecutionEffects({ code: "aborted", reason: "Operation aborted" }));
+    if (runtimePolicy.kind === "error")
+      return blocked(
+        withExecutionEffects({
+          code: "policy-error",
+          reason: runtimePolicy.reason,
+          request: normalized,
+        }),
+      );
+    if (runtimePolicy.kind === "deny")
+      return blocked(
+        withExecutionEffects({
+          code: "policy-denied",
+          reason: runtimePolicy.reason,
+          request: normalized,
+        }),
+      );
+
+    const retryableWrite =
+      allowRetry &&
+      request.runtimeDenialPolicy === "review-and-retry" &&
+      request.ownership === "sandbox-owned" &&
+      normalized.kind === "filesystem" &&
+      normalized.operation === "write";
+    if (retryableWrite && requestCovered(attempt.lease, normalized)) {
+      return blocked(
+        withExecutionEffects({
+          code: "enforcement-unavailable",
+          reason:
+            "Runtime denied a capability already covered by the execution lease; refusing a blind retry",
+          request: normalized,
+        }),
       );
     }
-    const grant: GrantRecord = {
-      callFingerprint: callFingerprint(state, request.call, request.ownership),
-      requested: [normalized],
-    };
-    state.grants.set(request.call.id, grant);
-    const spent = consumeGrant(state, request as Invocation<unknown, ReviewContext>, [normalized]);
-    if (!spent)
-      return blocked({
-        code: "stale-invocation",
-        reason: "Exact capability grant no longer matches",
-      });
-    const retried = await executeAttempt(
-      state,
-      request,
-      [...admissionRequested, normalized],
-      1,
-      spent,
+
+    // Codex's native file mutation runtime can ask for one fresh exact
+    // capability review after SRT denies a write. Bash is deliberately
+    // terminal here: replaying a command would repeat arbitrary work, while
+    // a Write/Edit adapter can safely re-enter its single-file operation.
+    // The retry policy is a trusted invocation declaration; it is never
+    // inferred from the executor's denial payload.
+    if (retryableWrite) {
+      const retryEffective = leaseWithAdditionalRequests(attempt.lease, [normalized]);
+      if (!requestCovered(retryEffective, normalized)) {
+        return blocked(
+          withExecutionEffects({
+            code: "enforcement-unavailable",
+            reason: "The approved retry cannot be represented by the sandbox policy",
+            request: normalized,
+          }),
+        );
+      }
+      const retryDecision = await runReview(
+        state,
+        request as Invocation<unknown, ReviewContext>,
+        attempt.lease,
+        {
+          source: "inline",
+          requested: [normalized],
+          effective: retryEffective,
+          risk: "REVIEW",
+          reason:
+            outcome.detail ??
+            "Sandbox enforcement denied a filesystem write; review one exact retry",
+          summary: `${request.call.tool} runtime write retry`,
+        },
+      );
+      if ("code" in retryDecision) return blocked(withExecutionEffects(retryDecision));
+      if (retryDecision.kind === "deny") {
+        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
+          rationale: retryDecision.rationale,
+          requested: [normalized],
+          admissionRequested: attempt.admissionRequested,
+          risk: "REVIEW",
+          summary: `${request.call.tool} runtime write retry`,
+          execution: attempt.plan,
+        });
+        return blocked(
+          withExecutionEffects({
+            code: "review-denied",
+            reason: retryDecision.rationale,
+            request: normalized,
+          }),
+          retryHandle,
+        );
+      }
+
+      // Do not grant the capability for the rest of the turn. This direct
+      // second attempt is the exact one-shot retry owned by the Engine.
+      const retryRequested = [...attempt.requested, normalized];
+      const retry = await executeAttempt(
+        state,
+        request,
+        retryRequested,
+        undefined,
+        attempt.plan,
+        retryEffective,
+      );
+      if (retry.kind === "completed") return retry;
+      if (retry.kind === "blocked") {
+        return blocked(withExecutionEffects(retry.error), retry.retryHandle);
+      }
+      if (retry.kind === "failed") return retry;
+      // A second boundary denial is always terminal. Passing false prevents
+      // an executor from ever turning two denials into an unbounded loop.
+      return handleRuntimeOutcome(
+        state,
+        request,
+        retry,
+        {
+          requested: retryRequested,
+          admissionRequested: attempt.admissionRequested,
+          lease: retryEffective,
+          plan: attempt.plan,
+        },
+        false,
+      );
+    }
+
+    return blocked(
+      withExecutionEffects({
+        code: "runtime-denied",
+        reason: outcome.detail ?? "Sandbox enforcement denied a capability during execution",
+        request: normalized,
+        ...(allowRetry ? {} : { retryAttempted: true as const }),
+      }),
     );
-    if ("kind" in retried && (retried.kind === "blocked" || retried.kind === "failed"))
-      return retried;
-    if (retried.kind === "completed") return retried;
-    return blocked({
-      code: "retry-denied",
-      reason: retried.detail ?? "The exact retry was denied by enforcement",
-      request: normalizeCapabilityRequest(retried.request, request.call.cwd),
-    });
   };
 
   const executeInvocationOwned = async <T>(
@@ -1615,23 +1825,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
       }
-      const amended = await executeAttempt(state, request, amendmentRequests, 0);
+      const amended = await executeAttempt(state, request, amendmentRequests);
       if ("kind" in amended && (amended.kind === "blocked" || amended.kind === "failed"))
         return amended;
       if (amended.kind === "completed") {
-        if (request.intent.scope === "session") {
-          for (const item of amendmentRequests) {
-            if (item.kind === "network") state.sessionNetworkHosts.add(item.host);
-            if (item.kind === "filesystem" && item.operation === "write") {
-              appendUnique(state.sessionWriteRoots, [item.path]);
-            }
-          }
-        } else {
-          for (const item of amendmentRequests) {
-            if (item.kind === "network") state.turnNetworkHosts.add(item.host);
-            if (item.kind === "filesystem" && item.operation === "write") {
-              appendUnique(state.turnWriteRoots, [item.path]);
-            }
+        for (const item of amendmentRequests) {
+          if (item.kind === "network") state.turnNetworkHosts.add(item.host);
+          if (item.kind === "filesystem" && item.operation === "write") {
+            appendUnique(state.turnWriteRoots, [item.path]);
           }
         }
         return amended;
@@ -1642,22 +1843,28 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           normalized !== undefined &&
           !runtimeCapabilitySupported(request.ownership, normalized)
         ) {
-          return blocked({
-            code: "enforcement-unavailable",
-            reason: "The execution adapter cannot enforce this runtime capability",
-            request: normalized,
-          });
+          return blocked(
+            withExecutionEffects({
+              code: "enforcement-unavailable",
+              reason: "The execution adapter cannot enforce this runtime capability",
+              request: normalized,
+            }),
+          );
         }
-        return blocked({
-          code: "runtime-denied",
-          reason: amended.detail ?? "Permission amendment acknowledgement was denied",
-          ...(normalized === undefined ? {} : { request: normalized }),
-        });
+        return blocked(
+          withExecutionEffects({
+            code: "runtime-denied",
+            reason: amended.detail ?? "Permission amendment acknowledgement was denied",
+            ...(normalized === undefined ? {} : { request: normalized }),
+          }),
+        );
       }
-      return blocked({
-        code: "runtime-denied",
-        reason: "Permission amendment acknowledgement failed",
-      });
+      return blocked(
+        withExecutionEffects({
+          code: "runtime-denied",
+          reason: "Permission amendment acknowledgement failed",
+        }),
+      );
     }
 
     let leaseRequested = admission.requested;
@@ -1755,45 +1962,40 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         state,
         request,
         leaseRequested,
-        0,
         spent,
         admission.execution,
       );
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
       if (result.kind === "completed") return result;
-      // The spent static grant is never replayed. A distinct capability that
-      // enforcement itself denied at runtime may still receive one fresh
-      // runtime review through the standard escalation path.
-      return handleRuntimeOutcome(
-        state,
-        request,
-        leaseWithRequests(state, request.ownership, leaseRequested),
-        result,
-        leaseRequested,
-        admission.execution,
-      );
+      // The spent static grant is not persisted as a turn-wide permission.
+      // The first attempt's exact lease is retained only so a trusted native
+      // file adapter can request the one fresh reviewed retry when needed.
+      return handleRuntimeOutcome(state, request, result, {
+        requested: [...leaseRequested],
+        admissionRequested: [...admission.requested],
+        lease: leaseWithRequests(state, request.ownership, leaseRequested),
+        plan: admission.execution,
+      });
     }
 
+    const initialRequested = [...leaseRequested];
     const initial = await executeAttempt(
       state,
       request,
-      leaseRequested,
-      0,
+      initialRequested,
       undefined,
       admission.execution,
     );
     if ("kind" in initial && (initial.kind === "blocked" || initial.kind === "failed"))
       return initial;
     if (initial.kind === "completed") return initial;
-    return handleRuntimeOutcome(
-      state,
-      request,
-      baseline,
-      initial,
-      admission.requested,
-      admission.execution,
-    );
+    return handleRuntimeOutcome(state, request, initial, {
+      requested: initialRequested,
+      admissionRequested: [...admission.requested],
+      lease: leaseWithRequests(state, request.ownership, initialRequested),
+      plan: admission.execution,
+    });
   };
 
   const executeInvocation = async <T>(
@@ -1822,7 +2024,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
 
   const authorizeInlineCapability = async (
     state: TurnState,
-    input: CapabilityAuthorizationRequest,
+    callId: string,
+    input: CapabilityAuthorizationInput,
   ): Promise<CapabilityAuthorizationDecision> => {
     if (!isCurrent(state)) {
       return {
@@ -1830,11 +2033,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         error: { code: "stale-invocation", reason: "Permission context changed" },
       };
     }
-    const attempt = inFlightAttempts.get(input.call.id);
-    if (
-      !attempt ||
-      attempt.callFingerprint !== callFingerprint(state, input.call, attempt.ownership)
-    ) {
+    const attempt = inFlightAttempts.get(callId);
+    if (!attempt) {
       return {
         kind: "deny",
         error: {
@@ -1845,8 +2045,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
     const signal = attempt.signal;
     if (signal?.aborted) {
-      return { kind: "deny", error: { code: "aborted", reason: "Operation aborted" } };
+      return {
+        kind: "deny",
+        error: attempt.terminalError ?? { code: "aborted", reason: "Operation aborted" },
+      };
     }
+    const denyAttemptForAttempt = (error: PermissionError): CapabilityAuthorizationDecision =>
+      denyAttempt(attempt, error);
     const normalized = normalizeCapabilityRequest(input.capability, attempt.call.cwd, {
       // Normalize private targets as well so the Engine can apply the
       // Codex-compatible exact-local/allowLocalBinding policy below and
@@ -1854,10 +2059,10 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       allowPrivateNetwork: true,
     });
     if (!normalized) {
-      return {
-        kind: "deny",
-        error: { code: "policy-denied", reason: "Inline capability request is invalid" },
-      };
+      return denyAttemptForAttempt({
+        code: "policy-denied",
+        reason: "Inline capability request is invalid",
+      });
     }
     if (state.snapshot.mode === "yolo") return { kind: "allow", capability: normalized };
     if (
@@ -1865,39 +2070,30 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       !isPublicNetworkHost(normalized.host) &&
       !localNetworkAllowed(attempt.baseline.policy, normalized.host, normalized.port)
     ) {
-      return {
-        kind: "deny",
-        error: {
-          code: "policy-denied",
-          reason: "Private or special-use network target is blocked",
-          request: normalized,
-        },
-      };
+      return denyAttemptForAttempt({
+        code: "policy-denied",
+        reason: "Private or special-use network target is blocked",
+        request: normalized,
+      });
     }
     if (
       attempt.ownership !== "sandbox-owned" ||
       normalized.kind !== "network" ||
       normalized.port === undefined
     ) {
-      return {
-        kind: "deny",
-        error: {
-          code: "enforcement-unavailable",
-          reason: "The execution adapter cannot authorize this inline capability",
-          request: normalized,
-        },
-      };
+      return denyAttemptForAttempt({
+        code: "enforcement-unavailable",
+        reason: "The execution adapter cannot authorize this inline capability",
+        request: normalized,
+      });
     }
     const baseline = cloneLease(attempt.baseline);
     if (baseline.policy && networkPolicyDenies(baseline.policy, normalized)) {
-      return {
-        kind: "deny",
-        error: {
-          code: "policy-denied",
-          reason: "Network target is denied by sandbox policy",
-          request: normalized,
-        },
-      };
+      return denyAttemptForAttempt({
+        code: "policy-denied",
+        reason: "Network target is denied by sandbox policy",
+        request: normalized,
+      });
     }
     const policy = await policyCheck({
       call: attempt.call,
@@ -1906,30 +2102,31 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       phase: "runtime",
     });
     if (!isCurrent(state)) {
-      return {
-        kind: "deny",
-        error: { code: "stale-invocation", reason: "Permission context changed" },
-      };
+      return denyAttemptForAttempt({
+        code: "stale-invocation",
+        reason: "Permission context changed",
+      });
     }
     if (signal?.aborted) {
-      return { kind: "deny", error: { code: "aborted", reason: "Operation aborted" } };
+      return denyAttemptForAttempt(
+        attempt.terminalError ?? { code: "aborted", reason: "Operation aborted" },
+      );
     }
     if (policy.kind === "error") {
-      return { kind: "deny", error: { code: "policy-error", reason: policy.reason } };
+      return denyAttemptForAttempt({ code: "policy-error", reason: policy.reason });
     }
     if (policy.kind === "deny") {
-      return {
-        kind: "deny",
-        error: { code: "policy-denied", reason: policy.reason, request: normalized },
-      };
+      return denyAttemptForAttempt({
+        code: "policy-denied",
+        reason: policy.reason,
+        request: normalized,
+      });
     }
     if (requestCovered(baseline, normalized)) {
       return { kind: "allow", capability: normalized };
     }
 
     const capabilityKey = requestKey(normalized);
-    const cached = attempt.inlineDecisions.get(capabilityKey);
-    if (cached) return cached;
     const key = `${state.generation}:${attempt.call.id}:${capabilityKey}`;
     const existing = inlineCapabilityReviews.get(key);
     if (existing) return existing;
@@ -1950,56 +2147,39 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         {
           source: "inline",
           requested: [normalized],
-          retryability: "safe",
           risk: "REVIEW",
           reason: input.reason ?? "Network access requires approval",
-          summary:
-            normalized.kind === "network"
-              ? `${normalized.host}:${normalized.port ?? 443}`
-              : input.summary,
+          summary: `${normalized.host}:${normalized.port}`,
         },
       );
       if ("code" in decision) {
-        const denied: CapabilityAuthorizationDecision = { kind: "deny", error: decision };
-        if (decision.code !== "aborted" && decision.code !== "stale-invocation") {
-          attempt.inlineDecisions.set(capabilityKey, denied);
-        }
-        return denied;
+        return denyAttemptForAttempt(decision);
       }
       if (decision.kind === "approve") {
-        const allowed: CapabilityAuthorizationDecision = { kind: "allow", capability: normalized };
-        attempt.inlineDecisions.set(capabilityKey, allowed);
-        return allowed;
+        return { kind: "allow", capability: normalized };
       }
       if (decision.kind !== "deny") {
-        const unavailable: CapabilityAuthorizationDecision = {
-          kind: "deny",
-          error: { code: "review-unavailable", reason: "The reviewer returned no decision" },
-        };
-        attempt.inlineDecisions.set(capabilityKey, unavailable);
-        return unavailable;
+        return denyAttemptForAttempt({
+          code: "review-unavailable",
+          reason: "The reviewer returned no decision",
+        });
       }
       // Inline network denials are final for this connection attempt. They do
       // not mint a replay handle: there is no safe whole-command replay after
       // a mid-execution denial.
       recordDenialStats();
-      const denied: CapabilityAuthorizationDecision = {
-        kind: "deny",
-        error: {
-          code: "review-denied",
-          reason: decision.rationale,
-          request: normalized,
-        },
-      };
-      attempt.inlineDecisions.set(capabilityKey, denied);
-      return denied;
-    })();
-    inlineCapabilityReviews.set(key, pending);
-    try {
-      return await pending;
-    } finally {
+      return denyAttemptForAttempt({
+        code: "review-denied",
+        reason: decision.rationale,
+        request: normalized,
+      });
+    })().finally(() => {
+      // Retire this exact pending generation before publishing its terminal
+      // decision, so a retry cannot inherit an already-consumed AllowOnce.
       if (inlineCapabilityReviews.get(key) === pending) inlineCapabilityReviews.delete(key);
-    }
+    });
+    inlineCapabilityReviews.set(key, pending);
+    return pending;
   };
 
   const listDenials = (): readonly DenialNotice[] =>
@@ -2039,8 +2219,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const configChanged = configKey !== undefined && configKey !== snapshot.configFingerprint;
     if (sessionChanged || configChanged) {
       armedRetry = undefined;
-      sessionNetworkHosts.clear();
-      sessionWriteRoots.length = 0;
       retryRecords.clear();
       denialNotices.length = 0;
       circuitOpen = false;
@@ -2049,8 +2227,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
     sessionKey = nextSessionKey;
     configKey = snapshot.configFingerprint;
-    // Breaker state belongs to a turn. Session-scoped capabilities remain in
-    // the durable world above, but a new turn gets a fresh denial window.
+    // Breaker state and all capability amendments belong to one turn.
     circuitOpen = false;
     consecutiveDenials = 0;
     denialWindow = [];
@@ -2058,21 +2235,14 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const state: TurnState = {
       generation: ++generation,
       snapshot,
-      sessionNetworkHosts,
-      sessionWriteRoots,
       turnNetworkHosts: new Set<string>(),
       turnWriteRoots: [],
       grants: new Map<string, GrantRecord>(),
       closed: false,
     };
-    // Session-scoped amendments survive a normal turn close. Carry them from
-    // the prior state only when it belongs to the same session/config.
-    // `active` was closed above, so the previous state is not available there;
-    // keep the durable world in local variables instead.
     active = state;
     const handle: TurnHandle<ReviewContext> = {
       execute: <T>(request: Invocation<T, ReviewContext>) => executeInvocation(state, request),
-      authorizeCapability: (request) => authorizeInlineCapability(state, request),
       close: (reason = "turn closed") => closeState(state, reason),
     };
     return handle;
@@ -2084,8 +2254,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     active = undefined;
     sessionKey = undefined;
     configKey = undefined;
-    sessionNetworkHosts.clear();
-    sessionWriteRoots.length = 0;
     retryRecords.clear();
     denialNotices.length = 0;
     armedRetry = undefined;

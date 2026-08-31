@@ -199,7 +199,7 @@ describe("createPiGuardianAdapter", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("passes effective turn, session, and one-shot policy data to Guardian", async () => {
+  it("passes the effective lease and exact requested network target to Guardian", async () => {
     const { reviewer, review } = createReviewer();
     const adapter = createPiGuardianAdapter(reviewer);
     const effectivePolicy: SandboxPolicy = {
@@ -209,12 +209,16 @@ describe("createPiGuardianAdapter", () => {
         denyWrite: ["/secret"],
       },
       network: {
-        allowedDomains: ["example.com", "session.example", "turn.example"],
+        allowedDomains: ["example.com", "turn.example"],
         deniedDomains: ["localhost"],
       },
     };
+    const baselinePolicy: SandboxPolicy = {
+      ...basePolicy,
+      filesystem: { ...basePolicy.filesystem, denyRead: ["/baseline-secret"] },
+    };
     const requested: CapabilityRequestInput[] = [
-      { kind: "network", host: "turn.example" },
+      { kind: "network", host: "turn.example", port: 8443, protocol: "https" },
       { kind: "filesystem", operation: "write", path: "/workspace/one-shot" },
     ];
 
@@ -222,6 +226,7 @@ describe("createPiGuardianAdapter", () => {
       reviewInput({
         requested,
         risk: "HARD",
+        baseline: { mode: "sandboxed", policy: baselinePolicy },
         effective: { mode: "sandboxed", policy: effectivePolicy },
         reason: "Needs the generated output directory",
         summary: "npm test",
@@ -236,16 +241,22 @@ describe("createPiGuardianAdapter", () => {
       filesystemWriteRoots: ["/workspace", "/workspace/turn", "/workspace/one-shot"],
       filesystemDenyRead: ["/secret"],
       filesystemDenyWrite: ["/secret"],
-      requestedNetworkHosts: ["turn.example"],
-      allowedNetworkHosts: ["example.com", "session.example", "turn.example"],
+      requestedNetworkTargets: [{ host: "turn.example", port: 8443, protocol: "https" }],
+      allowedNetworkHosts: ["example.com", "turn.example"],
       deniedNetworkHosts: ["localhost"],
       staticRisk: "HARD",
       staticReason: "Needs the generated output directory",
     });
     expect(request?.untrustedAction.toolCallId).toBe("call-1");
+    expect(review.mock.calls[0]?.[1]).toMatchObject({
+      guardianEvidenceScope: {
+        denyRead: ["/baseline-secret"],
+        authorityFingerprint: expect.any(String),
+      },
+    });
   });
 
-  it("does not present coding-agent sandbox roots as enforcement for a host tool", async () => {
+  it("uses the trusted host base policy only as a host-tool Guardian evidence ceiling", async () => {
     const { reviewer, review } = createReviewer();
     const adapter = createPiGuardianAdapter(reviewer);
     const hostPolicy: SandboxPolicy = {
@@ -269,6 +280,37 @@ describe("createPiGuardianAdapter", () => {
     expect(request?.permissionContext.filesystemWriteRoots).toEqual([]);
     expect(request?.permissionContext.sandboxEnforcesAction).toBe(false);
     expect(request?.permissionContext.allowedNetworkHosts).toEqual([]);
+    expect(review.mock.calls[0]?.[1]).toMatchObject({
+      guardianEvidenceScope: {
+        cwd: "/workspace",
+        denyRead: ["/secret"],
+        authorityFingerprint: expect.any(String),
+      },
+    });
+  });
+
+  it("uses a read-only evidence ceiling when the main sandbox is disabled", async () => {
+    const { reviewer, review } = createReviewer();
+    const adapter = createPiGuardianAdapter(reviewer);
+
+    await expect(
+      adapter.review(
+        reviewInput({
+          ownership: "host-admission",
+          baseline: { mode: "host-admitted" },
+          effective: { mode: "host-admitted" },
+          context: guardianContext({ sandboxEnabled: false, baseSandboxPolicy: undefined }),
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "approve" });
+    expect(review).toHaveBeenCalledOnce();
+    expect(review.mock.calls[0]?.[1]).toMatchObject({
+      guardianEvidenceScope: {
+        cwd: "/workspace",
+        denyRead: [],
+        authorityFingerprint: expect.any(String),
+      },
+    });
   });
 
   it("passes the Engine-generated manual retry override unchanged", async () => {
@@ -298,7 +340,14 @@ describe("createPiGuardianAdapter", () => {
 
     await adapter.review(reviewInput(), controller.signal);
 
-    expect(review.mock.calls[0]?.[1]).toBe(autoReviewerContext);
+    expect(review.mock.calls[0]?.[1]).toEqual({
+      ...autoReviewerContext,
+      guardianEvidenceScope: {
+        cwd: "/workspace",
+        denyRead: ["/secret"],
+        authorityFingerprint: expect.any(String),
+      },
+    });
     expect(review.mock.calls[0]?.[2]).toBe(controller.signal);
   });
 

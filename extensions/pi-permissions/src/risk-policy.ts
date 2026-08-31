@@ -337,16 +337,6 @@ export async function evaluateRiskRequest(
 
   const promptedByRule = rule?.action === "ask";
   const wouldPrompt = promptedByRule || risk !== "LOW";
-  // A sandboxed Bash command with a private literal is admitted as an action,
-  // then authorized by the SRT connection boundary. Do not turn that target
-  // into a host-wide capability in the pre-execution admission plan: the
-  // Engine intentionally accepts only public network capabilities here, and
-  // the runtime callback is the authority for local/private endpoints.
-  const requestedNetworkHosts =
-    request.operation === "execute" && request.networkTargets?.length
-      ? request.networkTargets.filter(isPublicNetworkHost)
-      : [];
-
   // ── escalation gate ────────────────────────────────────────────────────
   if (wouldPrompt) {
     return {
@@ -354,7 +344,6 @@ export async function evaluateRiskRequest(
       risk,
       reason: promptedByRule ? "Approval required by permissions rule" : `${risk} operation`,
       summary: summarize(tool, input),
-      ...(requestedNetworkHosts.length > 0 ? { networkHosts: requestedNetworkHosts } : {}),
       filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
       justification: additionalWriteRoots.justification,
       ...(executionPlan === undefined ? {} : { executionPlan }),

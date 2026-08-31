@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_PENDING_REQUESTS = 16;
+const MAX_ID_LENGTH = 128;
 
 const workerEnvironment = {
   PATH: process.platform === "win32" ? (process.env.Path ?? "") : "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -32,21 +34,12 @@ for (const name of ["SystemRoot", "WINDIR", "TEMP", "TMP", "ComSpec"]) {
   if (process.env[name] !== undefined) workerEnvironment[name] = process.env[name];
 }
 
-const readOnlySandboxConfig = {
-  filesystem: {
-    denyRead: [],
-    allowWrite: [],
-    denyWrite: [],
-  },
-  network: {
-    allowedDomains: [],
-    deniedDomains: ["*"],
-    allowLocalBinding: false,
-  },
-};
-
 let srtReady = false;
 let srtPoisoned = false;
+let evidenceScope;
+let evidenceScopeCwd;
+let readOnlySandboxConfig;
+let bootstrapStarted = false;
 let input = "";
 let fatalStarted = false;
 let shuttingDown = false;
@@ -54,12 +47,85 @@ let pumping = false;
 const queue = [];
 const active = new Map();
 
+function infrastructureFailure(error) {
+  return new Error(error instanceof Error ? error.message : text(error));
+}
+
 function text(value) {
   return typeof value === "string" ? value : String(value);
 }
 
 function byteLength(value) {
   return Buffer.byteLength(value, "utf8");
+}
+
+function authorityFingerprint(cwd, denyRead) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        allowWrite: [],
+        cwd,
+        denyRead,
+        network: "denied",
+      }),
+    )
+    .digest("hex");
+}
+
+function validateEvidenceScope(value) {
+  if (!value || typeof value !== "object" || typeof value.cwd !== "string") {
+    throw new Error("reviewer worker evidence scope is invalid");
+  }
+  if (!isAbsolute(value.cwd) || !Array.isArray(value.denyRead)) {
+    throw new Error("reviewer worker evidence scope is invalid");
+  }
+  if (
+    value.denyRead.some(
+      (entry) => typeof entry !== "string" || entry.length === 0 || !isAbsolute(entry),
+    )
+  ) {
+    throw new Error("reviewer worker denyRead entries must be absolute paths");
+  }
+  const denyRead = [...new Set(value.denyRead)].sort();
+  if (process.platform === "linux" && denyRead.some((entry) => /[*?[\]]/.test(entry))) {
+    throw new Error("reviewer worker cannot enforce glob denyRead entries on Linux");
+  }
+  const fingerprint = authorityFingerprint(value.cwd, denyRead);
+  if (value.authorityFingerprint !== fingerprint) {
+    throw new Error("reviewer worker evidence authority fingerprint mismatch");
+  }
+  return Object.freeze({
+    cwd: value.cwd,
+    denyRead: Object.freeze(denyRead),
+    authorityFingerprint: fingerprint,
+  });
+}
+
+async function bootstrap(request) {
+  if (bootstrapStarted || evidenceScope || active.size > 0 || queue.length > 0 || shuttingDown) {
+    throw new Error("reviewer worker evidence scope is already fixed");
+  }
+  bootstrapStarted = true;
+  if (byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES) {
+    throw new Error("reviewer worker bootstrap exceeds the bound");
+  }
+  const scope = validateEvidenceScope(request.evidenceScope);
+  const canonicalScopeCwd = await canonicalCwd(scope.cwd);
+  evidenceScope = scope;
+  evidenceScopeCwd = canonicalScopeCwd;
+  readOnlySandboxConfig = Object.freeze({
+    filesystem: Object.freeze({
+      denyRead: Object.freeze([...scope.denyRead]),
+      allowWrite: Object.freeze([]),
+      denyWrite: Object.freeze([]),
+    }),
+    network: Object.freeze({
+      allowedDomains: Object.freeze([]),
+      deniedDomains: Object.freeze(["*"]),
+      allowLocalBinding: false,
+    }),
+  });
+  send({ type: "result", id: request.id, stdout: "", stderr: "", exitCode: 0 });
 }
 
 function boundedInteger(value, fallback, maximum) {
@@ -102,6 +168,20 @@ function errorMessage(error) {
 // group, so the worker's PID is the only reliable tree-kill boundary. A
 // wrapped child's PID is not a process-group ID when `detached` is false.
 function killWorkerProcessTree(child) {
+  // A state without a wrapped child has no owned descendant to kill. In
+  // particular, never turn that case into `kill(-process.pid)`: shutdown must
+  // get a chance to reset SRT before the worker exits.
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    // The Windows isolated evidence surface is disabled until the complete
+    // worker -> runner process-tree boundary is proven safe to kill.
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The child has already exited.
+    }
+    return;
+  }
   if (process.platform !== "win32" && process.pid > 0) {
     try {
       process.kill(-process.pid, "SIGKILL");
@@ -183,6 +263,9 @@ function outputLimit(value, fallback, maximum) {
 async function ensureSrt() {
   if (srtPoisoned) throw new Error("reviewer worker sandbox is unavailable after cleanup failure");
   if (srtReady) return;
+  if (!evidenceScope || !readOnlySandboxConfig) {
+    throw new Error("reviewer worker evidence scope is unavailable");
+  }
   try {
     if (!SandboxManager.isSupportedPlatform()) {
       throw new Error(`reviewer worker sandbox is unsupported on ${process.platform}`);
@@ -201,8 +284,7 @@ async function ensureSrt() {
   } catch (error) {
     srtPoisoned = true;
     try {
-      SandboxManager.cleanupAfterCommand();
-      await SandboxManager.reset();
+      await cleanupAndResetSrt();
     } catch {
       // The worker is already poisoned; process teardown remains fail-closed.
     }
@@ -210,35 +292,59 @@ async function ensureSrt() {
   }
 }
 
-async function resetSrt() {
-  if (!srtReady) return;
+async function cleanupAndResetSrt() {
+  let cleanupError;
   try {
     SandboxManager.cleanupAfterCommand();
-    await SandboxManager.reset();
-  } finally {
-    srtReady = false;
+  } catch (error) {
+    cleanupError = error;
   }
+  let resetError;
+  try {
+    await SandboxManager.reset();
+  } catch (error) {
+    resetError = error;
+  }
+  srtReady = false;
+  if (cleanupError && resetError) {
+    throw new Error(
+      `reviewer worker sandbox cleanup failed: ${errorMessage(cleanupError)}; reset failed: ${errorMessage(resetError)}`,
+    );
+  }
+  if (cleanupError) throw cleanupError;
+  if (resetError) throw resetError;
+}
+
+async function resetSrt() {
+  if (!srtReady) return;
+  await cleanupAndResetSrt();
 }
 
 function runWrapped(wrapped, request, state) {
   return new Promise((resolve, reject) => {
     if (!Array.isArray(wrapped?.argv) || wrapped.argv.length < 1 || !isAbsolute(wrapped.argv[0])) {
-      reject(new Error("reviewer worker sandbox returned an invalid executable"));
+      reject(infrastructureFailure("reviewer worker sandbox returned an invalid executable"));
       return;
     }
-    const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
-      cwd: request.cwd,
-      // SRT's returned environment carries its proxy/command variables. The
-      // worker itself was started with a minimal environment, so this does
-      // not reintroduce the host process's secrets.
-      env: wrapped.env && typeof wrapped.env === "object" ? wrapped.env : workerEnvironment,
-      // Keep the wrapped command in the worker's process group. The client
-      // may have to kill the worker before a cancellation message is handled;
-      // sharing the group makes that fallback cover the wrapped child too.
-      detached: false,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
+        cwd: request.cwd,
+        // SRT's returned environment carries its proxy/command variables. The
+        // worker itself was started with a minimal environment, so this does
+        // not reintroduce the host process's secrets.
+        env: wrapped.env && typeof wrapped.env === "object" ? wrapped.env : workerEnvironment,
+        // Keep the wrapped command in the worker's process group. The client
+        // may have to kill the worker before a cancellation message is handled;
+        // sharing the group makes that fallback cover the wrapped child too.
+        detached: false,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      reject(infrastructureFailure(error));
+      return;
+    }
     state.child = child;
     const stdout = [];
     const stderr = [];
@@ -268,7 +374,7 @@ function runWrapped(wrapped, request, state) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       const next = current + buffer.byteLength;
       if (next > limit) {
-        outputError = new Error(`${streamName} exceeded the reviewer worker bound`);
+        outputError = infrastructureFailure(`${streamName} exceeded the reviewer worker bound`);
         killWorkerProcessTree(child);
         return next;
       }
@@ -293,15 +399,19 @@ function runWrapped(wrapped, request, state) {
         "stderr",
       );
     });
-    child.once("error", (error) => finishError(outputError ?? error));
-    child.once("close", (exitCode) => {
+    child.once("error", (error) => finishError(outputError ?? infrastructureFailure(error)));
+    child.once("close", (exitCode, signalCode) => {
       if (settled) return;
       settled = true;
       cleanup();
       if (state.controller.signal.aborted || aborted) {
-        reject(new Error("reviewer worker request aborted"));
+        reject(infrastructureFailure("reviewer worker request aborted"));
       } else if (outputError) {
         reject(outputError);
+      } else if (signalCode !== null) {
+        reject(infrastructureFailure(`reviewer inspect command terminated by ${signalCode}`));
+      } else if (exitCode === null) {
+        reject(infrastructureFailure("reviewer inspect command exited without a status"));
       } else {
         resolve({
           stdout: Buffer.concat(stdout),
@@ -318,28 +428,57 @@ function runWrapped(wrapped, request, state) {
 }
 
 async function execute(request, state) {
-  if (state.cancelled) throw new Error("reviewer worker request aborted");
-  request.cwd = await canonicalCwd(request.cwd);
-  const program = validateProgram(request.program);
-  await ensureSrt();
+  if (state.cancelled) throw infrastructureFailure("reviewer worker request aborted");
+  let canonicalRequestCwd;
+  try {
+    canonicalRequestCwd = await canonicalCwd(request.cwd);
+  } catch (error) {
+    throw infrastructureFailure(error);
+  }
+  request.cwd = canonicalRequestCwd;
+  if (
+    !evidenceScope ||
+    request.authorityFingerprint !== evidenceScope.authorityFingerprint ||
+    request.cwd !== evidenceScopeCwd
+  ) {
+    throw infrastructureFailure("reviewer worker execution scope drifted from bootstrap authority");
+  }
+  let program;
+  try {
+    program = validateProgram(request.program);
+  } catch (error) {
+    throw infrastructureFailure(error);
+  }
+  try {
+    await ensureSrt();
+  } catch (error) {
+    throw infrastructureFailure(error);
+  }
   let result;
   let bodyError;
   try {
-    const wrapped = await SandboxManager.wrapWithSandboxArgv(
-      program.serialized,
-      "/bin/bash",
-      undefined,
-      state.controller.signal,
-      request.cwd,
-      {
-        ...(typeof request.commandId === "string" ? { commandId: request.commandId } : {}),
-        ...(typeof request.commandText === "string" ? { commandText: request.commandText } : {}),
-      },
-    );
-    if (state.controller.signal.aborted) throw new Error("reviewer worker request aborted");
+    let wrapped;
+    try {
+      wrapped = await SandboxManager.wrapWithSandboxArgv(
+        program.serialized,
+        "/bin/bash",
+        undefined,
+        state.controller.signal,
+        request.cwd,
+        {
+          ...(typeof request.commandId === "string" ? { commandId: request.commandId } : {}),
+          ...(typeof request.commandText === "string" ? { commandText: request.commandText } : {}),
+        },
+      );
+    } catch (error) {
+      throw infrastructureFailure(error);
+    }
+    if (state.controller.signal.aborted) {
+      throw infrastructureFailure("reviewer worker request aborted");
+    }
     result = await runWrapped(wrapped, request, state);
   } catch (error) {
-    bodyError = error;
+    bodyError = state.controller.signal.aborted ? infrastructureFailure(error) : error;
   }
   let cleanupError;
   try {
@@ -351,18 +490,20 @@ async function execute(request, state) {
   // Cleanup failure is authoritative and poisons the worker. Keep it outside
   // a finally block so it cannot accidentally mask the cancellation/error
   // control flow in a way that leaves the caller waiting.
-  if (cleanupError) throw cleanupError;
+  if (cleanupError) throw infrastructureFailure(cleanupError);
   if (bodyError) throw bodyError;
   return result;
 }
 
 async function handleRequest(request, state) {
   const id = request?.id;
-  if (typeof id !== "string" || id.length < 1 || id.length > 128) {
-    throw new Error("invalid reviewer worker request id");
-  }
-  if (request.type !== "execute") throw new Error("unsupported reviewer worker request");
+  const responseId =
+    typeof id === "string" && id.length >= 1 && id.length <= MAX_ID_LENGTH ? id : "unknown";
   try {
+    if (typeof id !== "string" || id.length < 1 || id.length > MAX_ID_LENGTH) {
+      throw new Error("invalid reviewer worker request id");
+    }
+    if (request.type !== "execute") throw new Error("unsupported reviewer worker request");
     if (state.cancelled) throw new Error("reviewer worker request aborted");
     if (byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES) {
       throw new Error("reviewer worker request exceeds the bound");
@@ -376,7 +517,14 @@ async function handleRequest(request, state) {
       exitCode: result.exitCode,
     });
   } catch (error) {
-    send({ type: "error", id, error: errorMessage(error) });
+    // Every RPC error is an infrastructure failure. Expected evidence
+    // failures (ENOENT, EACCES, and child non-zero exits) are transported as
+    // ordinary result frames and converted to tool evidence by the caller.
+    send({ type: "error", id: responseId, error: errorMessage(error) });
+    // A worker-reported infrastructure error is already delivered to the
+    // client. Exit cleanly when reset succeeds; shutdown itself upgrades the
+    // exit to 1 if cleanup/reset cannot restore the SRT boundary.
+    await shutdown();
   } finally {
     active.delete(id);
   }
@@ -390,7 +538,11 @@ async function pump() {
       const item = queue.shift();
       if (!item) continue;
       if (item.state.cancelled) {
-        send({ type: "error", id: item.request.id, error: "reviewer worker request aborted" });
+        send({
+          type: "error",
+          id: item.request.id,
+          error: "reviewer worker request aborted",
+        });
         active.delete(item.request.id);
         continue;
       }
@@ -423,12 +575,14 @@ async function shutdown(exitCode = 0) {
     killWorkerProcessTree(state.child);
   }
   queue.length = 0;
+  let finalExitCode = exitCode;
   try {
     await resetSrt();
-  } catch {
-    // Process exit is the fail-closed cleanup path.
+  } catch (error) {
+    finalExitCode = 1;
+    process.stderr.write(`guardian worker sandbox reset failed: ${errorMessage(error)}`);
   }
-  process.exit(exitCode);
+  process.exit(finalExitCode);
 }
 
 async function protocolFatal(message) {
@@ -464,7 +618,17 @@ function parseInput(chunk) {
       void protocolFatal("invalid request");
       return;
     }
-    if (request.type === "cancel") {
+    if (request.type === "bootstrap") {
+      if (
+        typeof request.id !== "string" ||
+        request.id.length < 1 ||
+        request.id.length > MAX_ID_LENGTH
+      ) {
+        void protocolFatal("invalid bootstrap request");
+        return;
+      }
+      void bootstrap(request).catch((error) => protocolFatal(errorMessage(error)));
+    } else if (request.type === "cancel") {
       if (typeof request.id !== "string") {
         void protocolFatal("invalid cancellation request");
         return;
@@ -474,12 +638,20 @@ function parseInput(chunk) {
       shuttingDown = true;
       void pump();
     } else if (request.type === "execute") {
-      if (typeof request.id !== "string") {
+      if (
+        typeof request.id !== "string" ||
+        request.id.length < 1 ||
+        request.id.length > MAX_ID_LENGTH
+      ) {
         void protocolFatal("invalid execution request");
         return;
       }
       if (active.has(request.id)) {
         void protocolFatal("duplicate execution request id");
+        return;
+      }
+      if (!evidenceScope || request.authorityFingerprint !== evidenceScope.authorityFingerprint) {
+        void protocolFatal("execution authority differs from bootstrap scope");
         return;
       }
       if (active.size >= MAX_PENDING_REQUESTS) {

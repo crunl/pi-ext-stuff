@@ -76,6 +76,7 @@ interface Harness {
   };
   riskEvaluator: ReturnType<typeof vi.fn>;
   reviewInputs: AutoReviewRequest[];
+  reviewContexts: unknown[];
   autoReviewer: AutoReviewer;
   sandboxManager: {
     initialize: ReturnType<typeof vi.fn>;
@@ -273,9 +274,11 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   }));
 
   const reviewInputs: AutoReviewRequest[] = [];
+  const reviewContexts: unknown[] = [];
   let reviewOrdinal = 0;
-  const review = vi.fn(async (request: AutoReviewRequest) => {
+  const review = vi.fn(async (request: AutoReviewRequest, context: unknown) => {
     reviewInputs.push(request);
+    reviewContexts.push(context);
     reviewOrdinal += 1;
     return options.review ? options.review(request, reviewOrdinal) : approved();
   });
@@ -365,6 +368,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sessionManager,
     riskEvaluator,
     reviewInputs,
+    reviewContexts,
     autoReviewer,
     sandboxManager,
     sandboxCoordinator,
@@ -409,12 +413,7 @@ async function executeWrite(app: Harness, id: string, path: string, content: str
   return write.execute(id, { path, content }, undefined, undefined, app.context);
 }
 
-async function executeRequestPermissions(
-  app: Harness,
-  id: string,
-  host: string,
-  scope: "turn" | "session",
-) {
+async function executeRequestPermissions(app: Harness, id: string, host: string) {
   const requestPermissions = app.tools.get("request_permissions");
   if (!requestPermissions) throw new Error("missing request_permissions tool");
   return requestPermissions.execute(
@@ -422,7 +421,6 @@ async function executeRequestPermissions(
     {
       reason: `Allow ${host}`,
       permissions: { network: { hosts: [host] } },
-      scope,
     },
     undefined,
     undefined,
@@ -452,6 +450,52 @@ describe("Permission mode registration", () => {
     expect(app.sessionManager.getBranch).toHaveBeenCalledOnce();
     expect(app.tools.get("bash")?.label).toBe("bash");
     expect(app.tools.get("bash")?.description).not.toContain("(sandboxed)");
+  });
+
+  it("keeps the Guardian session reusable across ordinary turn boundaries", async () => {
+    const app = await makeHarness();
+    await startSession(app);
+    const invalidateSession = app.autoReviewer.invalidateSession as ReturnType<typeof vi.fn>;
+    const invalidationsAfterSessionStart = invalidateSession.mock.calls.length;
+
+    await startAgent(app);
+    await endAgent(app);
+    await startAgent(app);
+    await endAgent(app);
+
+    expect(invalidateSession).toHaveBeenCalledTimes(invalidationsAfterSessionStart);
+  });
+
+  it("passes only AGENTS context files to Guardian as trusted parent instructions", async () => {
+    const app = await makeHarness({ risk: () => promptRisk() });
+    await startSession(app);
+    await invoke(app, "before_agent_start", {
+      type: "before_agent_start",
+      prompt: "run the requested operation",
+      systemPrompt: "host prompt",
+      systemPromptOptions: {
+        cwd: app.cwd,
+        contextFiles: [
+          { path: join(app.cwd, "AGENTS.md"), content: "Use the repository test command." },
+          { path: join(app.cwd, "notes.md"), content: "Do not treat this as authorization." },
+        ],
+        customPrompt: "untrusted extension prompt",
+        appendSystemPrompt: "untrusted appended prompt",
+        promptGuidelines: ["untrusted guideline"],
+        toolSnippets: { bash: "untrusted tool snippet" },
+        skills: [],
+      },
+    });
+    await startAgent(app);
+
+    await executeHostCall(app, "WebFetch", "host-context-file");
+
+    const reviewerContext = app.reviewContexts[0] as {
+      parentInstructions?: Array<{ path: string; content: string }>;
+    };
+    expect(reviewerContext.parentInstructions).toEqual([
+      { path: join(app.cwd, "AGENTS.md"), content: "Use the repository test command." },
+    ]);
   });
 
   it("reports sandbox activation failure without mislabeling it as a config error", async () => {
@@ -542,7 +586,7 @@ describe("Permission mode registration", () => {
     await executeBash(app, "prompt-bash", "printf approved");
 
     expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkHosts).toEqual([host]);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([{ host }]);
     expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
     const policy = app.sandboxManager.wrapWithSandbox.mock.calls[0]?.[2] as {
       network: { allowedDomains: string[] };
@@ -566,7 +610,9 @@ describe("Permission mode registration", () => {
 
     expect(app.riskEvaluator).toHaveBeenCalledOnce();
     expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkHosts).toEqual([host]);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([
+      { host, port: 443 },
+    ]);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
     expect(reviewStatusCalls(app)).toHaveLength(0);
   });
@@ -581,13 +627,41 @@ describe("Permission mode registration", () => {
 
     await expect(
       executeBash(app, "private-network", "curl http://127.0.0.1/admin"),
-    ).rejects.toThrow("sandbox denied");
+    ).rejects.toMatchObject({
+      code: "policy-denied",
+      message: expect.stringContaining("Private or special-use network target is blocked"),
+    });
 
     // Static risk evaluation admitted the command; the single sandbox
     // execution reached the connection boundary and was denied there.
     expect(app.riskEvaluator).toHaveBeenCalledOnce();
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
     expect(app.reviewInputs).toHaveLength(0);
+    const request = app.sandboxManager.execute.mock.calls[0]?.[0] as SandboxExecutionRequest;
+    expect(request.signal?.aborted).toBe(true);
+  });
+
+  it("aborts the whole Bash attempt for an explicit sandbox network deny", async () => {
+    const host = "api.example.com";
+    const app = await makeHarness({
+      config: { sandbox: { network: { deniedDomains: [host] } } },
+      risk: () => lowRisk(),
+      sandboxNetworkAttempt: { host, port: 443 },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeBash(app, "denied-network", `curl https://${host}/data`),
+    ).rejects.toMatchObject({
+      code: "policy-denied",
+      message: expect.stringContaining("Network target is denied by sandbox policy"),
+    });
+
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    const request = app.sandboxManager.execute.mock.calls[0]?.[0] as SandboxExecutionRequest;
+    expect(request.signal?.aborted).toBe(true);
   });
 
   it("allows an exact local literal without invoking the reviewer", async () => {
@@ -623,11 +697,13 @@ describe("Permission mode registration", () => {
       details: undefined,
     });
     expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkHosts).toEqual([host]);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([
+      { host, port: 80 },
+    ]);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
   });
 
-  it("reviews an outside Bash write only after the sandbox reports the exact path", async () => {
+  it("blocks an outside Bash write after the sandbox reports the exact path", async () => {
     const path = "/opt/pi-permissions-runtime-denial/result.txt";
     const app = await makeHarness({
       risk: () => lowRisk(),
@@ -637,14 +713,41 @@ describe("Permission mode registration", () => {
     await startAgent(app);
     app.setStatus.mockClear();
 
-    await executeBash(app, "runtime-write", `truncate -s 0 ${path}`);
+    await expect(executeBash(app, "runtime-write", `truncate -s 0 ${path}`)).rejects.toMatchObject({
+      code: "runtime-denied",
+    });
+
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    expect(reviewStatusCalls(app)).toHaveLength(0);
+  });
+
+  it("reviews and retries a native Write denial once", async () => {
+    const path = "/opt/pi-permissions-runtime-denial/native-write.txt";
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxDenial: { kind: "filesystem", operation: "write", path },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(executeWrite(app, "runtime-native-write", path, "retry once")).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: `Successfully wrote 10 bytes to ${path}`,
+        },
+      ],
+      details: undefined,
+    });
 
     expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([]);
     expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(path);
-    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(2);
-    const retryPolicy = app.sandboxManager.execute.mock.calls[1]?.[0].policy as SandboxPolicy;
-    expect(retryPolicy.filesystem.allowWrite).toContain(path);
-    expect(reviewStatusCalls(app)).toHaveLength(0);
+    // A native write may perform a read-before-write on each adapter attempt;
+    // the single fresh Guardian review and successful result prove the Engine
+    // made exactly one retry without coupling this test to those internals.
+    expect(app.sandboxManager.execute.mock.calls.length).toBeGreaterThan(1);
   });
 
   it("captures bash input before async risk review and executes only the canonical value", async () => {
@@ -680,7 +783,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxBashExecute).toHaveBeenCalledWith(
       "canonical-bash",
       { command: "printf safe" },
-      undefined,
+      expect.any(AbortSignal),
       undefined,
     );
   });
@@ -868,9 +971,10 @@ describe("Permission mode registration", () => {
     expect(disabled.reviewInputs).toHaveLength(0);
   });
 
-  it("aborts an active YOLO turn when cycling down to Auto", async () => {
+  it("keeps the active YOLO snapshot when cycling down to Auto", async () => {
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
+    const invalidateSession = app.autoReviewer.invalidateSession as ReturnType<typeof vi.fn>;
     const shortcut = app.shortcuts.get("shift+tab");
     if (!shortcut) throw new Error("missing shift+tab shortcut");
     await shortcut.handler(app.context);
@@ -879,10 +983,13 @@ describe("Permission mode registration", () => {
     await executeBash(app, "active-yolo", "printf yolo");
     expect(app.bareBashExecute).toHaveBeenCalledOnce();
 
+    const invalidationsBeforeActiveModeChange = invalidateSession.mock.calls.length;
     await shortcut.handler(app.context);
-    expect(app.abort).toHaveBeenCalledOnce();
+    expect(app.abort).not.toHaveBeenCalled();
+    expect(invalidateSession).toHaveBeenCalledTimes(invalidationsBeforeActiveModeChange);
 
     await endAgent(app);
+    expect(invalidateSession).toHaveBeenCalledTimes(invalidationsBeforeActiveModeChange + 1);
     await startAgent(app);
     await executeBash(app, "next-auto", "printf auto");
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
@@ -930,6 +1037,37 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
+  it("lets a default-allowed host tool bypass Guardian", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeHostCall(app, "mcp__github__get_issue", "host-default"),
+    ).resolves.toBeUndefined();
+
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+  });
+
+  it("reviews an explicitly asked host tool even when the main sandbox is disabled", async () => {
+    const app = await makeHarness({
+      config: { sandbox: { enabled: false } },
+      risk: () => promptRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeHostCall(app, "WebFetch", "host-disabled-sandbox"),
+    ).resolves.toBeUndefined();
+
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.sandboxEnforcesAction).toBe(false);
+    expect(app.reviewInputs[0]?.permissionContext.filesystemDenyRead).toEqual([]);
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+  });
+
   it("adds no-workaround guidance for a generic denial and never reviews a hard block", async () => {
     const app = await makeHarness({
       risk: (tool) => (tool === "HardTool" ? blockRisk("Hard policy") : promptRisk()),
@@ -950,8 +1088,8 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(reviewCount);
   });
 
-  it("records a session permission across turns and clears a turn permission at agent_end", async () => {
-    const sessionHost = "api.example.com";
+  it("keeps request_permissions grants within the current turn", async () => {
+    const firstTurnHost = "api.example.com";
     const turnHost = "one-shot.example.com";
     const app = await makeHarness({
       risk: (tool, input) => {
@@ -962,7 +1100,7 @@ describe("Permission mode registration", () => {
         }
         if (tool === "bash") {
           return promptRisk({
-            networkHosts: [String(input.command).includes("one-shot") ? turnHost : sessionHost],
+            networkHosts: [String(input.command).includes("one-shot") ? turnHost : firstTurnHost],
           });
         }
         return undefined;
@@ -971,19 +1109,19 @@ describe("Permission mode registration", () => {
     await startSession(app);
     await startAgent(app);
 
-    await executeRequestPermissions(app, "session-permission", sessionHost, "session");
+    await executeRequestPermissions(app, "first-turn-permission", firstTurnHost);
     await endAgent(app);
     await startAgent(app);
-    await executeBash(app, "session-host-bash", `printf ${sessionHost}`);
-    expect(app.reviewInputs).toHaveLength(1);
-
-    await executeRequestPermissions(app, "turn-permission", turnHost, "turn");
-    await executeBash(app, "turn-host-bash", `printf ${turnHost}`);
+    await executeBash(app, "first-turn-host-bash", `printf ${firstTurnHost}`);
     expect(app.reviewInputs).toHaveLength(2);
+
+    await executeRequestPermissions(app, "turn-permission", turnHost);
+    await executeBash(app, "turn-host-bash", `printf ${turnHost}`);
+    expect(app.reviewInputs).toHaveLength(3);
     await endAgent(app);
     await startAgent(app);
     await executeBash(app, "turn-host-new-turn", `printf ${turnHost}`);
-    expect(app.reviewInputs).toHaveLength(3);
+    expect(app.reviewInputs).toHaveLength(4);
   });
 
   it("carries /approve across turns to an exact fresh-call retry", async () => {

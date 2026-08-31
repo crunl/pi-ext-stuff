@@ -52,6 +52,57 @@ describe("permission copy", () => {
     expect(message).not.toContain("unacceptable risk");
   });
 
+  it("does not suggest a blind retry after an inline review timeout", () => {
+    const message = renderPermissionErrorForAgent({
+      code: "review-timeout",
+      reason: "Automatic approval review timed out",
+      effectsMayHaveOccurred: true,
+    });
+
+    expect(message).toContain("after execution had started");
+    expect(message).toMatch(/earlier effects may have occurred/i);
+    expect(message).toContain("Do not replay it blindly");
+    expect(message).not.toContain("retry once");
+    expect(message).not.toContain("The action was not run");
+  });
+
+  it("distinguishes a runtime denial from a preflight denial", () => {
+    const message = renderPermissionErrorForAgent({
+      code: "runtime-denied",
+      reason: "The requested write was denied",
+      effectsMayHaveOccurred: true,
+    });
+
+    expect(message).toContain("during execution");
+    expect(message).toMatch(/earlier effects may have occurred/i);
+    expect(message).toContain("Do not replay it blindly");
+    expect(message).not.toContain("The action was not run");
+  });
+
+  it("reports that a reviewed runtime retry was already attempted", () => {
+    const message = renderPermissionErrorForAgent({
+      code: "runtime-denied",
+      reason: "The second write was denied",
+      effectsMayHaveOccurred: true,
+      retryAttempted: true,
+    });
+
+    expect(message).toContain("One reviewed retry already ran and was also denied");
+    expect(message).toContain("no further automatic replay is available");
+    expect(message).not.toContain("action was not replayed");
+  });
+
+  it("does not present a post-start execution failure as safe to blindly retry", () => {
+    const message = renderPermissionErrorForAgent({
+      code: "execution-failed",
+      reason: "write interrupted",
+      effectsMayHaveOccurred: true,
+    });
+
+    expect(message).toContain("Earlier effects may have occurred");
+    expect(message).toContain("inspect the result before considering any retry");
+  });
+
   it("turns sandbox deadline codes into user-facing timeout reasons", () => {
     expect(renderPermissionErrorForAgent({ code: "execution-failed", reason: "timeout:120" })).toBe(
       "The permitted action failed during execution.\nReason: Timed out after 120 seconds.",

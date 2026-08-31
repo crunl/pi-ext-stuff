@@ -6,14 +6,30 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GuardianWorkerAbortError,
   GuardianWorkerClient,
-  GuardianWorkerProtocolError,
+  GuardianWorkerInfrastructureError,
   GuardianWorkerTimeoutError,
 } from "../src/guardian-worker-client.ts";
+import { createGuardianEvidenceScope } from "../src/sandbox.ts";
 
 const temporaryDirectories: string[] = [];
 
+function guardianEvidenceScope(cwd: string, denyRead: readonly string[] = []) {
+  return createGuardianEvidenceScope(cwd, {
+    filesystem: { allowWrite: [cwd], denyRead: [...denyRead], denyWrite: [] },
+    network: { allowedDomains: [], deniedDomains: [] },
+  });
+}
+
 async function fixtureWorker(
-  mode: "roundtrip" | "hang" | "hang-with-child" | "exit" | "malformed" | "oversized",
+  mode:
+    | "roundtrip"
+    | "roundtrip-with-child"
+    | "hang"
+    | "hang-with-child"
+    | "exit"
+    | "exit-after-result"
+    | "malformed"
+    | "oversized",
 ) {
   const directory = await mkdtemp(join(tmpdir(), "pi-guardian-worker-test-"));
   temporaryDirectories.push(directory);
@@ -41,6 +57,10 @@ process.stdin.on("data", (chunk) => {
     input = input.slice(newline + 1);
     const request = JSON.parse(line);
     if (request.type === "shutdown") process.exit(0);
+    if (request.type === "bootstrap") {
+      process.stdout.write(JSON.stringify({ type: "result", id: request.id, stdout: "", stderr: "", exitCode: 0 }) + "\\n");
+      continue;
+    }
     if (request.type !== "execute") continue;
     if (mode === "exit") process.exit(23);
     if (mode === "hang") continue;
@@ -53,6 +73,14 @@ process.stdin.on("data", (chunk) => {
       child.unref();
       continue;
     }
+    if (mode === "roundtrip-with-child") {
+      const child = spawn(process.execPath, ["-e", childProgram], {
+        detached: false,
+        shell: false,
+        stdio: "ignore",
+      });
+      child.unref();
+    }
     if (mode === "malformed") {
       process.stdout.write("not-json\\n");
       continue;
@@ -62,6 +90,7 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     process.stdout.write(JSON.stringify({ type: "result", id: request.id, stdout: Buffer.from("roundtrip").toString("base64"), stderr: "", exitCode: 0 }) + "\\n");
+    if (mode === "exit-after-result") setTimeout(() => process.exit(23), 10);
   }
 });
 `,
@@ -82,6 +111,18 @@ async function waitForMarker(path: string): Promise<number> {
   throw new Error("worker fixture did not start");
 }
 
+async function waitForText(path: string, expected: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      if ((await readFile(path, "utf8")) === expected) return;
+    } catch {
+      // The worker has not written the marker yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`worker fixture did not write ${path}`);
+}
+
 async function waitForExit(pid: number): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
@@ -94,27 +135,45 @@ async function waitForExit(pid: number): Promise<void> {
   throw new Error(`worker fixture ${pid} did not exit`);
 }
 
-async function sourceWorkerWithFakeSandbox() {
+async function sourceWorkerWithFakeSandbox(
+  options: {
+    cleanupFails?: boolean;
+    resetFails?: boolean;
+    resetDelayMs?: number;
+    wrapFails?: boolean;
+  } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "pi-guardian-worker-source-test-"));
   temporaryDirectories.push(directory);
   const workerPath = join(directory, "worker.mjs");
   const sandboxPath = join(directory, "fake-sandbox.mjs");
   const childMarker = join(directory, "child-pid");
+  const configMarker = join(directory, "sandbox-config.json");
+  const resetMarker = join(directory, "sandbox-reset");
   const source = await readFile(new URL("../src/guardian-worker.mjs", import.meta.url), "utf8");
   const sandboxImport = 'import { SandboxManager } from "@anthropic-ai/sandbox-runtime";';
   if (!source.includes(sandboxImport)) throw new Error("guardian worker sandbox import changed");
   await writeFile(
     sandboxPath,
-    `export const SandboxManager = {
+    `import { writeFileSync } from "node:fs";
+export const SandboxManager = {
   isSupportedPlatform: () => true,
   checkDependenciesAsync: async () => ({ errors: [] }),
-  initialize: async () => {},
-  wrapWithSandboxArgv: async (command) => ({
-    argv: ["/bin/bash", "-c", command],
-    env: process.env,
-  }),
-  cleanupAfterCommand: () => {},
-  reset: async () => {},
+  initialize: async (config) => { writeFileSync(${JSON.stringify(configMarker)}, JSON.stringify(config)); },
+  wrapWithSandboxArgv: async (command) => {
+    if (${JSON.stringify(options.wrapFails === true)}) throw new Error("forced wrap failure");
+    return { argv: ["/bin/bash", "-c", command], env: process.env };
+  },
+  cleanupAfterCommand: () => {
+    if (${JSON.stringify(options.cleanupFails === true)}) throw new Error("forced cleanup failure");
+      },
+      reset: async () => {
+        if (${JSON.stringify(options.resetDelayMs ?? 0)} > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ${JSON.stringify(options.resetDelayMs ?? 0)}));
+        }
+        writeFileSync(${JSON.stringify(resetMarker)}, "reset");
+    if (${JSON.stringify(options.resetFails === true)}) throw new Error("forced reset failure");
+  },
 };
 `,
   );
@@ -122,7 +181,7 @@ async function sourceWorkerWithFakeSandbox() {
     workerPath,
     source.replace(sandboxImport, 'import { SandboxManager } from "./fake-sandbox.mjs";'),
   );
-  return { directory, workerPath, childMarker };
+  return { directory, workerPath, childMarker, configMarker, resetMarker };
 }
 
 afterEach(async () => {
@@ -136,7 +195,9 @@ afterEach(async () => {
 describe("GuardianWorkerClient", () => {
   it("round-trips a bounded execution result and shuts down the worker", async () => {
     const fixture = await fixtureWorker("roundtrip");
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
 
     await expect(
       client.execute({
@@ -156,7 +217,9 @@ describe("GuardianWorkerClient", () => {
 
   it("cancels the force-close timer after a normal worker exit", async () => {
     const fixture = await fixtureWorker("roundtrip");
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
     await client.execute({
       cwd: fixture.directory,
       program: { executable: process.execPath, args: ["-e", ""] },
@@ -167,13 +230,92 @@ describe("GuardianWorkerClient", () => {
     await client.close();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
 
-    expect(killSpy.mock.calls.some(([target]) => target === -pid)).toBe(false);
+    // A clean worker exit can still leave an inspection descendant in the
+    // detached worker group, so close always performs the bounded final kill.
+    expect(killSpy.mock.calls.some(([target]) => target === -pid)).toBe(true);
     killSpy.mockRestore();
+  });
+
+  it("allows the pinned SRT reset to finish within the graceful close budget", async () => {
+    const fixture = await sourceWorkerWithFakeSandbox({ resetDelayMs: 1_200 });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await client.execute({
+      cwd: fixture.directory,
+      program: { executable: process.execPath, args: ["-e", ""] },
+    });
+
+    await expect(client.close()).resolves.toBeUndefined();
+    await expect(readFile(fixture.resetMarker, "utf8")).resolves.toBe("reset");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "cleans a background descendant after a clean worker shutdown",
+    async () => {
+      const fixture = await fixtureWorker("roundtrip-with-child");
+      const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+        workerPath: fixture.workerPath,
+      });
+      await client.execute({
+        cwd: fixture.directory,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      });
+      const workerPid = await waitForMarker(fixture.marker);
+      const childPid = await waitForMarker(fixture.childMarker);
+
+      await client.close();
+      await waitForExit(workerPid);
+      await waitForExit(childPid);
+    },
+  );
+
+  it("shares one bootstrap when first executions start concurrently", async () => {
+    const fixture = await fixtureWorker("roundtrip");
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await expect(
+      Promise.all([
+        client.execute({
+          cwd: fixture.directory,
+          program: { executable: process.execPath, args: ["-e", ""] },
+        }),
+        client.execute({
+          cwd: fixture.directory,
+          program: { executable: process.execPath, args: ["-e", ""] },
+        }),
+      ]),
+    ).resolves.toHaveLength(2);
+    await client.close();
+  });
+
+  it("brands synchronous worker spawn failures as infrastructure errors", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-guardian-worker-spawn-failure-"));
+    temporaryDirectories.push(cwd);
+    const client = new GuardianWorkerClient(guardianEvidenceScope(cwd), {
+      spawnProcess: () => {
+        throw new Error("forced synchronous spawn failure");
+      },
+    });
+
+    await expect(
+      client.execute({
+        cwd,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      }),
+    ).rejects.toBeInstanceOf(GuardianWorkerInfrastructureError);
+    await client.close();
   });
 
   it("terminates a pending worker on caller cancellation", async () => {
     const fixture = await fixtureWorker("hang");
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath, timeoutMs: 10_000 });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+      timeoutMs: 10_000,
+    });
     const controller = new AbortController();
     const pending = client.execute({
       cwd: fixture.directory,
@@ -190,7 +332,10 @@ describe("GuardianWorkerClient", () => {
 
   it("terminates a pending worker when the per-call deadline expires", async () => {
     const fixture = await fixtureWorker("hang");
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath, timeoutMs: 10_000 });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+      timeoutMs: 10_000,
+    });
     const pending = client.execute({
       cwd: fixture.directory,
       program: { executable: process.execPath, args: ["-e", ""] },
@@ -207,7 +352,7 @@ describe("GuardianWorkerClient", () => {
     "terminates descendants in the worker process group on timeout",
     async () => {
       const fixture = await fixtureWorker("hang-with-child");
-      const client = new GuardianWorkerClient({
+      const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
         workerPath: fixture.workerPath,
         timeoutMs: 10_000,
       });
@@ -230,10 +375,14 @@ describe("GuardianWorkerClient", () => {
     "uses the worker process group for wrapped-child output-limit termination",
     async () => {
       const fixture = await sourceWorkerWithFakeSandbox();
-      const client = new GuardianWorkerClient({
-        workerPath: fixture.workerPath,
-        timeoutMs: 10_000,
-      });
+      const deniedEvidence = join(fixture.directory, "secret.txt");
+      const client = new GuardianWorkerClient(
+        guardianEvidenceScope(fixture.directory, [deniedEvidence]),
+        {
+          workerPath: fixture.workerPath,
+          timeoutMs: 10_000,
+        },
+      );
       const descendantProgram = `const { writeFileSync } = require("node:fs");
 writeFileSync(${JSON.stringify(fixture.childMarker)}, String(process.pid));
 setInterval(() => {}, 1_000);`;
@@ -256,7 +405,21 @@ setInterval(() => {}, 1_000);`;
         });
         const descendantPid = await waitForMarker(fixture.childMarker);
 
-        await expect(pending).rejects.toBeInstanceOf(GuardianWorkerProtocolError);
+        await expect(pending).rejects.toBeInstanceOf(GuardianWorkerInfrastructureError);
+        await expect(readFile(fixture.configMarker, "utf8")).resolves.toBe(
+          JSON.stringify({
+            filesystem: {
+              denyRead: [deniedEvidence],
+              allowWrite: [],
+              denyWrite: [],
+            },
+            network: {
+              allowedDomains: [],
+              deniedDomains: ["*"],
+              allowLocalBinding: false,
+            },
+          }),
+        );
         await waitForExit(descendantPid);
       } finally {
         await client.close();
@@ -264,22 +427,100 @@ setInterval(() => {}, 1_000);`;
     },
   );
 
-  it.each(["exit", "malformed"] as const)("fails closed on worker %s", async (mode) => {
-    const fixture = await fixtureWorker(mode);
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath });
+  it.skipIf(process.platform !== "linux")(
+    "fails closed before worker startup when the platform cannot enforce a denyRead glob",
+    () => {
+      const directory = process.cwd();
+      expect(() => guardianEvidenceScope(directory, [join(directory, "**/.env")])).toThrow(
+        /cannot enforce glob denyRead/i,
+      );
+    },
+  );
+
+  it("reports a sandbox reset failure during worker shutdown", async () => {
+    const fixture = await sourceWorkerWithFakeSandbox({ resetFails: true });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
 
     await expect(
       client.execute({
         cwd: fixture.directory,
         program: { executable: process.execPath, args: ["-e", ""] },
       }),
-    ).rejects.toBeInstanceOf(GuardianWorkerProtocolError);
+    ).resolves.toMatchObject({ exitCode: 0 });
+    await expect(client.close()).rejects.toThrow(/shutdown failed/i);
+  });
+
+  it("resets SRT after a worker-reported infrastructure failure", async () => {
+    const fixture = await sourceWorkerWithFakeSandbox({ wrapFails: true });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await expect(
+      client.execute({
+        cwd: fixture.directory,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      }),
+    ).rejects.toThrow(/forced wrap failure/i);
+    await waitForText(fixture.resetMarker, "reset");
+    await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it("attempts reset even when SRT cleanup itself fails", async () => {
+    const fixture = await sourceWorkerWithFakeSandbox({ cleanupFails: true });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await expect(
+      client.execute({
+        cwd: fixture.directory,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      }),
+    ).rejects.toThrow(/forced cleanup failure/i);
+    await waitForText(fixture.resetMarker, "reset");
+    await expect(client.close()).rejects.toThrow(/shutdown failed/i);
+  });
+
+  it.each(["exit", "malformed"] as const)("fails closed on worker %s", async (mode) => {
+    const fixture = await fixtureWorker(mode);
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await expect(
+      client.execute({
+        cwd: fixture.directory,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      }),
+    ).rejects.toBeInstanceOf(GuardianWorkerInfrastructureError);
     await client.close();
+  });
+
+  it("does not lose an asynchronous worker failure before close", async () => {
+    const fixture = await fixtureWorker("exit-after-result");
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
+
+    await expect(
+      client.execute({
+        cwd: fixture.directory,
+        program: { executable: process.execPath, args: ["-e", ""] },
+      }),
+    ).resolves.toMatchObject({ exitCode: 0 });
+    const pid = await waitForMarker(fixture.marker);
+    await waitForExit(pid);
+    await expect(client.close()).rejects.toThrow(/exited unexpectedly/i);
   });
 
   it("rejects a response that exceeds the request output bound", async () => {
     const fixture = await fixtureWorker("oversized");
-    const client = new GuardianWorkerClient({ workerPath: fixture.workerPath });
+    const client = new GuardianWorkerClient(guardianEvidenceScope(fixture.directory), {
+      workerPath: fixture.workerPath,
+    });
 
     await expect(
       client.execute({

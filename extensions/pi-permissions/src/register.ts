@@ -22,6 +22,10 @@ import {
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
 import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
+import {
+  type AutoReviewerParentInstruction,
+  boundAutoReviewerParentInstructions,
+} from "./auto-review-request.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   ConfigError,
@@ -58,8 +62,8 @@ import {
 } from "./pi-approve-for-me-adapters.ts";
 import {
   type PiAction,
-  type PiActionCall,
   type PiActionOutcome,
+  type PiExecutionAttempt,
   type PiExecutionOutcome,
   PiPermissionsRuntime,
   type PiTurnSnapshot,
@@ -214,6 +218,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let shortcutWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
+  let guardianParentInstructions: readonly AutoReviewerParentInstruction[] = [];
+  let guardianInvalidationAfterModeChange = false;
   const permissions = new PiPermissionsRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
     reviewEventSink: (event) => {
@@ -277,6 +283,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     guardianTranscript = [];
     inputFallbackTranscript = [];
+    guardianParentInstructions = [];
+    guardianInvalidationAfterModeChange = false;
     session.resetTurn();
     session.clearPending();
     invalidatePermissionContext(reason);
@@ -372,8 +380,30 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const closingTurnId = session.finishTurn();
     permissions.closeTurn(reason);
     if (closingTurnId === undefined) return;
-    if (closingTurnId !== undefined) clearPendingModeTransition(closingTurnId);
-    invalidatePermissionContext(reason);
+    clearPendingModeTransition(closingTurnId);
+    if (guardianInvalidationAfterModeChange) {
+      guardianInvalidationAfterModeChange = false;
+      invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+    }
+    // Ending a Pi turn revokes Engine grants and in-flight authorization, but
+    // does not change the Guardian session identity. The reviewer keeps its
+    // bounded reusable trunk across ordinary turns; explicit session/tree,
+    // config, mode, cwd, or reviewer-identity changes invalidate it.
+  };
+
+  const deferGuardianInvalidationForModeChange = (turnWasActive: boolean): void => {
+    if (!turnWasActive) return;
+    // A mode mutation during an active turn cannot replace that turn's
+    // execution snapshot. Invalidate the reusable Guardian trunk at the same
+    // lifecycle boundary that revokes the turn's Engine grants. If the turn
+    // ended while the mutation was awaiting sandbox activation, invalidate now
+    // rather than allowing the stale trunk into the next turn.
+    if (session.getTurnPhase() === "active") {
+      guardianInvalidationAfterModeChange = true;
+      return;
+    }
+    guardianInvalidationAfterModeChange = false;
+    invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
   };
 
   const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
@@ -740,6 +770,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           cwd: guardianCwd,
           configFingerprint,
         },
+        ...(guardianParentInstructions.length === 0
+          ? {}
+          : { parentInstructions: guardianParentInstructions }),
       },
       sandboxProfile: executionContext.config.sandbox.profile,
       sandboxEnabled: executionContext.config.sandbox.enabled,
@@ -795,8 +828,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (outcome.kind === "completed") return outcome.value;
     if (outcome.kind === "failed") {
       const reason = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-      const error = new Error(renderPermissionErrorForAgent({ code: "execution-failed", reason }));
-      Object.assign(error, { code: "execution-failed", reason });
+      const permissionError = {
+        code: "execution-failed" as const,
+        reason,
+        ...(outcome.effectsMayHaveOccurred === true
+          ? { effectsMayHaveOccurred: true as const }
+          : {}),
+      };
+      const error = new Error(renderPermissionErrorForAgent(permissionError));
+      Object.assign(error, permissionError);
       throw error;
     }
     const error = new Error(renderPermissionErrorForAgent(outcome.error));
@@ -806,8 +846,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   const createSandboxNetworkAuthorizer =
     (
-      call: PiActionCall,
       policy: SandboxPolicy,
+      authorizeCapability: PiExecutionAttempt["authorizeCapability"],
+      rejectCapability: PiExecutionAttempt["rejectCapability"],
       fallbackSignal?: AbortSignal,
     ): SandboxNetworkAuthorize =>
     async ({ host, port, signal }) => {
@@ -817,7 +858,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           matchesNetworkDomainPattern(pattern, host, port),
         )
       ) {
-        return { allowed: false, reason: "Network target is denied by sandbox policy" };
+        const decision = rejectCapability({
+          capability: { kind: "network", host, port },
+          reason: "Network target is denied by sandbox policy",
+        });
+        return {
+          allowed: false,
+          reason:
+            decision.kind === "deny"
+              ? decision.error.reason
+              : "Network target is denied by sandbox policy",
+        };
       }
       const normalizedHost = normalizeNetworkHost(host);
       const exactLocalAllow =
@@ -842,13 +893,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         },
       );
       if (endpoint.kind === "deny") {
-        return { allowed: false, reason: endpoint.reason };
+        const decision = rejectCapability({
+          capability: { kind: "network", host, port },
+          reason: endpoint.reason,
+        });
+        return {
+          allowed: false,
+          reason: decision.kind === "deny" ? decision.error.reason : endpoint.reason,
+        };
       }
-      const decision = await permissions.authorizeCapability({
-        call,
+      const decision = await authorizeCapability({
         capability: { kind: "network", host, port },
         reason: "Network access requires approval",
-        summary: `${endpoint.endpoint.host}:${endpoint.endpoint.port}`,
       });
       if (decision.kind === "deny") {
         return { allowed: false, reason: decision.error.reason };
@@ -1003,8 +1059,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // callback. A post-failure network denial is not replayable because it
     // would reopen an entire command rather than authorize one connection.
     if (capability?.kind !== "filesystem") return undefined;
-    const detail = `Sandbox enforcement denied writing ${capability.path} during execution`;
-    return { kind: "capability-denied", request: capability, retryability: "safe", detail };
+    const operation = capability.operation === "write" ? "writing" : "reading";
+    const detail = `Sandbox enforcement denied ${operation} ${capability.path} during execution`;
+    return { kind: "capability-denied", request: capability, detail };
   };
 
   const executePermissionedBash = async (
@@ -1058,6 +1115,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       captured,
       kind: "sandbox",
       risk,
+      runtimeDenialPolicy: "terminal",
       reviewContext,
       signal,
       reviewStatus: reviewBridge.binding,
@@ -1066,8 +1124,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         policy,
         plan,
         call,
-        ordinal,
-      }): Promise<PiActionOutcome<BashResult>> => {
+        signal: attemptSignal,
+        authorizeCapability,
+        rejectCapability,
+      }) => {
         try {
           if (mode === "unrestricted") {
             return {
@@ -1075,7 +1135,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               value: await bashToolFactory(canonicalCwd).execute(
                 call.id,
                 call.input,
-                signal,
+                attemptSignal,
                 reviewBridge.onUpdate as BashOnUpdate,
               ),
             };
@@ -1090,7 +1150,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             operations: createSandboxedBashOperations(sandboxManager, policy, {
               ...(plan?.kind === "git-init" ? { gitInitPlan: plan } : {}),
               commandId: call.id,
-              networkAuthorize: createSandboxNetworkAuthorizer(call, policy, signal),
+              networkAuthorize: createSandboxNetworkAuthorizer(
+                policy,
+                authorizeCapability,
+                rejectCapability,
+                attemptSignal,
+              ),
             }),
           });
           return {
@@ -1100,14 +1165,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 sandboxedBash.execute(
                   call.id,
                   call.input,
-                  signal,
+                  attemptSignal,
                   reviewBridge.onUpdate as BashOnUpdate,
                 ),
-              signal,
+              attemptSignal,
             ),
           };
         } catch (error: unknown) {
-          if (ordinal === 0 && mode === "sandboxed" && !signal?.aborted) {
+          if (mode === "sandboxed" && !attemptSignal.aborted) {
             const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
             if (denied) return denied;
           }
@@ -1208,6 +1273,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       captured,
       kind: "sandbox",
       risk,
+      runtimeDenialPolicy: "review-and-retry",
       reviewContext: createPiGuardianReviewContext(
         event,
         executionContext,
@@ -1217,7 +1283,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ),
       signal,
       reviewStatus: reviewBridge.binding,
-      execute: async ({ mode, policy, call, ordinal }): Promise<PiActionOutcome<R>> => {
+      execute: async ({
+        mode,
+        policy,
+        call,
+        signal: attemptSignal,
+      }): Promise<PiActionOutcome<R>> => {
         try {
           if (mode === "unrestricted") {
             return {
@@ -1225,7 +1296,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               value: await bare(
                 call.id,
                 call.input,
-                signal,
+                attemptSignal,
                 reviewBridge.onUpdate as U,
                 canonicalCwd,
               ),
@@ -1245,15 +1316,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                   policy,
                   call.id,
                   call.input,
-                  signal,
+                  attemptSignal,
                   reviewBridge.onUpdate as U,
                   canonicalCwd,
                 ),
-              signal,
+              attemptSignal,
             ),
           };
         } catch (error: unknown) {
-          if (ordinal === 0 && mode === "sandboxed" && !signal?.aborted) {
+          if (mode === "sandboxed" && !attemptSignal.aborted) {
             const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
             if (denied) return denied;
           }
@@ -1312,9 +1383,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseBash,
     ...addReviewResultRenderer(adoptHostTheme(codexBashToolSpec)),
     label: "bash",
-    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and provide a concrete justification. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn- or session-scoped network grant.`,
+    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and provide a concrete justification. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
     promptGuidelines: [
-      "When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and explain why. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn- or session-scoped network grant.",
+      "When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and explain why. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",
@@ -1339,7 +1410,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     name: "request_permissions",
     label: "request_permissions",
     description:
-      "Request a scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope and does not disable the sandbox. Protected paths and prohibited targets remain blocked.",
+      "Request a turn-scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for the current turn and does not disable the sandbox. Protected paths and prohibited targets remain blocked.",
     promptSnippet: "Request explicit filesystem/network permissions",
     parameters: Type.Object({
       reason: Type.Optional(Type.String()),
@@ -1347,7 +1418,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         filesystem: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
         network: Type.Optional(Type.Object({ hosts: Type.Array(Type.String()) })),
       }),
-      scope: Type.Optional(Type.Union([Type.Literal("turn"), Type.Literal("session")])),
     }),
     renderResult: createReviewResultRenderer(plainReviewResultRenderer) as unknown as NonNullable<
       ToolDefinition<TSchema>["renderResult"]
@@ -1397,7 +1467,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         });
         throw error;
       }
-      const scope = canonicalParams.scope === "session" ? "session" : "turn";
       const reason = canonicalParams.reason ?? decision.reason;
       const event = {
         type: "tool_call" as const,
@@ -1414,7 +1483,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         kind: "permission-amendment",
         risk: decision,
         permission: {
-          scope,
           reason,
         },
         reviewContext: createPiGuardianReviewContext(
@@ -1426,8 +1494,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ),
         signal: actionSignal,
         reviewStatus: reviewBridge.binding,
-        execute: async ({ mode, policy }): Promise<PiActionOutcome<WriteResult>> => {
+        execute: async ({
+          mode,
+          policy,
+          signal: attemptSignal,
+        }): Promise<PiActionOutcome<WriteResult>> => {
           try {
+            if (attemptSignal.aborted) return { kind: "failed", error: new Error("aborted") };
             if (mode === "unrestricted") {
               return {
                 kind: "completed",
@@ -1456,7 +1529,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 content: [
                   {
                     type: "text",
-                    text: `Granted ${scope} permissions${
+                    text: `Granted turn permissions${
                       grantedHosts.length > 0 ? `; hosts: ${grantedHosts.join(", ")}` : ""
                     }${grantedRoots.length > 0 ? `; write roots: ${grantedRoots.join(", ")}` : ""}`,
                   },
@@ -1548,6 +1621,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (!session.isCurrentGeneration(generation)) return;
         modeRuntime = restoredRuntime;
         setDefaultStatus(ctx);
+        // A tree switch is an explicit context invalidation. Do not carry an
+        // unrestricted YOLO execution into the newly restored branch.
         if (previousMode === "yolo" && restoredMode !== "yolo" && !ctx.isIdle()) ctx.abort();
       }
     });
@@ -1559,11 +1634,22 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     session.resetTurn();
     session.clearPending();
+    guardianParentInstructions = [];
+    guardianInvalidationAfterModeChange = false;
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
       await sandboxManager.reset();
     });
+  });
+
+  pi.on("before_agent_start", (event) => {
+    // Codex passes only its parent user-instruction sources to Guardian. Keep
+    // this boundary restricted to bounded AGENTS files; never inherit Pi's
+    // extension prompts, skills, tool snippets, or the assembled system text.
+    guardianParentInstructions = boundAutoReviewerParentInstructions(
+      event.systemPromptOptions.contextFiles,
+    );
   });
 
   pi.on("input", (event) => {
@@ -1743,11 +1829,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           runtime.activate(targetMode, {
             preserveAutoTransientState: beganDuringActiveTurn,
           });
-          if (beganDuringActiveTurn && previousMode === "yolo" && targetMode === "auto") {
-            // A downgrade must not leave the active turn's captured YOLO
-            // snapshot unrestricted. Abort it so the next turn captures Auto.
-            ctx.abort();
-          }
+          deferGuardianInvalidationForModeChange(beganDuringActiveTurn);
           if (
             transition &&
             transitionOwnsPendingState &&
@@ -1820,6 +1902,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const config = result.config;
           const runtime = ensureModeRuntime(config);
           setDefaultStatus(ctx);
+          // /permissions is an explicit policy/config reload, not a
+          // turn-local mode toggle; fail closed if it narrows a live YOLO run.
           if (previousMode === "yolo" && runtime.mode !== "yolo" && !ctx.isIdle()) ctx.abort();
           if (runtime.mode === "yolo") {
             ctx.ui.notify(

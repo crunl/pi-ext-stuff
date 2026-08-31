@@ -48,6 +48,18 @@ function messageCharacters(message: Message): number {
   return message.content.reduce((total, part) => {
     if (part.type === "text") return total + part.text.length;
     if (part.type === "thinking") return total + part.thinking.length;
+    if (part.type === "toolCall") {
+      // Tool-call arguments are model-controlled context too. Count their
+      // serialized identity so a large read path or query cannot bypass the
+      // bounded Guardian trunk merely by using a non-text content block.
+      try {
+        return total + JSON.stringify(part).length;
+      } catch {
+        // An un-serializable tool call cannot be safely budgeted; treat it as
+        // larger than the entire history budget and drop that turn.
+        return total + MAX_HISTORY_CHARACTERS + 1;
+      }
+    }
     return total;
   }, 0);
 }

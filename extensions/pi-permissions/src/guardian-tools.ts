@@ -23,13 +23,18 @@ import {
   truncateLine,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { fingerprintValue } from "./config.ts";
 import {
   createGuardianWorkerClient,
   type GuardianWorkerClientOptions,
+  GuardianWorkerInfrastructureError,
 } from "./guardian-worker-client.ts";
 import {
+  copyGuardianEvidenceScope,
+  createGuardianReadOnlySandboxConfig,
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
+  type GuardianEvidenceScope,
   type SandboxExecutionRequest,
   type SandboxedCommandResult,
   type SandboxManagerLike,
@@ -316,8 +321,9 @@ function resolveExistingRgPaths(): string[] {
 function createSandboxedRgRunner(
   manager: SandboxManagerLike,
   resolvedRgPaths: readonly string[],
+  evidenceScope: GuardianEvidenceScope,
 ): SandboxedRgRunner {
-  const runNode = createSandboxedReadOnlyCommandRunner(manager, "node");
+  const runNode = createSandboxedReadOnlyCommandRunner(manager, "node", evidenceScope);
   const encodedExecutables = Buffer.from(JSON.stringify(resolvedRgPaths)).toString("base64");
   return (args, mode, recordLimit, contextLineCount, signal) =>
     runNode(
@@ -751,6 +757,7 @@ export function createGuardianToolRuntime(
           timestamp: Date.now(),
         };
       } catch (error) {
+        if (error instanceof GuardianWorkerInfrastructureError) throw error;
         return toolErrorResult(toolCall, error);
       }
     },
@@ -758,23 +765,27 @@ export function createGuardianToolRuntime(
 }
 
 export function createSandboxedGuardianToolRuntime(
-  cwd: string,
+  evidenceScope: GuardianEvidenceScope,
   manager: SandboxManagerLike,
   options: SandboxedGuardianToolRuntimeOptions = {},
 ): GuardianToolRuntime {
+  const scope = copyGuardianEvidenceScope(evidenceScope);
+  const cwd = scope.cwd;
   const trustedHome = options.trustedHome ?? homedir();
   const resolvedRgPaths = options.resolveRgPath
     ? [executableRgPath(options.resolveRgPath())].filter((path): path is string => Boolean(path))
     : resolveExistingRgPaths();
   const runRg =
-    resolvedRgPaths.length > 0 ? createSandboxedRgRunner(manager, resolvedRgPaths) : undefined;
+    resolvedRgPaths.length > 0
+      ? createSandboxedRgRunner(manager, resolvedRgPaths, scope)
+      : undefined;
 
   const readDefinition = createReadToolDefinition(cwd);
   const readTool = publicToolFromDefinition(readDefinition, async (_toolCallId, params, signal) =>
     executeSandboxedRead(
       cwd,
       params as ReadToolInput,
-      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
+      createSandboxedGuardianFileOperations(manager, scope, signal, trustedHome),
     ),
   );
 
@@ -783,7 +794,7 @@ export function createSandboxedGuardianToolRuntime(
     executeSandboxedGrep(
       cwd,
       params as GrepToolInput,
-      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
+      createSandboxedGuardianFileOperations(manager, scope, signal, trustedHome),
       runRg,
       signal,
     ),
@@ -795,7 +806,7 @@ export function createSandboxedGuardianToolRuntime(
     async (toolCallId, params, signal, onUpdate) => {
       const input = params as FindToolInput;
       const effectiveLimit = boundedLimit(input.limit, DEFAULT_FIND_LIMIT, MAX_FIND_LIMIT);
-      const operations = createSandboxedGuardianFileOperations(manager, signal, trustedHome);
+      const operations = createSandboxedGuardianFileOperations(manager, scope, signal, trustedHome);
       const sandboxedDefinition = createFindToolDefinition(cwd, {
         operations: {
           exists: operations.find.exists,
@@ -848,11 +859,11 @@ export function createSandboxedGuardianToolRuntime(
     executeSandboxedLs(
       cwd,
       params as LsToolInput,
-      createSandboxedGuardianFileOperations(manager, signal, trustedHome),
+      createSandboxedGuardianFileOperations(manager, scope, signal, trustedHome),
     ),
   );
 
-  const runInspect = createSandboxedReadOnlyCommandRunner(manager, "bash");
+  const runInspect = createSandboxedReadOnlyCommandRunner(manager, "bash", scope);
   const inspectTool = {
     name: "inspect",
     label: "inspect",
@@ -891,7 +902,13 @@ export function createSandboxedGuardianToolRuntime(
     },
   } as PiAgentTool;
 
-  return createGuardianToolRuntime(cwd, () => [readTool, grepTool, findTool, lsTool, inspectTool]);
+  // The Windows client cannot prove that a hard-killed worker has also
+  // drained its child runner before the cancel race. Do not expose a worker
+  // backed evidence surface there until that process-tree boundary is
+  // reliable; the Guardian must decide from the transcript instead.
+  const tools =
+    process.platform === "win32" ? [] : [readTool, grepTool, findTool, lsTool, inspectTool];
+  return createGuardianToolRuntime(cwd, () => tools);
 }
 
 export interface IsolatedGuardianToolRuntimeOptions extends GuardianWorkerClientOptions {
@@ -910,15 +927,33 @@ export interface IsolatedGuardianToolRuntimeOptions extends GuardianWorkerClient
  * self-contained worker process; no SRT API is touched in the host process.
  */
 export function createIsolatedGuardianToolRuntime(
-  cwd: string,
+  evidenceScope: GuardianEvidenceScope,
   options: IsolatedGuardianToolRuntimeOptions = {},
 ): GuardianToolRuntime {
-  const client = createGuardianWorkerClient(options);
+  if (process.platform === "win32") {
+    return Object.freeze({
+      tools: [],
+      async execute(toolCall: ToolCall): Promise<ToolResultMessage> {
+        throw new Error(`Reviewer tool ${toolCall.name} is not available on Windows`);
+      },
+      close: async (): Promise<void> => undefined,
+    });
+  }
+  const scope = copyGuardianEvidenceScope(evidenceScope);
+  const cwd = scope.cwd;
+  const expectedPolicy = createGuardianReadOnlySandboxConfig(scope);
+  const expectedPolicyFingerprint = fingerprintValue(expectedPolicy);
+  const client = createGuardianWorkerClient(scope, options);
   const workerManager: SandboxManagerLike = {
     initialize: async () => undefined,
     reset: () => client.close(),
-    execute: (request: SandboxExecutionRequest) =>
-      client.execute({
+    execute: (request: SandboxExecutionRequest) => {
+      if (fingerprintValue(request.policy) !== expectedPolicyFingerprint) {
+        throw new GuardianWorkerInfrastructureError(
+          "Guardian evidence sandbox policy drifted from its fixed authority",
+        );
+      }
+      return client.execute({
         program: request.program,
         cwd: request.cwd ?? cwd,
         signal: request.signal,
@@ -927,9 +962,10 @@ export function createIsolatedGuardianToolRuntime(
         commandText: request.commandText,
         maxStdoutBytes: request.maxStdoutBytes,
         maxStderrBytes: request.maxStderrBytes,
-      }),
+      });
+    },
   };
-  const runtime = createSandboxedGuardianToolRuntime(cwd, workerManager, {
+  const runtime = createSandboxedGuardianToolRuntime(scope, workerManager, {
     resolveRgPath: options.resolveRgPath,
     trustedHome: options.trustedHome,
   });

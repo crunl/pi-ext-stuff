@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-policy.ts";
 import {
+  copyGuardianEvidenceScope,
+  createGuardianEvidenceScope,
   createGuardianReadOnlySandboxConfig,
   createSandboxedBashOperations,
   createSandboxedFileOperations,
@@ -19,6 +21,15 @@ import {
   type SandboxPolicy,
   withAdditionalWriteRoots,
 } from "../src/sandbox.ts";
+
+const guardianEvidenceScope = createGuardianEvidenceScope(process.cwd(), {
+  filesystem: {
+    allowWrite: [process.cwd()],
+    denyRead: ["/tmp/guardian-secret"],
+    denyWrite: [],
+  },
+  network: { allowedDomains: [], deniedDomains: [] },
+});
 
 type TestWrap = (
   command: string,
@@ -154,6 +165,7 @@ describe("sandbox integration", () => {
     try {
       const operations = createSandboxedGuardianFileOperations(
         testSandboxManager(),
+        guardianEvidenceScope,
         undefined,
         trustedHome,
       );
@@ -172,7 +184,7 @@ describe("sandbox integration", () => {
     await writeFile(file, "Guardian-visible evidence");
     await chmod(file, 0o444);
     const manager = testSandboxManager();
-    const operations = createSandboxedGuardianFileOperations(manager);
+    const operations = createSandboxedGuardianFileOperations(manager, guardianEvidenceScope);
 
     await expect(operations.read.readFile(file)).resolves.toEqual(
       Buffer.from("Guardian-visible evidence"),
@@ -191,7 +203,7 @@ describe("sandbox integration", () => {
     for (const [, shell, config, signal] of manager.wrapWithSandbox.mock.calls) {
       expect(shell).toBeUndefined();
       expect(signal).toBeUndefined();
-      expect(config).toEqual(createGuardianReadOnlySandboxConfig());
+      expect(config).toEqual(createGuardianReadOnlySandboxConfig(guardianEvidenceScope));
     }
     expect(manager.initialize).not.toHaveBeenCalled();
     expect(manager.reset).not.toHaveBeenCalled();
@@ -199,7 +211,7 @@ describe("sandbox integration", () => {
 
   it("binds a read-only command runner to a resolved executable and literal arguments", async () => {
     const manager = testSandboxManager();
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node", guardianEvidenceScope);
     const literalArgument = "spaces 'quotes' $(must-not-run)\nnext-line";
 
     const result = await run(["-e", "process.stdout.write(process.argv[1])", literalArgument]);
@@ -208,13 +220,13 @@ describe("sandbox integration", () => {
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       expect.stringContaining(`'${process.execPath}'`),
       undefined,
-      createGuardianReadOnlySandboxConfig(),
+      createGuardianReadOnlySandboxConfig(guardianEvidenceScope),
       undefined,
     );
     expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
       expect.stringContaining("'spaces '\\''quotes'\\'' $(must-not-run)\nnext-line'"),
       undefined,
-      createGuardianReadOnlySandboxConfig(),
+      createGuardianReadOnlySandboxConfig(guardianEvidenceScope),
       undefined,
     );
 
@@ -230,14 +242,14 @@ describe("sandbox integration", () => {
       if (configs.length === 1) config.filesystem.allowWrite.push("/parent-write-root");
       return command;
     });
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node", guardianEvidenceScope);
 
     await run(["-e", ""]);
     await run(["-e", ""]);
 
     expect(configs).toHaveLength(2);
     expect(configs[0]).not.toBe(configs[1]);
-    expect(configs[1]).toEqual(createGuardianReadOnlySandboxConfig());
+    expect(configs[1]).toEqual(createGuardianReadOnlySandboxConfig(guardianEvidenceScope));
   });
 
   it("reports sandboxed exists permission failures instead of missing paths", async () => {
@@ -245,7 +257,7 @@ describe("sandbox integration", () => {
     const blockedDirectory = join(directory, "blocked");
     await mkdir(blockedDirectory);
     const manager = testSandboxManager();
-    const operations = createSandboxedGuardianFileOperations(manager);
+    const operations = createSandboxedGuardianFileOperations(manager, guardianEvidenceScope);
 
     await chmod(blockedDirectory, 0o000);
     try {
@@ -259,7 +271,7 @@ describe("sandbox integration", () => {
 
   it("rejects aborted read-only commands after child cleanup", async () => {
     const manager = testSandboxManager();
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node", guardianEvidenceScope);
 
     const controller = new AbortController();
     const aborted = run(["-e", "setInterval(() => {}, 1_000)"], controller.signal);
@@ -274,7 +286,7 @@ describe("sandbox integration", () => {
 
   it("times out a hanging read-only helper at 30s and kills its process group", async () => {
     const manager = testSandboxManager();
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node", guardianEvidenceScope);
     const killSpy = vi.spyOn(process, "kill");
 
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -296,7 +308,7 @@ describe("sandbox integration", () => {
 
   it("terminates a read-only command before stdout can exceed the Guardian bound", async () => {
     const manager = testSandboxManager();
-    const run = createSandboxedReadOnlyCommandRunner(manager, "node");
+    const run = createSandboxedReadOnlyCommandRunner(manager, "node", guardianEvidenceScope);
 
     const outcome = await run(["-e", "process.stdout.write('x'.repeat(6 * 1024 * 1024))"]).catch(
       (error: unknown) => error,
@@ -315,7 +327,7 @@ describe("sandbox integration", () => {
     const manager = testSandboxManager();
 
     try {
-      const operations = createSandboxedGuardianFileOperations(manager);
+      const operations = createSandboxedGuardianFileOperations(manager, guardianEvidenceScope);
       const outcome = await operations.read.readFile(file).catch((error: unknown) => error);
       expect(outcome instanceof Error).toBe(true);
       if (outcome instanceof Error) {
@@ -337,7 +349,7 @@ describe("sandbox integration", () => {
     const manager = testSandboxManager();
 
     try {
-      const operations = createSandboxedGuardianFileOperations(manager);
+      const operations = createSandboxedGuardianFileOperations(manager, guardianEvidenceScope);
       const entries = await operations.ls.readdir(directory);
       expect(entries.length).toBeLessThan(entryCount);
     } finally {
@@ -346,18 +358,18 @@ describe("sandbox integration", () => {
   });
 
   it("returns an independent Guardian read-only sandbox config", () => {
-    const first = createGuardianReadOnlySandboxConfig();
-    const second = createGuardianReadOnlySandboxConfig();
+    const first = createGuardianReadOnlySandboxConfig(guardianEvidenceScope);
+    const second = createGuardianReadOnlySandboxConfig(guardianEvidenceScope);
 
     expect(first).toEqual({
       filesystem: {
         allowWrite: [],
-        denyRead: [],
+        denyRead: ["/tmp/guardian-secret"],
         denyWrite: [],
       },
       network: {
         allowedDomains: [],
-        deniedDomains: [],
+        deniedDomains: ["*"],
         trustedFakeIpRanges: [],
         allowLocalBinding: false,
       },
@@ -372,16 +384,65 @@ describe("sandbox integration", () => {
     expect(second).toEqual({
       filesystem: {
         allowWrite: [],
-        denyRead: [],
+        denyRead: ["/tmp/guardian-secret"],
         denyWrite: [],
       },
       network: {
         allowedDomains: [],
-        deniedDomains: [],
+        deniedDomains: ["*"],
         trustedFakeIpRanges: [],
         allowLocalBinding: false,
       },
     });
+  });
+
+  it("intersects Guardian evidence with the parent's denyRead boundary", () => {
+    const parent: SandboxPolicy = {
+      filesystem: {
+        allowWrite: ["/workspace", "/outside"],
+        denyRead: ["/z-secret", "/a-secret", "/z-secret"],
+        denyWrite: ["/protected"],
+      },
+      network: { allowedDomains: ["example.com"], deniedDomains: [] },
+    };
+    const scope = createGuardianEvidenceScope("/workspace", parent);
+
+    expect(scope).toEqual({
+      cwd: "/workspace",
+      denyRead: ["/a-secret", "/z-secret"],
+      authorityFingerprint: expect.any(String),
+    });
+    expect(createGuardianReadOnlySandboxConfig(scope)).toEqual({
+      filesystem: {
+        allowWrite: [],
+        denyRead: ["/a-secret", "/z-secret"],
+        denyWrite: [],
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: ["*"],
+        trustedFakeIpRanges: [],
+        allowLocalBinding: false,
+      },
+    });
+    expect(Object.isFrozen(scope)).toBe(true);
+    expect(Object.isFrozen(scope.denyRead)).toBe(true);
+  });
+
+  it("rejects forged or non-normalized Guardian evidence authority", () => {
+    expect(() =>
+      createGuardianEvidenceScope("/workspace", {
+        filesystem: { allowWrite: [], denyRead: ["relative-secret"], denyWrite: [] },
+        network: { allowedDomains: [], deniedDomains: [] },
+      }),
+    ).toThrow(/absolute paths/i);
+
+    expect(() =>
+      copyGuardianEvidenceScope({
+        ...guardianEvidenceScope,
+        authorityFingerprint: "forged",
+      }),
+    ).toThrow(/fingerprint/i);
   });
 
   it("resolves the configured workspace root without an OS-specific filter", () => {
@@ -580,6 +641,7 @@ describe("sandbox integration", () => {
       });
 
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), DEFAULT_BASH_TIMEOUT_MS);
+      expect(manager.execute.mock.calls[0]?.[0].policy.network.deniedDomains).toEqual(["*"]);
     } finally {
       setTimeoutSpy.mockRestore();
     }

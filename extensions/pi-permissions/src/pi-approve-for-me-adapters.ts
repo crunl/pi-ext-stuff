@@ -4,7 +4,6 @@ import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 
 import type {
   AdmissionPlan,
-  CapabilityRequest,
   CapabilityRequestInput,
   GuardianAdapter,
   GuardianReviewInput,
@@ -15,11 +14,20 @@ import {
   type AutoReviewResult,
   buildAutoReviewRequest,
 } from "./auto-review-request.ts";
-import { type AutoReviewer, AutoReviewerFailure } from "./auto-reviewer.ts";
+import {
+  type AutoReviewer,
+  AutoReviewerFailure,
+  type TrustedAutoReviewerContext,
+} from "./auto-reviewer.ts";
 import { fingerprintValue } from "./config.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
-import type { SandboxPolicy } from "./sandbox.ts";
+import {
+  createGuardianEvidencePolicyCeiling,
+  createGuardianEvidenceScope,
+  type GuardianEvidenceScope,
+  type SandboxPolicy,
+} from "./sandbox.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 /**
@@ -56,16 +64,14 @@ export function toolCallEventMetadata(event: ToolCallEvent): Record<string, unkn
   return Object.keys(metadata).length === 0 ? undefined : metadata;
 }
 
-function requestedCapabilities(decision: Extract<RiskDecision, { action: "prompt" }>): {
-  requested: CapabilityRequestInput[];
-  networkHosts: string[];
-  filesystemWriteRoots: string[];
-} {
-  const networkHosts = [...(decision.networkHosts ?? [])];
-  const filesystemWriteRoots = [...(decision.filesystemWriteRoots ?? [])];
-  const requested: CapabilityRequestInput[] = [
-    ...networkHosts.map((host): CapabilityRequestInput => ({ kind: "network", host })),
-    ...filesystemWriteRoots.map(
+function requestedCapabilities(
+  decision: Extract<RiskDecision, { action: "prompt" }>,
+): CapabilityRequestInput[] {
+  return [
+    ...(decision.networkHosts ?? []).map(
+      (host): CapabilityRequestInput => ({ kind: "network", host }),
+    ),
+    ...(decision.filesystemWriteRoots ?? []).map(
       (path): CapabilityRequestInput => ({
         kind: "filesystem",
         operation: "write",
@@ -73,7 +79,6 @@ function requestedCapabilities(decision: Extract<RiskDecision, { action: "prompt
       }),
     ),
   ];
-  return { requested, networkHosts, filesystemWriteRoots };
 }
 
 /**
@@ -89,7 +94,7 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
     return { kind: "allow" };
   }
 
-  const { requested } = requestedCapabilities(decision);
+  const requested = requestedCapabilities(decision);
   return {
     kind: "review",
     risk: decision.risk,
@@ -162,6 +167,20 @@ function policyForReview(
   return input.effective.policy ?? context.baseSandboxPolicy;
 }
 
+function evidenceScopeForReview(
+  input: GuardianReviewInput<PiGuardianReviewContext>,
+): GuardianEvidenceScope {
+  const parentPolicy =
+    input.ownership === "host-admission"
+      ? (input.context.baseSandboxPolicy ??
+        (input.context.sandboxEnabled ? undefined : createGuardianEvidencePolicyCeiling()))
+      : input.baseline.policy;
+  if (!parentPolicy) {
+    throw new Error("Guardian review requires a trusted parent evidence policy");
+  }
+  return createGuardianEvidenceScope(input.call.cwd, parentPolicy);
+}
+
 function guardianPermissionContext(
   input: GuardianReviewInput<PiGuardianReviewContext>,
   decision: PromptRiskDecision,
@@ -171,7 +190,11 @@ function guardianPermissionContext(
   filesystemWriteRoots: string[];
   filesystemDenyRead: string[];
   filesystemDenyWrite: string[];
-  requestedNetworkHosts: string[];
+  requestedNetworkTargets: Array<{
+    host: string;
+    port?: number;
+    protocol?: string;
+  }>;
   allowedNetworkHosts: string[];
   deniedNetworkHosts: string[];
   staticRisk: "LOW" | "REVIEW" | "HARD";
@@ -179,14 +202,24 @@ function guardianPermissionContext(
   justification?: string;
 } {
   const policy = policyForReview(input);
-  const requested = requestedCapabilities(decision);
+  const requestedNetworkTargets = input.requested.flatMap((request) =>
+    request.kind === "network"
+      ? [
+          {
+            host: request.host,
+            ...(request.port === undefined ? {} : { port: request.port }),
+            ...(request.protocol === undefined ? {} : { protocol: request.protocol }),
+          },
+        ]
+      : [],
+  );
   return {
     sandboxProfile: input.context.sandboxProfile,
     sandboxEnforcesAction: input.ownership !== "host-admission" && input.context.sandboxEnabled,
     filesystemWriteRoots: [...(policy?.filesystem.allowWrite ?? [])],
     filesystemDenyRead: [...(policy?.filesystem.denyRead ?? [])],
     filesystemDenyWrite: [...(policy?.filesystem.denyWrite ?? [])],
-    requestedNetworkHosts: requested.networkHosts,
+    requestedNetworkTargets,
     allowedNetworkHosts: [...(policy?.network.allowedDomains ?? [])],
     deniedNetworkHosts: [...(policy?.network.deniedDomains ?? [])],
     staticRisk: decision.risk,
@@ -198,26 +231,11 @@ function guardianPermissionContext(
 function promptDecisionFromEngine(
   input: GuardianReviewInput<PiGuardianReviewContext>,
 ): PromptRiskDecision {
-  const requested = input.requested;
-  const networkHosts = requested
-    .filter(
-      (request): request is Extract<CapabilityRequest, { kind: "network" }> =>
-        request.kind === "network",
-    )
-    .map((request) => request.host);
-  const filesystemWriteRoots = requested
-    .filter(
-      (request): request is Extract<CapabilityRequest, { kind: "filesystem" }> =>
-        request.kind === "filesystem" && request.operation === "write",
-    )
-    .map((request) => request.path);
   return {
     action: "prompt",
     risk: input.risk ?? "REVIEW",
     reason: input.reason ?? "Permission review requested",
     summary: input.summary ?? input.call.tool,
-    ...(networkHosts.length > 0 ? { networkHosts } : {}),
-    ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
     ...(input.source === "permission-amendment" && input.reason !== undefined
       ? { justification: input.reason }
       : {}),
@@ -243,7 +261,11 @@ export function createPiGuardianAdapter(
       );
       let result: AutoReviewResult;
       try {
-        result = await autoReviewer.review(request, input.context.autoReviewerContext, signal);
+        const reviewerContext: TrustedAutoReviewerContext = {
+          ...input.context.autoReviewerContext,
+          guardianEvidenceScope: evidenceScopeForReview(input),
+        };
+        result = await autoReviewer.review(request, reviewerContext, signal);
       } catch (error) {
         if (error instanceof AutoReviewerFailure) {
           if (error.kind === "timeout") return { kind: "timed-out" };
