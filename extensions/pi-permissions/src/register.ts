@@ -22,10 +22,6 @@ import {
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
 import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
-import {
-  type AutoReviewerParentInstruction,
-  boundAutoReviewerParentInstructions,
-} from "./auto-review-request.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   ConfigError,
@@ -218,7 +214,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let shortcutWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
-  let guardianParentInstructions: readonly AutoReviewerParentInstruction[] = [];
   let guardianInvalidationAfterModeChange = false;
   const permissions = new PiPermissionsRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
@@ -283,7 +278,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     guardianTranscript = [];
     inputFallbackTranscript = [];
-    guardianParentInstructions = [];
     guardianInvalidationAfterModeChange = false;
     session.resetTurn();
     session.clearPending();
@@ -770,9 +764,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           cwd: guardianCwd,
           configFingerprint,
         },
-        ...(guardianParentInstructions.length === 0
-          ? {}
-          : { parentInstructions: guardianParentInstructions }),
       },
       sandboxProfile: executionContext.config.sandbox.profile,
       sandboxEnabled: executionContext.config.sandbox.enabled,
@@ -1634,22 +1625,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     session.resetTurn();
     session.clearPending();
-    guardianParentInstructions = [];
     guardianInvalidationAfterModeChange = false;
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {
       sandboxState = { kind: "pending" };
       await sandboxManager.reset();
     });
-  });
-
-  pi.on("before_agent_start", (event) => {
-    // Codex passes only its parent user-instruction sources to Guardian. Keep
-    // this boundary restricted to bounded AGENTS files; never inherit Pi's
-    // extension prompts, skills, tool snippets, or the assembled system text.
-    guardianParentInstructions = boundAutoReviewerParentInstructions(
-      event.systemPromptOptions.contextFiles,
-    );
   });
 
   pi.on("input", (event) => {

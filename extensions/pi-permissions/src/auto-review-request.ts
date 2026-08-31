@@ -1,4 +1,3 @@
-import { basename, isAbsolute } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
@@ -29,15 +28,6 @@ export interface AutoReviewResult {
   };
 }
 
-/** A host-loaded project instruction file that Codex exposes to Guardian as
- * trusted parent instructions. This is deliberately narrower than Pi's full
- * system-prompt input: skills, tool snippets, and extension-authored prompt
- * text are not parent authorization. */
-export interface AutoReviewerParentInstruction {
-  readonly path: string;
-  readonly content: string;
-}
-
 /** Host-provided inputs a guardian review run needs. Owned here so that
  * model selection and the reviewer implementation can share it without
  * importing each other. */
@@ -51,8 +41,6 @@ export interface AutoReviewerContext {
     cwd: string;
     configFingerprint: string;
   };
-  /** Bounded AGENTS files loaded by the host's system-prompt builder. */
-  parentInstructions?: readonly AutoReviewerParentInstruction[];
 }
 
 export interface AutoReviewApprovalOverride {
@@ -89,9 +77,6 @@ export interface AutoReviewRequest {
 type PromptDecision = Extract<RiskDecision, { action: "prompt" }>;
 
 const MAX_ACTION_CHARACTERS = 16_000;
-export const MAX_GUARDIAN_PARENT_INSTRUCTION_PATH_CHARACTERS = 4_096;
-export const MAX_GUARDIAN_PARENT_INSTRUCTION_CHARACTERS = 32 * 1024;
-const TRUSTED_PARENT_INSTRUCTION_BASENAMES = new Set(["AGENTS.md", "AGENTS.override.md"]);
 
 export const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX =
   "The user has manually approved a specific action that was previously `Rejected`.";
@@ -171,63 +156,6 @@ export function renderAutoReviewTrustedContext(request: AutoReviewRequest): stri
       permissionContext: request.permissionContext,
     }),
   );
-}
-
-/**
- * Keep the host boundary and the reviewer boundary consistent. A caller may
- * construct AutoReviewerContext directly, so filtering and bounds are applied
- * again here instead of trusting every optional context-file-shaped object.
- * Malformed entries are omitted. Like Codex's AGENTS loader, the final entry
- * may be cut to the remaining total budget; no later file is then admitted.
- */
-export function boundAutoReviewerParentInstructions(
-  instructions: readonly AutoReviewerParentInstruction[] | undefined,
-): AutoReviewerParentInstruction[] {
-  if (instructions === undefined) return [];
-  const bounded: AutoReviewerParentInstruction[] = [];
-  const seenPaths = new Set<string>();
-  let totalCharacters = 0;
-  for (const candidate of instructions) {
-    if (!isRecord(candidate)) continue;
-    const path = candidate.path;
-    const content = candidate.content;
-    if (
-      typeof path !== "string" ||
-      typeof content !== "string" ||
-      !isAbsolute(path) ||
-      !TRUSTED_PARENT_INSTRUCTION_BASENAMES.has(basename(path)) ||
-      path.length > MAX_GUARDIAN_PARENT_INSTRUCTION_PATH_CHARACTERS ||
-      content.length === 0 ||
-      seenPaths.has(path)
-    ) {
-      continue;
-    }
-    const remainingCharacters = MAX_GUARDIAN_PARENT_INSTRUCTION_CHARACTERS - totalCharacters;
-    if (remainingCharacters <= path.length) break;
-    const contentBudget = remainingCharacters - path.length;
-    const boundedContent = content.slice(0, contentBudget);
-    seenPaths.add(path);
-    bounded.push({ path, content: boundedContent });
-    totalCharacters += path.length + boundedContent.length;
-    if (boundedContent.length < content.length) break;
-  }
-  return bounded;
-}
-
-export function renderAutoReviewParentInstructions(
-  instructions: readonly AutoReviewerParentInstruction[] | undefined,
-): string | undefined {
-  const bounded = boundAutoReviewerParentInstructions(instructions);
-  if (bounded.length === 0) return undefined;
-  return [
-    "# Trusted Parent Project Instructions",
-    "The host supplied the following bounded AGENTS instructions through its trusted context-file loader. They may establish user authorization according to the Guardian policy for the action under review.",
-    ...bounded.map(({ path, content }) =>
-      [`<parent_instruction path=${JSON.stringify(path)}>`, content, "</parent_instruction>"].join(
-        "\n",
-      ),
-    ),
-  ].join("\n\n");
 }
 
 function approvedActionContext(serializedAction: string): string {

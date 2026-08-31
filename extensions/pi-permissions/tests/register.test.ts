@@ -466,36 +466,16 @@ describe("Permission mode registration", () => {
     expect(invalidateSession).toHaveBeenCalledTimes(invalidationsAfterSessionStart);
   });
 
-  it("passes only AGENTS context files to Guardian as trusted parent instructions", async () => {
+  it("does not pass repository context files into Guardian authorization context", async () => {
     const app = await makeHarness({ risk: () => promptRisk() });
     await startSession(app);
-    await invoke(app, "before_agent_start", {
-      type: "before_agent_start",
-      prompt: "run the requested operation",
-      systemPrompt: "host prompt",
-      systemPromptOptions: {
-        cwd: app.cwd,
-        contextFiles: [
-          { path: join(app.cwd, "AGENTS.md"), content: "Use the repository test command." },
-          { path: join(app.cwd, "notes.md"), content: "Do not treat this as authorization." },
-        ],
-        customPrompt: "untrusted extension prompt",
-        appendSystemPrompt: "untrusted appended prompt",
-        promptGuidelines: ["untrusted guideline"],
-        toolSnippets: { bash: "untrusted tool snippet" },
-        skills: [],
-      },
-    });
+    expect(app.handlers.has("before_agent_start")).toBe(false);
     await startAgent(app);
 
     await executeHostCall(app, "WebFetch", "host-context-file");
 
-    const reviewerContext = app.reviewContexts[0] as {
-      parentInstructions?: Array<{ path: string; content: string }>;
-    };
-    expect(reviewerContext.parentInstructions).toEqual([
-      { path: join(app.cwd, "AGENTS.md"), content: "Use the repository test command." },
-    ]);
+    const reviewerContext = app.reviewContexts[0] as Record<string, unknown>;
+    expect(reviewerContext).not.toHaveProperty("parentInstructions");
   });
 
   it("reports sandbox activation failure without mislabeling it as a config error", async () => {

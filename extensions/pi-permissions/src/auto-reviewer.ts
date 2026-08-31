@@ -17,7 +17,6 @@ import {
   type AutoReviewRequest,
   type AutoReviewResult,
   parseAutoReviewResult,
-  renderAutoReviewParentInstructions,
   renderAutoReviewPrompt,
   renderAutoReviewTrustedContext,
 } from "./auto-review-request.ts";
@@ -337,16 +336,8 @@ export class PiAutoReviewer implements AutoReviewer {
         parameters: tool.parameters,
       })),
     });
-    const trustedContext = [
-      renderAutoReviewTrustedContext(request),
-      renderAutoReviewParentInstructions(context.parentInstructions),
-    ]
-      .filter((value): value is string => value !== undefined)
-      .join("\n\n");
-    const systemPrompt = renderGuardianSystemPrompt(
-      context.guardianPolicy,
-      trustedContext.length > 0 ? trustedContext : undefined,
-    );
+    const trustedContext = renderAutoReviewTrustedContext(request);
+    const systemPrompt = renderGuardianSystemPrompt(context.guardianPolicy, trustedContext);
     const closeToolRuntime = async (): Promise<void> => {
       await toolRuntime.close?.();
     };
