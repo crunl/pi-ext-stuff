@@ -23,6 +23,38 @@ const WORKER_TERMINATE_WAIT_MS = 1_000;
 // separate from hard request cancellation and leave bounded recovery margin.
 const WORKER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const MAX_ID_LENGTH = 128;
+const MAX_ERROR_CHARACTERS = 2_000;
+
+const FAILURE_STAGES = [
+  "bootstrap",
+  "initialization",
+  "execution",
+  "cleanup",
+  "transport",
+] as const;
+const FAILURE_CODES = [
+  "failed",
+  "timeout",
+  "poisoned",
+  "protocol",
+  "unsupported",
+  "cancelled",
+] as const;
+
+export interface GuardianWorkerFailure {
+  readonly stage: (typeof FAILURE_STAGES)[number];
+  readonly code: (typeof FAILURE_CODES)[number];
+}
+
+function isWorkerFailure(value: unknown): value is GuardianWorkerFailure {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).length === 2 &&
+    FAILURE_STAGES.some((stage) => record.stage === stage) &&
+    FAILURE_CODES.some((code) => record.code === code)
+  );
+}
 
 export interface GuardianWorkerProgram {
   executable: string;
@@ -68,23 +100,36 @@ export class GuardianWorkerAbortError extends Error {
 
 /** A worker/transport/SRT lifecycle failure that must abort the review. */
 export class GuardianWorkerInfrastructureError extends Error {
-  constructor(message: string, cause?: unknown) {
+  readonly failure: GuardianWorkerFailure;
+
+  constructor(
+    message: string,
+    cause?: unknown,
+    failure: GuardianWorkerFailure = { stage: "transport", code: "failed" },
+  ) {
     super(message);
     this.name = "GuardianWorkerInfrastructureError";
+    this.failure = Object.freeze({ stage: failure.stage, code: failure.code });
     if (cause !== undefined) Object.assign(this, { cause });
   }
 }
 
 export class GuardianWorkerTimeoutError extends GuardianWorkerInfrastructureError {
-  constructor(timeoutMs: number) {
-    super(`Guardian worker request timed out after ${timeoutMs}ms`);
+  constructor(timeoutMs: number, stage: GuardianWorkerFailure["stage"] = "transport") {
+    super(`Guardian worker request timed out after ${timeoutMs}ms`, undefined, {
+      stage,
+      code: "timeout",
+    });
     this.name = "GuardianWorkerTimeoutError";
   }
 }
 
 export class GuardianWorkerProtocolError extends GuardianWorkerInfrastructureError {
   constructor(message: string) {
-    super(`Guardian worker protocol error: ${message}`);
+    super(`Guardian worker protocol error: ${message}`, undefined, {
+      stage: "transport",
+      code: "protocol",
+    });
     this.name = "GuardianWorkerProtocolError";
   }
 }
@@ -103,14 +148,21 @@ type WorkerRequest = {
   maxStderrBytes?: number;
 };
 
-type WorkerResponse = {
-  type: "result" | "error";
-  id: string;
-  stdout?: string;
-  stderr?: string;
-  exitCode?: number | null;
-  error?: string;
-};
+type WorkerResponse =
+  | {
+      type: "result";
+      id: string;
+      stdout?: string;
+      stderr?: string;
+      exitCode?: number | null;
+    }
+  | {
+      type: "error";
+      // Fatal protocol and shutdown failures do not belong to a live request.
+      id?: string;
+      error: string;
+      failure: GuardianWorkerFailure;
+    };
 
 interface PendingRequest {
   readonly resolve: (result: GuardianWorkerExecutionResult) => void;
@@ -205,11 +257,15 @@ function decodeBase64(value: string | undefined, label: string): Buffer {
 function isWorkerResponse(value: unknown): value is WorkerResponse {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  const validId =
+    typeof record.id === "string" && record.id.length > 0 && record.id.length <= MAX_ID_LENGTH;
+  if (record.type === "result") return validId;
   return (
-    (record.type === "result" || record.type === "error") &&
-    typeof record.id === "string" &&
-    record.id.length > 0 &&
-    record.id.length <= MAX_ID_LENGTH
+    record.type === "error" &&
+    (record.id === undefined || validId) &&
+    typeof record.error === "string" &&
+    record.error.length <= MAX_ERROR_CHARACTERS &&
+    isWorkerFailure(record.failure)
   );
 }
 
@@ -374,6 +430,7 @@ export class GuardianWorkerClient {
       throw new GuardianWorkerInfrastructureError(
         `worker process failed to start: ${error instanceof Error ? error.message : String(error)}`,
         error,
+        { stage: "bootstrap", code: "failed" },
       );
     }
     this.child = child;
@@ -387,7 +444,10 @@ export class GuardianWorkerClient {
     });
     child.once("error", (error) => {
       void this.terminate(
-        new GuardianWorkerProtocolError(`worker process failed: ${error.message}`),
+        new GuardianWorkerInfrastructureError(`worker process failed: ${error.message}`, error, {
+          stage: "bootstrap",
+          code: "failed",
+        }),
       );
     });
     child.once("close", (exitCode, signalCode) => {
@@ -436,7 +496,10 @@ export class GuardianWorkerClient {
         maxStderrBytes: 1,
       };
       pending.timer = setTimeout(() => {
-        void this.cancelAndTerminate(id, new GuardianWorkerTimeoutError(this.timeoutMs));
+        void this.cancelAndTerminate(
+          id,
+          new GuardianWorkerTimeoutError(this.timeoutMs, "bootstrap"),
+        );
       }, this.timeoutMs);
       this.pending.set(id, pending);
       try {
@@ -491,6 +554,25 @@ export class GuardianWorkerClient {
   }
 
   private resolveResponse(response: WorkerResponse): void {
+    if (response.type === "error") {
+      if (response.id !== undefined && !this.pending.has(response.id)) {
+        void this.terminate(
+          new GuardianWorkerProtocolError("worker returned an unknown request id"),
+        );
+        return;
+      }
+      const failure = new GuardianWorkerInfrastructureError(
+        response.error || "worker request failed",
+        undefined,
+        response.failure,
+      );
+      this.latchFailure(failure);
+      this.rejectPending(failure);
+      // The worker starts its own bounded shutdown/reset after an error.
+      // Id-less errors also cover fatal protocol and shutdown/reset failures.
+      void this.close().catch(() => undefined);
+      return;
+    }
     const pending = this.pending.get(response.id);
     if (!pending) {
       void this.terminate(new GuardianWorkerProtocolError("worker returned an unknown request id"));
@@ -498,21 +580,6 @@ export class GuardianWorkerClient {
     }
     this.pending.delete(response.id);
     this.cleanupPending(pending);
-    if (response.type === "error") {
-      const failure = new GuardianWorkerInfrastructureError(
-        response.error || "worker request failed",
-      );
-      this.latchFailure(failure);
-      pending.reject(failure);
-      this.terminalFailureReported = true;
-      // The worker has already started its own bounded shutdown/reset after
-      // reporting an infrastructure error. Give that reset a chance to run;
-      // closeInternal() still force-kills the detached process group if it
-      // hangs or exits unsuccessfully.
-      this.rejectPending(failure);
-      void this.close().catch(() => undefined);
-      return;
-    }
     try {
       const stdout = decodeBase64(response.stdout, "stdout");
       const stderr = decodeBase64(response.stderr, "stderr");
@@ -553,6 +620,13 @@ export class GuardianWorkerClient {
   }
 
   private latchFailure(error: GuardianWorkerInfrastructureError): void {
+    // Cleanup remains authoritative over an earlier execution failure. Keep
+    // its source metadata even if the request already reported the first error.
+    if (error.failure.stage === "cleanup" && error !== this.terminalFailure) {
+      this.terminalFailure = error;
+      this.terminalFailureReported = false;
+      return;
+    }
     this.terminalFailure ??= error;
   }
 
@@ -615,7 +689,7 @@ export class GuardianWorkerClient {
       if (this.terminalFailure && !this.terminalFailureReported) throw this.terminalFailure;
       return;
     }
-    let closeError: Error | undefined;
+    let closeError: GuardianWorkerInfrastructureError | undefined;
     await new Promise<void>((resolve) => {
       let finished = false;
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -630,13 +704,23 @@ export class GuardianWorkerClient {
         finished = true;
         if (fallbackTimer) clearTimeout(fallbackTimer);
         if (onClose) child.removeListener("close", onClose);
+        // An exit status alone cannot prove an SRT cleanup failure. Only a
+        // structured worker report or our own close deadline can identify it.
+        const failure: GuardianWorkerFailure =
+          this.terminalFailure?.failure.stage === "cleanup"
+            ? this.terminalFailure.failure
+            : { stage: "transport", code: "failed" };
         if (signalCode !== null) {
           closeError = new GuardianWorkerInfrastructureError(
             `worker shutdown failed with signal ${signalCode}`,
+            undefined,
+            failure,
           );
         } else if (exitCode !== null && exitCode !== 0) {
           closeError = new GuardianWorkerInfrastructureError(
             `worker shutdown failed with exit code ${exitCode}`,
+            undefined,
+            failure,
           );
         }
         resolve();
@@ -650,8 +734,15 @@ export class GuardianWorkerClient {
         }
         this.child = undefined;
         this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
-        closeError = new GuardianWorkerInfrastructureError("worker did not shut down cleanly");
-        this.latchFailure(new GuardianWorkerInfrastructureError(closeError.message, closeError));
+        closeError = new GuardianWorkerInfrastructureError(
+          "worker did not shut down cleanly",
+          undefined,
+          {
+            stage: "cleanup",
+            code: "timeout",
+          },
+        );
+        this.latchFailure(closeError);
         finish();
         killProcessGroup(child);
       }, WORKER_SHUTDOWN_TIMEOUT_MS);
@@ -680,11 +771,7 @@ export class GuardianWorkerClient {
     }
     this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
     if (closeError) {
-      this.latchFailure(
-        closeError instanceof GuardianWorkerInfrastructureError
-          ? closeError
-          : new GuardianWorkerInfrastructureError(closeError.message, closeError),
-      );
+      this.latchFailure(closeError);
       throw closeError;
     }
     if (this.terminalFailure && !this.terminalFailureReported) throw this.terminalFailure;

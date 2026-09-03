@@ -13,6 +13,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
     "test": "vitest --run"
   },
   "peerDependencies": {
@@ -27,6 +28,7 @@
     "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@types/node": "^24.0.0",
+    "jiti": "2.7.0",
     "typebox": "1.1.38",
     "typescript": "^5.9.0",
     "vitest": "^4.1.0"

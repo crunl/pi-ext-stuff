@@ -951,6 +951,8 @@ export function createIsolatedGuardianToolRuntime(
       if (fingerprintValue(request.policy) !== expectedPolicyFingerprint) {
         throw new GuardianWorkerInfrastructureError(
           "Guardian evidence sandbox policy drifted from its fixed authority",
+          undefined,
+          { stage: "execution", code: "protocol" },
         );
       }
       return client.execute({

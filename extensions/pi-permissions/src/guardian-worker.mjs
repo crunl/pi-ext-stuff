@@ -47,8 +47,27 @@ let pumping = false;
 const queue = [];
 const active = new Map();
 
-function infrastructureFailure(error) {
-  return new Error(error instanceof Error ? error.message : text(error));
+// The client validates this wire vocabulary. Keep the worker self-contained;
+// callers consume stage/code, never this error's human-readable message.
+class WorkerInfrastructureError extends Error {
+  constructor(error, stage, code) {
+    super(error instanceof Error ? error.message : text(error));
+    this.failure = Object.freeze({ stage, code });
+  }
+}
+
+function infrastructureFailure(error, stage = "execution", code = "failed") {
+  return error instanceof WorkerInfrastructureError
+    ? error
+    : new WorkerInfrastructureError(error, stage, code);
+}
+
+function cancellationFailure(state) {
+  return infrastructureFailure(
+    state.controller.signal.reason ?? "reviewer worker request aborted",
+    "execution",
+    "cancelled",
+  );
 }
 
 function text(value) {
@@ -103,13 +122,26 @@ function validateEvidenceScope(value) {
 
 async function bootstrap(request) {
   if (bootstrapStarted || evidenceScope || active.size > 0 || queue.length > 0 || shuttingDown) {
-    throw new Error("reviewer worker evidence scope is already fixed");
+    throw infrastructureFailure(
+      "reviewer worker evidence scope is already fixed",
+      "bootstrap",
+      "protocol",
+    );
   }
   bootstrapStarted = true;
   if (byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES) {
-    throw new Error("reviewer worker bootstrap exceeds the bound");
+    throw infrastructureFailure(
+      "reviewer worker bootstrap exceeds the bound",
+      "bootstrap",
+      "protocol",
+    );
   }
-  const scope = validateEvidenceScope(request.evidenceScope);
+  let scope;
+  try {
+    scope = validateEvidenceScope(request.evidenceScope);
+  } catch (error) {
+    throw infrastructureFailure(error, "bootstrap", "protocol");
+  }
   const canonicalScopeCwd = await canonicalCwd(scope.cwd);
   evidenceScope = scope;
   evidenceScopeCwd = canonicalScopeCwd;
@@ -140,15 +172,15 @@ function jsonFrame(value) {
   } catch {
     encoded = JSON.stringify({
       type: "error",
-      id: "unknown",
       error: "response is not serializable",
+      failure: { stage: "transport", code: "protocol" },
     });
   }
   if (byteLength(encoded) + 1 > MAX_FRAME_BYTES) {
     encoded = JSON.stringify({
       type: "error",
-      id: value.id ?? "unknown",
       error: "worker response exceeds the frame bound",
+      failure: { stage: "transport", code: "protocol" },
     });
   }
   return `${encoded}\n`;
@@ -156,6 +188,15 @@ function jsonFrame(value) {
 
 function send(value) {
   if (!process.stdout.destroyed) process.stdout.write(jsonFrame(value));
+}
+
+function sendFailure(error, id) {
+  send({
+    type: "error",
+    ...(id === undefined ? {} : { id }),
+    error: errorMessage(error),
+    failure: error.failure,
+  });
 }
 
 function errorMessage(error) {
@@ -261,14 +302,28 @@ function outputLimit(value, fallback, maximum) {
 }
 
 async function ensureSrt() {
-  if (srtPoisoned) throw new Error("reviewer worker sandbox is unavailable after cleanup failure");
+  if (srtPoisoned) {
+    throw infrastructureFailure(
+      "reviewer worker sandbox is unavailable after cleanup failure",
+      "initialization",
+      "poisoned",
+    );
+  }
   if (srtReady) return;
   if (!evidenceScope || !readOnlySandboxConfig) {
-    throw new Error("reviewer worker evidence scope is unavailable");
+    throw infrastructureFailure(
+      "reviewer worker evidence scope is unavailable",
+      "initialization",
+      "protocol",
+    );
   }
   try {
     if (!SandboxManager.isSupportedPlatform()) {
-      throw new Error(`reviewer worker sandbox is unsupported on ${process.platform}`);
+      throw infrastructureFailure(
+        `reviewer worker sandbox is unsupported on ${process.platform}`,
+        "initialization",
+        "unsupported",
+      );
     }
     const dependency = await SandboxManager.checkDependenciesAsync({
       command: process.execPath,
@@ -288,7 +343,7 @@ async function ensureSrt() {
     } catch {
       // The worker is already poisoned; process teardown remains fail-closed.
     }
-    throw error;
+    throw infrastructureFailure(error, "initialization");
   }
 }
 
@@ -307,12 +362,13 @@ async function cleanupAndResetSrt() {
   }
   srtReady = false;
   if (cleanupError && resetError) {
-    throw new Error(
+    throw infrastructureFailure(
       `reviewer worker sandbox cleanup failed: ${errorMessage(cleanupError)}; reset failed: ${errorMessage(resetError)}`,
+      "cleanup",
     );
   }
-  if (cleanupError) throw cleanupError;
-  if (resetError) throw resetError;
+  if (cleanupError) throw infrastructureFailure(cleanupError, "cleanup");
+  if (resetError) throw infrastructureFailure(resetError, "cleanup");
 }
 
 async function resetSrt() {
@@ -356,7 +412,9 @@ function runWrapped(wrapped, request, state) {
     const timeout = boundedInteger(request.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
     const timer = setTimeout(() => {
       aborted = true;
-      state.controller.abort(new Error("reviewer worker request timed out"));
+      state.controller.abort(
+        infrastructureFailure("reviewer worker request timed out", "execution", "timeout"),
+      );
       killWorkerProcessTree(child);
     }, timeout);
     const cleanup = () => {
@@ -405,7 +463,7 @@ function runWrapped(wrapped, request, state) {
       settled = true;
       cleanup();
       if (state.controller.signal.aborted || aborted) {
-        reject(infrastructureFailure("reviewer worker request aborted"));
+        reject(cancellationFailure(state));
       } else if (outputError) {
         reject(outputError);
       } else if (signalCode !== null) {
@@ -428,7 +486,7 @@ function runWrapped(wrapped, request, state) {
 }
 
 async function execute(request, state) {
-  if (state.cancelled) throw infrastructureFailure("reviewer worker request aborted");
+  if (state.cancelled) throw cancellationFailure(state);
   let canonicalRequestCwd;
   try {
     canonicalRequestCwd = await canonicalCwd(request.cwd);
@@ -441,13 +499,17 @@ async function execute(request, state) {
     request.authorityFingerprint !== evidenceScope.authorityFingerprint ||
     request.cwd !== evidenceScopeCwd
   ) {
-    throw infrastructureFailure("reviewer worker execution scope drifted from bootstrap authority");
+    throw infrastructureFailure(
+      "reviewer worker execution scope drifted from bootstrap authority",
+      "execution",
+      "protocol",
+    );
   }
   let program;
   try {
     program = validateProgram(request.program);
   } catch (error) {
-    throw infrastructureFailure(error);
+    throw infrastructureFailure(error, "execution", "protocol");
   }
   try {
     await ensureSrt();
@@ -474,23 +536,26 @@ async function execute(request, state) {
       throw infrastructureFailure(error);
     }
     if (state.controller.signal.aborted) {
-      throw infrastructureFailure("reviewer worker request aborted");
+      throw cancellationFailure(state);
     }
     result = await runWrapped(wrapped, request, state);
   } catch (error) {
-    bodyError = state.controller.signal.aborted ? infrastructureFailure(error) : error;
+    bodyError = state.controller.signal.aborted ? cancellationFailure(state) : error;
   }
   let cleanupError;
   try {
     SandboxManager.cleanupAfterCommand();
   } catch (error) {
     srtPoisoned = true;
-    cleanupError = new Error(`reviewer worker sandbox cleanup failed: ${errorMessage(error)}`);
+    cleanupError = infrastructureFailure(
+      `reviewer worker sandbox cleanup failed: ${errorMessage(error)}`,
+      "cleanup",
+    );
   }
   // Cleanup failure is authoritative and poisons the worker. Keep it outside
   // a finally block so it cannot accidentally mask the cancellation/error
   // control flow in a way that leaves the caller waiting.
-  if (cleanupError) throw infrastructureFailure(cleanupError);
+  if (cleanupError) throw cleanupError;
   if (bodyError) throw bodyError;
   return result;
 }
@@ -498,13 +563,13 @@ async function execute(request, state) {
 async function handleRequest(request, state) {
   const id = request?.id;
   const responseId =
-    typeof id === "string" && id.length >= 1 && id.length <= MAX_ID_LENGTH ? id : "unknown";
+    typeof id === "string" && id.length >= 1 && id.length <= MAX_ID_LENGTH ? id : undefined;
   try {
     if (typeof id !== "string" || id.length < 1 || id.length > MAX_ID_LENGTH) {
       throw new Error("invalid reviewer worker request id");
     }
     if (request.type !== "execute") throw new Error("unsupported reviewer worker request");
-    if (state.cancelled) throw new Error("reviewer worker request aborted");
+    if (state.cancelled) throw cancellationFailure(state);
     if (byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES) {
       throw new Error("reviewer worker request exceeds the bound");
     }
@@ -520,7 +585,7 @@ async function handleRequest(request, state) {
     // Every RPC error is an infrastructure failure. Expected evidence
     // failures (ENOENT, EACCES, and child non-zero exits) are transported as
     // ordinary result frames and converted to tool evidence by the caller.
-    send({ type: "error", id: responseId, error: errorMessage(error) });
+    sendFailure(infrastructureFailure(error, "execution", "protocol"), responseId);
     // A worker-reported infrastructure error is already delivered to the
     // client. Exit cleanly when reset succeeds; shutdown itself upgrades the
     // exit to 1 if cleanup/reset cannot restore the SRT boundary.
@@ -538,11 +603,7 @@ async function pump() {
       const item = queue.shift();
       if (!item) continue;
       if (item.state.cancelled) {
-        send({
-          type: "error",
-          id: item.request.id,
-          error: "reviewer worker request aborted",
-        });
+        sendFailure(cancellationFailure(item.state), item.request.id);
         active.delete(item.request.id);
         continue;
       }
@@ -580,15 +641,27 @@ async function shutdown(exitCode = 0) {
     await resetSrt();
   } catch (error) {
     finalExitCode = 1;
+    sendFailure(infrastructureFailure(error, "cleanup"));
     process.stderr.write(`guardian worker sandbox reset failed: ${errorMessage(error)}`);
+  }
+  // Flush terminal metadata before exit. The parent's existing bounded close
+  // deadline still owns termination if this pipe or SRT reset cannot drain.
+  if (!process.stdout.destroyed) {
+    await new Promise((resolve) => process.stdout.write("", resolve));
   }
   process.exit(finalExitCode);
 }
 
-async function protocolFatal(message) {
+async function fatalFailure(error) {
   if (fatalStarted) return;
-  process.stderr.write(`guardian worker protocol failure: ${message}`);
-  await shutdown(1);
+  sendFailure(error);
+  // The error frame already fails the review. A non-zero exit is reserved
+  // for failed shutdown, so it cannot relabel a protocol error as cleanup.
+  await shutdown();
+}
+
+async function protocolFatal(message) {
+  await fatalFailure(infrastructureFailure(message, "transport", "protocol"));
 }
 
 function parseInput(chunk) {
@@ -627,7 +700,9 @@ function parseInput(chunk) {
         void protocolFatal("invalid bootstrap request");
         return;
       }
-      void bootstrap(request).catch((error) => protocolFatal(errorMessage(error)));
+      void bootstrap(request).catch((error) =>
+        fatalFailure(infrastructureFailure(error, "bootstrap")),
+      );
     } else if (request.type === "cancel") {
       if (typeof request.id !== "string") {
         void protocolFatal("invalid cancellation request");
