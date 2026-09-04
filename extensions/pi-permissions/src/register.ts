@@ -31,6 +31,15 @@ import {
   loadPermissionsConfig,
   type PermissionsConfig,
 } from "./config.ts";
+import {
+  createAuditLink,
+  createDelegationPlan,
+  type DelegationEnvelope,
+  intersectSandboxPolicy,
+  isNetworkCovered,
+  isWriteCovered,
+  resolveChildEnvelope,
+} from "./delegation.ts";
 import { defaultProtectedWritePaths, resolvePolicyPath } from "./filesystem-policy.ts";
 import { inspectRepositoryGitMetadata } from "./git-metadata.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
@@ -370,10 +379,200 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.cancelInFlightBarrier();
   };
 
-  const finishPermissionTurn = (reason: string): void => {
-    const closingTurnId = session.finishTurn();
+  /**
+   * Tool names that spawn a delegated subagent turn. A call to one of these
+   * is the delegation point: the parent declares the child's upper bound
+   * here, enforced as a ceiling for the whole nested turn.
+   */
+  const DELEGATED_TOOL_NAMES = new Set(["subagent"]);
+
+  /** Remaining delegation levels below the current (possibly nested) turn. */
+  const delegationRemainingDepth = (config: PermissionsConfig): number => {
+    const ceiling = session.activeDelegationCeiling();
+    if (ceiling?.maxDepth !== undefined) return ceiling.maxDepth;
+    return config.delegation.maxDepth - (session.getTurnDepth() - 1);
+  };
+
+  const checkDelegateSpawn = (
+    tool: string,
+    config: PermissionsConfig,
+  ): { blocked: true; reason: string } | { blocked: false } => {
+    if (!DELEGATED_TOOL_NAMES.has(tool)) return { blocked: false };
+    for (const link of session.delegationAuditTrail()) {
+      if (link.envelope.allowReDelegate === false) {
+        return {
+          blocked: true,
+          reason:
+            "Re-delegation is disabled by the active delegation envelope: this subagent may not spawn its own subagents.",
+        };
+      }
+    }
+    if (delegationRemainingDepth(config) <= 0) {
+      return {
+        blocked: true,
+        reason: `Delegation depth limit reached (max ${config.delegation.maxDepth} nested subagent levels): refusing to spawn a deeper subagent.`,
+      };
+    }
+    return { blocked: false };
+  };
+
+  const checkDelegationWrite = (
+    absolutePath: string,
+    mode: ExecutablePermissionMode,
+    config: PermissionsConfig,
+  ): string | undefined => {
+    if (mode === "yolo" || !config.delegation.enabled) return undefined;
+    const ceiling = session.activeDelegationCeiling();
+    if (!ceiling || isWriteCovered(absolutePath, ceiling)) return undefined;
+    const roots = ceiling.writeRoots.length === 0 ? "(none)" : ceiling.writeRoots.join(", ");
+    return (
+      `Write to ${absolutePath} is outside the delegation envelope for this subagent ` +
+      `(allowed roots: ${roots}).`
+    );
+  };
+
+  const checkDelegationNetwork = (
+    host: string,
+    mode: ExecutablePermissionMode,
+    config: PermissionsConfig,
+  ): string | undefined => {
+    if (mode === "yolo" || !config.delegation.enabled) return undefined;
+    const ceiling = session.activeDelegationCeiling();
+    if (!ceiling || isNetworkCovered(host, ceiling)) return undefined;
+    const hosts = ceiling.networkHosts.length === 0 ? "(none)" : ceiling.networkHosts.join(", ");
+    return (
+      `Network access to ${host} is outside the delegation envelope for this subagent ` +
+      `(allowed hosts: ${hosts}).`
+    );
+  };
+
+  /**
+   * Mint an isolated child turn for a nested agent: the base policy narrows
+   * to parent ∩ delegation envelope and the Engine state starts fresh, so
+   * parent grants and amendments never leak into the child. Returns false
+   * when nesting saturated (caller falls back to sharing the parent turn).
+   *
+   * Enforcement scope: the envelope binds sandbox-executed capabilities
+   * (bash/write/edit/request_permissions, statically and at the network
+   * authorize boundary) plus delegation spawning itself. Opaque host-tool
+   * side effects stay under risk-policy + Guardian review with the narrowed
+   * child context — host-admission is review-only by design
+   * (sandboxEnforcesAction=false) and arbitrary host inputs have no
+   * statically checkable capability shape.
+   */
+  const mintNestedPermissionTurn = (
+    ctx: ExtensionContext,
+    parentSnapshot: PermissionExecutionSnapshot,
+  ): boolean => {
+    const childTurnId = session.allocateTurnId();
+    const delegation = parentSnapshot.config.delegation;
+    const childCwd = resolve(ctx.cwd);
+    let childBase = parentSnapshot.baseSandboxConfig;
+    let envelope: DelegationEnvelope = {
+      writeRoots: [...(childBase?.filesystem.allowWrite ?? [])],
+      networkHosts: [...(childBase?.network.allowedDomains ?? [])],
+      allowReDelegate: delegation.allowReDelegate,
+      maxDepth: delegation.maxDepth,
+    };
+    let droppedWriteRoots: readonly string[] = [];
+    let droppedNetworkHosts: readonly string[] = [];
+    if (parentSnapshot.mode !== "yolo" && delegation.enabled && childBase) {
+      try {
+        const parentCeiling = session.activeDelegationCeiling();
+        const resolved = resolveChildEnvelope({
+          configuredWriteRoots: delegation.writeRoots,
+          configuredNetworkHosts: delegation.networkHosts,
+          allowReDelegate: delegation.allowReDelegate,
+          parentBase: childBase,
+          parentRemainingDepth: parentCeiling?.maxDepth ?? delegation.maxDepth,
+          childCwd,
+        });
+        envelope = { ...resolved.envelope, maxDepth: resolved.remainingDepth };
+        childBase = intersectSandboxPolicy(childBase, resolved.envelope);
+        droppedWriteRoots = resolved.droppedWriteRoots;
+        droppedNetworkHosts = resolved.droppedNetworkHosts;
+      } catch {
+        // Config was validated at load; a resolution failure here must not
+        // break the subagent — fall back to inheriting the parent policy.
+      }
+    }
+    const sessionId = stableSessionId(ctx, session.getGeneration());
+    const audit = createAuditLink({
+      parentSessionId: sessionId,
+      parentTurnId: parentSnapshot.turnId,
+      childTurnId,
+      envelope,
+    });
+    // Validate the plan shape (normalizes + freezes); enforcement reads the
+    // ceiling sets, so a validation miss falls back to the resolved envelope.
+    let auditedEnvelope = envelope;
+    try {
+      const plan = createDelegationPlan({
+        envelope: {
+          writeRoots: [...envelope.writeRoots],
+          networkHosts: [...envelope.networkHosts],
+          allowReDelegate: envelope.allowReDelegate,
+          maxDepth: envelope.maxDepth,
+        },
+        parentTurnId: parentSnapshot.turnId,
+        parentSessionId: sessionId,
+        reason: "subagent delegation",
+        maxDepth: envelope.maxDepth,
+        noReDelegate: envelope.allowReDelegate !== true,
+      });
+      auditedEnvelope = plan.envelope;
+    } catch {
+      // Fall back to the resolved envelope (see above).
+    }
+    const childSnapshot: PermissionExecutionSnapshot = {
+      ...parentSnapshot,
+      turnId: childTurnId,
+      baseSandboxConfig: childBase,
+    };
+    if (
+      !session.beginNestedTurn({
+        snapshot: childSnapshot,
+        envelope: auditedEnvelope,
+        audit: { ...audit, envelope: auditedEnvelope },
+      })
+    ) {
+      return false;
+    }
+    permissions.beginNestedTurn(
+      buildTurnSnapshot(ctx, childSnapshot, {
+        turnId: childTurnId,
+        baseSandboxPolicy: childBase,
+      }),
+      ctx,
+    );
+    try {
+      pi.events.emit("pi-permissions:delegation", {
+        parentSessionId: sessionId,
+        parentTurnId: parentSnapshot.turnId,
+        childTurnId,
+        envelope: auditedEnvelope,
+        droppedWriteRoots,
+        droppedNetworkHosts,
+      });
+    } catch {
+      // Delegation audit events are best effort; enforcement never depends on observers.
+    }
+    return true;
+  };
+
+  const finishPermissionTurn = (reason: string): number | undefined => {
+    // A nested agent level pops its isolated Engine turn and restores the
+    // parent untouched; only the outermost close revokes the turn's grants.
+    // Engine levels pair with session levels except on the snapshot-less
+    // fallback path, which never pushed an Engine turn.
+    if (session.getTurnDepth() > 1) {
+      session.finishNestedTurn();
+      if (permissions.hasNestedTurn()) permissions.closeNestedTurn(reason);
+      return undefined;
+    }
+    const closingTurnId = session.finishNestedTurn();
+    if (closingTurnId === undefined) return undefined;
     permissions.closeTurn(reason);
-    if (closingTurnId === undefined) return;
     clearPendingModeTransition(closingTurnId);
     if (guardianInvalidationAfterModeChange) {
       guardianInvalidationAfterModeChange = false;
@@ -409,6 +608,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ctx: Pick<ExtensionContext, "sessionManager">,
     generation: number,
   ): string => {
+    // SAFETY: the host always supplies a sessionManager object; only the
+    // optional getSessionId shape is assumed, and every use below is guarded
+    // (optional chaining, typeof check, try/catch with a fallback id).
     const sessionManager = ctx.sessionManager as unknown as
       | { getSessionId?: () => unknown }
       | undefined;
@@ -423,21 +625,29 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return `pi-permissions-session-${generation}`;
   };
 
+  const buildTurnSnapshot = (
+    ctx: ExtensionContext,
+    executionSnapshot: PermissionExecutionSnapshot,
+    overrides?: { turnId?: string | number; baseSandboxPolicy?: SandboxPolicy },
+  ): PiTurnSnapshot => ({
+    sessionId: stableSessionId(ctx, session.getGeneration()),
+    turnId: overrides?.turnId ?? executionSnapshot.turnId,
+    mode: executionSnapshot.mode,
+    cwd: resolve(ctx.cwd),
+    configFingerprint: fingerprintConfig(executionSnapshot.config),
+    baseSandboxPolicy:
+      overrides?.baseSandboxPolicy !== undefined
+        ? overrides.baseSandboxPolicy
+        : executionSnapshot.baseSandboxConfig,
+    sandboxReady: executionSnapshot.sandboxReady,
+    transcript: currentGuardianTranscriptSnapshot(),
+  });
+
   const beginPermissionTurn = (
     ctx: ExtensionContext,
     executionSnapshot: PermissionExecutionSnapshot,
   ): void => {
-    const snapshot: PiTurnSnapshot = {
-      sessionId: stableSessionId(ctx, session.getGeneration()),
-      turnId: executionSnapshot.turnId,
-      mode: executionSnapshot.mode,
-      cwd: resolve(ctx.cwd),
-      configFingerprint: fingerprintConfig(executionSnapshot.config),
-      baseSandboxPolicy: executionSnapshot.baseSandboxConfig,
-      sandboxReady: executionSnapshot.sandboxReady,
-      transcript: currentGuardianTranscriptSnapshot(),
-    };
-    permissions.beginTurn(snapshot, ctx);
+    permissions.beginTurn(buildTurnSnapshot(ctx, executionSnapshot), ctx);
   };
 
   const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
@@ -684,15 +894,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   function addReviewResultRenderer(
     rendering: Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult">,
   ): Pick<ToolDefinition<TSchema>, "renderShell" | "renderCall" | "renderResult"> {
-    return {
-      ...rendering,
-      renderResult:
-        rendering.renderResult === undefined
-          ? undefined
-          : (createReviewResultRenderer(
-              rendering.renderResult as unknown as ReviewRenderResult,
-            ) as unknown as NonNullable<typeof rendering.renderResult>),
-    };
+    if (rendering.renderResult === undefined) return { ...rendering, renderResult: undefined };
+    // SAFETY: the wrapper preserves the renderer's input/output contract and only
+    // adds a review side-channel; this bridges generic instantiations of the host
+    // ToolDefinition across SDK versions.
+    const wrapped = createReviewResultRenderer(
+      rendering.renderResult as unknown as ReviewRenderResult,
+    );
+    // SAFETY: wrapped keeps identical input/output behavior; this only satisfies
+    // the host's NonNullable render type.
+    const adapted = wrapped as unknown as NonNullable<typeof rendering.renderResult>;
+    return { ...rendering, renderResult: adapted };
   }
 
   // Per-tool concrete types derived from the base factories so strategy
@@ -841,6 +1053,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       authorizeCapability: PiExecutionAttempt["authorizeCapability"],
       rejectCapability: PiExecutionAttempt["rejectCapability"],
       fallbackSignal?: AbortSignal,
+      delegationCeiling?: DelegationEnvelope,
     ): SandboxNetworkAuthorize =>
     async ({ host, port, signal }) => {
       const activeSignal = signal ?? fallbackSignal;
@@ -859,6 +1072,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             decision.kind === "deny"
               ? decision.error.reason
               : "Network target is denied by sandbox policy",
+        };
+      }
+      // Runtime delegation boundary: a connection outside the envelope is
+      // rejected outright instead of entering Engine capability review,
+      // whose approval would otherwise expand the lease past the ceiling.
+      if (delegationCeiling && !isNetworkCovered(host, delegationCeiling, port)) {
+        const reason = `Network access to ${host} is outside the delegation envelope for this subagent.`;
+        const decision = rejectCapability({
+          capability: { kind: "network", host, port },
+          reason,
+        });
+        return {
+          allowed: false,
+          reason: decision.kind === "deny" ? decision.error.reason : reason,
         };
       }
       const normalizedHost = normalizeNetworkHost(host);
@@ -965,6 +1192,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
 
     const { executionSnapshot, executionContext } = prepared;
+    // Delegation point: a subagent spawn declares the child's upper bound.
+    // Re-delegation and depth are gated here, before any risk review.
+    if (executionSnapshot.mode !== "yolo" && executionContext.config.delegation.enabled) {
+      const spawn = checkDelegateSpawn(actionTool, executionContext.config);
+      if (spawn.blocked) {
+        return {
+          block: true,
+          reason: renderPermissionErrorForAgent({
+            code: "policy-denied",
+            reason: spawn.reason,
+          }),
+        };
+      }
+    }
     let risk: RiskDecision | undefined;
     if (executionSnapshot.mode !== "yolo") {
       try {
@@ -981,6 +1222,38 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           block: true,
           reason: renderPermissionErrorForAgent({ code: "policy-error", reason: message }),
         };
+      }
+    }
+
+    // Static capabilities declared by the risk verdict stay inside the
+    // envelope. Opaque host-tool side effects remain under risk-policy +
+    // Guardian review with the narrowed child context (see mintNestedPermissionTurn).
+    if (risk?.action === "prompt") {
+      for (const root of risk.filesystemWriteRoots ?? []) {
+        const violation = checkDelegationWrite(
+          resolvePolicyPath(root, canonicalCwd),
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          return {
+            block: true,
+            reason: renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          };
+        }
+      }
+      for (const host of risk.networkHosts ?? []) {
+        const violation = checkDelegationNetwork(
+          host,
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          return {
+            block: true,
+            reason: renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          };
+        }
       }
     }
 
@@ -1085,6 +1358,39 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             executionContext,
             canonicalCwd,
           );
+    // Ceiling before review: admission-declared roots/hosts merge into the
+    // execution lease, so an allow-risk verdict would otherwise carry an
+    // out-of-envelope capability past the narrowed child base policy.
+    if (risk?.action === "prompt") {
+      for (const root of risk.filesystemWriteRoots ?? []) {
+        const violation = checkDelegationWrite(
+          resolvePolicyPath(root, canonicalCwd),
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          const error = new Error(
+            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          );
+          Object.assign(error, { code: "policy-denied", reason: violation });
+          throw error;
+        }
+      }
+      for (const host of risk.networkHosts ?? []) {
+        const violation = checkDelegationNetwork(
+          host,
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          const error = new Error(
+            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          );
+          Object.assign(error, { code: "policy-denied", reason: violation });
+          throw error;
+        }
+      }
+    }
     const event: ToolCallEvent = {
       type: "tool_call",
       toolCallId: actionId,
@@ -1098,6 +1404,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       capturedTranscript,
       canonicalCwd,
     );
+    // SAFETY: the bridge invokes onUpdate solely with ReviewPartialResult
+    // payloads, which the host update channel accepts; no other call shape
+    // flows through this seam.
     const reviewBridge = createReviewStatusBridge(
       onUpdate as unknown as (result: ReviewPartialResult) => void,
       ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
@@ -1137,6 +1446,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               error: new Error("Sandbox enforcement is unavailable for this action"),
             };
           }
+          // The ceiling is read at execution time, matching the snapshot /
+          // Engine attribution semantics: whichever turn level submitted this
+          // action governs it. Unrestricted (yolo) leases return above, so
+          // every lease reaching here is sandboxed and ceiling-bound.
+          const delegationCeiling = session.activeDelegationCeiling();
           const sandboxedBash = bashToolFactory(canonicalCwd, {
             operations: createSandboxedBashOperations(sandboxManager, policy, {
               ...(plan?.kind === "git-init" ? { gitInitPlan: plan } : {}),
@@ -1146,6 +1460,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 authorizeCapability,
                 rejectCapability,
                 attemptSignal,
+                delegationCeiling,
               ),
             }),
           });
@@ -1192,8 +1507,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       executionContext,
       canonicalCwd,
     );
-    if (decision.action !== "prompt") return decision;
     const target = resolvePolicyPath(params.path, canonicalCwd);
+    // Ceiling first: an allow-risk verdict must not bypass the envelope.
+    // Without this, LOW writes outside the envelope would ride the lease's
+    // requested-path expansion past the narrowed child base policy.
+    const envelopeViolation = checkDelegationWrite(
+      target,
+      executionSnapshot.mode,
+      executionContext.config,
+    );
+    if (envelopeViolation) return { action: "block", risk: "HARD", reason: envelopeViolation };
+    if (decision.action !== "prompt") return decision;
     const requested = decision.filesystemWriteRoots ?? [];
     if (requested.some((path) => resolvePolicyPath(path, canonicalCwd) === target)) {
       return decision;
@@ -1250,6 +1574,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ctx,
       canonicalCwd,
     );
+    // SAFETY: same bridge contract as the bash path — only ReviewPartialResult
+    // payloads reach the host update channel.
     const reviewBridge = createReviewStatusBridge(
       onUpdate as unknown as (result: ReviewPartialResult) => void,
       ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
@@ -1410,6 +1736,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         network: Type.Optional(Type.Object({ hosts: Type.Array(Type.String()) })),
       }),
     }),
+    // SAFETY: same renderer-wrapper contract as addReviewResultRenderer —
+    // identical input/output behavior, assertion only bridges host generics.
     renderResult: createReviewResultRenderer(plainReviewResultRenderer) as unknown as NonNullable<
       ToolDefinition<TSchema>["renderResult"]
     >,
@@ -1426,7 +1754,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       const canonicalCwd = call.cwd;
       const canonicalParams = call.input;
       const capturedTranscript = currentGuardianTranscriptSnapshot();
-      const { executionContext } = await preparePermissionExecution(ctx);
+      const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
       const decision = await evaluateManagedRisk(
         "request_permissions",
         canonicalParams as Record<string, unknown>,
@@ -1458,6 +1786,37 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         });
         throw error;
       }
+      // A nested amendment may only request capabilities inside its
+      // delegation envelope; the child Engine would otherwise accumulate
+      // rights the parent never granted it.
+      for (const root of decision.filesystemWriteRoots ?? []) {
+        const violation = checkDelegationWrite(
+          resolvePolicyPath(root, canonicalCwd),
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          const error = new Error(
+            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          );
+          Object.assign(error, { code: "policy-denied", reason: violation });
+          throw error;
+        }
+      }
+      for (const host of decision.networkHosts ?? []) {
+        const violation = checkDelegationNetwork(
+          host,
+          executionSnapshot.mode,
+          executionContext.config,
+        );
+        if (violation) {
+          const error = new Error(
+            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
+          );
+          Object.assign(error, { code: "policy-denied", reason: violation });
+          throw error;
+        }
+      }
       const reason = canonicalParams.reason ?? decision.reason;
       const event = {
         type: "tool_call" as const,
@@ -1465,6 +1824,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         toolName: "request_permissions",
         input: canonicalParams,
       } as ToolCallEvent;
+      // SAFETY: same bridge contract as the bash path — only ReviewPartialResult
+      // payloads reach the host update channel.
       const reviewBridge = createReviewStatusBridge(
         _onUpdate as unknown as (result: ReviewPartialResult) => void,
         ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
@@ -1649,9 +2010,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   });
 
+  // Nested agents run on an isolated child turn: the base policy narrows to
+  // parent ∩ delegation envelope and Engine grants/amendments start fresh.
+  // Saturation falls back to sharing the parent turn rather than breaking
+  // the subagent.
   pi.on("agent_start", async (_event, ctx) => {
     session.markLifecycleEvent();
-    if (session.getTurnPhase() === "active") return;
+    if (session.getTurnPhase() === "active") {
+      const parentSnapshot = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
+      if (parentSnapshot && mintNestedPermissionTurn(ctx, parentSnapshot)) return;
+      session.beginNestedTurn();
+      return;
+    }
     const startingTurnId = session.allocateTurnId();
     session.beginTurn(startingTurnId);
     const transition = session.getInFlightBarrier();
@@ -1673,13 +2043,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("agent_end", () => {
     session.markLifecycleEvent();
+    const wasActive = session.getTurnPhase() === "active";
     finishPermissionTurn("permission turn ended");
+    if (wasActive) session.noteEndAwaitingSettle();
   });
 
   pi.on("agent_settled", () => {
     session.markLifecycleEvent();
-    finishPermissionTurn("permission turn settled");
-    session.settleBetween();
+    // The host emits end+settled per agent level. A settled paired with a
+    // preceding end must not finish again; settleBetween is still safe
+    // (no-op unless a turn is actually between).
+    if (session.takeEndAwaitingSettle()) {
+      session.settleBetween();
+      return;
+    }
+    // Belt-and-braces: a settled without a preceding end still closes.
+    if (finishPermissionTurn("permission turn settled") !== undefined) {
+      session.settleBetween();
+    }
   });
 
   pi.on(

@@ -4,6 +4,7 @@
 // side effects around these transitions.
 
 import type { PermissionsConfig } from "./config.ts";
+import type { DelegationAuditLink, DelegationEnvelope } from "./delegation.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 import type { PermissionMode } from "./state.ts";
 
@@ -41,6 +42,30 @@ export class PermissionSession {
   private currentTurnId: number | undefined;
   private executionSnapshot: PermissionExecutionSnapshot | undefined;
   private lifecycleEventsObserved = false;
+  private turnDepth = 0;
+  /**
+   * True after an agent_end was accounted while a turn was active and before
+   * its paired agent_settled arrived. The host emits end+settled per agent
+   * level (including nested subagents), so settled must not finish twice.
+   * Cleared by any begin/reset; a stray flag self-heals on the next turn.
+   */
+  private endAwaitingSettle = false;
+  /**
+   * Per-nesting-level execution snapshots and delegation ceilings.
+   * Index 0 is the outermost nested level; the outer turn itself lives in
+   * executionSnapshot. Pushed by beginNestedTurn, popped by finishNestedTurn.
+   */
+  private nestedSnapshots: Array<PermissionExecutionSnapshot | undefined> = [];
+  private delegationStack: Array<DelegationEnvelope | undefined> = [];
+  private delegationAudit: DelegationAuditLink[] = [];
+
+  /**
+   * Bound for nested agent turns. A leaked agent_end (crashed subagent)
+   * can strand depth, but the next outer beginTurn/resetTurn zeroes it,
+   * so the blast radius is one outer turn. Saturation (not growth) on
+   * overflow keeps finishNestedTurn accounting exact.
+   */
+  static readonly maxNestedTurnDepth = 32;
 
   // --- generations -------------------------------------------------------
 
@@ -70,6 +95,70 @@ export class PermissionSession {
   beginTurn(turnId: number): void {
     this.currentTurnId = turnId;
     this.turnPhase = "active";
+    this.turnDepth = 1;
+    this.endAwaitingSettle = false;
+    this.nestedSnapshots = [];
+    this.delegationStack = [];
+    this.delegationAudit = [];
+  }
+
+  getTurnDepth(): number {
+    return this.turnDepth;
+  }
+
+  beginNestedTurn(nested?: {
+    snapshot?: PermissionExecutionSnapshot;
+    envelope?: DelegationEnvelope;
+    audit?: DelegationAuditLink;
+  }): boolean {
+    if (this.turnPhase !== "active" || this.currentTurnId === undefined) return false;
+    if (this.turnDepth >= PermissionSession.maxNestedTurnDepth) return false;
+    this.turnDepth += 1;
+    this.endAwaitingSettle = false;
+    this.nestedSnapshots.push(nested?.snapshot);
+    this.delegationStack.push(nested?.envelope);
+    if (nested?.audit) this.delegationAudit.push(nested.audit);
+    return true;
+  }
+
+  /** Innermost active delegation ceiling, or undefined at the outer level. */
+  activeDelegationCeiling(): DelegationEnvelope | undefined {
+    return this.delegationStack.at(-1);
+  }
+
+  /** Audit chain of parent → child delegations for the active turn. */
+  delegationAuditTrail(): readonly DelegationAuditLink[] {
+    return this.delegationAudit;
+  }
+
+  getCurrentTurnId(): number | undefined {
+    return this.currentTurnId;
+  }
+
+  /** Record an agent_end accounted while a turn was active. */
+  noteEndAwaitingSettle(): void {
+    this.endAwaitingSettle = true;
+  }
+
+  /**
+   * Consume the pending end/settled pairing. Returns true when this settled
+   * pairs with a preceding end (turn accounting already ran — skip finish).
+   */
+  takeEndAwaitingSettle(): boolean {
+    if (!this.endAwaitingSettle) return false;
+    this.endAwaitingSettle = false;
+    return true;
+  }
+
+  finishNestedTurn(): number | undefined {
+    if (this.turnPhase !== "active") return undefined;
+    if (this.turnDepth > 1) {
+      this.turnDepth -= 1;
+      this.nestedSnapshots.pop();
+      this.delegationStack.pop();
+      return undefined;
+    }
+    return this.finishTurn();
   }
 
   isCurrentTurn(turnId: number): boolean {
@@ -83,6 +172,7 @@ export class PermissionSession {
     this.executionSnapshot = undefined;
     this.currentTurnId = undefined;
     this.turnPhase = "between";
+    this.turnDepth = 0;
     return closingTurnId;
   }
 
@@ -96,6 +186,11 @@ export class PermissionSession {
     this.executionSnapshot = undefined;
     this.currentTurnId = undefined;
     this.turnPhase = "idle";
+    this.turnDepth = 0;
+    this.endAwaitingSettle = false;
+    this.nestedSnapshots = [];
+    this.delegationStack = [];
+    this.delegationAudit = [];
   }
 
   setExecutionSnapshot(snapshot: PermissionExecutionSnapshot): void {
@@ -108,9 +203,11 @@ export class PermissionSession {
 
   /** Snapshot currency: it must belong to the still-active turn. */
   currentExecutionSnapshot(): PermissionExecutionSnapshot | undefined {
-    return this.turnPhase === "active" &&
-      this.currentTurnId !== undefined &&
-      this.executionSnapshot?.turnId === this.currentTurnId
+    if (this.turnPhase !== "active" || this.currentTurnId === undefined) return undefined;
+    // Inside a nested agent the innermost child snapshot governs; it was
+    // minted from the outer snapshot so it inherits the turn's identity.
+    if (this.nestedSnapshots.length > 0) return this.nestedSnapshots.at(-1);
+    return this.executionSnapshot?.turnId === this.currentTurnId
       ? this.executionSnapshot
       : undefined;
   }

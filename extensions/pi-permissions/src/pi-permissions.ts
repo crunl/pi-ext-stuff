@@ -211,6 +211,16 @@ export interface PiPermissionsOptions<ReviewContext = undefined> {
 
 export interface PiPermissions<ReviewContext = undefined> {
   beginTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void;
+  /**
+   * Open an isolated child turn for a delegated subagent. The child runs on
+   * a fresh Engine (empty grants/amendments/circuit) while the parent turn
+   * is parked untouched; submit() routes to the innermost turn.
+   */
+  beginNestedTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void;
+  /** Close the innermost child turn and restore its parent. */
+  closeNestedTurn(reason?: string): void;
+  /** True while at least one delegated child turn is open. */
+  hasNestedTurn(): boolean;
   hasActiveTurn(): boolean;
   /**
    * Submit an opaque action capture produced at host ingress. The action's
@@ -252,19 +262,33 @@ function retryChoice(
 export class PiPermissionsRuntime<ReviewContext = undefined>
   implements PiPermissions<ReviewContext>
 {
-  private readonly engine: ApproveForMeEngine<ReviewContext>;
+  private engine: ApproveForMeEngine<ReviewContext>;
   private readonly presenter: ReviewPresenter;
   private readonly options: PiPermissionsOptions<ReviewContext>;
   private activeTurn: TurnHandle<ReviewContext> | undefined;
   private currentContext: ExtensionContext | undefined;
   private circuitPauseNotified = false;
+  /**
+   * Parked parent levels while a delegated child turn is open.
+   * The child Engine is fresh (no shared grants); the parent resumes
+   * byte-identical on closeNestedTurn.
+   */
+  private nestedLevels: Array<{
+    engine: ApproveForMeEngine<ReviewContext>;
+    turn: TurnHandle<ReviewContext> | undefined;
+    context: ExtensionContext | undefined;
+  }> = [];
 
   constructor(options: PiPermissionsOptions<ReviewContext> = {}) {
     this.options = options;
     this.presenter = new ReviewPresenter();
-    this.engine = createApproveForMeEngine<ReviewContext>({
-      guardian: options.guardian,
-      policy: options.policy,
+    this.engine = this.createEngine();
+  }
+
+  private createEngine(): ApproveForMeEngine<ReviewContext> {
+    return createApproveForMeEngine<ReviewContext>({
+      guardian: this.options.guardian,
+      policy: this.options.policy,
       onReviewEvent: (event) => this.handleReviewEvent(event),
       onAutoStateChange: (state) => this.handleAutoStateChange(state),
     });
@@ -272,9 +296,46 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
 
   beginTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void {
     if (this.activeTurn) this.closeTurn("turn replaced");
+    this.discardNestedLevels("turn replaced");
     this.currentContext = context;
     this.circuitPauseNotified = false;
     this.activeTurn = this.engine.beginTurn(snapshot);
+  }
+
+  beginNestedTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void {
+    this.nestedLevels.push({
+      engine: this.engine,
+      turn: this.activeTurn,
+      context: this.currentContext,
+    });
+    this.engine = this.createEngine();
+    this.currentContext = context;
+    this.circuitPauseNotified = false;
+    this.activeTurn = this.engine.beginTurn(snapshot);
+  }
+
+  closeNestedTurn(reason = "nested turn closed"): void {
+    const parent = this.nestedLevels.pop();
+    // No parked level (e.g. a session-only fallback nesting): leave the live
+    // turn untouched instead of tearing it down.
+    if (!parent) return;
+    this.activeTurn?.close(reason);
+    this.engine = parent.engine;
+    this.activeTurn = parent.turn;
+    this.currentContext = parent.context;
+    this.circuitPauseNotified = false;
+  }
+
+  hasNestedTurn(): boolean {
+    return this.nestedLevels.length > 0;
+  }
+
+  private discardNestedLevels(reason: string): void {
+    while (this.nestedLevels.length > 0) {
+      const level = this.nestedLevels.pop();
+      level?.turn?.close(reason);
+      level?.engine.invalidate(reason);
+    }
   }
 
   hasActiveTurn(): boolean {
@@ -366,6 +427,7 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
   closeTurn(reason = "turn closed"): void {
     const turn = this.activeTurn;
     const ui = reviewUi(this.currentContext);
+    this.discardNestedLevels(reason);
     this.activeTurn = undefined;
     this.currentContext = undefined;
     this.circuitPauseNotified = false;
@@ -375,6 +437,7 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
 
   invalidate(reason: string): void {
     const ui = reviewUi(this.currentContext);
+    this.discardNestedLevels(reason);
     this.activeTurn = undefined;
     this.currentContext = undefined;
     this.circuitPauseNotified = false;

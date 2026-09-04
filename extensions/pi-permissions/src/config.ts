@@ -30,6 +30,18 @@ export interface PermissionsConfig {
     };
   };
   rules: Array<{ action: "allow" | "ask" | "deny"; tool: string; pattern?: string }>;
+  delegation: {
+    /** Master switch for nested-turn envelope enforcement. Empty roots inherit. */
+    enabled: boolean;
+    /** Max nested subagent levels below the outer turn (0 = leaf-only outer). */
+    maxDepth: number;
+    /** Whether a delegated child may itself spawn subagents. */
+    allowReDelegate: boolean;
+    /** Narrowed write roots for children; [] inherits the parent policy. */
+    writeRoots: string[];
+    /** Narrowed network hosts for children; [] inherits the parent policy. */
+    networkHosts: string[];
+  };
 }
 
 export interface LoadedPermissionsConfig {
@@ -55,6 +67,13 @@ export type PermissionsConfigOverlay = {
     };
   };
   rules?: PermissionsConfig["rules"];
+  delegation?: {
+    enabled?: boolean;
+    maxDepth?: number;
+    allowReDelegate?: boolean;
+    writeRoots?: string[];
+    networkHosts?: string[];
+  };
 };
 
 export class ConfigError extends Error {
@@ -86,6 +105,13 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
     },
   },
   rules: [],
+  delegation: {
+    enabled: true,
+    maxDepth: 8,
+    allowReDelegate: true,
+    writeRoots: [],
+    networkHosts: [],
+  },
 };
 
 const profiles = new Set<PermissionsConfig["sandbox"]["profile"]>(["workspace-write", "read-only"]);
@@ -191,7 +217,7 @@ function cloneConfig(config: PermissionsConfig): PermissionsConfig {
 
 function parseOverlay(input: unknown): PermissionsConfigOverlay {
   if (!isRecord(input)) throw new ConfigError("config must be an object");
-  rejectUnknownKeys(input, ["version", "reviewer", "sandbox", "rules"], "");
+  rejectUnknownKeys(input, ["version", "reviewer", "sandbox", "rules", "delegation"], "");
   const overlay: PermissionsConfigOverlay = {};
 
   if ("version" in input && input.version !== undefined) {
@@ -341,6 +367,43 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         : parsed;
     });
   }
+  if ("delegation" in input && input.delegation !== undefined) {
+    if (!isRecord(input.delegation)) throw new ConfigError("delegation must be an object");
+    rejectUnknownKeys(
+      input.delegation,
+      ["enabled", "maxDepth", "allowReDelegate", "writeRoots", "networkHosts"],
+      "delegation",
+    );
+    const delegation: NonNullable<PermissionsConfigOverlay["delegation"]> = {};
+    if ("enabled" in input.delegation && input.delegation.enabled !== undefined)
+      delegation.enabled = expectBoolean(input.delegation.enabled, "delegation.enabled");
+    if ("maxDepth" in input.delegation && input.delegation.maxDepth !== undefined) {
+      const maxDepth: unknown = input.delegation.maxDepth;
+      if (
+        typeof maxDepth !== "number" ||
+        !Number.isInteger(maxDepth) ||
+        maxDepth < 0 ||
+        maxDepth > 31
+      ) {
+        throw new ConfigError("delegation.maxDepth must be an integer between 0 and 31");
+      }
+      delegation.maxDepth = maxDepth;
+    }
+    if ("allowReDelegate" in input.delegation && input.delegation.allowReDelegate !== undefined)
+      delegation.allowReDelegate = expectBoolean(
+        input.delegation.allowReDelegate,
+        "delegation.allowReDelegate",
+      );
+    if ("writeRoots" in input.delegation && input.delegation.writeRoots !== undefined)
+      delegation.writeRoots = expectStrings(input.delegation.writeRoots, "delegation.writeRoots");
+    if ("networkHosts" in input.delegation && input.delegation.networkHosts !== undefined)
+      delegation.networkHosts = expectNetworkDomainPatterns(
+        input.delegation.networkHosts,
+        "delegation.networkHosts",
+        false,
+      );
+    overlay.delegation = delegation;
+  }
   return overlay;
 }
 
@@ -370,6 +433,18 @@ function applyOverlay(
       config.sandbox.network.allowLocalBinding = overlay.sandbox.network.allowLocalBinding;
   }
   if (overlay.rules !== undefined) config.rules = structuredClone(overlay.rules);
+  if (overlay.delegation !== undefined) {
+    if (overlay.delegation.enabled !== undefined)
+      config.delegation.enabled = overlay.delegation.enabled;
+    if (overlay.delegation.maxDepth !== undefined)
+      config.delegation.maxDepth = overlay.delegation.maxDepth;
+    if (overlay.delegation.allowReDelegate !== undefined)
+      config.delegation.allowReDelegate = overlay.delegation.allowReDelegate;
+    if (overlay.delegation.writeRoots !== undefined)
+      config.delegation.writeRoots = [...overlay.delegation.writeRoots];
+    if (overlay.delegation.networkHosts !== undefined)
+      config.delegation.networkHosts = [...overlay.delegation.networkHosts];
+  }
   return config;
 }
 
@@ -416,7 +491,16 @@ export async function loadPermissionsConfig(agentDir: string): Promise<LoadedPer
   };
 }
 
-function stableValue(value: unknown): unknown {
+/** JSON-compatible value: the domain stableValue normalizes into for hashing. */
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
+function stableValue(value: unknown): JsonValue {
   if (Array.isArray(value)) return value.map(stableValue);
   if (isRecord(value)) {
     return Object.fromEntries(
@@ -425,7 +509,9 @@ function stableValue(value: unknown): unknown {
         .map((key) => [key, stableValue(value[key])]),
     );
   }
-  return value;
+  // Non-container leaves pass through; JSON.stringify drops what JSON cannot
+  // represent (undefined/functions) exactly as it did before typing.
+  return value as JsonValue;
 }
 
 export function fingerprintValue(value: unknown): string {

@@ -20,5 +20,12 @@
       "allowLocalBinding": false
     }
   },
-  "rules": []
+  "rules": [],
+  "delegation": {
+    "enabled": true,
+    "maxDepth": 8,
+    "allowReDelegate": true,
+    "writeRoots": [],
+    "networkHosts": []
+  }
 }

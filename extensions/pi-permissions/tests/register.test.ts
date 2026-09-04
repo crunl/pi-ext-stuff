@@ -1222,4 +1222,187 @@ describe("Permission mode registration", () => {
     expect(app.bareBashExecute).not.toHaveBeenCalled();
     expect(app.reviewInputs).toHaveLength(0);
   });
+
+  it("keeps the outer turn alive across nested end+settled pairs", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+    await startSession(app);
+    await startAgent(app);
+
+    await startAgent(app);
+    await endAgent(app);
+    await settle();
+    await executeBash(app, "nested-bash", "printf nested");
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+
+    await startAgent(app);
+    await endAgent(app);
+    await settle();
+    await executeBash(app, "sibling-bash", "printf sibling");
+    expect(app.sandboxBashExecute).toHaveBeenCalledTimes(2);
+
+    await endAgent(app);
+    await settle();
+    await expect(executeBash(app, "orphan-bash", "printf orphan")).rejects.toThrow(
+      "The active permission context is unavailable",
+    );
+  });
+
+  it("closes the turn on settled without a preceding end", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    await startAgent(app);
+    await invoke(app, "agent_settled", { type: "agent_settled" });
+    await expect(executeBash(app, "orphan-bash", "printf orphan")).rejects.toThrow(
+      "The active permission context is unavailable",
+    );
+  });
+
+  it("runs nested subagents on a narrowed child turn", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["sub"] } },
+      risk: () => lowRisk(),
+    });
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    await executeWrite(app, "child-write-in", "sub/a.txt", "hi");
+    const policies = app.sandboxManager.wrapWithSandbox.mock.calls.map(
+      (call) => call[2] as { filesystem: { allowWrite: string[] } },
+    );
+    expect(policies.length).toBeGreaterThan(0);
+    for (const policy of policies) {
+      expect(policy.filesystem.allowWrite).not.toContain(app.cwd);
+      expect(policy.filesystem.allowWrite).not.toContain("/tmp");
+    }
+
+    await expect(executeWrite(app, "child-write-out", "other.txt", "no")).rejects.toThrow(
+      /delegation envelope/,
+    );
+
+    await endAgent(app);
+    await settle();
+    // The parent turn resumes with its full policy after the child closes.
+    await executeWrite(app, "parent-write", "other.txt", "yes");
+  });
+
+  it("gates subagent spawns on re-delegation and depth", async () => {
+    const app = await makeHarness({
+      config: { delegation: { allowReDelegate: false } },
+      risk: () => lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeHostCall(app, "subagent", "spawn-outer")).resolves.toBeUndefined();
+
+    await startAgent(app);
+    const nested = await executeHostCall(app, "subagent", "spawn-nested");
+    expect(nested).toMatchObject({ block: true });
+    expect((nested as { reason?: string }).reason).toContain("Re-delegation is disabled");
+
+    await endAgent(app);
+    await invoke(app, "agent_settled", { type: "agent_settled" });
+  });
+
+  it("refuses subagent spawns when delegation maxDepth is 0", async () => {
+    const app = await makeHarness({
+      config: { delegation: { maxDepth: 0 } },
+      risk: () => lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    const blocked = await executeHostCall(app, "subagent", "spawn-blocked");
+    expect(blocked).toMatchObject({ block: true });
+    expect((blocked as { reason?: string }).reason).toContain("depth limit");
+  });
+
+  it("blocks admission-declared bash capabilities outside the envelope", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["sub"], networkHosts: [] } },
+      risk: (tool) =>
+        tool === "bash" ? promptRisk({ networkHosts: ["outside.example"] }) : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    // Blocked before Guardian review: no lease expansion past the ceiling.
+    await expect(
+      executeBash(app, "child-bash-net", "curl https://outside.example"),
+    ).rejects.toThrow(/delegation envelope/);
+    expect(app.reviewInputs).toHaveLength(0);
+
+    await endAgent(app);
+    await invoke(app, "agent_settled", { type: "agent_settled" });
+  });
+
+  it("blocks declared host-tool capabilities outside the envelope", async () => {
+    const app = await makeHarness({
+      config: { delegation: { networkHosts: [] } },
+      risk: (tool) =>
+        tool === "WebFetch" ? promptRisk({ networkHosts: ["outside.example"] }) : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    const blocked = await executeHostCall(app, "WebFetch", "child-fetch");
+    expect(blocked).toMatchObject({ block: true });
+    expect((blocked as { reason?: string }).reason).toContain("delegation envelope");
+    expect(app.reviewInputs).toHaveLength(0);
+
+    await endAgent(app);
+    await invoke(app, "agent_settled", { type: "agent_settled" });
+  });
+
+  it("narrows envelopes across a two-level delegation chain", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["sub"] } },
+      risk: () => lowRisk(),
+    });
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    await executeWrite(app, "l2-write-in", "sub/deep.txt", "hi");
+    await expect(executeWrite(app, "l2-write-out", "other.txt", "no")).rejects.toThrow(
+      /delegation envelope/,
+    );
+
+    await endAgent(app);
+    await settle();
+    await endAgent(app);
+    await settle();
+    // Back at the outer level the full policy applies again.
+    await executeWrite(app, "outer-write", "other.txt", "yes");
+    await endAgent(app);
+    await settle();
+  });
+
+  it("keeps turn accounting exact through nesting saturation", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+    await startSession(app);
+    await startAgent(app);
+    for (let i = 0; i < 40; i += 1) {
+      await startAgent(app);
+    }
+
+    // Saturated levels share the parent turn instead of dying: still alive.
+    await executeBash(app, "saturated-bash", "printf saturated");
+    expect(app.sandboxBashExecute).toHaveBeenCalled();
+
+    for (let i = 0; i < 40; i += 1) {
+      await endAgent(app);
+      await settle();
+    }
+    // Balanced unwind closes exactly once: no leak keeps the turn alive.
+    await expect(executeBash(app, "orphan-bash", "printf orphan")).rejects.toThrow(
+      "The active permission context is unavailable",
+    );
+  });
 });
