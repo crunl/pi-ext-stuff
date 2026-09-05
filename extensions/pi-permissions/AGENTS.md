@@ -114,5 +114,8 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
 - Design history: `docs/superpowers/{plans,specs}` and dated notes in
   `docs/research/`; task briefs and review diffs in `.superpowers/sdd/`.
 
-Peer deps pin the target host: `@earendil-works/pi-coding-agent` 0.84.4 —
+Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.85.0 —
 check its API surface before upgrading assumptions about extension hooks.
+Use pnpm for dependency installation: `pnpm-workspace.yaml` supplies the missing
+`pi-server` dependency for the published 0.85.0 SDK entry through a version-scoped
+`packageExtensions` correction. Recheck this workaround on the next Pi upgrade.

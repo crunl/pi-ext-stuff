@@ -715,7 +715,7 @@ describe("Permission mode registration", () => {
       content: [
         {
           type: "text",
-          text: `Successfully wrote 10 bytes to ${path}`,
+          text: `Successfully wrote to ${path}`,
         },
       ],
       details: undefined,
