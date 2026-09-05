@@ -32,7 +32,9 @@ describe("registerCodexToolRendering", () => {
     }
   });
 
-  it("delegates read execution to a definition rooted at the call's cwd", async () => {
+  // The host resolves paths against ctx.cwd natively (Pi 0.85+), so the
+  // registered execute() is the factory's own — this pins that behavior.
+  it("executes reads against the call's cwd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-core-builtin-"));
     try {
       writeFileSync(join(dir, "probe.txt"), "probe-content\n");

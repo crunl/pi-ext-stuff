@@ -1,132 +1,29 @@
 /**
- * /effort — open a thinking-level panel matching Settings → Thinking level.
+ * /effort — open the host's thinking-level panel (Settings → Thinking level).
  *
  * Uses ctx.ui.custom (editor-slot swap, same path as built-in selectors) so
- * selector-tab-nav and selector-float apply. UI mirrors settings' SelectSubmenu:
- * title, subtitle, SelectList with label+description, preselect current.
- * Esc dismisses back to the editor (top-level command, not a settings submenu).
+ * selector-tab-nav and selector-float apply. The panel itself is pi's own
+ * ThinkingSelectorComponent, and level availability comes from pi-ai's
+ * getSupportedThinkingLevels — search filter, descriptions, and level
+ * filtering all stay in the host, so this command cannot drift from
+ * Settings the way a mirrored local copy would.
  */
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, type SelectListTheme, Spacer, Text } from "@earendil-works/pi-tui";
+
+import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ThinkingSelectorComponent } from "@earendil-works/pi-coding-agent";
 import { markFloatableSelector } from "./selector-float.ts";
 import { isInteractiveTui } from "./ui-guard.ts";
 
-/** Same copy as settings-selector / ThinkingSelectorComponent (0.84.1). */
-export const THINKING_DESCRIPTIONS: Record<string, string> = {
-  off: "No reasoning",
-  minimal: "Very brief reasoning (~1k tokens)",
-  low: "Light reasoning (~2k tokens)",
-  medium: "Moderate reasoning (~8k tokens)",
-  high: "Deep reasoning (~16k tokens)",
-  xhigh: "Extra-high reasoning (~32k tokens)",
-  max: "Maximum reasoning",
-};
-
-/** Host order from @earendil-works/pi-ai getSupportedThinkingLevels. */
-export const EXTENDED_THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
-
-type EffortLevel = (typeof EXTENDED_THINKING_LEVELS)[number];
-
-/** Minimal model shape needed to mirror host level filtering. */
-export interface EffortModelInfo {
-  reasoning?: boolean;
-  thinkingLevelMap?: Partial<Record<string, string | null>>;
-}
-
-/**
- * Mirror of pi-ai getSupportedThinkingLevels (kept local for unit tests
- * without jiti virtualModules).
- */
-export function availableThinkingLevels(model: EffortModelInfo | undefined | null): EffortLevel[] {
-  if (!model?.reasoning) return ["off"];
-  return EXTENDED_THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
-}
-
-const SELECT_LAYOUT = {
-  minPrimaryColumnWidth: 12,
-  maxPrimaryColumnWidth: 32,
-};
-
-/** Visible rows of the level list. */
-const EFFORT_LIST_ROWS = 10;
-
-/**
- * Settings-parity thinking picker. Marked floatable so selector-float lifts
- * it into EditorFloatPanel. Forwards input to the inner SelectList
- * (Container alone does not).
- */
-export class EffortSelectorComponent extends Container {
-  private readonly selectList: SelectList;
-
-  constructor(
-    theme: Theme,
-    currentLevel: string,
-    levels: readonly EffortLevel[],
-    onSelect: (level: EffortLevel) => void,
-    onCancel: () => void,
-    /** Test seam: avoid pi theme singleton when provided. */
-    selectListTheme?: SelectListTheme,
-  ) {
-    super();
-    // Cross-jiti brand — constructor.name alone is unreliable under loaders.
-    markFloatableSelector(this);
-
-    this.addChild(new Text(theme.bold(theme.fg("accent", "Thinking Level")), 0, 0));
-    this.addChild(new Spacer(1));
-    this.addChild(
-      new Text(theme.fg("muted", "Select reasoning depth for thinking-capable models"), 0, 0),
-    );
-    this.addChild(new Spacer(1));
-
-    const items = levels.map((level) => ({
-      value: level,
-      label: level,
-      description: THINKING_DESCRIPTIONS[level] ?? "",
-    }));
-
-    this.selectList = new SelectList(
-      items,
-      Math.min(items.length, EFFORT_LIST_ROWS),
-      selectListTheme ?? getSelectListTheme(),
-      SELECT_LAYOUT,
-    );
-
-    const currentIndex = items.findIndex((item) => item.value === currentLevel);
-    if (currentIndex !== -1) {
-      this.selectList.setSelectedIndex(currentIndex);
-    }
-
-    this.selectList.onSelect = (item) => {
-      // SelectList's public value type is string; this list was built solely
-      // from the EffortLevel array above, so narrow at the library boundary.
-      onSelect(item.value as EffortLevel);
-    };
-    this.selectList.onCancel = () => {
-      onCancel();
-    };
-
-    this.addChild(this.selectList);
-    this.addChild(new Spacer(1));
-    this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to cancel"), 0, 0));
-  }
-
-  handleInput(data: string): void {
-    this.selectList.handleInput(data);
-  }
+interface EffortChoice {
+  level: ModelThinkingLevel;
+  /**
+   * Save-key was used. Extensions cannot persist the default (the host
+   * SettingsManager is not exposed), so this still applies the level to the
+   * session and points at /settings — keeping the component's own footer
+   * hint honest instead of leaving a dead key.
+   */
+  asDefault: boolean;
 }
 
 /** Register `/effort` slash command. */
@@ -136,29 +33,35 @@ export function registerEffortCommand(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       if (!isInteractiveTui(ctx)) return;
 
-      const model = ctx.model as EffortModelInfo | undefined;
+      const model = ctx.model;
       if (!model?.reasoning) {
         ctx.ui.notify("Current model does not support thinking", "warning");
         return;
       }
 
-      const levels = availableThinkingLevels(model);
+      const levels = getSupportedThinkingLevels(model);
       const current = pi.getThinkingLevel();
 
-      const chosen = await ctx.ui.custom<EffortLevel | undefined>((_tui, theme, _kb, done) => {
-        return new EffortSelectorComponent(
-          theme,
+      const chosen = await ctx.ui.custom<EffortChoice | undefined>((_tui, _theme, _kb, done) => {
+        const component = new ThinkingSelectorComponent(
           current,
           levels,
-          (level) => done(level),
+          (level) => done({ level, asDefault: false }),
           () => done(undefined),
+          (level) => done({ level, asDefault: true }),
         );
+        return markFloatableSelector(component);
       });
 
       if (chosen === undefined) return;
 
-      pi.setThinkingLevel(chosen);
-      ctx.ui.notify(`Thinking level: ${chosen}`, "info");
+      pi.setThinkingLevel(chosen.level);
+      ctx.ui.notify(
+        chosen.asDefault
+          ? `Thinking level: ${chosen.level} (this session; change the default in /settings)`
+          : `Thinking level: ${chosen.level}`,
+        "info",
+      );
     },
   });
 }

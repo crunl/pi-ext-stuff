@@ -1,130 +1,91 @@
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import {
-  availableThinkingLevels,
-  EffortSelectorComponent,
-  registerEffortCommand,
-  THINKING_DESCRIPTIONS,
-} from "../src/tui/effort-command.ts";
-import {
-  fakeSelectListTheme as selectListTheme,
-  fakeTheme as theme,
-} from "./helpers/effort-fixtures.ts";
+import { registerEffortCommand } from "../src/tui/effort-command.ts";
+import { isAllowlistedSelector } from "../src/tui/selector-float.ts";
+import { fakeTheme as theme } from "./helpers/effort-fixtures.ts";
 
-describe("availableThinkingLevels", () => {
-  it("returns only off when the model has no reasoning", () => {
-    expect(availableThinkingLevels(undefined)).toEqual(["off"]);
-    expect(availableThinkingLevels({ reasoning: false })).toEqual(["off"]);
-  });
+interface TuiContextDouble {
+  hasUI: boolean;
+  mode: string;
+  model: unknown;
+  ui: { custom: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
+}
 
-  it("includes base levels for a reasoning model without a map", () => {
-    expect(availableThinkingLevels({ reasoning: true })).toEqual([
-      "off",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-    ]);
-  });
+function register(commands = new Map<string, any>(), pi: any = {}) {
+  registerEffortCommand({
+    registerCommand: (name: string, opts: any) => commands.set(name, opts),
+    getThinkingLevel: () => "medium",
+    setThinkingLevel: vi.fn(),
+    ...pi,
+  } as any);
+  return commands;
+}
 
-  it("hides levels mapped to null and only shows xhigh/max when mapped", () => {
-    expect(
-      availableThinkingLevels({
-        reasoning: true,
-        thinkingLevelMap: {
-          minimal: null,
-          xhigh: "xhigh",
-          max: "max",
-        },
-      }),
-    ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
-  });
-});
-
-describe("THINKING_DESCRIPTIONS", () => {
-  it("matches settings-selector copy for every extended level", () => {
-    expect(THINKING_DESCRIPTIONS.off).toBe("No reasoning");
-    expect(THINKING_DESCRIPTIONS.high).toContain("~16k");
-    expect(THINKING_DESCRIPTIONS.max).toBe("Maximum reasoning");
-  });
-});
-
-describe("EffortSelectorComponent", () => {
-  it("forwards input to the select list and reports selection", () => {
-    const onSelect = vi.fn();
-    const onCancel = vi.fn();
-    const panel = new EffortSelectorComponent(
-      theme,
-      "high",
-      ["off", "low", "high"],
-      onSelect,
-      onCancel,
-      selectListTheme,
-    );
-
-    // Enter confirms the preselected "high" (index of high in list).
-    panel.handleInput("\r");
-    expect(onSelect).toHaveBeenCalledWith("high");
-    expect(onCancel).not.toHaveBeenCalled();
-  });
-
-  it("renders title and level labels", () => {
-    const panel = new EffortSelectorComponent(
-      theme,
-      "low",
-      ["off", "low", "high"],
-      vi.fn(),
-      vi.fn(),
-      selectListTheme,
-    );
-    const lines = panel.render(80).join("\n");
-    expect(lines).toContain("Thinking Level");
-    expect(lines).toContain("Select reasoning depth");
-    expect(lines).toContain("low");
-    expect(lines).toContain("high");
-  });
-});
+function tuiContext(overrides: Partial<TuiContextDouble> = {}): TuiContextDouble {
+  return {
+    hasUI: true,
+    mode: "tui",
+    model: { reasoning: true },
+    ui: { custom: vi.fn(), notify: vi.fn() },
+    ...overrides,
+  };
+}
 
 describe("registerEffortCommand", () => {
-  it("registers /effort and opens the panel for reasoning models", async () => {
+  it("registers /effort and applies the chosen level for the session", async () => {
     const commands = new Map<string, any>();
     const setThinkingLevel = vi.fn();
-    const getThinkingLevel = vi.fn(() => "medium");
     const notify = vi.fn();
-    const custom = vi.fn(async (_factory: any) => "high");
-
-    registerEffortCommand({
-      registerCommand: (name: string, opts: any) => commands.set(name, opts),
-      getThinkingLevel,
-      setThinkingLevel,
-    } as any);
+    const custom = vi.fn(async (_factory: any) => ({ level: "high", asDefault: false }));
+    register(commands, { setThinkingLevel });
 
     expect(commands.has("effort")).toBe(true);
-    await commands.get("effort").handler("", {
-      hasUI: true,
-      mode: "tui",
-      model: { reasoning: true },
-      ui: { custom, notify },
-    });
+    await commands.get("effort").handler("", { ...tuiContext(), ui: { custom, notify } });
 
     expect(custom).toHaveBeenCalled();
     expect(setThinkingLevel).toHaveBeenCalledWith("high");
     expect(notify).toHaveBeenCalledWith("Thinking level: high", "info");
   });
 
+  it("points at /settings when the save-key choice is used", async () => {
+    const commands = new Map<string, any>();
+    const setThinkingLevel = vi.fn();
+    const notify = vi.fn();
+    const custom = vi.fn(async (_factory: any) => ({ level: "max", asDefault: true }));
+    register(commands, { setThinkingLevel });
+
+    await commands.get("effort").handler("", { ...tuiContext(), ui: { custom, notify } });
+
+    // Extensions cannot persist the default; the level still applies to the
+    // session and the notice stays honest about where defaults live.
+    expect(setThinkingLevel).toHaveBeenCalledWith("max");
+    expect(notify).toHaveBeenCalledWith(
+      "Thinking level: max (this session; change the default in /settings)",
+      "info",
+    );
+  });
+
+  it("does nothing when the panel is dismissed", async () => {
+    const commands = new Map<string, any>();
+    const setThinkingLevel = vi.fn();
+    const notify = vi.fn();
+    const custom = vi.fn(async (_factory: any) => undefined);
+    register(commands, { setThinkingLevel });
+
+    await commands.get("effort").handler("", { ...tuiContext(), ui: { custom, notify } });
+
+    expect(setThinkingLevel).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("warns and skips the panel when the model cannot think", async () => {
     const commands = new Map<string, any>();
     const notify = vi.fn();
     const custom = vi.fn();
-
-    registerEffortCommand({
-      registerCommand: (name: string, opts: any) => commands.set(name, opts),
-      getThinkingLevel: () => "off",
-      setThinkingLevel: vi.fn(),
-    } as any);
+    register(commands);
 
     await commands.get("effort").handler("", {
-      hasUI: true,
-      mode: "tui",
+      ...tuiContext(),
       model: { reasoning: false },
       ui: { custom, notify },
     });
@@ -136,18 +97,45 @@ describe("registerEffortCommand", () => {
   it("does nothing outside tui", async () => {
     const commands = new Map<string, any>();
     const custom = vi.fn();
-    registerEffortCommand({
-      registerCommand: (name: string, opts: any) => commands.set(name, opts),
-      getThinkingLevel: () => "high",
-      setThinkingLevel: vi.fn(),
-    } as any);
+    register(commands);
 
     await commands.get("effort").handler("", {
-      hasUI: true,
+      ...tuiContext(),
       mode: "rpc",
-      model: { reasoning: true },
       ui: { custom, notify: vi.fn() },
     });
     expect(custom).not.toHaveBeenCalled();
+  });
+
+  it("composes the host panel as a floatable component wired to done()", async () => {
+    const commands = new Map<string, any>();
+    let factory: any;
+    const custom = vi.fn(async (f: any) => {
+      factory = f;
+      return undefined;
+    });
+    register(commands);
+
+    await commands.get("effort").handler("", { ...tuiContext(), ui: { custom, notify: vi.fn() } });
+    expect(factory).toBeDefined();
+
+    // The host panel reads the theme singleton at construction.
+    initTheme();
+    const done = vi.fn();
+    const component = factory({}, theme, {}, done);
+    expect(isAllowlistedSelector(component)).toBe(true);
+
+    // Drive the host panel's own select/cancel outlets: our closures must
+    // translate them into the EffortChoice the handler understands.
+    // getSelectList() is the component's public accessor — do not reach
+    // into its private field.
+    const selectList = component.getSelectList() as unknown as {
+      onSelect: ((item: { value: string }) => void) | undefined;
+      onCancel: (() => void) | undefined;
+    };
+    selectList.onSelect?.({ value: "high" });
+    expect(done).toHaveBeenCalledWith({ level: "high", asDefault: false });
+    selectList.onCancel?.();
+    expect(done).toHaveBeenCalledWith(undefined);
   });
 });

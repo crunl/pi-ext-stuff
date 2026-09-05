@@ -29,9 +29,6 @@ Exports (no side effects on import):
 - `withCodexToolPresentation` — pi-permissions; decorates a complete tool definition while preserving its execution and metadata
 - `createEditDiffBox` — pi-permissions
 - `createCodexToolRendering` — pi-permissions
-- `markToolCall` / `ToolCallMark` — permission UIs; requests a persistent,
-  host-owned tool-row mark when the host supports the optional API and safely
-  returns `false` on older hosts
 - `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` and `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `summarizeEditDiff` — pi-permissions migration compatibility; marked `@deprecated` in `standalone.ts`, prefer `withCodexToolPresentation` for new code
 
 Adding an export here is the only supported way to widen the contract.
@@ -41,21 +38,21 @@ Adding an export here is the only supported way to widen the contract.
 - `codex-tool-presentation.ts` — side-effect-free decorator seam. It maps the
   complete seven-tool definition to an internal spec and replaces only
   `renderShell`/`renderCall`/`renderResult`; unsupported names fail fast.
-- `built-in-tools.ts` — registers Codex rendering on read/grep/find/ls. It wraps
-  Pi's public `create*ToolDefinition` factories so prompt metadata and the full
-  execution context are preserved. The four per-tool blocks cannot be
-  table-driven: `registerTool` infers the schema from the spread argument, so
-  each tool needs its own call site.
+- `built-in-tools.ts` — registers Codex rendering on read/grep/find/ls.
+  Presentation only: since Pi 0.85.0 the factories' execute() honors
+  `ctx.cwd` natively, so the definitions register as-is through one shared
+  helper. The four call sites cannot be table-driven: `registerTool` infers
+  the schema from the spread argument, so each tool needs its own call site.
 - `canonical-tool-fallback.ts` — TUI-only adapter for canonical bash/write/edit.
   It snapshots `getAllTools()` before registering anything, skips extension/SDK
   owners, reconstructs definitions with Pi's public factories, and never calls
-  `setActiveTools`. Pi 0.84.1 cannot expose the actual definition or host
+  `setActiveTools`. Pi 0.85.1 cannot expose the actual definition or host
   `SettingsManager` through the extension context, so an SDK
   `baseToolsOverride`, custom/non-file-backed shell settings, and a later
   dynamic same-name registration cannot be distinguished safely. Those SDK
   configurations should use the `off` flag; these remain documented
   compatibility boundaries rather than private-registry patch points.
-- Pi 0.84.1 has no public renderer-only registration API: execution and
+- Pi 0.85.1 has no public renderer-only registration API: execution and
   rendering are combined in `ToolDefinition`. If a future Pi release exposes
   an API such as `registerToolRenderer(name, renderer)`, replace this Adapter
   with that host integration while keeping `withCodexToolPresentation` as the
@@ -63,12 +60,9 @@ Adding an export here is the only supported way to widen the contract.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary)
   plus the per-tool summary helpers (bash status spacing compaction, edit-diff
   count/colorize, write line-count colorize).
-- `tool-call-mark.ts` — side-effect-free compatibility adapter for Pi's
-  optional `ExtensionUIContext.markToolCall()` API. UI failures and older hosts
-  return `false`; authorization callers never depend on the result.
-- `tool-renderer.ts` — generic `createCodexToolRendering(spec)`. When the host
-  supplies `ToolRenderContext.toolCallMark`, the renderer yields its own icon
-  so the host-owned mark remains the single leading status icon.
+- `tool-renderer.ts` — generic `createCodexToolRendering(spec)` with lifecycle
+  colors and renderer-owned shared state. Approval presentation remains outside
+  tool rows so completed calls retain their ordinary success/error semantics.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its
   controller is shared through `globalThis`/`Symbol.for` so renderers imported
   by pi-permissions through a separate jiti instance see the same value.
@@ -84,15 +78,18 @@ Adding an export here is the only supported way to widen the contract.
   replace the editor without leaking an overlay.
 - `token-rate.ts` (pure tracker) / `working-token-rate.ts` (indicator adapter):
   the rate is shown as part of the footer working line
-  (`setWorkingMessage`, `⠋ Working  50 tok/s`), cleared at `agent_end`; it does
+  (`setWorkingMessage`, `⠋ Working  50 tok/s`), cleared at `agent_end`; while
+  blocked on a `ctx.ui` prompt (`ui_prompt_start/end`) it shows `Waiting for
+  input` instead of a frozen rate, then restores. It does
   not overwrite spinner frames potentially owned by another extension. The
   legacy `setWidget("pi-core:working-token-rate")` above the editor is only
   cleared, never populated.
 - `ui-guard.ts` — shared `isInteractiveTui()` guard for terminal-only hooks;
   `hasUI` alone is insufficient because it is also true in RPC mode.
 - `effort-command.ts`, `exit-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
-  single-purpose patches (effort/exit register slash commands `/effort` and `/exit` (alias for `/quit`)). (`startup-header.ts` was removed — it rendered a
-  logo via the external `chafa` binary.) Pi 0.84's
+  single-purpose patches (effort/exit register slash commands `/effort` and `/exit` (alias for `/quit`);
+  `/effort` hosts pi's own `ThinkingSelectorComponent` with pi-ai level filtering, so no local copy can drift). (`startup-header.ts` was removed — it rendered a
+  logo via the external `chafa` binary.) Pi 0.85's
   `registerMarkdownTransformer()` can rewrite source text but cannot replace a
   themed token renderer, so framed code blocks remain a guarded prototype seam.
 

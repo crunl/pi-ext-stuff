@@ -195,6 +195,50 @@ describe("working token rate adapter", () => {
     expect(setWorkingMessage).toHaveBeenCalledTimes(2);
   });
 
+  it("shows waiting during ui prompts and restores the rate after", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("") }, context);
+    vi.setSystemTime(1000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
+    vi.setSystemTime(2000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
+
+    // Blocked on user input: the frozen decode rate would read as progress.
+    handlers.get("ui_prompt_start")?.({ kind: "select" }, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Waiting for input");
+
+    // Prompt resolved: the last rate comes back until the stream replaces it.
+    handlers.get("ui_prompt_end")?.({ kind: "select" }, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s");
+  });
+
+  it("restores pi's default when a prompt ends with no rate shown", () => {
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+
+    handlers.get("ui_prompt_start")?.({ kind: "confirm" }, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Waiting for input");
+
+    handlers.get("ui_prompt_end")?.({ kind: "confirm" }, context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("ignores ui prompts in non-TUI modes", () => {
+    const { handlers, context, setWorkingMessage } = registerForTest({
+      hasUI: false,
+      mode: "print",
+    });
+    handlers.get("ui_prompt_start")?.({ kind: "select" }, context);
+    handlers.get("ui_prompt_end")?.({ kind: "select" }, context);
+
+    expect(setWorkingMessage).not.toHaveBeenCalled();
+  });
+
   it("starts a new agent run with the legacy widget cleared", () => {
     const { handlers, context, setWidget } = registerForTest();
     handlers.get("agent_start")?.({}, context);

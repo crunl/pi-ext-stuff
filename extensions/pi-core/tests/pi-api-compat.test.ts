@@ -7,12 +7,12 @@ import { Editor, Markdown } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 
 /**
- * Pi 0.84.1 has no public hook for moving the built-in autocomplete list,
+ * Pi 0.85.1 has no public hook for moving the built-in autocomplete list,
  * replacing only fenced-code token rendering, or identifying the active host
  * selector. Keep these deliberate runtime seams loud: a future Pi upgrade
  * should fail here instead of degrading later in an interactive session.
  */
-describe("Pi 0.84.1 compatibility seams", () => {
+describe("Pi 0.85.1 compatibility seams", () => {
   it("retains the Editor autocomplete fields used for above-editor placement", () => {
     const editor = new Editor(
       { requestRender: () => {}, terminal: { rows: 24, columns: 80 } } as never,

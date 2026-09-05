@@ -113,6 +113,18 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
     tracker.reset();
   });
 
+  pi.on("ui_prompt_start", (_event, context) => {
+    if (!isInteractiveTui(context)) return;
+    // Blocked on user input: the frozen decode rate would read as progress.
+    context.ui.setWorkingMessage("Waiting for input");
+  });
+
+  pi.on("ui_prompt_end", (_event, context) => {
+    if (!isInteractiveTui(context)) return;
+    // Prompt resolved: restore the last rate, or pi's default when idle.
+    context.ui.setWorkingMessage(lastMessage === "" ? undefined : lastMessage);
+  });
+
   pi.on("agent_end", (_event, context) => {
     // Idle: the working line is restored to pi's default.
     clearRate(context);
