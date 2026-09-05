@@ -7,8 +7,8 @@ export type GitMetadataResult =
   | { ok: true; configPath: string; writeRoots: string[] }
   | { ok: false; reason: string };
 
-export type GitInitializationMetadataResult =
-  | { ok: true; writeRoots: string[] }
+export type GitMetadataProtectionResult =
+  | { ok: true; roots: string[] }
   | { ok: false; reason: string };
 
 type GitMetadataInspectionResult =
@@ -229,19 +229,99 @@ export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMeta
   return result.ok ? result : { ok: false, reason: result.reason };
 }
 
-export async function inspectCurrentDirectoryGitInitialization(
-  cwd: string,
-): Promise<GitInitializationMetadataResult> {
-  const result = await inspectGitMetadata(cwd, false);
-  if (result.ok) return { ok: true, writeRoots: result.writeRoots };
-  if (!("notFound" in result)) return result;
+function isMissingPath(error: unknown): boolean {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
+async function canonicalMetadataDirectory(path: string): Promise<string | undefined> {
   try {
-    return {
-      ok: true,
-      writeRoots: [join(await realpath(cwd), ".git")],
-    };
+    const canonical = await realpath(path);
+    if (isFilesystemRoot(canonical)) return undefined;
+    const details = await lstat(canonical);
+    return details.isDirectory() ? canonical : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function discoverMetadataRoots(metadataRoot: string): Promise<GitMetadataProtectionResult> {
+  const commondirPath = join(metadataRoot, "commondir");
+  let commondirDetails: Stats;
+  try {
+    commondirDetails = await lstat(commondirPath);
   } catch (error) {
-    return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+    if (isMissingPath(error)) return { ok: true, roots: [metadataRoot] };
+    return { ok: false, reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}` };
+  }
+  if (!commondirDetails.isFile() || commondirDetails.isSymbolicLink()) {
+    return { ok: false, reason: "unsafe Git common metadata path" };
+  }
+
+  let commonPointer: string;
+  try {
+    commonPointer = (await readFile(commondirPath, "utf8")).trim();
+  } catch (error) {
+    return { ok: false, reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}` };
+  }
+  if (!commonPointer) return { ok: false, reason: "unsafe Git common metadata path" };
+  const commonRoot = await canonicalMetadataDirectory(resolve(metadataRoot, commonPointer));
+  if (commonRoot === undefined) return { ok: false, reason: "unsafe Git common metadata path" };
+  return { ok: true, roots: [...new Set([metadataRoot, commonRoot])] };
+}
+
+/**
+ * Discover Git metadata roots that the base sandbox must keep read-only.
+ *
+ * This deliberately does less than inspectRepositoryGitMetadata(): activation
+ * needs protection identities even when a repository is incomplete, external,
+ * or not owned by the current worktree. Network remote parsing keeps using the
+ * stricter inspector above. An existing metadata pointer that cannot be
+ * canonicalized is an activation failure rather than an unprotected policy.
+ */
+export async function discoverGitMetadataProtectionRoots(
+  cwd: string,
+): Promise<GitMetadataProtectionResult> {
+  let directory = resolve(cwd);
+  const root = parse(directory).root;
+  while (true) {
+    const dotGit = join(directory, ".git");
+    let details: Stats;
+    try {
+      details = await lstat(dotGit);
+    } catch (error) {
+      if (!isMissingPath(error)) {
+        return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+      }
+      if (directory === root) return { ok: true, roots: [] };
+      directory = dirname(directory);
+      continue;
+    }
+
+    if (details.isSymbolicLink()) {
+      return { ok: false, reason: "unsafe Git metadata symlink" };
+    }
+
+    if (details.isDirectory()) {
+      const metadataRoot = await canonicalMetadataDirectory(dotGit);
+      if (metadataRoot === undefined) return { ok: false, reason: "unsafe Git metadata path" };
+      return discoverMetadataRoots(metadataRoot);
+    }
+
+    if (!details.isFile()) {
+      return { ok: false, reason: "unsafe Git metadata pointer" };
+    }
+
+    let pointer: string | undefined;
+    try {
+      pointer = /^gitdir:\s*(.+?)\s*$/i.exec(await readFile(dotGit, "utf8"))?.[1];
+    } catch (error) {
+      return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+    }
+    if (!pointer) return { ok: false, reason: "unsafe Git metadata pointer" };
+
+    const metadataRoot = await canonicalMetadataDirectory(resolve(directory, pointer));
+    if (metadataRoot === undefined) return { ok: false, reason: "unsafe Git metadata path" };
+    return discoverMetadataRoots(metadataRoot);
   }
 }
 

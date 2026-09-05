@@ -24,7 +24,6 @@ import {
   type RuntimeDenialPolicy,
   type TurnHandle,
 } from "./approve-for-me-engine.ts";
-import type { StructuredExecutionPlan } from "./execution-plan.ts";
 import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
 import type { ReviewUi } from "./review-presenter.ts";
 import { ReviewPresenter, type ReviewStatusBinding } from "./review-presenter.ts";
@@ -51,6 +50,10 @@ export interface PiTurnSnapshot {
   configFingerprint: string;
   baseSandboxPolicy?: SandboxPolicy;
   sandboxReady?: boolean;
+  escalationEligibility?: {
+    eligible: boolean;
+    reason: string;
+  };
   transcript?: readonly unknown[];
 }
 
@@ -73,9 +76,8 @@ export interface PiCapturedAction<Input = unknown> {
 /** The only execution capability shape visible to a Pi adapter. */
 export interface PiExecutionAttempt<Input = unknown> {
   readonly call: PiActionCall<Input>;
-  readonly mode: "sandboxed" | "host-admitted" | "unrestricted";
+  readonly mode: "sandboxed" | "host-admitted" | "escalated" | "unrestricted";
   readonly policy?: SandboxPolicy;
-  readonly plan?: StructuredExecutionPlan;
   readonly signal: AbortSignal;
   readonly authorizeCapability: (
     request: EngineCapabilityAuthorizationInput,
@@ -408,7 +410,6 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
           },
           mode: attempt.lease.mode,
           ...(attempt.lease.policy === undefined ? {} : { policy: attempt.lease.policy }),
-          ...(attempt.plan === undefined ? {} : { plan: attempt.plan }),
           signal: attempt.signal,
           authorizeCapability: attempt.authorizeCapability,
           rejectCapability: attempt.rejectCapability,

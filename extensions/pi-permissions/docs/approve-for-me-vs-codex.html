@@ -640,7 +640,8 @@
             </div>
             <div class="pi">
               <div class="k">Pi</div>
-              没有 unsandbox 重试。精确 filesystem capability 由 Engine 形成 lease，SRT policy 仍是最终 enforcement owner；只有 cwd `.git` 的 grantable deny 可被 exact grant 移除。
+              普通调用没有 unsandbox 重试。精确 filesystem capability 由 Engine 形成 lease，SRT policy 仍是最终 enforcement owner；显式
+              <code>sandbox_permissions=require_escalated</code> 只对冻结的完整 Bash command/cwd/justification 触发一次 action review，批准后才选择 native Pi executor，默认 metadata carveouts 不会伪装成永久授权。
             </div>
           </div>
         </article>

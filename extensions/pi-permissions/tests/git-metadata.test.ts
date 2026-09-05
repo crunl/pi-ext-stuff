@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  inspectCurrentDirectoryGitInitialization,
+  discoverGitMetadataProtectionRoots,
   inspectRepositoryGitMetadata,
   readRepositoryRemoteHosts,
 } from "../src/git-metadata.ts";
@@ -17,6 +17,44 @@ async function createGitDirectory(path: string, config = ""): Promise<void> {
 }
 
 describe("Git metadata ownership", () => {
+  it("discovers a separate-git-dir target without requiring worktree ownership", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-separate-git-dir-worktree-"));
+    const metadata = await mkdtemp(join(tmpdir(), "pi-permissions-separate-git-dir-metadata-"));
+    await createGitDirectory(metadata);
+    await writeFile(join(cwd, ".git"), `gitdir: ${metadata}\n`);
+
+    await expect(discoverGitMetadataProtectionRoots(cwd)).resolves.toEqual({
+      ok: true,
+      roots: [await realpath(metadata)],
+    });
+  });
+
+  it("discovers a common root from an ordinary Git metadata directory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-ordinary-git-worktree-"));
+    const gitDirectory = join(cwd, ".git");
+    const commonGit = join(cwd, "common.git");
+    await createGitDirectory(gitDirectory);
+    await createGitDirectory(commonGit);
+    await writeFile(join(gitDirectory, "commondir"), "../common.git\n");
+
+    await expect(discoverGitMetadataProtectionRoots(cwd)).resolves.toEqual({
+      ok: true,
+      roots: [await realpath(gitDirectory), await realpath(commonGit)],
+    });
+  });
+
+  it("fails closed when an existing common metadata pointer is malformed", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-ordinary-git-worktree-"));
+    const gitDirectory = join(cwd, ".git");
+    await mkdir(gitDirectory);
+    await writeFile(join(gitDirectory, "commondir"), "missing-common\n");
+
+    await expect(discoverGitMetadataProtectionRoots(cwd)).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("common metadata"),
+    });
+  });
+
   it("returns the real root for a complete ordinary .git directory", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-metadata-"));
     await createGitDirectory(join(cwd, ".git"));
@@ -33,29 +71,6 @@ describe("Git metadata ownership", () => {
     await mkdir(join(cwd, ".git"));
 
     await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
-  });
-
-  it("returns only the prospective child root when initializing inside a parent repository", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-git-metadata-"));
-    const cwd = join(parent, "child");
-    await createGitDirectory(join(parent, ".git"));
-    await mkdir(cwd);
-
-    await expect(inspectCurrentDirectoryGitInitialization(cwd)).resolves.toEqual({
-      ok: true,
-      writeRoots: [join(await realpath(cwd), ".git")],
-    });
-  });
-
-  it("fails initialization closed for malformed current-directory metadata", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-git-metadata-"));
-    const cwd = join(parent, "child");
-    await createGitDirectory(join(parent, ".git"));
-    await mkdir(join(cwd, ".git"), { recursive: true });
-
-    await expect(inspectCurrentDirectoryGitInitialization(cwd)).resolves.toMatchObject({
-      ok: false,
-    });
   });
 
   it("rejects a .git symbolic link before resolving its target", async () => {

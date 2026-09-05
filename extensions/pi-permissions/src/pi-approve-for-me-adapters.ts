@@ -102,7 +102,8 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
     review: requested.length > 0 ? "capability" : "action",
     reason: decision.reason,
     summary: decision.summary,
-    ...(decision.executionPlan === undefined ? {} : { execution: decision.executionPlan }),
+    ...(decision.executionMode === undefined ? {} : { executionMode: decision.executionMode }),
+    ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
 }
 
@@ -164,6 +165,11 @@ function policyForReview(
     // not mean an external MCP/custom tool is isolated by the sandbox adapter.
     return undefined;
   }
+  if (input.effective.mode === "escalated") {
+    // A one-shot escalated lease carries no sandbox policy. Evidence still
+    // comes from the separate baseline lease in evidenceScopeForReview().
+    return undefined;
+  }
   return input.effective.policy ?? context.baseSandboxPolicy;
 }
 
@@ -186,6 +192,7 @@ function guardianPermissionContext(
   decision: PromptRiskDecision,
 ): {
   sandboxProfile: "workspace-write" | "read-only";
+  executionMode: "sandboxed" | "escalated" | "host-admitted";
   sandboxEnforcesAction: boolean;
   filesystemWriteRoots: string[];
   filesystemDenyRead: string[];
@@ -202,6 +209,8 @@ function guardianPermissionContext(
   justification?: string;
 } {
   const policy = policyForReview(input);
+  const escalated = input.effective.mode === "escalated";
+  const hostAdmitted = input.ownership === "host-admission";
   const requestedNetworkTargets = input.requested.flatMap((request) =>
     request.kind === "network"
       ? [
@@ -215,13 +224,16 @@ function guardianPermissionContext(
   );
   return {
     sandboxProfile: input.context.sandboxProfile,
-    sandboxEnforcesAction: input.ownership !== "host-admission" && input.context.sandboxEnabled,
-    filesystemWriteRoots: [...(policy?.filesystem.allowWrite ?? [])],
-    filesystemDenyRead: [...(policy?.filesystem.denyRead ?? [])],
-    filesystemDenyWrite: [...(policy?.filesystem.denyWrite ?? [])],
+    executionMode: escalated ? "escalated" : hostAdmitted ? "host-admitted" : "sandboxed",
+    sandboxEnforcesAction: !hostAdmitted && !escalated && input.context.sandboxEnabled,
+    // Escalated execution has no sandbox grant or effective filesystem/network
+    // policy. The baseline remains separate reviewer evidence.
+    filesystemWriteRoots: escalated ? [] : [...(policy?.filesystem.allowWrite ?? [])],
+    filesystemDenyRead: escalated ? [] : [...(policy?.filesystem.denyRead ?? [])],
+    filesystemDenyWrite: escalated ? [] : [...(policy?.filesystem.denyWrite ?? [])],
     requestedNetworkTargets,
-    allowedNetworkHosts: [...(policy?.network.allowedDomains ?? [])],
-    deniedNetworkHosts: [...(policy?.network.deniedDomains ?? [])],
+    allowedNetworkHosts: escalated ? [] : [...(policy?.network.allowedDomains ?? [])],
+    deniedNetworkHosts: escalated ? [] : [...(policy?.network.deniedDomains ?? [])],
     staticRisk: decision.risk,
     staticReason: decision.reason,
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
@@ -239,6 +251,8 @@ function promptDecisionFromEngine(
     ...(input.source === "permission-amendment" && input.reason !== undefined
       ? { justification: input.reason }
       : {}),
+    ...(input.executionMode === undefined ? {} : { executionMode: input.executionMode }),
+    ...(input.justification === undefined ? {} : { justification: input.justification }),
   };
 }
 

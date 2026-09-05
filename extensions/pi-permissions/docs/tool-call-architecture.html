@@ -376,7 +376,7 @@
         <code>src/permission-amendment.ts</code>
         <code>src/sandbox/srt-enforcer.ts</code>
         <code>src/sandbox/srt-coordinator.ts</code>
-        <code>src/execution-plan.ts</code>
+        <code>src/git-metadata.ts</code>
       </div>
 
       <!-- ================= 总览 ================= -->
@@ -572,12 +572,12 @@
         </tr>
         <tr>
           <td>git 约束</td>
-          <td>隐式网络要读 remote；突变要能授予 metadata</td>
-          <td>多命令 git、不安全 remote、init 目录检查失败 → block</td>
+          <td>隐式网络要读 remote；metadata roots 由基础策略保护</td>
+          <td>不安全 remote / 无法安全发现 metadata → block；突变默认留在 SRT</td>
         </tr>
         <tr>
           <td><code>resolveAdditionalWriteRoots</code></td>
-          <td>bash 的 <code>additional_permissions</code> + git write roots</td>
+          <td>bash 的 <code>additional_permissions</code> 窄写入 roots</td>
           <td>申请不成立 → block</td>
         </tr>
         <tr>
@@ -827,9 +827,13 @@
           <div class="node sandbox">
             <div class="t"><span class="tag orange">租约</span><code>CapabilityLease</code></div>
             <div class="d">
-              Engine 将 base policy 与本次 exact request 合并为不可变 lease；
-              exact approved `.git` protected root 才能移除对应 grantable deny，
-              broad root 和 `.agents`/`.codex`/权限配置等 hard deny 不会解锁；
+              Engine 将 base policy 与普通 exact capability request 合并为不可变 lease；
+              `.git`/`.agents`/`.codex`/权限配置等基础保护不会被
+              <code>with_additional_permissions</code> 移除。显式
+              <code>sandbox_permissions=require_escalated</code> 是不同的
+              one-shot action lease：只绑定冻结的完整 command、cwd、justification，
+              经 Guardian 审批后才可选择裸 Pi executor；它不是 yolo，也不是 Git 特权
+              fast path。
               <code>srtProcessCoordinator</code> 是 process-global exclusive lease，
               串行化 SRT config reload / child execution，不拥有审批状态。
             </div>
@@ -877,9 +881,12 @@
               argv/env 后由 adapter 以 <code>shell:false</code> spawn；stdout/stderr
               有界，abort/timeout 杀 detached process group，随后 cleanup 并恢复
               base config。Linux 含 glob 的 deny policy 确定性不可用，不静默放宽。
-              Git init 只接受 canonical system Git 的 typed plan，并以预创建的
-              <code>.git</code>、hard-deny hooks、exact config release 和空 template
-              helper 运行；任一恢复/清理失败都会 poison 全局 executor。
+              ordinary/linked/separate-git-dir metadata roots 由基础策略保持只读；
+              Git status/stash/log/revparse 与复合检查仍走 LOW/SRT，Git mutation（包括
+              init）也默认走 SRT。只有 exact escalated Bash action 经 Guardian 审批后
+              才能单次使用 native Pi executor；失败、取消、超时或 stale review 都不执行，
+              不自动重放。native Pi 的 120s 默认和 output tail/temp-file 行为不是 SRT
+              的硬字节上限；任一 SRT cleanup/restore 失败仍会 poison 全局 executor。
             </div>
           </div>
         </div>

@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type {
   BashOperations,
   EditOperations,
@@ -13,15 +12,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
 import { fingerprintValue } from "./config.ts";
-import type { GitInitExecutionPlan } from "./execution-plan.ts";
 import {
   createFilesystemPolicy,
   expandSymlinkAliases,
   hasGlobSyntax,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
-import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
-import { inspectRepositoryGitMetadata } from "./git-metadata.ts";
+import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
 
 /**
  * Our own sandbox policy — the complete description of what a sandboxed
@@ -33,12 +30,6 @@ export interface SandboxPolicy {
     allowWrite: string[];
     denyRead: string[];
     denyWrite: string[];
-    /**
-     * Deny entries that may be removed by an exact, explicitly approved
-     * filesystem write capability. The entries remain in denyWrite on the
-     * baseline policy; this is identity metadata for the Engine only.
-     */
-    grantableDenyWrite?: string[];
   };
   network: {
     allowedDomains: string[];
@@ -173,8 +164,6 @@ export interface SandboxExecutionRequest {
   env?: NodeJS.ProcessEnv;
   /** Replace the inherited host environment instead of overlaying it. */
   envMode?: "inherit" | "replace";
-  /** Only the validated structured git-init plan may enable Git config writes. */
-  allowGitConfig?: boolean;
   signal?: AbortSignal;
   stdin?: "ignore" | string;
   timeoutMs?: number;
@@ -216,6 +205,8 @@ export interface SandboxManagerLike {
   execute(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
   /** Atomically reset and install a new process-global sandbox policy. */
   activate?(config: SandboxPolicy): Promise<void>;
+  /** Live health of the backend process/coordinator, when available. */
+  isHealthy?(): boolean;
   reset(): Promise<void>;
   /**
    * After a failed execution, report the exact capability enforcement
@@ -261,19 +252,11 @@ export function withAdditionalWriteRoots(
 ): SandboxPolicy {
   const roots = [...new Set(writeRoots.flatMap(expandSymlinkAliases))];
   if (roots.length === 0) return config;
-  const grantable = new Set(config.filesystem.grantableDenyWrite ?? []);
-  const released = new Set(
-    config.filesystem.denyWrite.filter((path) => grantable.has(path) && roots.includes(path)),
-  );
   return {
     ...config,
     filesystem: {
       ...config.filesystem,
       allowWrite: [...new Set([...config.filesystem.allowWrite, ...roots])],
-      denyWrite: config.filesystem.denyWrite.filter((path) => !released.has(path)),
-      grantableDenyWrite: (config.filesystem.grantableDenyWrite ?? []).filter(
-        (path) => !released.has(path),
-      ),
     },
   };
 }
@@ -282,7 +265,7 @@ export function createSandboxRuntimeConfig(
   config: PermissionsConfig["sandbox"],
   cwd: string,
   protectedWritePaths?: readonly string[],
-  gitMetadataWriteRoots: readonly string[] = [],
+  gitMetadataProtectionRoots: readonly string[] = [],
 ): SandboxPolicy {
   const filesystem = createFilesystemPolicy(
     config,
@@ -298,31 +281,19 @@ export function createSandboxRuntimeConfig(
   const gitRoot = resolve(cwd, ".git");
   const gitAliases = new Set(expandSymlinkAliases(gitRoot));
   const metadataRoots = [
-    ...new Set(gitMetadataWriteRoots.flatMap((path) => expandSymlinkAliases(resolve(path)))),
+    ...new Set(gitMetadataProtectionRoots.flatMap((path) => expandSymlinkAliases(resolve(path)))),
   ];
-  const protectedMetadataRoots = [...new Set([...metadataRoots, ...gitAliases])];
-  const metadataDenyWrite = protectedMetadataRoots.flatMap((root) => [
+  const metadataDenyWrite = metadataRoots.flatMap((root) => [
     root,
     join(root, "hooks"),
     join(root, "config"),
   ]);
-  const finalDenyWrite = [...new Set([...denyWrite, ...metadataDenyWrite])];
-  const grantableDenyWrite = [
-    ...new Set(
-      [...filesystem.protectedWritePaths, ...metadataRoots]
-        .flatMap((pattern) => expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)))
-        .filter(
-          (path) =>
-            (gitAliases.has(path) || metadataRoots.includes(path)) && finalDenyWrite.includes(path),
-        ),
-    ),
-  ];
+  const finalDenyWrite = [...new Set([...denyWrite, ...gitAliases, ...metadataDenyWrite])];
   return {
     filesystem: {
       allowWrite: filesystem.allowWrite,
       denyRead,
       denyWrite: finalDenyWrite,
-      ...(grantableDenyWrite.length > 0 ? { grantableDenyWrite } : {}),
     },
     network: {
       allowedDomains: [...config.network.allowedDomains],
@@ -350,201 +321,59 @@ async function executeSandboxProgram(
   manager: SandboxManagerLike,
   request: SandboxExecutionRequest,
 ): Promise<SandboxExecutionResult> {
-  return manager.execute(request);
-}
-
-function pathWithin(root: string, candidate: string): boolean {
-  const remainder = relative(resolve(root), resolve(candidate));
-  return remainder === "" || (!remainder.startsWith("..") && !isAbsolute(remainder));
-}
-
-function isMissingPath(error: unknown): boolean {
-  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
-}
-
-function filesystemError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-interface PreparedGitInit {
-  policy: SandboxPolicy;
-  environment: NodeJS.ProcessEnv;
-  cleanup(succeeded: boolean): Promise<void>;
-}
-
-async function removeOwnedEmptyGitRoot(gitRoot: string): Promise<void> {
-  try {
-    await rmdir(gitRoot);
-  } catch (error) {
-    if (isMissingPath(error)) return;
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOTEMPTY"
-    ) {
-      throw new Error("partial Git metadata was retained after failed initialization");
-    }
-    throw error;
+  if (request.cwd === undefined) return manager.execute(request);
+  const metadata = await discoverGitMetadataProtectionRoots(request.cwd);
+  if (!metadata.ok) {
+    throw new Error(`pi-permissions sandbox unavailable: ${metadata.reason}`);
   }
+  const policy = policyWithGitMetadataProtection(request.policy, request.cwd, metadata.roots);
+  return manager.execute(policy === request.policy ? request : { ...request, policy });
 }
 
-/**
- * Prepare the one sealed Git-init execution. SRT cannot permit creation of a
- * future path below a mandatory hooks deny, so the host creates only the
- * exact `.git` directory and verifies its identity before the child starts.
- * The child still receives a hard hooks deny; only exact config deny entries
- * are released for this typed plan.
- */
-async function prepareGitInit(cwd: string, policy: SandboxPolicy): Promise<PreparedGitInit> {
-  const lexicalCwd = resolve(cwd);
-  const physicalCwd = await realpath(cwd).catch((error: unknown) => {
-    throw new Error(`pi-permissions: cannot resolve Git init cwd: ${filesystemError(error)}`);
-  });
-  const gitRoots = [
-    ...new Set([
-      ...expandSymlinkAliases(join(lexicalCwd, ".git")),
-      ...expandSymlinkAliases(join(physicalCwd, ".git")),
-    ]),
-  ];
-  const gitRoot = join(physicalCwd, ".git");
-  const hookPaths = gitRoots.flatMap((root) => expandSymlinkAliases(join(root, "hooks")));
-  const configPaths = new Set(
-    gitRoots.flatMap((root) => expandSymlinkAliases(join(root, "config"))),
-  );
-  const denyWrite = policy.filesystem.denyWrite;
-  if (gitRoots.some((root) => denyWrite.includes(root))) {
-    throw new Error("pi-permissions: Git init metadata root was not released exactly");
-  }
-  if (!hookPaths.every((path) => denyWrite.includes(path))) {
-    throw new Error("pi-permissions: Git init hooks must remain hard-denied");
-  }
-  const allowed = gitRoots.some((root) =>
-    policy.filesystem.allowWrite.some((writeRoot) => pathWithin(writeRoot, root)),
-  );
-  if (!allowed) {
-    throw new Error("pi-permissions: Git init metadata root is outside the write lease");
-  }
+/** Add only current Git metadata deny rules to one execution's policy copy. */
+function policyWithGitMetadataProtection(
+  policy: SandboxPolicy,
+  cwd: string,
+  roots: readonly string[],
+): SandboxPolicy {
+  const metadataRoots = [...new Set(roots.flatMap((root) => expandSymlinkAliases(resolve(root))))];
+  if (metadataRoots.length === 0) return policy;
 
-  let createdGitRoot = false;
-  let runtimeDirectory: string | undefined;
-  let templateDirectory: string | undefined;
-  try {
-    let details: Awaited<ReturnType<typeof lstat>> | undefined;
-    try {
-      details = await lstat(gitRoot);
-    } catch (error) {
-      if (!isMissingPath(error)) throw error;
-    }
-    if (details) {
-      if (details.isSymbolicLink() || !details.isDirectory()) {
-        throw new Error("pi-permissions: existing .git must be a real directory");
-      }
-      if ((await readdir(gitRoot)).length > 0) {
-        const metadata = await inspectRepositoryGitMetadata(cwd);
-        if (!metadata.ok || !metadata.writeRoots.some((root) => root === gitRoot)) {
-          throw new Error("pi-permissions: existing .git metadata is not trusted");
-        }
-      }
-    } else {
-      await mkdir(gitRoot, { mode: 0o700 });
-      createdGitRoot = true;
-    }
-    const verifiedRoot = await lstat(gitRoot);
-    if (verifiedRoot.isSymbolicLink() || !verifiedRoot.isDirectory()) {
-      throw new Error("pi-permissions: .git identity changed during preparation");
-    }
-
-    const preparedRuntimeDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-git-home-"));
-    runtimeDirectory = preparedRuntimeDirectory;
-    const preparedTemplateDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-git-template-"));
-    templateDirectory = preparedTemplateDirectory;
-    await chmod(preparedTemplateDirectory, 0o555);
-    const verifiedTemplate = await lstat(preparedTemplateDirectory);
-    if (verifiedTemplate.isSymbolicLink() || !verifiedTemplate.isDirectory()) {
-      throw new Error("pi-permissions: Git template directory is not trusted");
-    }
-    const preparedPolicy: SandboxPolicy = {
-      ...policy,
-      filesystem: {
-        ...policy.filesystem,
-        // Exact config identities are released only for the sealed helper;
-        // broad/glob entries and the hooks deny are intentionally untouched.
-        denyWrite: denyWrite.filter((path) => !configPaths.has(path)),
-        grantableDenyWrite: (policy.filesystem.grantableDenyWrite ?? []).filter(
-          (path) => !configPaths.has(path),
-        ),
-      },
-    };
-    return {
-      policy: preparedPolicy,
-      environment: gitInitializationEnvironment(
-        preparedRuntimeDirectory,
-        preparedTemplateDirectory,
-      ),
-      cleanup: async (succeeded) => {
-        let cleanupError: unknown;
-        try {
-          await rm(preparedTemplateDirectory, { recursive: true, force: true });
-        } catch (error) {
-          cleanupError = error;
-        }
-        try {
-          await rm(preparedRuntimeDirectory, { recursive: true, force: true });
-        } catch (error) {
-          cleanupError ??= error;
-        }
-        if (!succeeded && createdGitRoot) {
-          try {
-            const current = await lstat(gitRoot);
-            if (current.isSymbolicLink() || !current.isDirectory()) {
-              throw new Error(".git identity changed before cleanup");
-            }
-            await removeOwnedEmptyGitRoot(gitRoot);
-          } catch (error) {
-            cleanupError ??= error;
-          }
-        }
-        if (cleanupError) {
-          throw new Error(
-            `pi-permissions: Git init cleanup failed: ${filesystemError(cleanupError)}`,
-          );
-        }
-      },
-    };
-  } catch (error) {
-    let cleanupError: unknown;
-    if (templateDirectory) {
-      try {
-        await rm(templateDirectory, { recursive: true, force: true });
-      } catch (error) {
-        cleanupError = error;
-      }
-    }
-    if (runtimeDirectory) {
-      try {
-        await rm(runtimeDirectory, { recursive: true, force: true });
-      } catch (error) {
-        cleanupError ??= error;
-      }
-    }
-    if (createdGitRoot) {
-      try {
-        await removeOwnedEmptyGitRoot(gitRoot);
-      } catch (error) {
-        cleanupError ??= error;
-      }
-    }
-    const message = `pi-permissions: Git init preparation failed: ${filesystemError(error)}`;
-    throw new Error(cleanupError ? `${message}; ${filesystemError(cleanupError)}` : message);
+  const denyWrite = [...policy.filesystem.denyWrite];
+  const additions: string[] = [];
+  for (const root of expandSymlinkAliases(resolve(cwd, ".git"))) {
+    if (!denyWrite.includes(root)) additions.push(root);
   }
+  for (const root of metadataRoots) {
+    if (denyWrite.includes(root)) continue;
+    additions.push(root, join(root, "hooks"), join(root, "config"));
+  }
+  const uniqueAdditions = [...new Set(additions)].filter((path) => !denyWrite.includes(path));
+  if (uniqueAdditions.length === 0) return policy;
+
+  return {
+    ...policy,
+    filesystem: {
+      ...policy.filesystem,
+      allowWrite: [...policy.filesystem.allowWrite],
+      denyRead: [...policy.filesystem.denyRead],
+      denyWrite: [...denyWrite, ...uniqueAdditions],
+    },
+    network: {
+      ...policy.network,
+      allowedDomains: [...policy.network.allowedDomains],
+      deniedDomains: [...policy.network.deniedDomains],
+      ...(policy.network.trustedFakeIpRanges === undefined
+        ? {}
+        : { trustedFakeIpRanges: [...policy.network.trustedFakeIpRanges] }),
+    },
+  };
 }
 
 export function createSandboxedBashOperations(
   manager: SandboxManagerLike,
   customConfig?: SandboxPolicy,
   options: {
-    gitInitPlan?: GitInitExecutionPlan;
     commandId?: string;
     networkAuthorize?: SandboxNetworkAuthorize;
   } = {},
@@ -555,26 +384,7 @@ export function createSandboxedBashOperations(
         throw new Error(`Working directory does not exist: ${cwd}`);
       }
 
-      const gitInitPlan = options.gitInitPlan;
-      if (gitInitPlan && resolve(cwd) !== gitInitPlan.cwd) {
-        throw new Error("pi-permissions: structured git init cwd does not match execution cwd");
-      }
-      if (gitInitPlan) {
-        const trustedExecutable = resolveTrustedSystemGitExecutable(gitInitPlan.executable);
-        const fixedArgs =
-          (gitInitPlan.args.length === 1 && gitInitPlan.args[0] === "init") ||
-          (gitInitPlan.args.length === 2 &&
-            gitInitPlan.args[0] === "init" &&
-            gitInitPlan.args[1] === ".");
-        if (trustedExecutable !== gitInitPlan.executable || !fixedArgs) {
-          throw new Error("pi-permissions: structured Git init plan is not trusted");
-        }
-      }
-
-      const preparation = gitInitPlan
-        ? await prepareGitInit(cwd, customConfig ?? createDefaultSandboxConfig())
-        : undefined;
-      const executionPolicy = preparation?.policy ?? customConfig ?? createDefaultSandboxConfig();
+      const executionPolicy = customConfig ?? createDefaultSandboxConfig();
       // SRT injects a private-target NO_PROXY set by default. When the
       // sandbox-owned callback is active, local/private exceptions must still
       // pass through the authenticated parent guard so its exact ticket and
@@ -587,47 +397,27 @@ export function createSandboxedBashOperations(
       const executionEnv = options.networkAuthorize
         ? { ...(env ?? {}), NO_PROXY: "", no_proxy: "" }
         : env;
-      try {
-        const result = await executeSandboxProgram(manager, {
-          policy: executionPolicy,
-          program: gitInitPlan
-            ? { executable: gitInitPlan.executable, args: gitInitPlan.args }
-            : { executable: WRAP_SHELL, args: ["-c", command] },
-          cwd,
-          ...(gitInitPlan
-            ? {
-                env: preparation?.environment,
-                envMode: "replace" as const,
-                allowGitConfig: true,
-              }
-            : { env: executionEnv }),
-          signal,
-          stdin: "ignore",
-          timeoutMs:
-            timeout === undefined
-              ? DEFAULT_BASH_TIMEOUT_MS
-              : timeout > 0
-                ? timeout * 1000
-                : undefined,
-          ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
-          ...(options.networkAuthorize === undefined
-            ? {}
-            : { networkAuthorize: options.networkAuthorize }),
-          onStdout: onData,
-          onStderr: onData,
-        });
-        await preparation?.cleanup(result.exitCode === 0);
-        return { exitCode: result.exitCode };
-      } catch (error) {
-        if (preparation) {
-          try {
-            await preparation.cleanup(false);
-          } catch (cleanupError) {
-            throw new Error(`${filesystemError(error)}; ${filesystemError(cleanupError)}`);
-          }
-        }
-        throw error;
-      }
+      const result = await executeSandboxProgram(manager, {
+        policy: executionPolicy,
+        program: { executable: WRAP_SHELL, args: ["-c", command] },
+        cwd,
+        env: executionEnv,
+        signal,
+        stdin: "ignore",
+        timeoutMs:
+          timeout === undefined
+            ? DEFAULT_BASH_TIMEOUT_MS
+            : timeout > 0
+              ? timeout * 1000
+              : undefined,
+        ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
+        ...(options.networkAuthorize === undefined
+          ? {}
+          : { networkAuthorize: options.networkAuthorize }),
+        onStdout: onData,
+        onStderr: onData,
+      });
+      return { exitCode: result.exitCode };
     },
   };
 }
@@ -696,28 +486,6 @@ function guardianEnvironment(): NodeJS.ProcessEnv {
     PATH: systemPath(),
     HOME: tmpdir(),
     TMPDIR: tmpdir(),
-    LANG: "C.UTF-8",
-    LC_ALL: "C.UTF-8",
-    TERM: "dumb",
-  };
-}
-
-/**
- * The only command allowed to opt into Git's repository-local config writes.
- * Every value is fixed or temporary; in particular no caller-provided loader,
- * proxy, credential, Git directory, or global config variable is inherited.
- */
-export function gitInitializationEnvironment(
-  homeDirectory: string,
-  templateDirectory: string,
-): NodeJS.ProcessEnv {
-  return {
-    PATH: systemPath(),
-    HOME: homeDirectory,
-    XDG_CONFIG_HOME: homeDirectory,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_TEMPLATE_DIR: templateDirectory,
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
     TERM: "dumb",
@@ -1169,6 +937,7 @@ async function runSandboxedFileOperation(
   input?: string,
   signal?: AbortSignal,
   commandId?: string,
+  cwd?: string,
 ): Promise<Buffer> {
   const result = await executeSandboxProgram(manager, {
     policy: config,
@@ -1176,6 +945,7 @@ async function runSandboxedFileOperation(
       executable: process.execPath,
       args: ["-e", FILE_OPERATION_HELPER, operation, Buffer.from(path).toString("base64")],
     },
+    ...(cwd === undefined ? {} : { cwd }),
     signal,
     stdin: input === undefined ? "ignore" : input,
     timeoutMs: DEFAULT_FILE_OPERATION_TIMEOUT_MS,
@@ -1197,17 +967,36 @@ export function createSandboxedFileOperations(
   writePaths: readonly string[] = [],
   signal?: AbortSignal,
   commandId?: string,
+  cwd?: string,
 ): SandboxedFileOperations {
   const config = fileOperationConfig(baseConfig, writePaths);
   return {
     mkdir: async (path) => {
-      await runSandboxedFileOperation(manager, config, "mkdir", path, undefined, signal, commandId);
+      await runSandboxedFileOperation(
+        manager,
+        config,
+        "mkdir",
+        path,
+        undefined,
+        signal,
+        commandId,
+        cwd,
+      );
     },
     writeFile: async (path, content) => {
-      await runSandboxedFileOperation(manager, config, "write", path, content, signal, commandId);
+      await runSandboxedFileOperation(
+        manager,
+        config,
+        "write",
+        path,
+        content,
+        signal,
+        commandId,
+        cwd,
+      );
     },
     readFile: (path) =>
-      runSandboxedFileOperation(manager, config, "read", path, undefined, signal, commandId),
+      runSandboxedFileOperation(manager, config, "read", path, undefined, signal, commandId, cwd),
     access: async (path) => {
       await runSandboxedFileOperation(
         manager,
@@ -1217,6 +1006,7 @@ export function createSandboxedFileOperations(
         undefined,
         signal,
         commandId,
+        cwd,
       );
     },
   };

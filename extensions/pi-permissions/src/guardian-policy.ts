@@ -31,9 +31,8 @@ export function guardianPolicyFloorViolation(assessment: {
 // Adapted from openai/codex at 88f776588f5e73467e7659c268f8358a9a2378b6:
 // codex-rs/core/src/guardian/{policy_template.md,policy.md,prompt.rs},
 // with two runtime-specific sections adapted to pi's runtime (SRT sandbox +
-// bounded read-only guardian tools) instead of codex's sandbox_permissions
-// escalation model: the trusted-content sources bullet and the
-// "# Execution Environment" section.
+// bounded read-only guardian tools): the trusted-content sources bullet and
+// the "# Execution Environment" section.
 // Licensed under Apache-2.0.
 export const CODEX_GUARDIAN_POLICY_TEMPLATE = `You are judging one planned coding-agent action.
 Assess the exact action's intrinsic risk and whether the transcript authorizes its target and side effects. Then derive \`outcome\` from the security policy, \`risk_level\`, and \`user_authorization\`.
@@ -91,8 +90,10 @@ You share the execution environment with the agent, but you have different restr
 ## Coding-Agent Restrictions
 - The permission context records the exact filesystem and network capabilities relevant to this action, including explicit read and write denials.
 - Only eligible tool, MCP, filesystem, and network requests reach review. Deterministic policy can block an action before review.
-- An approved permission request changes only the exact capability being reviewed. When \`sandboxEnforcesAction\` is true, the sandbox remains enabled for the action.
-- When \`sandboxEnforcesAction\` is false, the action executes under an external tool's own authority; coding-agent filesystem roots and network policy are not enforcement facts for that action.
+- An approved permission request changes only the exact capability being reviewed. The permission context's \`executionMode\` is \`sandboxed\`, \`escalated\`, or \`host-admitted\`.
+- For \`executionMode=escalated\`, \`sandboxEnforcesAction\` is false because this exact Bash command and cwd will execute once outside the coding-agent sandbox after approval. This is still a coding-agent shell action, not an MCP or other external tool. Ordinary \`allowWrite\` roots never authorize escalation; judge the full command, cwd, and justification, and treat explicit deny rules as hard constraints.
+- In an escalated context, empty effective allow/deny lists mean the reviewed command is leaving the sandbox; they do not erase the trusted evidence scope, and default Git/.agents/.codex sandbox carve-outs are not a separate hard deny or authorization for this one action.
+- For \`executionMode=host-admitted\`, \`sandboxEnforcesAction\` is false because the action executes under an external tool's own authority; coding-agent filesystem roots and network policy are not enforcement facts for that action.
 - A request for an additional exact capability is not suspicious in itself; evaluate the proposed action and its effective permissions on their own merits.
 
 ## Your Restrictions

@@ -1,30 +1,21 @@
 import type { PermissionsConfig } from "./config.ts";
-import type { StructuredExecutionPlan } from "./execution-plan.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
-import {
-  inspectCurrentDirectoryGitInitialization,
-  inspectRepositoryGitMetadata,
-  readRepositoryRemoteHosts,
-} from "./git-metadata.ts";
+import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
   classifyRisk,
-  gitInitializationPlan as createGitInitializationPlan,
   deletionExecutables,
   deletionTargets,
   isPublicNetworkHost,
   normalizeToolCall,
   parseCommandSegments,
   type Risk,
-  shellCommandCanGrantGitMetadata,
-  shellCommandInitializesCurrentDirectory,
   shellCommandIsDangerous,
-  shellCommandUsesGitMutation,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
-import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
+import { requestedEscalation, resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export type RiskDecision =
@@ -37,7 +28,7 @@ export type RiskDecision =
       networkHosts?: string[];
       filesystemWriteRoots?: string[];
       justification?: string;
-      executionPlan?: StructuredExecutionPlan;
+      executionMode?: "escalated";
     }
   | { action: "block"; risk: Risk; reason: string };
 
@@ -160,6 +151,30 @@ export async function evaluateRiskRequest(
   }
   const request = normalizeToolCall(tool, input, cwd);
   const command = typeof input.command === "string" ? input.command : undefined;
+  const escalation = requestedEscalation(input);
+  if ("error" in escalation) {
+    return { action: "block", risk: "HARD", reason: escalation.error };
+  }
+  const escalationRequested = escalation.requested;
+  if (escalationRequested && (tool.toLowerCase() !== "bash" || command === undefined)) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: "Command escalation is supported only for Bash executions",
+    };
+  }
+  if (
+    escalationRequested &&
+    (config.sandbox.filesystem.denyRead.length > 0 ||
+      config.sandbox.filesystem.denyWrite.length > 0 ||
+      config.sandbox.network.deniedDomains.length > 0)
+  ) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason: "Command escalation cannot preserve explicit sandbox deny rules",
+    };
+  }
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
     return {
@@ -170,39 +185,7 @@ export async function evaluateRiskRequest(
   }
   const usesImplicitGitNetwork =
     request.operation === "execute" && Boolean(gitNetwork?.usesImplicitNetwork);
-  const usesGitMutation =
-    request.operation === "execute" && command && shellCommandUsesGitMutation(command);
-  const initializesCurrentDirectory =
-    usesGitMutation && command && shellCommandInitializesCurrentDirectory(command);
-  if (usesGitMutation && command && !shellCommandCanGrantGitMetadata(command)) {
-    return {
-      action: "block",
-      risk: "HARD",
-      reason: "Git metadata access requires a single Git mutation command",
-    };
-  }
-  const gitInitialization = initializesCurrentDirectory
-    ? await inspectCurrentDirectoryGitInitialization(cwd)
-    : undefined;
-  if (gitInitialization && !gitInitialization.ok) {
-    return { action: "block", risk: "HARD", reason: gitInitialization.reason };
-  }
-  const executionPlan = initializesCurrentDirectory
-    ? command === undefined
-      ? undefined
-      : createGitInitializationPlan(command, cwd)
-    : undefined;
-  if (initializesCurrentDirectory && executionPlan === undefined) {
-    return {
-      action: "block",
-      risk: "HARD",
-      reason: "Trusted Git executable is unavailable for structured git init",
-    };
-  }
-  const gitMetadata =
-    !initializesCurrentDirectory && (usesImplicitGitNetwork || usesGitMutation)
-      ? await inspectRepositoryGitMetadata(cwd)
-      : undefined;
+  const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
     return { action: "block", risk: "HARD", reason: gitMetadata.reason };
   }
@@ -218,24 +201,16 @@ export async function evaluateRiskRequest(
       ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
     ];
   }
-  const gitWriteRoots = usesGitMutation
-    ? gitInitialization?.ok
-      ? gitInitialization.writeRoots
-      : gitMetadata?.ok
-        ? gitMetadata.writeRoots
-        : []
-    : [];
   const additionalWriteRoots = await resolveAdditionalWriteRoots(
     input,
     cwd,
     config,
     protectedWritePaths ? [...protectedWritePaths] : defaultProtectedWritePaths(cwd),
-    gitWriteRoots,
   );
   if (!additionalWriteRoots.ok) {
     return { action: "block", risk: "HARD", reason: additionalWriteRoots.reason };
   }
-  const filesystemWriteRoots = [...gitWriteRoots, ...additionalWriteRoots.writeRoots];
+  const filesystemWriteRoots = [...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
   if (rule?.action === "deny") {
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
@@ -256,7 +231,10 @@ export async function evaluateRiskRequest(
     };
   }
   const sandboxedBashNetwork =
-    config.sandbox.enabled && request.operation === "execute" && tool.toLowerCase() === "bash";
+    !escalationRequested &&
+    config.sandbox.enabled &&
+    request.operation === "execute" &&
+    tool.toLowerCase() === "bash";
   if (request.networkTargets?.some((host) => !isPublicNetworkHost(host)) && !sandboxedBashNetwork) {
     return {
       action: "block",
@@ -271,9 +249,9 @@ export async function evaluateRiskRequest(
     protectedWritePaths ? [...protectedWritePaths] : undefined,
   );
   // Bash is executed inside the active sandbox. Static policy identifies
-  // capabilities that must be granted before execution (for example Git
-  // metadata); network effects are authorized at the SRT connection boundary
-  // so one approved endpoint never turns into a whole-command replay.
+  // explicit additional filesystem capabilities; network effects are
+  // authorized at the SRT connection boundary so one approved endpoint never
+  // turns into a whole-command replay.
   let risk =
     request.operation === "execute" && tool.toLowerCase() === "bash" && config.sandbox.enabled
       ? command !== undefined && shellCommandIsDangerous(command)
@@ -331,22 +309,32 @@ export async function evaluateRiskRequest(
     }
   }
 
-  if (rule?.action === "allow" && risk !== "HARD" && filesystemWriteRoots.length === 0) {
+  if (
+    rule?.action === "allow" &&
+    risk !== "HARD" &&
+    filesystemWriteRoots.length === 0 &&
+    !escalationRequested
+  ) {
     return { action: "allow", risk, reason: "Allowed by permissions rule" };
   }
 
   const promptedByRule = rule?.action === "ask";
-  const wouldPrompt = promptedByRule || risk !== "LOW";
-  // ── escalation gate ────────────────────────────────────────────────────
+  const wouldPrompt = promptedByRule || risk !== "LOW" || escalationRequested;
   if (wouldPrompt) {
     return {
       action: "prompt",
       risk,
-      reason: promptedByRule ? "Approval required by permissions rule" : `${risk} operation`,
+      reason: escalationRequested
+        ? "Command requires escalated sandbox permissions"
+        : promptedByRule
+          ? "Approval required by permissions rule"
+          : `${risk} operation`,
       summary: summarize(tool, input),
-      filesystemWriteRoots: filesystemWriteRoots.length > 0 ? filesystemWriteRoots : undefined,
-      justification: additionalWriteRoots.justification,
-      ...(executionPlan === undefined ? {} : { executionPlan }),
+      ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
+      justification: escalation.requested
+        ? escalation.justification
+        : additionalWriteRoots.justification,
+      ...(escalationRequested ? { executionMode: "escalated" as const } : {}),
     };
   }
 

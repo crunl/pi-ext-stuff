@@ -106,6 +106,22 @@ describe("Risk policy gate", () => {
     }
   });
 
+  it.each(["git stash list", "compound current-worktree probe"] as const)(
+    "keeps Git read-only probes ordinary LOW/SRT operations: %s",
+    async (probe) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-readonly-"));
+      const command =
+        probe === "git stash list"
+          ? probe
+          : `cd ${cwd} && git status --short && git stash list | head -2; git log --oneline -1; git rev-parse --show-toplevel`;
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "LOW",
+      });
+    },
+  );
+
   it("treats the configured current directory as the writable workspace", async () => {
     const cwd = homedir();
     const models = resolve(cwd, ".pi/agent/models.json");
@@ -235,10 +251,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-    });
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -261,8 +274,8 @@ describe("Risk policy gate", () => {
     );
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
+      action: "allow",
+      risk: "LOW",
     });
   });
 
@@ -281,8 +294,8 @@ describe("Risk policy gate", () => {
       );
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
+        action: "allow",
+        risk: "LOW",
       });
     },
   );
@@ -298,8 +311,8 @@ describe("Risk policy gate", () => {
       await createGitDirectory(join(cwd, ".git"));
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
+        action: "allow",
+        risk: "LOW",
       });
     },
   );
@@ -313,8 +326,8 @@ describe("Risk policy gate", () => {
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
+      action: "allow",
+      risk: "LOW",
     });
   });
 
@@ -338,10 +351,7 @@ describe("Risk policy gate", () => {
       await createGitDirectory(join(cwd, ".git"));
 
       const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
-      expect(decision).toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
-      });
+      expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
       expect(decision).not.toHaveProperty("networkHosts");
     },
   );
@@ -356,25 +366,16 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-    });
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
   it("keeps a local Git remote operand out of network policy", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
-    const gitRoot = await realpath(join(cwd, ".git"));
-
     await expect(
       evaluateRiskRequest("bash", { command: "git push ../local.git HEAD:main" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-      filesystemWriteRoots: [gitRoot],
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
   it("fails closed when a Git remote option cannot be parsed reliably", async () => {
@@ -413,10 +414,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-    });
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -433,10 +431,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-    });
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -459,17 +454,15 @@ describe("Risk policy gate", () => {
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
-  it("requests one-call Git metadata access for agent Git mutations", async () => {
+  it("keeps Git mutations on the ordinary sandbox path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
-    const gitRoot = await realpath(join(cwd, ".git"));
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
     ).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-      filesystemWriteRoots: [gitRoot],
+      action: "allow",
+      risk: "LOW",
     });
     const ghDecision = await evaluateRiskRequest(
       "bash",
@@ -477,10 +470,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(ghDecision).toMatchObject({
-      action: "prompt",
-      filesystemWriteRoots: [gitRoot],
-    });
+    expect(ghDecision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(ghDecision).not.toHaveProperty("networkHosts");
     for (const command of [
       "git commit -m 'document input > output'",
@@ -492,8 +482,8 @@ describe("Risk policy gate", () => {
       'git add "\\$' + '{| touch .git/hooks/pre-commit; }"',
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        filesystemWriteRoots: [gitRoot],
+        action: "allow",
+        risk: "LOW",
       });
     }
   });
@@ -505,14 +495,13 @@ describe("Risk policy gate", () => {
     "git -c core.hooksPath=/tmp/hooks commit -am update",
     "git --config-env=core.hooksPath=HOOKS commit -am update",
     "git --unknown-global commit -am update",
-  ])("blocks Git metadata grants through unsafe global options in %s", async (command) => {
+  ])("does not gate ordinary Git mutations on global-option parsing in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("single Git mutation"),
+      action: "allow",
+      risk: "LOW",
     });
   });
 
@@ -525,20 +514,15 @@ describe("Risk policy gate", () => {
     "GIT_DIR=/tmp/repo.git git add README.md",
     "env GIT_WORK_TREE=/tmp/tree git add README.md",
     "env -C /tmp git add README.md",
-    "sudo -C /tmp git push origin main",
-    "sudo --chdir /tmp git push origin main",
-  ])(
-    "blocks Git metadata grants through an untrusted executable context in %s",
-    async (command) => {
-      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
-      await createGitDirectory(join(cwd, ".git"));
+  ])("does not gate ordinary Git mutations on executable identity in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
+    await createGitDirectory(join(cwd, ".git"));
 
-      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "block",
-        risk: "HARD",
-      });
-    },
-  );
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "allow",
+      risk: "LOW",
+    });
+  });
 
   it.each([
     "git add README.md &",
@@ -549,76 +533,59 @@ describe("Risk policy gate", () => {
     "git add README.md |",
     "\ngit add README.md",
     "git add README.md\n",
-  ])("blocks Git metadata grants with top-level shell controls in %s", async (command) => {
+  ])("does not apply a single-command gate to Git shell composition in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("single Git mutation"),
+      action: "allow",
+      risk: "LOW",
     });
   });
 
   it.each(["git init", "git init ."])(
-    "grants the prospective current-directory metadata root for %s",
+    "keeps Git init as an ordinary sandbox action for %s",
     async (command) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-init-"));
-      const prospectiveGitRoot = join(await realpath(cwd), ".git");
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "REVIEW",
-        filesystemWriteRoots: [prospectiveGitRoot],
-        executionPlan: {
-          kind: "git-init",
-          executable: expect.stringMatching(/^\//),
-          args: command === "git init" ? ["init"] : ["init", "."],
-          cwd: resolve(cwd),
-        },
+        action: "allow",
+        risk: "LOW",
       });
     },
   );
 
-  it("grants a child prospective root for git init inside an existing parent repository", async () => {
+  it("keeps Git init ordinary inside an existing parent repository", async () => {
     const parent = await mkdtemp(join(tmpdir(), "pi-permissions-parent-repository-"));
     const cwd = join(parent, "child");
     await createGitDirectory(join(parent, ".git"));
     await mkdir(cwd);
-    const prospectiveGitRoot = join(await realpath(cwd), ".git");
-
     await expect(
       evaluateRiskRequest("bash", { command: "git init" }, cwd, config()),
     ).resolves.toMatchObject({
-      action: "prompt",
-      risk: "REVIEW",
-      filesystemWriteRoots: [prospectiveGitRoot],
+      action: "allow",
+      risk: "LOW",
     });
   });
 
   it.each(['git init ""', "git init ''"])(
-    "blocks an explicit empty repository path in %s",
+    "does not statically reject an ordinary Git init operand in %s",
     async (command) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-empty-git-init-"));
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "block",
-        risk: "HARD",
-        reason: expect.stringContaining("single Git mutation"),
+        action: "allow",
+        risk: "LOW",
       });
     },
   );
 
-  it("keeps a missing repository fail-closed for non-init Git mutations", async () => {
+  it("leaves missing-repository Git mutations to the ordinary sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-no-repository-"));
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("repository not found"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
   it.each([
@@ -630,42 +597,36 @@ describe("Risk policy gate", () => {
     'git add "$' + '{ touch .git/hooks/pre-commit; }"',
     'git add "$' + '{| touch .git/hooks/pre-commit; }"',
     "git add README.md | tee result.txt",
-  ])("blocks Git metadata grants for compound shell effects in %s", async (command) => {
+  ])("leaves compound Git shell effects to the ordinary sandbox in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await mkdir(join(cwd, ".git"));
     await writeFile(join(cwd, ".git", "config"), "");
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("single Git mutation"),
+      action: "allow",
+      risk: "LOW",
     });
   });
 
-  it("blocks a repository pointer that would grant the filesystem root", async () => {
+  it("does not statically inspect Git metadata for an ordinary mutation", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await writeFile(join(cwd, ".git"), "gitdir: /\n");
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("unsafe Git"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("blocks a repository symlink that would grant the filesystem root", async () => {
+  it("leaves Git metadata symlinks to the ordinary sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     await symlink("/", join(cwd, ".git"));
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("unsafe Git metadata"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("blocks a repository symlink that redirects Git access outside the workspace", async () => {
+  it("leaves external Git metadata pointers to the ordinary sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
     await writeFile(join(unrelated, "HEAD"), "ref: refs/heads/main\n");
@@ -676,13 +637,10 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("unsafe Git metadata"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("blocks a gitdir pointer that does not belong to the current worktree", async () => {
+  it("does not add metadata roots for an invalid linked-worktree pointer", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
     await writeFile(join(unrelated, "HEAD"), "ref: refs/heads/main\n");
@@ -693,13 +651,10 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("unsafe Git metadata"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("blocks a back-pointer without valid worktree or submodule metadata", async () => {
+  it("does not add metadata roots for an invalid back-pointer", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const unrelated = await mkdtemp(join(tmpdir(), "pi-permissions-unrelated-"));
     await writeFile(join(cwd, ".git"), `gitdir: ${unrelated}\n`);
@@ -707,13 +662,10 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "block",
-      reason: expect.stringContaining("unsafe Git"),
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("grants both per-worktree and common Git metadata roots", async () => {
+  it("does not grant per-worktree or common Git metadata roots", async () => {
     const parent = await mkdtemp(join(tmpdir(), "pi-permissions-default-"));
     const cwd = join(parent, "worktree");
     const commonGit = join(parent, "main.git");
@@ -728,18 +680,12 @@ describe("Risk policy gate", () => {
     await writeFile(join(worktreeGit, "commondir"), "../..\n");
     await writeFile(join(cwd, ".git"), `gitdir: ${worktreeGit}\n`);
     await writeFile(join(worktreeGit, "gitdir"), `${join(cwd, ".git")}\n`);
-    const canonicalWorktreeGit = await realpath(worktreeGit);
-    const canonicalCommonGit = await realpath(commonGit);
-
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      filesystemWriteRoots: [canonicalWorktreeGit, canonicalCommonGit],
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
-  it("preserves a structurally valid submodule gitdir pointer", async () => {
+  it("does not grant a submodule Git metadata root", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-submodule-"));
     const gitDirectory = await mkdtemp(join(tmpdir(), "pi-permissions-module-git-"));
     await writeFile(join(gitDirectory, "HEAD"), "ref: refs/heads/main\n");
@@ -747,14 +693,9 @@ describe("Risk policy gate", () => {
     await mkdir(join(gitDirectory, "objects"));
     await mkdir(join(gitDirectory, "refs"));
     await writeFile(join(cwd, ".git"), `gitdir: ${gitDirectory}\n`);
-    const canonicalGitDirectory = await realpath(gitDirectory);
-
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      filesystemWriteRoots: [canonicalGitDirectory],
-    });
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
   });
 
   it("defers private shell network targets to the sandbox boundary", async () => {
@@ -889,6 +830,138 @@ describe("Risk policy gate", () => {
       action: "block",
       reason: expect.stringContaining("protected"),
     });
+  });
+
+  it("routes require_escalated through an exact action review", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const decision = await evaluateRiskRequest(
+      "bash",
+      {
+        command: "git add README.md && git commit -m update",
+        sandbox_permissions: "require_escalated",
+        justification: "Update the isolated fixture repository",
+      },
+      cwd,
+      config(),
+    );
+
+    expect(decision).toMatchObject({
+      action: "prompt",
+      reason: "Command requires escalated sandbox permissions",
+      executionMode: "escalated",
+      justification: "Update the isolated fixture repository",
+    });
+    expect(decision).not.toHaveProperty("filesystemWriteRoots");
+    expect(decision).not.toHaveProperty("networkHosts");
+  });
+
+  it("does not let an allow rule bypass an escalated action review", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const configured = config({
+      rules: [{ action: "allow", tool: "bash", pattern: "git add *" }],
+    });
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "git add README.md",
+          sandbox_permissions: "require_escalated",
+          justification: "Update the isolated fixture repository",
+        },
+        cwd,
+        configured,
+      ),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      executionMode: "escalated",
+      reason: "Command requires escalated sandbox permissions",
+    });
+  });
+
+  it.each<Partial<PermissionsConfig>>([
+    {
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        filesystem: {
+          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
+          denyRead: ["/secret"],
+        },
+      },
+    },
+    {
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        filesystem: {
+          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
+          denyWrite: ["/secret"],
+        },
+      },
+    },
+    {
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        network: {
+          ...structuredClone(DEFAULT_CONFIG.sandbox.network),
+          deniedDomains: ["example.com"],
+        },
+      },
+    },
+  ])("fails closed when explicit sandbox deny rules cannot be preserved", async (override) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const configured = config(override);
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "printf escalated",
+          sandbox_permissions: "require_escalated",
+          justification: "Run a controlled command",
+        },
+        cwd,
+        configured,
+      ),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("explicit sandbox deny rules"),
+    });
+  });
+
+  it("rejects escalation for non-Bash tools and malformed requests", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    await expect(
+      evaluateRiskRequest(
+        "write",
+        { path: "out.txt", sandbox_permissions: "require_escalated", justification: "write" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        { command: "printf x", sandbox_permissions: "require_escalated" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "HARD",
+      reason: expect.stringContaining("justification"),
+    });
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "printf x",
+          sandbox_permissions: "require_escalated",
+          additional_permissions: { file_system: { write: ["/tmp"] } },
+          justification: "conflicting modes",
+        },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
   });
 
   it("applies deny, ask, and allow rules without bypassing hard policy", async () => {

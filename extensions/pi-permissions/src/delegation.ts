@@ -149,9 +149,6 @@ export function intersectSandboxPolicy(
       allowWrite,
       denyRead: [...base.filesystem.denyRead],
       denyWrite: [...base.filesystem.denyWrite],
-      ...(base.filesystem.grantableDenyWrite === undefined
-        ? {}
-        : { grantableDenyWrite: [...base.filesystem.grantableDenyWrite] }),
     },
     network: {
       allowedDomains,

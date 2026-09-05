@@ -463,11 +463,10 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
     expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/.pi/permissions.json");
-    expect(runtime.filesystem.grantableDenyWrite).toEqual(["/workspace/project/.git"]);
     expect(runtime.network.allowedDomains).toEqual([]);
   });
 
-  it("marks only the cwd's default Git protection as grantable", () => {
+  it("keeps an explicit Git metadata root deny-only", () => {
     const runtime = createSandboxRuntimeConfig(
       {
         ...DEFAULT_CONFIG.sandbox,
@@ -481,10 +480,9 @@ describe("sandbox integration", () => {
     );
 
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
-    expect(runtime.filesystem.grantableDenyWrite).toBeUndefined();
   });
 
-  it("keeps Git config and hooks hard-denied when the exact metadata root is released", () => {
+  it("keeps Git config, hooks, and metadata roots hard-denied for extra roots", () => {
     const cwd = "/workspace/project";
     const gitRoot = `${cwd}/.git`;
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd, undefined, [gitRoot]);
@@ -492,11 +490,10 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toEqual(
       expect.arrayContaining([gitRoot, `${gitRoot}/hooks`, `${gitRoot}/config`]),
     );
-    expect(runtime.filesystem.grantableDenyWrite).toContain(gitRoot);
 
     const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
     expect(exact.filesystem.allowWrite).toContain(gitRoot);
-    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).toContain(gitRoot);
     expect(exact.filesystem.denyWrite).toEqual(
       expect.arrayContaining([`${gitRoot}/hooks`, `${gitRoot}/config`]),
     );
@@ -504,6 +501,21 @@ describe("sandbox integration", () => {
     const broad = withAdditionalWriteRoots(runtime, [cwd]);
     expect(broad.filesystem.allowWrite).toContain(cwd);
     expect(broad.filesystem.denyWrite).toContain(gitRoot);
+  });
+
+  it("does not form descendant deny patterns below a lexical .git pointer", () => {
+    const cwd = "/workspace/project";
+    const metadataRoot = "/tmp/project-metadata.git";
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd, undefined, [
+      metadataRoot,
+    ]);
+
+    expect(runtime.filesystem.denyWrite).toContain(`${cwd}/.git`);
+    expect(runtime.filesystem.denyWrite).not.toContain(`${cwd}/.git/hooks`);
+    expect(runtime.filesystem.denyWrite).not.toContain(`${cwd}/.git/config`);
+    expect(runtime.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([metadataRoot, `${metadataRoot}/hooks`, `${metadataRoot}/config`]),
+    );
   });
 
   it("expands macOS symlink aliases so /tmp rules apply to /private/tmp", () => {
@@ -576,6 +588,83 @@ describe("sandbox integration", () => {
     );
     expect(Buffer.concat(output).toString()).toBe("sandboxed");
     expect(result.exitCode).toBe(0);
+  });
+
+  it("refreshes Git metadata denies for later bash and file executions", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-refresh-worktree-"));
+    const metadata = await mkdtemp(join(tmpdir(), "pi-permissions-git-refresh-metadata-"));
+    const policy: SandboxPolicy = {
+      filesystem: {
+        allowWrite: [tmpdir()],
+        denyRead: ["/baseline/read"],
+        denyWrite: ["/baseline/write"],
+      },
+      network: {
+        allowedDomains: ["allowed.example"],
+        deniedDomains: [],
+        trustedFakeIpRanges: [],
+        allowLocalBinding: false,
+      },
+    };
+    const manager = testSandboxManager();
+
+    try {
+      await createSandboxedBashOperations(manager, policy).exec("true", cwd, {
+        onData: () => undefined,
+      });
+      await writeFile(join(cwd, ".git"), `gitdir: ${metadata}\n`);
+
+      await createSandboxedFileOperations(
+        manager,
+        policy,
+        [],
+        undefined,
+        "git-refresh",
+        cwd,
+      ).access(join(cwd, ".git"));
+
+      const lastRequest = manager.execute.mock.calls.at(-1)?.[0];
+      if (!lastRequest) throw new Error("missing refreshed sandbox request");
+      const refreshed = lastRequest.policy;
+      expect(refreshed.filesystem.allowWrite).toEqual(policy.filesystem.allowWrite);
+      expect(refreshed.filesystem.denyRead).toEqual(policy.filesystem.denyRead);
+      expect(refreshed.filesystem.denyWrite).toEqual(
+        expect.arrayContaining([
+          ...policy.filesystem.denyWrite,
+          metadata,
+          join(metadata, "hooks"),
+          join(metadata, "config"),
+        ]),
+      );
+      expect(refreshed.network).toEqual(policy.network);
+      expect(policy.filesystem.denyWrite).toEqual(["/baseline/write"]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(metadata, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed before executing when Git metadata becomes malformed", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-refresh-invalid-"));
+    const policy = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd);
+    const manager = testSandboxManager();
+
+    try {
+      await writeFile(join(cwd, ".git"), "gitdir: missing-metadata\n");
+      await expect(
+        createSandboxedBashOperations(manager, policy).exec("true", cwd, {
+          onData: () => undefined,
+        }),
+      ).rejects.toThrow(/unsafe Git metadata/);
+      await expect(
+        createSandboxedFileOperations(manager, policy, [], undefined, "invalid-git", cwd).access(
+          join(cwd, ".git"),
+        ),
+      ).rejects.toThrow(/unsafe Git metadata/);
+      expect(manager.execute).not.toHaveBeenCalled();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("forces local targets through the parent guard when inline network auth is active", async () => {
@@ -713,11 +802,9 @@ describe("sandbox integration", () => {
 
     const broad = withAdditionalWriteRoots(runtime, ["/workspace"]);
     expect(broad.filesystem.denyWrite).toContain(gitRoot);
-    expect(broad.filesystem.grantableDenyWrite).toContain(gitRoot);
 
     const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
-    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
-    expect(exact.filesystem.grantableDenyWrite).not.toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).toContain(gitRoot);
     expect(exact.filesystem.denyWrite).toContain(agentsRoot);
     expect(exact.filesystem.denyWrite).toContain("/workspace/project/.codex");
   });
@@ -729,7 +816,6 @@ describe("sandbox integration", () => {
     const requested = withAdditionalWriteRoots(runtime, [agentsRoot]);
     expect(requested.filesystem.allowWrite).toContain(agentsRoot);
     expect(requested.filesystem.denyWrite).toContain(agentsRoot);
-    expect(requested.filesystem.grantableDenyWrite).not.toContain(agentsRoot);
   });
 
   it("preserves explicit additional roots and nested file grants", () => {

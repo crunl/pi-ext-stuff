@@ -1,13 +1,9 @@
-import { lstat, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   SandboxAskCallback,
   SandboxRuntimeConfig,
   SandboxViolationStore,
 } from "@anthropic-ai/sandbox-runtime";
 import { describe, expect, it } from "vitest";
-import { expandSymlinkAliases } from "../src/filesystem-policy.ts";
 import { SandboxConnectGuard } from "../src/sandbox/connect-guard.ts";
 import {
   assertSrtPolicySupported,
@@ -17,7 +13,6 @@ import {
 } from "../src/sandbox/srt-enforcer.ts";
 import {
   createGuardianEvidenceScope,
-  createSandboxedBashOperations,
   createSandboxedReadOnlyCommandRunner,
   type SandboxExecutionRequest,
   type SandboxExecutionResult,
@@ -565,153 +560,6 @@ describe("Guardian environment seam", () => {
     expect(request?.env).not.toHaveProperty("OPENAI_API_KEY");
     expect(request?.program.executable).toBe(process.execPath);
   });
-
-  it("executes only the typed Git init plan with fixed config-safe environment", async () => {
-    let request: SandboxExecutionRequest | undefined;
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-init-"));
-    const gitRoots = [...new Set(expandSymlinkAliases(join(cwd, ".git")))];
-    const policy: SandboxPolicy = {
-      filesystem: {
-        allowWrite: gitRoots,
-        denyRead: [],
-        denyWrite: gitRoots.flatMap((root) => [join(root, "hooks"), join(root, "config")]),
-      },
-      network: { allowedDomains: [], deniedDomains: [] },
-    };
-    const manager = {
-      initialize: async (): Promise<void> => undefined,
-      reset: async (): Promise<void> => undefined,
-      execute: async (next: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
-        request = next;
-        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
-      },
-    };
-    const plan = {
-      kind: "git-init" as const,
-      executable: "/usr/bin/git",
-      args: ["init"] as ["init"],
-      cwd,
-    };
-    try {
-      await createSandboxedBashOperations(manager, policy, { gitInitPlan: plan }).exec(
-        "git init",
-        cwd,
-        { onData: () => undefined },
-      );
-
-      expect(request?.program).toEqual({ executable: plan.executable, args: plan.args });
-      expect(request?.allowGitConfig).toBe(true);
-      expect(request?.envMode).toBe("replace");
-      expect(request?.env).toMatchObject({
-        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_TEMPLATE_DIR: expect.stringContaining("pi-permissions-git-template-"),
-      });
-      expect(request?.env?.GIT_TEMPLATE_DIR).not.toBe("");
-      expect(request?.env?.HOME).toMatch(/pi-permissions-git-home-/);
-      expect(request?.env?.XDG_CONFIG_HOME).toBe(request?.env?.HOME);
-      expect(request?.policy.filesystem.denyWrite).toEqual(
-        expect.arrayContaining(gitRoots.flatMap((root) => [join(root, "hooks")])),
-      );
-      expect(request?.policy.filesystem.denyWrite).not.toEqual(
-        expect.arrayContaining(gitRoots.flatMap((root) => [join(root, "config")])),
-      );
-      await expect(lstat(join(cwd, ".git"))).resolves.toMatchObject({
-        isDirectory: expect.any(Function),
-      });
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it("removes only its newly prepared Git metadata after a failed init", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-git-init-failed-"));
-    const gitRoots = [...new Set(expandSymlinkAliases(join(cwd, ".git")))];
-    const policy: SandboxPolicy = {
-      filesystem: {
-        allowWrite: gitRoots,
-        denyRead: [],
-        denyWrite: gitRoots.flatMap((root) => [join(root, "hooks"), join(root, "config")]),
-      },
-      network: { allowedDomains: [], deniedDomains: [] },
-    };
-    const manager = {
-      initialize: async (): Promise<void> => undefined,
-      reset: async (): Promise<void> => undefined,
-      execute: async (): Promise<SandboxExecutionResult> => ({
-        stdout: Buffer.alloc(0),
-        stderr: Buffer.from("git init failed"),
-        exitCode: 1,
-      }),
-    };
-    const plan = {
-      kind: "git-init" as const,
-      executable: "/usr/bin/git",
-      args: ["init"] as ["init"],
-      cwd,
-    };
-
-    try {
-      await expect(
-        createSandboxedBashOperations(manager, policy, { gitInitPlan: plan }).exec(
-          "git init",
-          cwd,
-          { onData: () => undefined },
-        ),
-      ).resolves.toEqual({ exitCode: 1 });
-      await expect(lstat(join(cwd, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
-  it.each(["file", "symlink"] as const)(
-    "rejects an existing .git %s before invoking the Git helper",
-    async (kind) => {
-      const cwd = await mkdtemp(join(tmpdir(), `pi-permissions-git-init-${kind}-`));
-      const gitRoot = join(cwd, ".git");
-      const gitRoots = [...new Set(expandSymlinkAliases(gitRoot))];
-      const policy: SandboxPolicy = {
-        filesystem: {
-          allowWrite: gitRoots,
-          denyRead: [],
-          denyWrite: gitRoots.flatMap((root) => [join(root, "hooks"), join(root, "config")]),
-        },
-        network: { allowedDomains: [], deniedDomains: [] },
-      };
-      if (kind === "file") await writeFile(gitRoot, "not a repository");
-      else await symlink(cwd, gitRoot);
-      let executed = false;
-      const manager = {
-        initialize: async (): Promise<void> => undefined,
-        reset: async (): Promise<void> => undefined,
-        execute: async (): Promise<SandboxExecutionResult> => {
-          executed = true;
-          return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
-        },
-      };
-      const plan = {
-        kind: "git-init" as const,
-        executable: "/usr/bin/git",
-        args: ["init"] as ["init"],
-        cwd,
-      };
-
-      try {
-        await expect(
-          createSandboxedBashOperations(manager, policy, { gitInitPlan: plan }).exec(
-            "git init",
-            cwd,
-            { onData: () => undefined },
-          ),
-        ).rejects.toThrow(/existing \.git/);
-        expect(executed).toBe(false);
-      } finally {
-        await rm(cwd, { recursive: true, force: true });
-      }
-    },
-  );
 });
 
 describe("Runtime denial classification", () => {

@@ -96,7 +96,6 @@ export function assertSrtPolicySupported(
 
 function toSrtConfig(
   policy: SandboxPolicy,
-  allowGitConfig = false,
   connectGuard?: SandboxConnectGuard,
 ): SandboxRuntimeConfig {
   assertSrtPolicySupported(policy);
@@ -105,7 +104,6 @@ function toSrtConfig(
       denyRead: [...policy.filesystem.denyRead],
       allowWrite: [...policy.filesystem.allowWrite],
       denyWrite: [...policy.filesystem.denyWrite],
-      ...(allowGitConfig ? { allowGitConfig: true } : {}),
     },
     network: {
       // The callback is the sole authorization seam in production. Keeping
@@ -339,6 +337,10 @@ export class SrtSandboxManager implements SandboxManagerLike {
     await this.activate(config);
   }
 
+  isHealthy(): boolean {
+    return processSandboxState.initialized && !srtProcessCoordinator.isPoisoned;
+  }
+
   async activate(config: SandboxPolicy): Promise<void> {
     const snapshot = clonePolicy(config);
     const activation = deadlineSignal(SRT_ACTIVATION_TIMEOUT_MS);
@@ -360,11 +362,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           }
           await this.connectGuard?.start();
           processSandboxState.connectGuard = this.connectGuard;
-          await this.runtime.initialize(
-            toSrtConfig(snapshot, false, this.connectGuard),
-            askNetwork,
-            true,
-          );
+          await this.runtime.initialize(toSrtConfig(snapshot, this.connectGuard), askNetwork, true);
           if (activation.signal.aborted) {
             await this.resetSrt();
             throw new Error("aborted");
@@ -443,6 +441,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
         if (srtProcessCoordinator.isPoisoned) {
           throw sandboxUnavailable("executor is poisoned after a previous cleanup failure");
         }
+        if (signal.aborted) throw new Error("aborted");
         const previousNetworkAuthorize = processSandboxState.networkAuthorize;
         const previousNetworkSignal = processSandboxState.networkSignal;
         processSandboxState.networkAuthorize = request.networkAuthorize;
@@ -476,11 +475,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           let result: SandboxExecutionResult | undefined;
           let lifecycleError: unknown;
           try {
-            if (changed || request.allowGitConfig) {
-              this.runtime.updateConfig(
-                toSrtConfig(derived, request.allowGitConfig === true, this.connectGuard),
-              );
-            }
+            if (changed) this.runtime.updateConfig(toSrtConfig(derived, this.connectGuard));
             const command = serializeProgram(request.program, {
               forceProxyForLocalTargets: request.networkAuthorize !== undefined,
             });
@@ -510,9 +505,9 @@ export class SrtSandboxManager implements SandboxManagerLike {
               lifecycleError = error;
               srtProcessCoordinator.markPoisoned();
             }
-            if (changed || request.allowGitConfig) {
+            if (changed) {
               try {
-                this.runtime.updateConfig(toSrtConfig(base, false, this.connectGuard));
+                this.runtime.updateConfig(toSrtConfig(base, this.connectGuard));
               } catch (error) {
                 lifecycleError ??= error;
                 srtProcessCoordinator.markPoisoned();
@@ -585,11 +580,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
       if (signal?.aborted) throw new Error("aborted");
       await this.connectGuard?.start();
       processSandboxState.connectGuard = this.connectGuard;
-      await this.runtime.initialize(
-        toSrtConfig(config, false, this.connectGuard),
-        askNetwork,
-        true,
-      );
+      await this.runtime.initialize(toSrtConfig(config, this.connectGuard), askNetwork, true);
     } catch (error) {
       await this.connectGuard?.close().catch(() => undefined);
       if (processSandboxState.connectGuard === this.connectGuard) {

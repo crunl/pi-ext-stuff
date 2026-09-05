@@ -1,8 +1,6 @@
 import { isIP } from "node:net";
 import { basename, relative, resolve, sep } from "node:path";
-import type { GitInitExecutionPlan } from "../execution-plan.ts";
 import { defaultPermissionsConfigPath, resolvePolicyPath } from "../filesystem-policy.ts";
-import { resolveTrustedSystemGitExecutable, TRUSTED_SYSTEM_GIT_PATHS } from "../git-executable.ts";
 import {
   isPublicNetworkHost,
   normalizeNetworkHost,
@@ -30,43 +28,6 @@ const directNetworkExecutables = new Set([
 ]);
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 const gitNetworkSubcommands = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
-const gitMutationSubcommands = new Set([
-  "add",
-  "am",
-  "bisect",
-  "branch",
-  "checkout",
-  "cherry-pick",
-  "commit",
-  "fetch",
-  "gc",
-  "init",
-  "maintenance",
-  "merge",
-  "mv",
-  "notes",
-  "pull",
-  "push",
-  "rebase",
-  "reset",
-  "restore",
-  "revert",
-  "rm",
-  "stash",
-  "switch",
-  "tag",
-  "update-ref",
-  "worktree",
-]);
-const gitSubmoduleMutationActions = new Set([
-  "absorbgitdirs",
-  "add",
-  "deinit",
-  "set-branch",
-  "set-url",
-  "sync",
-  "update",
-]);
 const packageNetworkSubcommands = new Set([
   "add",
   "audit",
@@ -392,239 +353,6 @@ export function parseCommandSegments(command: string): CommandSegment[] {
   return [...segments, ...nested];
 }
 
-const safeGitGlobalOptions = new Set([
-  "--no-pager",
-  "--paginate",
-  "-p",
-  "--no-replace-objects",
-  "--literal-pathspecs",
-  "--glob-pathspecs",
-  "--noglob-pathspecs",
-  "--icase-pathspecs",
-  "--no-optional-locks",
-  "--no-lazy-fetch",
-  "--no-advice",
-]);
-const unsafeGitGlobalValueOptions = new Set([
-  "-c",
-  "-C",
-  "--config-env",
-  "--exec-path",
-  "--git-dir",
-  "--namespace",
-  "--super-prefix",
-  "--work-tree",
-]);
-const recognizedGitSubcommands = new Set([
-  ...gitMutationSubcommands,
-  ...gitNetworkSubcommands,
-  "config",
-  "submodule",
-]);
-
-interface GitInvocation {
-  segment: CommandSegment;
-  kind: "git" | "gh";
-  subcommand?: string;
-  arguments: string[];
-  mutation: boolean;
-  globalOptionsSafe: boolean;
-  trusted: boolean;
-}
-
-function relevantGitSubcommandIndex(args: readonly string[], start: number): number | undefined {
-  for (let index = start; index < args.length; index += 1) {
-    if (recognizedGitSubcommands.has((args[index] ?? "").toLowerCase())) return index;
-  }
-  return undefined;
-}
-
-function parseGitSubcommand(args: readonly string[]): {
-  index?: number;
-  safe: boolean;
-} {
-  let index = 0;
-  let safe = true;
-  while (index < args.length) {
-    const token = args[index] ?? "";
-    if (token === "--") {
-      const candidate = args[index + 1];
-      return candidate ? { index: index + 1, safe } : { safe: false };
-    }
-    if (!token.startsWith("-") || token === "-") return { index, safe };
-    if (safeGitGlobalOptions.has(token)) {
-      index += 1;
-      continue;
-    }
-    const optionName = token.split("=", 1)[0] ?? token;
-    if (
-      unsafeGitGlobalValueOptions.has(optionName) ||
-      token.startsWith("-c") ||
-      token.startsWith("-C")
-    ) {
-      safe = false;
-      const hasAttachedValue =
-        token.includes("=") ||
-        (token.length > 2 && (token.startsWith("-c") || token.startsWith("-C")));
-      index += hasAttachedValue ? 1 : 2;
-      continue;
-    }
-    safe = false;
-    const candidate = relevantGitSubcommandIndex(args, index + 1);
-    return candidate === undefined ? { safe } : { index: candidate, safe };
-  }
-  return { safe };
-}
-
-function parseGitInvocation(segment: CommandSegment): GitInvocation | undefined {
-  if (segment.executable !== "git" && segment.executable !== "gh") return undefined;
-  if (segment.executable === "gh") {
-    const positional = segment.args.filter((argument) => !argument.startsWith("-"));
-    const checkout =
-      positional[0]?.toLowerCase() === "pr" && positional[1]?.toLowerCase() === "checkout";
-    return {
-      segment,
-      kind: "gh",
-      subcommand: positional[0]?.toLowerCase(),
-      arguments: positional.slice(1),
-      mutation: checkout,
-      globalOptionsSafe: true,
-      trusted: segment.executableTrusted,
-    };
-  }
-
-  const parsed = parseGitSubcommand(segment.args);
-  const subcommand =
-    parsed.index === undefined ? undefined : segment.args[parsed.index]?.toLowerCase();
-  const commandArguments = parsed.index === undefined ? [] : segment.args.slice(parsed.index + 1);
-  const mutation =
-    subcommand === "config"
-      ? !commandArguments.some(
-          (argument) =>
-            argument === "--global" ||
-            argument === "--system" ||
-            argument === "--file" ||
-            argument.startsWith("--file="),
-        )
-      : subcommand === "submodule"
-        ? commandArguments.some((argument) => gitSubmoduleMutationActions.has(argument))
-        : subcommand !== undefined && gitMutationSubcommands.has(subcommand);
-  return {
-    segment,
-    kind: "git",
-    subcommand,
-    arguments: commandArguments,
-    mutation,
-    globalOptionsSafe: parsed.safe,
-    trusted: segment.executableTrusted,
-  };
-}
-
-function parsedGitInvocations(command: string): GitInvocation[] {
-  return parseCommandSegments(command).flatMap((segment) => {
-    const invocation = parseGitInvocation(segment);
-    return invocation ? [invocation] : [];
-  });
-}
-
-export function shellCommandUsesGitMutation(command: string): boolean {
-  return parsedGitInvocations(command).some((invocation) => invocation.mutation);
-}
-
-function invocationInitializesCurrentDirectory(invocation: GitInvocation): boolean {
-  return (
-    invocation.kind === "git" &&
-    invocation.subcommand === "init" &&
-    (invocation.arguments.length === 0 ||
-      (invocation.arguments.length === 1 && invocation.arguments[0] === "."))
-  );
-}
-
-function resolveTrustedGitExecutable(segment: CommandSegment): string | undefined {
-  if (!segment.directExecutable || !segment.executableTrusted) return undefined;
-  if (segment.executable !== "git") return undefined;
-  const candidates =
-    segment.executableToken === "/usr/bin/git"
-      ? ["/usr/bin/git"]
-      : segment.executableToken === "/bin/git"
-        ? ["/bin/git"]
-        : TRUSTED_SYSTEM_GIT_PATHS;
-  for (const candidate of candidates) {
-    const executable = resolveTrustedSystemGitExecutable(candidate);
-    if (executable) return executable;
-  }
-  return undefined;
-}
-
-export function gitInitializationPlan(
-  command: string,
-  cwd: string,
-): GitInitExecutionPlan | undefined {
-  const segments = parseCommandSegments(command);
-  const segment = segments.length === 1 ? segments[0] : undefined;
-  const invocation = segment ? parseGitInvocation(segment) : undefined;
-  const syntax = scanShellSyntax(command);
-  if (
-    !segment ||
-    !invocation ||
-    !invocationInitializesCurrentDirectory(invocation) ||
-    !segment.directExecutable ||
-    !invocation.globalOptionsSafe ||
-    syntax.hasActiveControl ||
-    segment.hasRedirect ||
-    segment.hasSubstitution ||
-    segment.nestedShell
-  ) {
-    return undefined;
-  }
-  const executable = resolveTrustedGitExecutable(segment);
-  if (!executable) return undefined;
-  return {
-    kind: "git-init",
-    executable,
-    args: invocation.arguments.length === 0 ? ["init"] : ["init", "."],
-    cwd: resolve(cwd),
-  };
-}
-
-export function shellCommandInitializesCurrentDirectory(command: string): boolean {
-  const segments = parseCommandSegments(command);
-  const segment = segments.length === 1 ? segments[0] : undefined;
-  const invocation = segment ? parseGitInvocation(segment) : undefined;
-  if (!segment || !invocation) return false;
-  const syntax = scanShellSyntax(command);
-  return (
-    command.trim() === segment.source &&
-    segment.directExecutable &&
-    invocation.trusted &&
-    invocation.globalOptionsSafe &&
-    invocationInitializesCurrentDirectory(invocation) &&
-    !syntax.hasActiveControl &&
-    !segment.hasRedirect &&
-    !segment.hasSubstitution &&
-    !segment.nestedShell
-  );
-}
-
-export function shellCommandCanGrantGitMetadata(command: string): boolean {
-  const segments = parseCommandSegments(command);
-  const segment = segments.length === 1 ? segments[0] : undefined;
-  const invocation = segment ? parseGitInvocation(segment) : undefined;
-  if (invocation?.subcommand === "init") {
-    return shellCommandInitializesCurrentDirectory(command);
-  }
-  return Boolean(
-    segment &&
-      invocation?.mutation &&
-      invocation.trusted &&
-      invocation.globalOptionsSafe &&
-      !scanShellSyntax(command).hasActiveControl &&
-      !segment.hasRedirect &&
-      !segment.hasSubstitution &&
-      !segment.nestedShell,
-  );
-}
-
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
   return ["path", "filePath", "targetPath", "sourcePath"].flatMap((key) => {
     const value = input[key];
@@ -768,6 +496,118 @@ const gitRemoteOptionGrammar = new Map<string, GitRemoteOptionGrammar>([
     },
   ],
 ]);
+
+const safeGitGlobalOptions = new Set([
+  "--no-pager",
+  "--paginate",
+  "-p",
+  "--no-replace-objects",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-optional-locks",
+  "--no-lazy-fetch",
+  "--no-advice",
+]);
+const unsafeGitGlobalValueOptions = new Set([
+  "-c",
+  "-C",
+  "--config-env",
+  "--exec-path",
+  "--git-dir",
+  "--namespace",
+  "--super-prefix",
+  "--work-tree",
+]);
+const recognizedGitSubcommands = new Set([...gitNetworkSubcommands, "config", "submodule"]);
+
+interface GitInvocation {
+  segment: CommandSegment;
+  kind: "git" | "gh";
+  subcommand?: string;
+  arguments: string[];
+  globalOptionsSafe: boolean;
+  trusted: boolean;
+}
+
+function relevantGitSubcommandIndex(args: readonly string[], start: number): number | undefined {
+  for (let index = start; index < args.length; index += 1) {
+    if (recognizedGitSubcommands.has((args[index] ?? "").toLowerCase())) return index;
+  }
+  return undefined;
+}
+
+function parseGitSubcommand(args: readonly string[]): {
+  index?: number;
+  safe: boolean;
+} {
+  let index = 0;
+  let safe = true;
+  while (index < args.length) {
+    const token = args[index] ?? "";
+    if (token === "--") {
+      const candidate = args[index + 1];
+      return candidate ? { index: index + 1, safe } : { safe: false };
+    }
+    if (!token.startsWith("-") || token === "-") return { index, safe };
+    if (safeGitGlobalOptions.has(token)) {
+      index += 1;
+      continue;
+    }
+    const optionName = token.split("=", 1)[0] ?? token;
+    if (
+      unsafeGitGlobalValueOptions.has(optionName) ||
+      token.startsWith("-c") ||
+      token.startsWith("-C")
+    ) {
+      safe = false;
+      const hasAttachedValue =
+        token.includes("=") ||
+        (token.length > 2 && (token.startsWith("-c") || token.startsWith("-C")));
+      index += hasAttachedValue ? 1 : 2;
+      continue;
+    }
+    safe = false;
+    const candidate = relevantGitSubcommandIndex(args, index + 1);
+    return candidate === undefined ? { safe } : { index: candidate, safe };
+  }
+  return { safe };
+}
+
+function parseGitInvocation(segment: CommandSegment): GitInvocation | undefined {
+  if (segment.executable !== "git" && segment.executable !== "gh") return undefined;
+  if (segment.executable === "gh") {
+    const positional = segment.args.filter((argument) => !argument.startsWith("-"));
+    return {
+      segment,
+      kind: "gh",
+      subcommand: positional[0]?.toLowerCase(),
+      arguments: positional.slice(1),
+      globalOptionsSafe: true,
+      trusted: segment.executableTrusted,
+    };
+  }
+  const parsed = parseGitSubcommand(segment.args);
+  const subcommand =
+    parsed.index === undefined ? undefined : segment.args[parsed.index]?.toLowerCase();
+  const commandArguments = parsed.index === undefined ? [] : segment.args.slice(parsed.index + 1);
+  return {
+    segment,
+    kind: "git",
+    subcommand,
+    arguments: commandArguments,
+    globalOptionsSafe: parsed.safe,
+    trusted: segment.executableTrusted,
+  };
+}
+
+function parsedGitInvocations(command: string): GitInvocation[] {
+  return parseCommandSegments(command).flatMap((segment) => {
+    const invocation = parseGitInvocation(segment);
+    return invocation ? [invocation] : [];
+  });
+}
 
 function gitInvocationUsesNetwork(invocation: GitInvocation): boolean {
   if (invocation.kind !== "git" || !invocation.subcommand) return false;

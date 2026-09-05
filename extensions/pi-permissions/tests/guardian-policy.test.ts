@@ -41,6 +41,10 @@ describe("Guardian policy", () => {
     expect(prompt).toContain("writes and network are denied");
     expect(prompt).toContain("If no read-only evidence tools are exposed");
     expect(prompt).toContain("If no such tools are exposed");
+    expect(prompt).toContain("`executionMode=escalated`");
+    expect(prompt).toContain("exact Bash command and cwd will execute once outside");
+    expect(prompt).toContain("not an MCP or other external tool");
+    expect(prompt).toContain("explicit deny rules as hard constraints");
     expect(prompt).not.toContain("You cannot run shell commands");
     expect(prompt).not.toContain("sandbox_permissions");
     expect(prompt).not.toContain("{{ tenant_policy_config }}");

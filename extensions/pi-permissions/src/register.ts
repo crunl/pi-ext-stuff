@@ -41,7 +41,7 @@ import {
   resolveChildEnvelope,
 } from "./delegation.ts";
 import { defaultProtectedWritePaths, resolvePolicyPath } from "./filesystem-policy.ts";
-import { inspectRepositoryGitMetadata } from "./git-metadata.ts";
+import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
@@ -264,6 +264,67 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     | { kind: "disabled" }
     | { kind: "ready"; profile: LoadedPermissionsConfig["config"]["sandbox"]["profile"] }
     | { kind: "failed"; error: string } = { kind: "pending" };
+
+  /**
+   * A cached `sandboxReady` bit is a lifecycle fact, not proof that the SRT
+   * process is still usable. Backends may expose a live health check; legacy
+   * test adapters without one retain the existing ready-state behaviour.
+   */
+  const sandboxManagerHealthy = (): boolean => {
+    if (sandboxState.kind !== "ready") return false;
+    if (typeof sandboxManager.isHealthy !== "function") return true;
+    try {
+      return sandboxManager.isHealthy();
+    } catch {
+      return false;
+    }
+  };
+
+  const escalationEligibility = (
+    snapshot: Pick<
+      PermissionExecutionSnapshot,
+      "mode" | "config" | "sandboxReady" | "baseSandboxConfig"
+    >,
+    baseSandboxConfig = snapshot.baseSandboxConfig,
+  ): { eligible: boolean; reason: string } => {
+    if (snapshot.mode !== "auto") {
+      return { eligible: false, reason: "Command escalation is unavailable outside auto mode" };
+    }
+    if (!snapshot.sandboxReady || baseSandboxConfig === undefined || !sandboxManagerHealthy()) {
+      return {
+        eligible: false,
+        reason: "Sandbox executor is unavailable or poisoned",
+      };
+    }
+    if (snapshot.config.sandbox.filesystem.denyRead.length > 0) {
+      return {
+        eligible: false,
+        reason: "Command escalation cannot preserve configured denyRead rules",
+      };
+    }
+    if (snapshot.config.sandbox.filesystem.denyWrite.length > 0) {
+      return {
+        eligible: false,
+        reason: "Command escalation cannot preserve configured denyWrite rules",
+      };
+    }
+    if (snapshot.config.sandbox.network.deniedDomains.length > 0) {
+      return {
+        eligible: false,
+        reason: "Command escalation cannot preserve configured deniedDomains rules",
+      };
+    }
+    if (session.activeDelegationCeiling()) {
+      return {
+        eligible: false,
+        reason: "Command escalation is outside the active delegation envelope",
+      };
+    }
+    return {
+      eligible: true,
+      reason: "Sandbox is healthy and no explicit deny rules or delegation ceiling apply",
+    };
+  };
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-permissions", modeRuntime?.statusLabel ?? "Approve for me");
@@ -640,6 +701,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ? overrides.baseSandboxPolicy
         : executionSnapshot.baseSandboxConfig,
     sandboxReady: executionSnapshot.sandboxReady,
+    escalationEligibility: escalationEligibility(executionSnapshot, overrides?.baseSandboxPolicy),
     transcript: currentGuardianTranscriptSnapshot(),
   });
 
@@ -823,22 +885,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       baseSandboxConfig,
       sandboxState,
     };
-    let candidateSandbox: SandboxPolicy | undefined;
-    if (candidate.config.sandbox.enabled) {
-      const gitMetadata = await inspectRepositoryGitMetadata(ctx.cwd);
-      candidateSandbox = createSandboxRuntimeConfig(
-        candidate.config.sandbox,
-        ctx.cwd,
-        defaultProtectedWritePaths(ctx.cwd, agentDir),
-        gitMetadata.ok ? gitMetadata.writeRoots : [],
-      );
-    }
-
     if (!requiresSandbox(effectiveMode, candidate.config)) {
       assertActivationCurrent(expectedGeneration);
       await sandboxManager.reset();
       assertActivationCurrent(expectedGeneration);
       return commitActivation(ctx, key, candidate, undefined, { kind: "disabled" }, force);
+    }
+
+    let candidateSandbox: SandboxPolicy | undefined;
+    if (candidate.config.sandbox.enabled) {
+      const gitMetadata = await discoverGitMetadataProtectionRoots(ctx.cwd);
+      if (!gitMetadata.ok) throw new Error(gitMetadata.reason);
+      candidateSandbox = createSandboxRuntimeConfig(
+        candidate.config.sandbox,
+        ctx.cwd,
+        defaultProtectedWritePaths(ctx.cwd, agentDir),
+        gitMetadata.roots,
+      );
     }
 
     return activateWithSandbox(
@@ -921,6 +984,33 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type EditParams = Parameters<EditInstance["execute"]>[1];
   type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
   type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
+
+  // Pi 0.85.1's native createBashTool leaves timeout unset by default. The
+  // escalated path is deliberately still Pi's executor, so normalize only
+  // that path at ingress; ordinary sandbox/yolo calls retain their Pi/SRT
+  // timeout semantics.
+  const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
+  const MAX_BASH_TIMEOUT_SECONDS = 2_147_483.647;
+  const normalizeBashParams = (params: BashParams): BashParams => {
+    if (!isRecord(params)) throw new Error("Bash parameters must be an object");
+    const rawParams = params as unknown as Record<string, unknown>;
+    if (rawParams.sandbox_permissions !== "require_escalated") return params;
+    const timeout = params.timeout;
+    if (timeout === undefined) {
+      return { ...params, timeout: DEFAULT_BASH_TIMEOUT_SECONDS } as BashParams;
+    }
+    if (
+      typeof timeout !== "number" ||
+      !Number.isFinite(timeout) ||
+      timeout <= 0 ||
+      timeout > MAX_BASH_TIMEOUT_SECONDS
+    ) {
+      throw new Error(
+        `Invalid timeout: must be a finite number greater than 0 and at most ${MAX_BASH_TIMEOUT_SECONDS} seconds`,
+      );
+    }
+    return params;
+  };
 
   interface PreparedPermissionExecution {
     executionSnapshot: PermissionExecutionSnapshot;
@@ -1335,10 +1425,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     onUpdate: BashOnUpdate,
     ctx: ExtensionContext,
   ): Promise<BashResult> => {
+    const normalizedParams = normalizeBashParams(params);
     const captured = permissions.captureAction({
       id,
       tool: "bash",
-      input: params,
+      input: normalizedParams,
       cwd: resolve(ctx.cwd),
     });
     const { call } = captured;
@@ -1422,14 +1513,41 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       execute: async ({
         mode,
         policy,
-        plan,
         call,
         signal: attemptSignal,
         authorizeCapability,
         rejectCapability,
       }) => {
         try {
+          if (attemptSignal.aborted) throw new Error("aborted");
           if (mode === "unrestricted") {
+            return {
+              kind: "completed",
+              value: await bashToolFactory(canonicalCwd).execute(
+                call.id,
+                call.input,
+                attemptSignal,
+                reviewBridge.onUpdate as BashOnUpdate,
+              ),
+            };
+          }
+          if (mode === "escalated") {
+            // The Engine supplies this explicit one-shot lease only after the
+            // exact command/cwd review. Re-check live backend health so a
+            // poisoned SRT snapshot can never turn into a bare execution.
+            if (!sandboxManagerHealthy()) {
+              return {
+                kind: "failed",
+                error: new Error("Sandbox executor is unavailable or poisoned"),
+              };
+            }
+            if (session.activeDelegationCeiling()) {
+              return {
+                kind: "failed",
+                error: new Error("Command escalation is outside the active delegation envelope"),
+              };
+            }
+            if (attemptSignal.aborted) throw new Error("aborted");
             return {
               kind: "completed",
               value: await bashToolFactory(canonicalCwd).execute(
@@ -1453,7 +1571,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const delegationCeiling = session.activeDelegationCeiling();
           const sandboxedBash = bashToolFactory(canonicalCwd, {
             operations: createSandboxedBashOperations(sandboxManager, policy, {
-              ...(plan?.kind === "git-init" ? { gitInitPlan: plan } : {}),
               commandId: call.id,
               networkAuthorize: createSandboxNetworkAuthorizer(
                 policy,
@@ -1670,7 +1787,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         createWriteTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
       (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
         createWriteTool(cwd, {
-          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal, callId),
+          operations: createSandboxedFileOperations(
+            sandboxManager,
+            policy,
+            [],
+            callSignal,
+            callId,
+            cwd,
+          ),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
 
@@ -1692,7 +1816,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         createEditTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
       (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
         createEditTool(cwd, {
-          operations: createSandboxedFileOperations(sandboxManager, policy, [], callSignal, callId),
+          operations: createSandboxedFileOperations(
+            sandboxManager,
+            policy,
+            [],
+            callSignal,
+            callId,
+            cwd,
+          ),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
 
@@ -1700,9 +1831,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseBash,
     ...addReviewResultRenderer(adoptHostTheme(codexBashToolSpec)),
     label: "bash",
-    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and provide a concrete justification. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
+    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write. For Git metadata writes such as git add, git commit, or git init, use sandbox_permissions=require_escalated instead of additional_permissions when the exact command must run outside the active sandbox, with a concrete justification; it receives one action review and is not a blind retry. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
     promptGuidelines: [
-      "When the active sandbox does not allow a required filesystem operation, request only the smallest exact permission needed and explain why. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
+      "When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write and explain why. For Git metadata writes such as git add, git commit, or git init, use sandbox_permissions=require_escalated instead of additional_permissions when the exact command must run outside the active sandbox, with a concrete justification; it is a one-shot reviewed action and cannot be combined with additional_permissions. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
     ],
     parameters: permissionedBashParameters,
     executionMode: "sequential",

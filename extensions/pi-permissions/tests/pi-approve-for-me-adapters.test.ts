@@ -163,6 +163,26 @@ describe("admissionPlanFromRiskDecision", () => {
       summary: "custom tool",
     });
   });
+
+  it("maps an escalated Bash review without pretending the sandbox enforces it", () => {
+    const decision: RiskDecision = {
+      action: "prompt",
+      risk: "LOW",
+      reason: "Command requires escalated sandbox permissions",
+      summary: "git add README.md && git commit -m update",
+      executionMode: "escalated",
+      justification: "Update the isolated fixture repository",
+    };
+    expect(admissionPlanFromRiskDecision(decision)).toEqual({
+      kind: "review",
+      review: "action",
+      risk: "LOW",
+      reason: "Command requires escalated sandbox permissions",
+      summary: "git add README.md && git commit -m update",
+      executionMode: "escalated",
+      justification: "Update the isolated fixture repository",
+    });
+  });
 });
 
 describe("createPiGuardianAdapter", () => {
@@ -248,6 +268,69 @@ describe("createPiGuardianAdapter", () => {
       staticReason: "Needs the generated output directory",
     });
     expect(request?.untrustedAction.toolCallId).toBe("call-1");
+    expect(review.mock.calls[0]?.[1]).toMatchObject({
+      guardianEvidenceScope: {
+        denyRead: ["/baseline-secret"],
+        authorityFingerprint: expect.any(String),
+      },
+    });
+  });
+
+  it("shows an escalated Bash action and separate baseline evidence", async () => {
+    const { reviewer, review } = createReviewer();
+    const adapter = createPiGuardianAdapter(reviewer);
+    const escalatedInput = {
+      command: "git add README.md && git commit -m update",
+      sandbox_permissions: "require_escalated" as const,
+      justification: "Update the isolated fixture repository",
+    };
+    const baselinePolicy: SandboxPolicy = {
+      ...basePolicy,
+      filesystem: {
+        ...basePolicy.filesystem,
+        denyRead: ["/baseline-secret"],
+      },
+    };
+
+    await adapter.review(
+      reviewInput({
+        call: {
+          id: "call-1",
+          tool: "bash",
+          input: escalatedInput,
+          cwd: "/workspace",
+        },
+        baseline: { mode: "sandboxed", policy: baselinePolicy },
+        effective: { mode: "escalated" },
+        reason: "Command requires escalated sandbox permissions",
+        summary: escalatedInput.command,
+        executionMode: "escalated",
+        justification: escalatedInput.justification,
+        context: guardianContext({
+          event: { ...event, input: escalatedInput },
+          baseSandboxPolicy: baselinePolicy,
+        }),
+      }),
+    );
+
+    const request = review.mock.calls[0]?.[0] as AutoReviewRequest | undefined;
+    expect(request?.untrustedAction).toEqual({
+      kind: "shell",
+      toolCallId: "call-1",
+      command: escalatedInput.command,
+      cwd: "/workspace",
+    });
+    expect(request?.permissionContext).toMatchObject({
+      executionMode: "escalated",
+      sandboxEnforcesAction: false,
+      filesystemWriteRoots: [],
+      filesystemDenyRead: [],
+      filesystemDenyWrite: [],
+      allowedNetworkHosts: [],
+      deniedNetworkHosts: [],
+      justification: escalatedInput.justification,
+      staticReason: "Command requires escalated sandbox permissions",
+    });
     expect(review.mock.calls[0]?.[1]).toMatchObject({
       guardianEvidenceScope: {
         denyRead: ["/baseline-secret"],

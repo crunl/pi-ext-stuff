@@ -1,4 +1,4 @@
-import { parse, resolve } from "node:path";
+import { parse } from "node:path";
 import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
@@ -39,21 +39,29 @@ export const permissionedBashParameters = Type.Object(
     command: Type.String({ description: "Bash command to execute" }),
     timeout: Type.Optional(
       Type.Number({
-        description: "Timeout in seconds (optional, defaults to 120 seconds)",
+        description:
+          "Timeout in seconds (escalated commands default to 120 seconds; other modes keep their runtime default)",
       }),
     ),
     sandbox_permissions: Type.Optional(
-      Type.Union([Type.Literal("use_default"), Type.Literal("with_additional_permissions")], {
-        description:
-          "Use with_additional_permissions only when this command must write outside the active sandbox",
-      }),
+      Type.Union(
+        [
+          Type.Literal("use_default"),
+          Type.Literal("with_additional_permissions"),
+          Type.Literal("require_escalated"),
+        ],
+        {
+          description:
+            "Use require_escalated only when this exact command must run outside the active sandbox; use with_additional_permissions for narrow sandbox writes",
+        },
+      ),
     ),
     additional_permissions: Type.Optional(additionalPermissions),
     justification: Type.Optional(
       Type.String({
         minLength: 1,
         maxLength: 1000,
-        description: "Why the additional filesystem access is required",
+        description: "Why the additional filesystem access or command escalation is required",
       }),
     ),
   },
@@ -63,6 +71,37 @@ export const permissionedBashParameters = Type.Object(
 export type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
   | { ok: false; reason: string };
+
+export interface EscalatedCommandRequest {
+  readonly requested: boolean;
+  readonly justification?: string;
+}
+
+/**
+ * Parse the command-level escalation intent without granting or selecting an
+ * executor. The Engine remains the only authority that can turn this intent
+ * into an effective lease.
+ */
+export function requestedEscalation(
+  input: Record<string, unknown>,
+): EscalatedCommandRequest | { error: string } {
+  if (input.sandbox_permissions !== "require_escalated") {
+    return { requested: false };
+  }
+  if (input.additional_permissions !== undefined) {
+    return {
+      error: "require_escalated cannot be combined with additional_permissions",
+    };
+  }
+  if (
+    typeof input.justification !== "string" ||
+    input.justification.trim().length === 0 ||
+    input.justification.length > 1000
+  ) {
+    return { error: "command escalation requires a justification" };
+  }
+  return { requested: true, justification: input.justification.trim() };
+}
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
@@ -77,6 +116,9 @@ function requestedWriteRoots(
     return { roots: [], requested: false };
   }
   if (mode === "use_default" && permissions === undefined) {
+    return { roots: [], requested: false };
+  }
+  if (mode === "require_escalated") {
     return { roots: [], requested: false };
   }
   if (mode !== "with_additional_permissions") {
@@ -121,14 +163,12 @@ export async function resolveAdditionalWriteRoots(
   cwd: string,
   config: PermissionsConfig,
   protectedWritePaths: readonly string[],
-  gitWriteRoots: readonly string[] = [],
 ): Promise<AdditionalWriteRootsResult> {
   const requested = requestedWriteRoots(input);
   if ("error" in requested) return { ok: false, reason: requested.error };
   if (!requested.requested) return { ok: true, writeRoots: [] };
 
   const filesystem = createFilesystemPolicy(config.sandbox, cwd, [...protectedWritePaths]);
-  const permittedGitRoots = new Set(gitWriteRoots.map((path) => resolve(path)));
   const writeRoots: string[] = [];
   for (const rawPath of requested.roots) {
     const absolutePath = resolvePolicyPath(rawPath, cwd);
@@ -150,14 +190,6 @@ export async function resolveAdditionalWriteRoots(
       };
     }
     if (decision.allowed) continue;
-    if (
-      decision.reason === "permission control path is protected" &&
-      (permittedGitRoots.has(resolve(absolutePath)) ||
-        permittedGitRoots.has(resolve(decision.canonicalPath)))
-    ) {
-      writeRoots.push(decision.canonicalPath);
-      continue;
-    }
     if (decision.reason !== "write path is outside allowed roots") {
       return {
         ok: false,

@@ -53,6 +53,7 @@ interface HarnessOptions {
   sandboxNetworkAttempt?: { host: string; port: number };
   sandboxNetworkAnswers?: Record<string, readonly string[]>;
   sandboxResetErrorAfter?: number;
+  sandboxHealthy?: boolean;
 }
 
 interface Harness {
@@ -80,11 +81,13 @@ interface Harness {
   autoReviewer: AutoReviewer;
   sandboxManager: {
     initialize: ReturnType<typeof vi.fn>;
+    isHealthy: ReturnType<typeof vi.fn>;
     wrapWithSandbox: ReturnType<typeof vi.fn>;
     execute: ReturnType<typeof vi.fn>;
     classifyDenial: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
+  bashToolFactory: ReturnType<typeof vi.fn>;
   sandboxCoordinator: {
     runShared: ReturnType<typeof vi.fn>;
     runExclusive: ReturnType<typeof vi.fn>;
@@ -230,7 +233,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       throw new Error("timeout:5");
     }
   });
-  const sandboxManager = { initialize, wrapWithSandbox, execute, classifyDenial, reset };
+  const isHealthy = vi.fn(() => options.sandboxHealthy ?? true);
+  const sandboxManager = { initialize, isHealthy, wrapWithSandbox, execute, classifyDenial, reset };
 
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
@@ -371,6 +375,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     reviewContexts,
     autoReviewer,
     sandboxManager,
+    bashToolFactory,
     sandboxCoordinator,
     bareBashExecute,
     sandboxBashExecute,
@@ -405,6 +410,17 @@ async function executeBash(app: Harness, id: string, command: string, signal?: A
   const bash = app.tools.get("bash");
   if (!bash) throw new Error("missing bash tool");
   return bash.execute(id, { command }, signal, undefined, app.context);
+}
+
+async function executeBashWithParams(
+  app: Harness,
+  id: string,
+  params: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const bash = app.tools.get("bash");
+  if (!bash) throw new Error("missing bash tool");
+  return bash.execute(id, params, signal, undefined, app.context);
 }
 
 async function executeWrite(app: Harness, id: string, path: string, content: string) {
@@ -532,6 +548,172 @@ describe("Permission mode registration", () => {
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
     expect(app.bareBashExecute).not.toHaveBeenCalled();
     expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it("executes an approved escalated Bash call once, then keeps later calls sandboxed", async () => {
+    const justification = "Update the isolated fixture repository";
+    const app = await makeHarness({
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification,
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await executeBashWithParams(app, "escalated-bash", {
+      command: "git add README.md && git commit -m update",
+      sandbox_permissions: "require_escalated",
+      justification,
+    });
+
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.untrustedAction).toMatchObject({
+      kind: "shell",
+      command: "git add README.md && git commit -m update",
+      cwd: app.cwd,
+    });
+    expect(app.reviewInputs[0]?.permissionContext).toMatchObject({
+      executionMode: "escalated",
+      sandboxEnforcesAction: false,
+      filesystemWriteRoots: [],
+      filesystemDenyRead: [],
+      filesystemDenyWrite: [],
+      allowedNetworkHosts: [],
+      deniedNetworkHosts: [],
+      justification,
+    });
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+    expect(app.bareBashExecute.mock.calls[0]?.[1]).toMatchObject({
+      command: "git add README.md && git commit -m update",
+      sandbox_permissions: "require_escalated",
+      justification,
+      timeout: 120,
+    });
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+    expect(app.bashToolFactory.mock.calls.at(-1)?.[1]).toBeUndefined();
+
+    await executeBash(app, "ordinary-after-escalation", "printf ordinary");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      label: "denied",
+      review: () => denied("The exact command is not authorized."),
+      code: "review-denied",
+    },
+    {
+      label: "timed out",
+      review: () => {
+        throw new AutoReviewerFailure("timeout", "review timed out");
+      },
+      code: "review-timeout",
+    },
+    {
+      label: "failed",
+      review: () => {
+        throw new AutoReviewerFailure("provider", "review provider unavailable");
+      },
+      code: "review-unavailable",
+    },
+  ] as const)(
+    "does not execute an escalated command when review is $label",
+    async ({ review, code }) => {
+      const app = await makeHarness({
+        risk: (tool, input) =>
+          tool === "bash" && input.sandbox_permissions === "require_escalated"
+            ? promptRisk({
+                reason: "Command requires escalated sandbox permissions",
+                executionMode: "escalated",
+                justification: "Run a controlled command",
+              })
+            : lowRisk(),
+        review,
+      });
+      await startSession(app);
+      await startAgent(app);
+
+      await expect(
+        executeBashWithParams(app, `escalated-${code}`, {
+          command: "printf no",
+          sandbox_permissions: "require_escalated",
+          justification: "Run a controlled command",
+        }),
+      ).rejects.toMatchObject({ code });
+      expect(app.bareBashExecute).not.toHaveBeenCalled();
+      expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+    },
+  );
+
+  it("cancels an escalated review without executing the command", async () => {
+    let releaseReview: (result: AutoReviewResult) => void = () => undefined;
+    const reviewGate = new Promise<AutoReviewResult>((resolveReview) => {
+      releaseReview = resolveReview;
+    });
+    const app = await makeHarness({
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification: "Run a controlled command",
+            })
+          : lowRisk(),
+      review: async () => reviewGate,
+    });
+    await startSession(app);
+    await startAgent(app);
+    const controller = new AbortController();
+    const pending = executeBashWithParams(
+      app,
+      "escalated-cancelled",
+      {
+        command: "printf no",
+        sandbox_permissions: "require_escalated",
+        justification: "Run a controlled command",
+      },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(1));
+    controller.abort();
+    releaseReview(approved());
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+  });
+
+  it("rechecks live sandbox health before an approved escalated execution", async () => {
+    const app = await makeHarness({
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification: "Run a controlled command",
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    app.sandboxManager.isHealthy.mockReturnValue(false);
+
+    await expect(
+      executeBashWithParams(app, "escalated-poisoned", {
+        command: "printf no",
+        sandbox_permissions: "require_escalated",
+        justification: "Run a controlled command",
+      }),
+    ).rejects.toMatchObject({ code: "execution-failed" });
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
   it("humanizes a sandbox execution deadline before returning it to the agent", async () => {
@@ -951,6 +1133,20 @@ describe("Permission mode registration", () => {
     expect(disabled.reviewInputs).toHaveLength(0);
   });
 
+  it("does not inspect Git metadata while activating YOLO", async () => {
+    const app = await makeHarness();
+    await startSession(app);
+    await writeFile(join(app.cwd, ".git"), "not a valid Git pointer\n");
+
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing permission shortcut");
+    await expect(shortcut.handler(app.context)).resolves.toBeUndefined();
+
+    await executeBash(app, "yolo-with-invalid-git", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
+  });
+
   it("keeps the active YOLO snapshot when cycling down to Auto", async () => {
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
@@ -1286,6 +1482,34 @@ describe("Permission mode registration", () => {
     await settle();
     // The parent turn resumes with its full policy after the child closes.
     await executeWrite(app, "parent-write", "other.txt", "yes");
+  });
+
+  it("blocks command escalation inside an active delegation envelope", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["sub"] } },
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification: "Run a controlled command",
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    await expect(
+      executeBashWithParams(app, "nested-escalated", {
+        command: "printf no",
+        sandbox_permissions: "require_escalated",
+        justification: "Run a controlled command",
+      }),
+    ).rejects.toMatchObject({ code: "enforcement-unavailable" });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
   it("gates subagent spawns on re-delegation and depth", async () => {

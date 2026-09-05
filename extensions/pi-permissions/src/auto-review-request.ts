@@ -50,6 +50,8 @@ export interface AutoReviewApprovalOverride {
 
 export interface GuardianPermissionContext {
   sandboxProfile: "workspace-write" | "read-only";
+  /** Whether this is an ordinary sandbox, exact command escalation, or host tool review. */
+  executionMode?: "sandboxed" | "escalated" | "host-admitted";
   sandboxEnforcesAction: boolean;
   filesystemWriteRoots: string[];
   filesystemDenyRead: string[];

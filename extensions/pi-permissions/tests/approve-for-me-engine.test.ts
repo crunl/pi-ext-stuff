@@ -455,24 +455,26 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("rejects an untrusted absolute executable in a typed Git plan", async () => {
+  it("rejects escalation when the exact Bash input is not present", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
-    const turn = engine.beginTurn(snapshot());
+    const turn = engine.beginTurn(
+      snapshot({ escalationEligibility: { eligible: true, reason: "test" } }),
+    );
     const executor = vi.fn(async () => completed("must not run"));
 
     const result = await turn.execute(
       call(executor, {
         admission: {
-          kind: "allow",
-          execution: {
-            kind: "git-init",
-            executable: "/tmp/evil",
-            args: ["init"],
-            cwd: "/workspace",
-          },
+          kind: "review",
+          risk: "REVIEW",
+          requested: [],
+          review: "action",
+          reason: "Command requires escalated sandbox permissions",
+          executionMode: "escalated",
+          justification: "Run the exact command",
         },
       }),
     );
@@ -483,7 +485,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("releases only an exact grantable protected deny for an approved write", async () => {
+  it("does not release a protected deny for an approved write", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
       rationale: "The Git mutation is explicitly approved.",
@@ -493,16 +495,14 @@ describe("ApproveForMeEngine public seam", () => {
         allowWrite: ["/workspace"],
         denyRead: [],
         denyWrite: ["/workspace/.git", "/workspace/.agents"],
-        grantableDenyWrite: ["/workspace/.git"],
       },
       network: { allowedDomains: [], deniedDomains: [] },
     };
     const turn = engine.beginTurn(snapshot({ baseSandboxPolicy: gitPolicy }));
     const execute = vi.fn(async (attempt) => {
       expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/workspace/.git");
-      expect(attempt.lease.policy?.filesystem.denyWrite).not.toContain("/workspace/.git");
+      expect(attempt.lease.policy?.filesystem.denyWrite).toContain("/workspace/.git");
       expect(attempt.lease.policy?.filesystem.denyWrite).toContain("/workspace/.agents");
-      expect(attempt.lease.policy?.filesystem.grantableDenyWrite).toEqual([]);
       return completed("committed");
     });
 
@@ -528,7 +528,6 @@ describe("ApproveForMeEngine public seam", () => {
         allowWrite: [],
         denyRead: [],
         denyWrite: ["/workspace/project/.git", "/workspace/project/.agents"],
-        grantableDenyWrite: ["/workspace/project/.git"],
       },
       network: { allowedDomains: [], deniedDomains: [] },
     };
@@ -538,9 +537,6 @@ describe("ApproveForMeEngine public seam", () => {
     const broad = vi.fn(async (attempt) => {
       expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/workspace");
       expect(attempt.lease.policy?.filesystem.denyWrite).toContain("/workspace/project/.git");
-      expect(attempt.lease.policy?.filesystem.grantableDenyWrite).toContain(
-        "/workspace/project/.git",
-      );
       return completed("broad");
     });
     await expect(
@@ -562,9 +558,7 @@ describe("ApproveForMeEngine public seam", () => {
     const hard = vi.fn(async (attempt) => {
       expect(attempt.lease.policy?.filesystem.allowWrite).toContain("/workspace/project/.agents");
       expect(attempt.lease.policy?.filesystem.denyWrite).toContain("/workspace/project/.agents");
-      expect(attempt.lease.policy?.filesystem.grantableDenyWrite).toContain(
-        "/workspace/project/.git",
-      );
+      expect(attempt.lease.policy?.filesystem.denyWrite).toContain("/workspace/project/.git");
       return completed("hard");
     });
     await expect(
@@ -1204,7 +1198,7 @@ describe("ApproveForMeEngine public seam", () => {
   it("does not review a retry that the sandbox policy cannot represent", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
-      rationale: "must not review an ungrantable deny",
+      rationale: "must not review an unsupported deny",
     }));
     const turn = engine.beginTurn(snapshot());
     const deniedWrite = {
@@ -1217,7 +1211,7 @@ describe("ApproveForMeEngine public seam", () => {
     const result = await turn.execute(
       call(execute, {
         call: {
-          id: "native-write-ungrantable-denial",
+          id: "native-write-unsupported-denial",
           tool: "write",
           input: { path: deniedWrite.path, content: "updated" },
           cwd: "/workspace",
@@ -1516,33 +1510,40 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps an exact retry armed when the structured execution plan changes", async () => {
+  it("keeps an exact retry armed when the escalation justification changes", async () => {
     const sources: GuardianReviewInput["source"][] = [];
     const { engine, review } = createEngine(async (request) => {
       sources.push(request.source);
       if (sources.length === 1) {
-        return { kind: "deny", rationale: "Review the exact Git initialization plan." };
+        return { kind: "deny", rationale: "Review the exact escalated command." };
       }
-      return { kind: "approve", rationale: "This exact plan is acceptable." };
+      return { kind: "approve", rationale: "This exact escalated command is acceptable." };
     });
-    const turn = engine.beginTurn(snapshot());
+    const turn = engine.beginTurn(
+      snapshot({ escalationEligibility: { eligible: true, reason: "test" } }),
+    );
+    const originalInput = {
+      command: "git add README.md && git commit -m update",
+      sandbox_permissions: "require_escalated" as const,
+      justification: "Run the exact Git update",
+    };
     const originalAdmission: AdmissionPlan = {
       kind: "review",
       risk: "REVIEW",
-      requested: writeOutsidePreview(),
-      review: "capability",
-      reason: "The operation needs a capability outside the baseline lease.",
-      execution: {
-        kind: "git-init",
-        executable: "/usr/bin/git",
-        args: ["init"],
-        cwd: "/workspace",
-      },
+      requested: [],
+      review: "action",
+      reason: "Command requires escalated sandbox permissions",
+      executionMode: "escalated",
+      justification: originalInput.justification,
     };
+    const differentInput = { ...originalInput, justification: "A different reason" };
     const first = await turn.execute(
       call(
         vi.fn(async () => completed("never")),
-        { admission: originalAdmission },
+        {
+          call: { id: "original", tool: "bash", input: originalInput, cwd: "/workspace" },
+          admission: originalAdmission,
+        },
       ),
     );
     const retryHandle = first.kind === "blocked" ? first.retryHandle : undefined;
@@ -1555,23 +1556,19 @@ describe("ApproveForMeEngine public seam", () => {
           vi.fn(async () => completed("different plan")),
           {
             call: {
-              id: "different-plan",
+              id: "different-justification",
               tool: "bash",
-              input: { command: "printf ok" },
+              input: differentInput,
               cwd: "/workspace",
             },
             admission: {
               kind: "review",
               risk: "REVIEW",
-              requested: writeOutsidePreview(),
-              review: "capability",
-              reason: "The operation needs a capability outside the baseline lease.",
-              execution: {
-                kind: "git-init",
-                executable: "/usr/bin/git",
-                args: ["init", "."],
-                cwd: "/workspace",
-              },
+              requested: [],
+              review: "action",
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification: "A different reason",
             },
           },
         ),
@@ -1583,12 +1580,7 @@ describe("ApproveForMeEngine public seam", () => {
         call(
           vi.fn(async () => completed("exact plan")),
           {
-            call: {
-              id: "exact-plan",
-              tool: "bash",
-              input: { command: "printf ok" },
-              cwd: "/workspace",
-            },
+            call: { id: "exact-escalation", tool: "bash", input: originalInput, cwd: "/workspace" },
             admission: originalAdmission,
           },
         ),
@@ -1823,7 +1815,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).toHaveBeenCalledTimes(2);
   });
 
-  it("applies exact grantable deny semantics to turn amendments", async () => {
+  it("keeps protected denies through turn amendments", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
       rationale: "The explicit turn amendment is approved.",
@@ -1833,7 +1825,6 @@ describe("ApproveForMeEngine public seam", () => {
         allowWrite: [],
         denyRead: [],
         denyWrite: ["/workspace/.git", "/workspace/.agents"],
-        grantableDenyWrite: ["/workspace/.git"],
       },
       network: { allowedDomains: [], deniedDomains: [] },
     };
@@ -1846,8 +1837,10 @@ describe("ApproveForMeEngine public seam", () => {
               "/workspace/.git",
               "/workspace/.agents",
             ]);
-            expect(attempt.lease.policy?.filesystem.denyWrite).toEqual(["/workspace/.agents"]);
-            expect(attempt.lease.policy?.filesystem.grantableDenyWrite).toEqual([]);
+            expect(attempt.lease.policy?.filesystem.denyWrite).toEqual([
+              "/workspace/.git",
+              "/workspace/.agents",
+            ]);
             return completed("amended");
           }),
           {

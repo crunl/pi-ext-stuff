@@ -36,7 +36,7 @@ flowchart TD
         PROXY --> EXEC
     end
 
-    EXEC["沙箱内基底执行<br/>bashToolFactory / createSandboxedFileOperations<br/>git init 结构性豁免除外"]
+    EXEC["沙箱内基底执行<br/>bashToolFactory / createSandboxedFileOperations<br/>Git mutation 默认仍走 SRT；显式 escalated action 经审后单次 native Pi"]
 
     style GATE1 fill:#3d1d20,stroke:#f85149,color:#f85149
     style FAIL fill:#3d1d20,stroke:#f85149,color:#f85149

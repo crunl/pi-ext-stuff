@@ -1,9 +1,7 @@
 import { isIP } from "node:net";
 import { relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
-import type { StructuredExecutionPlan } from "./execution-plan.ts";
 import { hasGlobSyntax } from "./filesystem-policy.ts";
-import { resolveTrustedSystemGitExecutable } from "./git-executable.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
@@ -11,6 +9,7 @@ import { errorMessage, isRecord } from "./unknown-value.ts";
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
 export type AdmissionRisk = "LOW" | "REVIEW" | "HARD";
+export type CommandExecutionMode = "escalated";
 
 /** Ownership says which external execution Adapter is authoritative. */
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
@@ -35,7 +34,6 @@ export type AdmissionPlan =
   | {
       kind: "allow";
       requested?: readonly CapabilityRequestInput[];
-      execution?: StructuredExecutionPlan;
     }
   | {
       kind: "review";
@@ -44,7 +42,9 @@ export type AdmissionPlan =
       risk: AdmissionRisk;
       reason: string;
       summary?: string;
-      execution?: StructuredExecutionPlan;
+      /** Exact Bash action may run outside the coding-agent sandbox once approved. */
+      executionMode?: CommandExecutionMode;
+      justification?: string;
     }
   | {
       kind: "deny";
@@ -64,12 +64,17 @@ export interface TurnSnapshot {
   configFingerprint: string;
   baseSandboxPolicy?: SandboxPolicy;
   sandboxReady?: boolean;
+  /** Immutable, host-derived facts required before a Bash escalation review. */
+  escalationEligibility?: {
+    eligible: boolean;
+    reason: string;
+  };
   transcript?: readonly unknown[];
 }
 
 /** The effective lease supplied to a concrete execution Adapter. */
 export interface CapabilityLease {
-  readonly mode: "sandboxed" | "host-admitted" | "unrestricted";
+  readonly mode: "sandboxed" | "host-admitted" | "escalated" | "unrestricted";
   readonly policy?: SandboxPolicy;
 }
 
@@ -97,7 +102,6 @@ export interface ExecutionAttempt {
   /** Canonical action snapshot reviewed and fingerprinted by the Engine. */
   readonly call: InvocationCall;
   readonly lease: CapabilityLease;
-  readonly plan?: StructuredExecutionPlan;
   /** The signal owned by this execution attempt, including caller cancellation. */
   readonly signal: AbortSignal;
   /**
@@ -148,6 +152,8 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   transcript: readonly unknown[];
   reason?: string;
   summary?: string;
+  executionMode?: CommandExecutionMode;
+  justification?: string;
   context: ReviewContext;
   approvalOverride?: ApprovalOverride;
 }
@@ -323,10 +329,11 @@ interface RetryRecord {
   readonly requested: readonly CapabilityRequest[];
   /** Exact normalized admission scope observed for the denied action. */
   readonly admissionRequested: readonly CapabilityRequest[];
-  readonly execution?: StructuredExecutionPlan;
   readonly risk?: AdmissionRisk;
   readonly rationale: string;
   readonly summary?: string;
+  readonly executionMode?: CommandExecutionMode;
+  readonly justification?: string;
 }
 
 interface ReviewRequest {
@@ -338,6 +345,8 @@ interface ReviewRequest {
   /** Override the derived post-review lease for a retry of an existing attempt. */
   readonly effective?: CapabilityLease;
   readonly approvalOverride?: ApprovalOverride;
+  readonly executionMode?: CommandExecutionMode;
+  readonly justification?: string;
 }
 
 interface RuntimeAttemptContext {
@@ -347,7 +356,6 @@ interface RuntimeAttemptContext {
   readonly admissionRequested: readonly CapabilityRequest[];
   /** The immutable effective lease observed by that attempt. */
   readonly lease: CapabilityLease;
-  readonly plan?: StructuredExecutionPlan;
 }
 
 interface InFlightAttempt<ReviewContext> {
@@ -361,7 +369,7 @@ interface InFlightAttempt<ReviewContext> {
 }
 
 type ResolvedAdmission =
-  | { kind: "allow"; requested: CapabilityRequest[]; execution?: StructuredExecutionPlan }
+  | { kind: "allow"; requested: CapabilityRequest[] }
   | {
       kind: "review";
       requested: CapabilityRequest[];
@@ -369,7 +377,8 @@ type ResolvedAdmission =
       risk: AdmissionRisk;
       reason: string;
       summary?: string;
-      execution?: StructuredExecutionPlan;
+      executionMode?: CommandExecutionMode;
+      justification?: string;
     }
   | { kind: "deny"; reason: string };
 
@@ -461,6 +470,13 @@ function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
     configFingerprint: snapshot.configFingerprint,
     baseSandboxPolicy: clonePolicy(snapshot.baseSandboxPolicy),
     sandboxReady: snapshot.sandboxReady,
+    escalationEligibility:
+      snapshot.escalationEligibility === undefined
+        ? undefined
+        : {
+            eligible: snapshot.escalationEligibility.eligible,
+            reason: snapshot.escalationEligibility.reason,
+          },
     transcript: snapshot.transcript === undefined ? [] : structuredClone(snapshot.transcript),
   };
 }
@@ -624,30 +640,6 @@ function normalizeRequests(
   return { ok: true, requests };
 }
 
-function normalizeExecutionPlan(raw: unknown, cwd: string): StructuredExecutionPlan | undefined {
-  if (!isRecord(raw) || raw.kind !== "git-init") return undefined;
-  if (typeof raw.executable !== "string") return undefined;
-  const executable = resolveTrustedSystemGitExecutable(raw.executable);
-  if (!executable) return undefined;
-  if (!Array.isArray(raw.args) || !raw.args.every((arg) => typeof arg === "string")) {
-    return undefined;
-  }
-  const args = raw.args;
-  if (
-    !(args.length === 1 && args[0] === "init") &&
-    !(args.length === 2 && args[0] === "init" && args[1] === ".")
-  ) {
-    return undefined;
-  }
-  if (typeof raw.cwd !== "string" || resolve(raw.cwd) !== resolve(cwd)) return undefined;
-  return {
-    kind: "git-init",
-    executable,
-    args: args.length === 1 ? ["init"] : ["init", "."],
-    cwd: resolve(raw.cwd),
-  };
-}
-
 function normalizeAdmission(
   raw: AdmissionPlan | undefined,
   cwd: string,
@@ -667,15 +659,12 @@ function normalizeAdmission(
   );
   if (!normalized.ok) return { ok: false };
   if (raw.kind === "allow") {
-    const execution =
-      raw.execution === undefined ? undefined : normalizeExecutionPlan(raw.execution, cwd);
-    if (raw.execution !== undefined && execution === undefined) return { ok: false };
+    if ("executionMode" in raw || "justification" in raw) return { ok: false };
     return {
       ok: true,
       admission: {
         kind: "allow",
         requested: normalized.requests,
-        ...(execution === undefined ? {} : { execution }),
       },
     };
   }
@@ -688,9 +677,20 @@ function normalizeAdmission(
   ) {
     return { ok: false };
   }
-  const execution =
-    raw.execution === undefined ? undefined : normalizeExecutionPlan(raw.execution, cwd);
-  if (raw.execution !== undefined && execution === undefined) return { ok: false };
+  if (raw.executionMode !== undefined && raw.executionMode !== "escalated") {
+    return { ok: false };
+  }
+  if (
+    raw.justification !== undefined &&
+    (typeof raw.justification !== "string" ||
+      raw.justification.trim().length === 0 ||
+      raw.justification.length > 1000)
+  ) {
+    return { ok: false };
+  }
+  if (raw.executionMode === "escalated" && raw.justification === undefined) {
+    return { ok: false };
+  }
   return {
     ok: true,
     admission: {
@@ -700,7 +700,8 @@ function normalizeAdmission(
       risk: raw.risk,
       reason: raw.reason,
       ...(raw.summary === undefined ? {} : { summary: raw.summary }),
-      ...(execution === undefined ? {} : { execution }),
+      ...(raw.executionMode === undefined ? {} : { executionMode: raw.executionMode }),
+      ...(raw.justification === undefined ? {} : { justification: raw.justification.trim() }),
     },
   };
 }
@@ -752,6 +753,17 @@ function runtimeCapabilitySupported(
   );
 }
 
+function isExactEscalatedBashCall(call: InvocationCall): boolean {
+  if (call.tool.toLowerCase() !== "bash" || !isRecord(call.input)) return false;
+  return (
+    call.input.sandbox_permissions === "require_escalated" &&
+    call.input.additional_permissions === undefined &&
+    typeof call.input.command === "string" &&
+    typeof call.input.justification === "string" &&
+    call.input.justification.trim().length > 0
+  );
+}
+
 function requestKey(request: CapabilityRequest): string {
   return fingerprintValue(request);
 }
@@ -767,28 +779,6 @@ function sameRequests(
 
 function appendUnique(target: string[], values: readonly string[]): void {
   for (const value of values) if (!target.includes(value)) target.push(value);
-}
-
-/**
- * Release only the protected deny identities explicitly classified as
- * grantable, and only when the approved write capability names that identity
- * exactly. A broad allow root must never erase a nested protected deny.
- */
-function releaseExactGrantableWriteDenies(
-  policy: SandboxPolicy,
-  exactWritePaths: readonly string[],
-): void {
-  const grantable = new Set(policy.filesystem.grantableDenyWrite ?? []);
-  const released = new Set(
-    policy.filesystem.denyWrite.filter(
-      (path) => grantable.has(path) && exactWritePaths.includes(path),
-    ),
-  );
-  if (released.size === 0) return;
-  policy.filesystem.denyWrite = policy.filesystem.denyWrite.filter((path) => !released.has(path));
-  policy.filesystem.grantableDenyWrite = (policy.filesystem.grantableDenyWrite ?? []).filter(
-    (path) => !released.has(path),
-  );
 }
 
 function leaseWithRequests(
@@ -812,7 +802,6 @@ function leaseWithRequests(
   }
   appendUnique(policy.network.allowedDomains, extraHosts);
   appendUnique(policy.filesystem.allowWrite, extraRoots);
-  releaseExactGrantableWriteDenies(policy, extraRoots);
   // Keep ownership in the call, not in the lease. The Adapter sees the same
   // immutable policy shape for sandbox-owned and permission-amendment calls.
   return { mode: "sandboxed", policy };
@@ -834,7 +823,6 @@ function leaseWithAdditionalRequests(
   }
   appendUnique(next.policy.network.allowedDomains, extraHosts);
   appendUnique(next.policy.filesystem.allowWrite, extraRoots);
-  releaseExactGrantableWriteDenies(next.policy, extraRoots);
   return next;
 }
 
@@ -871,7 +859,8 @@ function retryFingerprint(
   ownership: InvocationOwnership,
   grantScope: readonly CapabilityRequest[],
   admissionScope: readonly CapabilityRequest[],
-  execution?: StructuredExecutionPlan,
+  executionMode?: CommandExecutionMode,
+  justification?: string,
 ): string {
   // A manually armed retry is a request to review the same action in the
   // next turn, not permission to replay the old tool-call envelope.  Keep the
@@ -887,7 +876,8 @@ function retryFingerprint(
     metadata: call.metadata,
     grantScope,
     admissionScope,
-    execution,
+    executionMode,
+    justification,
   });
 }
 
@@ -985,14 +975,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       readonly admissionRequested: readonly CapabilityRequest[];
       readonly risk?: AdmissionRisk;
       readonly summary?: string;
-      readonly execution?: StructuredExecutionPlan;
+      readonly executionMode?: CommandExecutionMode;
+      readonly justification?: string;
     },
   ): RetryHandle => {
     recordDenialStats();
     const frozenRequested = denial.requested.map((item) => structuredClone(item));
     const frozenAdmissionRequested = denial.admissionRequested.map((item) => structuredClone(item));
-    const frozenExecution =
-      denial.execution === undefined ? undefined : structuredClone(denial.execution);
     const retryHandle = makeRetryHandle({
       fingerprint: retryFingerprint(
         state,
@@ -1000,16 +989,18 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         request.ownership,
         frozenRequested,
         frozenAdmissionRequested,
-        frozenExecution,
+        denial.executionMode,
+        denial.justification,
       ),
       call: cloneInvocationCall(request.call),
       ownership: request.ownership,
       requested: frozenRequested,
       admissionRequested: frozenAdmissionRequested,
-      ...(frozenExecution === undefined ? {} : { execution: frozenExecution }),
       ...(denial.risk === undefined ? {} : { risk: denial.risk }),
       rationale: denial.rationale,
       ...(denial.summary === undefined ? {} : { summary: denial.summary }),
+      ...(denial.executionMode === undefined ? {} : { executionMode: denial.executionMode }),
+      ...(denial.justification === undefined ? {} : { justification: denial.justification }),
     });
     const notice: DenialNotice = {
       call: cloneInvocationCall(request.call),
@@ -1151,6 +1142,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           transcript: structuredClone(state.snapshot.transcript ?? []),
           reason: review.reason,
           summary: review.summary,
+          ...(review.executionMode === undefined ? {} : { executionMode: review.executionMode }),
+          ...(review.justification === undefined ? {} : { justification: review.justification }),
           context: request.reviewContext,
           ...(review.approvalOverride === undefined
             ? {}
@@ -1354,7 +1347,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     request: Invocation<T, ReviewContext>,
     requested: readonly CapabilityRequest[],
     grant?: GrantRecord,
-    plan?: StructuredExecutionPlan,
     leaseOverride?: CapabilityLease,
   ): Promise<RuntimeOutcome<T> | ExecutionOutcome<T>> => {
     if (!isCurrent(state))
@@ -1381,7 +1373,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       const result = await request.executor({
         call: attemptCall,
         lease,
-        ...(plan === undefined ? {} : { plan }),
         signal,
         authorizeCapability: (input) => authorizeInlineCapability(state, attemptCall.id, input),
         rejectCapability: (input) => rejectInlineCapability(state, attemptCall.id, input),
@@ -1557,7 +1548,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           admissionRequested: attempt.admissionRequested,
           risk: "REVIEW",
           summary: `${request.call.tool} runtime write retry`,
-          execution: attempt.plan,
         });
         return blocked(
           withExecutionEffects({
@@ -1572,14 +1562,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       // Do not grant the capability for the rest of the turn. This direct
       // second attempt is the exact one-shot retry owned by the Engine.
       const retryRequested = [...attempt.requested, normalized];
-      const retry = await executeAttempt(
-        state,
-        request,
-        retryRequested,
-        undefined,
-        attempt.plan,
-        retryEffective,
-      );
+      const retry = await executeAttempt(state, request, retryRequested, undefined, retryEffective);
       if (retry.kind === "completed") return retry;
       if (retry.kind === "blocked") {
         return blocked(withExecutionEffects(retry.error), retry.retryHandle);
@@ -1595,7 +1578,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           requested: retryRequested,
           admissionRequested: attempt.admissionRequested,
           lease: retryEffective,
-          plan: attempt.plan,
         },
         false,
       );
@@ -1657,6 +1639,35 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const admission = admissionResult.admission;
     if (admission.kind === "deny") {
       return blocked({ code: "policy-denied", reason: admission.reason });
+    }
+    const escalated = admission.kind === "review" && admission.executionMode === "escalated";
+    if (escalated) {
+      if (
+        request.ownership !== "sandbox-owned" ||
+        admission.kind !== "review" ||
+        admission.review !== "action" ||
+        admission.requested.length > 0 ||
+        admission.justification === undefined ||
+        !isExactEscalatedBashCall(request.call) ||
+        admission.justification !==
+          (isRecord(request.call.input) && typeof request.call.input.justification === "string"
+            ? request.call.input.justification.trim()
+            : undefined)
+      ) {
+        return blocked({
+          code: "policy-denied",
+          reason: "Command escalation admission does not match the exact Bash action",
+        });
+      }
+      const eligibility = state.snapshot.escalationEligibility;
+      if (eligibility?.eligible !== true) {
+        return blocked({
+          code: "enforcement-unavailable",
+          reason:
+            eligibility?.reason ??
+            "Command escalation is unavailable without a trusted eligible sandbox snapshot",
+        });
+      }
     }
     if (request.ownership === "host-admission" && admission.requested.length === 0) {
       return blocked({
@@ -1880,6 +1891,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let reviewSummary = admission.kind === "review" ? admission.summary : undefined;
     let reviewRisk = admission.kind === "review" ? admission.risk : undefined;
     let approvalOverride: ApprovalOverride | undefined;
+    const effectiveLeaseOverride: CapabilityLease | undefined = escalated
+      ? { mode: "escalated" }
+      : undefined;
     const armed = armedRetry;
     const armedRecord =
       armed !== undefined &&
@@ -1890,7 +1904,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           request.ownership,
           armed.record.requested,
           admission.requested,
-          admission.execution,
+          admission.kind === "review" ? admission.executionMode : undefined,
+          admission.kind === "review" ? admission.justification : undefined,
         )
         ? armed
         : undefined;
@@ -1929,6 +1944,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           reason: reviewReason,
           summary: reviewSummary,
           approvalOverride,
+          effective: effectiveLeaseOverride,
+          executionMode: admission.kind === "review" ? admission.executionMode : undefined,
+          justification: admission.kind === "review" ? admission.justification : undefined,
         },
       );
       if ("code" in decision) return blocked(decision);
@@ -1939,7 +1957,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           admissionRequested: admission.requested,
           risk: reviewRisk,
           summary: reviewSummary,
-          execution: admission.execution,
+          executionMode: admission.kind === "review" ? admission.executionMode : undefined,
+          justification: admission.kind === "review" ? admission.justification : undefined,
         });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
       }
@@ -1963,7 +1982,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         request,
         leaseRequested,
         spent,
-        admission.execution,
+        effectiveLeaseOverride,
       );
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
@@ -1974,19 +1993,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return handleRuntimeOutcome(state, request, result, {
         requested: [...leaseRequested],
         admissionRequested: [...admission.requested],
-        lease: leaseWithRequests(state, request.ownership, leaseRequested),
-        plan: admission.execution,
+        lease:
+          effectiveLeaseOverride ?? leaseWithRequests(state, request.ownership, leaseRequested),
       });
     }
 
     const initialRequested = [...leaseRequested];
-    const initial = await executeAttempt(
-      state,
-      request,
-      initialRequested,
-      undefined,
-      admission.execution,
-    );
+    const initial = await executeAttempt(state, request, initialRequested, undefined);
     if ("kind" in initial && (initial.kind === "blocked" || initial.kind === "failed"))
       return initial;
     if (initial.kind === "completed") return initial;
@@ -1994,7 +2007,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       requested: initialRequested,
       admissionRequested: [...admission.requested],
       lease: leaseWithRequests(state, request.ownership, initialRequested),
-      plan: admission.execution,
     });
   };
 
@@ -2065,6 +2077,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
     if (state.snapshot.mode === "yolo") return { kind: "allow", capability: normalized };
+    if (attempt.baseline.mode === "escalated") {
+      return denyAttemptForAttempt({
+        code: "enforcement-unavailable",
+        reason: "Escalated Bash executions cannot authorize a second inline capability",
+        request: normalized,
+      });
+    }
     if (
       normalized.kind === "network" &&
       !isPublicNetworkHost(normalized.host) &&
@@ -2201,7 +2220,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           record.ownership,
           record.requested,
           record.admissionRequested,
-          record.execution,
+          record.executionMode,
+          record.justification,
         )
       ) {
         return false;

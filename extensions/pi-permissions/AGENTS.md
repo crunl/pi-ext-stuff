@@ -56,8 +56,9 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   bash/write/edit/request-permissions adapters.
 - `src/approve-for-me-engine.ts` is the deep, I/O-free decision module. It owns
   admission-plan validation, hard policy checks, Guardian review routing,
-  exact one-shot grants, exact grantable-deny leases, denial circuit breaking,
-  `/approve` retry handles, and turn/session-scoped permission amendments.
+  exact one-shot grants, exact command-escalation leases, denial circuit
+  breaking, `/approve` retry handles, and turn/session-scoped permission
+  amendments.
 - `src/pi-approve-for-me-adapters.ts` translates the host's static risk result
   into an `AdmissionPlan` and adapts the Guardian implementation. The Engine
   owns authorization; adapters own only host integration and enforcement.
@@ -90,22 +91,31 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   is a later fresh worker, not a host-coordinator reset.
 - `SandboxPolicy` keeps independent `allowWrite`, `denyRead`, `denyWrite`, and
   network rules; deny rules are never unioned. Linux activation rejects any glob
-  in `denyRead`/`denyWrite` because SRT cannot enforce it. The host deadline is
-  120s for bash and 30s for each file operation, with output bounds and
-  detached-process-group cleanup. Guardian uses full-read/zero-write/zero-net
-  SRT policy, a minimal replacement environment, and an explicit trusted host
-  home for `~` path resolution; `rg` runs only from a parent-resolved absolute
-  executable.
+  in `denyRead`/`denyWrite` because SRT cannot enforce it. SRT-owned bash keeps
+  the 120s host deadline and file operations keep 30s, with the existing output
+  bounds and detached-process-group cleanup. The native Pi executor used by an
+  approved command escalation has its own 120s default, output-tail/temp-file
+  behavior (2000 lines / 50 KiB), and abort cleanup; those are not SRT hard byte
+  limits. Guardian uses full-read/zero-write/zero-net SRT policy, a minimal
+  replacement environment, and an explicit trusted host home for `~` path
+  resolution; `rg` runs only from a parent-resolved absolute executable.
 - Git metadata is modeled by `git-metadata.ts`: ordinary and linked metadata
-  roots are readable but not writable, with `<gitdir>/hooks` always hard-denied.
-  Only a typed, canonical system-Git `init` plan may enable `allowGitConfig`;
-  its adapter pre-creates a verified `.git` directory, releases only exact
-  config deny identities, and uses an empty controlled template directory plus
-  per-run replacement `HOME`/`XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL=/dev/null`.
-  Failure never falls back to an unsandboxed command; newly created metadata is
-  removed only when it is still empty, while partial metadata is retained and
-  reported. Guardian's `rg` path is realpath-resolved by the parent and the
-  child executes that absolute identity.
+  roots are readable but not writable under the base SRT policy; their
+  `<gitdir>/hooks` descendants are hard-denied there. Git status/stash/log/revparse
+  and other read-only or compound inspections remain ordinary LOW/SRT operations.
+  Git mutations, including `init`, remain ordinary sandbox executions unless the
+  exact Bash call explicitly requests `sandbox_permissions=require_escalated`;
+  then the Engine routes that one frozen command/cwd through Guardian action
+  review and a one-shot bare Pi executor. Default Git/.agents/.codex carveouts
+  are not permanent hard denies on that reviewed escalated executor; explicit
+  configured denies and active delegation ceilings still make escalation
+  ineligible. No Git-specific write grant or unsandboxed fallback is created.
+  Guardian's `rg` path is realpath-resolved by the parent and the child executes
+  that absolute identity. The shared sandbox Bash/file execution entrypoint
+  re-discovers metadata roots from the actual `cwd` for each execution and only
+  appends deny rules to that invocation's policy; discovery failures fail
+  closed before execution. This does not modify the Engine snapshot or lease
+  and does not cross the independent Guardian worker boundary.
 - Generic tools use `host-admission`: the Engine can review their exact
   external-tool capability, but SRT only enforces sandbox-owned
   bash/write/edit and permission-amendment executions. Temporary scratch
