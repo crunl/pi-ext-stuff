@@ -14,13 +14,16 @@ const info = {
 };
 
 test("formats model and effort for the bottom border", () => {
-	assert.equal(formatModelStatus(info), "\u{F15BA} gpt-5.6-sol-fast \u{F0875} xhigh");
+	assert.equal(
+		formatModelStatus(info),
+		"\u{F035B} gpt-5.6-sol-fast \u{F0875} xhigh",
+	);
 });
 
 test("omits the effort segment when effort is absent", () => {
 	assert.equal(
 		formatModelStatus({ ...info, effort: undefined }),
-		"\u{F15BA} gpt-5.6-sol-fast",
+		"\u{F035B} gpt-5.6-sol-fast",
 	);
 });
 

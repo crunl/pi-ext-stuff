@@ -49,7 +49,7 @@ export const ICONS = {
 	branch: "\u{F0641}", // -like nf-md-source_branch
 	gauge: "\uF49B", // gauge icon used before the usage meter
 	cache: "\uF1C0", // nf-fa-database (cache blocks)
-	model: "\u{F15BA}", // nf-md-motorbike_electric — editor bottom border model
+	model: "\u{F035B}", // nf-md-memory — editor bottom border model
 	effort: "\u{F0875}", // nf-md-gauge_low — editor bottom border effort
 } as const;
 

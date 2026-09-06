@@ -57,7 +57,7 @@ test("bottom border: model info without the mode", () => {
 		modelId: "gpt-5.6",
 		effort: "high",
 	});
-	assert.match(bottom!, /^── \u{F15BA} gpt-5\.6 \u{F0875} high ─+$/u);
+	assert.match(bottom!, /^── \u{F035B} gpt-5\.6 \u{F0875} high ─+$/u);
 	assert.equal(bottom!.length, WIDTH);
 });
 
