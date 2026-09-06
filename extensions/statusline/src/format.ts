@@ -53,6 +53,31 @@ export const ICONS = {
 	effort: "\u{F0875}", // nf-md-gauge_low — editor bottom border effort
 } as const;
 
+/** setStatus key under which pi-lens publishes its LSP state. */
+export const LSP_STATUS_KEY = "pi-lens-lsp";
+
+/**
+ * Split the pi-lens LSP entry out of extension statuses so the footer can
+ * inline it on the first line (right side, after usage) instead of burning
+ * a whole second line. Match on the key, since the text carries ANSI color
+ * codes. Newlines are flattened to keep the footer single-height per line.
+ */
+export function partitionLspStatus(statuses: Array<[string, string]>): {
+	lsp: string | undefined;
+	rest: Array<[string, string]>;
+} {
+	let lsp: string | undefined;
+	const rest: Array<[string, string]> = [];
+	for (const [key, text] of statuses) {
+		if (key === LSP_STATUS_KEY && lsp === undefined) {
+			lsp = text.replace(/[\r\n]+/g, " ");
+		} else {
+			rest.push([key, text]);
+		}
+	}
+	return { lsp, rest };
+}
+
 /**
  * Block meter cells: how many of `cells` blocks are filled for `percent`.
  * ceil(percent/10) semantics, same as the opencode reference (cells=10).

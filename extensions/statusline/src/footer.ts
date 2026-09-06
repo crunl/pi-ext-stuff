@@ -3,14 +3,22 @@
  *
  * Line 1:  📁 ~/path  branch • name           CH66%  ██░░░░░░░░ 1.0k/192k
  *          └─ dim, icons accent ─┘          └─ meter threshold-colored ─┘
- * Line 2 (optional): extension statuses from other extensions' setStatus()
+ * Line 1 right also inlines the pi-lens LSP state after usage.
+ * Line 2 (optional): remaining extension statuses from setStatus()
  *
  * Model info intentionally omitted — it lives in the editor's bottom border.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { alignLine, formatCwd, formatTokens, ICONS, meterCells } from "./format.ts";
+import {
+	alignLine,
+	formatCwd,
+	formatTokens,
+	ICONS,
+	meterCells,
+	partitionLspStatus,
+} from "./format.ts";
 import { PermissionsModeState, syncPermissionsMode } from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
 
@@ -26,6 +34,9 @@ export function installFooter(
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		try {
+			// SAFETY: theme is the live TUI theme object, which exposes getFgAnsi
+			// at runtime; the static EditorTheme type just doesn't declare it.
+			// Failure falls through to the inverse-video badge fallback below.
 			onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
 		} catch {
 			// theme without getFgAnsi: badge falls back to inverse video
@@ -41,6 +52,8 @@ export function installFooter(
 				// proxy, so hot theme switches (file watch or /theme) refresh the
 				// badge colors without a reinstall.
 				try {
+					// SAFETY: same live-theme invariant as above; re-read every render
+					// so hot theme switches refresh badge colors without reinstall.
 					onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
 				} catch {
 					// theme without getFgAnsi: badge falls back to inverse video
@@ -54,7 +67,8 @@ export function installFooter(
 				const sessionName = ctx.sessionManager.getSessionName();
 
 				let leftPlain = `${ICONS.folder} ${pwd}`;
-				let leftColored = theme.fg("accent", ICONS.folder) + theme.fg("dim", ` ${pwd}`);
+				let leftColored =
+					theme.fg("accent", ICONS.folder) + theme.fg("dim", ` ${pwd}`);
 				if (branch) {
 					leftPlain += ` ${ICONS.branch} ${branch}`;
 					leftColored +=
@@ -91,7 +105,9 @@ export function installFooter(
 					const meterPlain = "█".repeat(filled) + "░".repeat(METER_CELLS - filled);
 					const meterColored =
 						(filled > 0 ? theme.fg(meterColor, "█".repeat(filled)) : "") +
-						(filled < METER_CELLS ? theme.fg("dim", "░".repeat(METER_CELLS - filled)) : "");
+						(filled < METER_CELLS
+							? theme.fg("dim", "░".repeat(METER_CELLS - filled))
+							: "");
 
 					const tokText =
 						usage.tokens !== null
@@ -106,6 +122,22 @@ export function installFooter(
 							" " +
 							theme.fg(meterColor, tokText),
 					);
+				}
+
+				// ---- extension statuses (from other extensions' setStatus) ----
+				const statuses = syncPermissionsMode(
+					footerData.getExtensionStatuses(),
+					permissionsMode,
+					() => queueMicrotask(() => tui.requestRender()),
+				);
+				// pi-lens LSP state moves up to the first line (right side,
+				// after usage); remaining statuses share the second line.
+				// The LSP text carries its own ANSI colors; visibleWidth
+				// below strips them for layout, so it can join the parts.
+				const { lsp, rest: visible } = partitionLspStatus(statuses);
+				if (lsp) {
+					rightPlainParts.push(lsp);
+					rightColoredParts.push(lsp);
 				}
 
 				const statsPlain = rightPlainParts.join("  ");
@@ -125,14 +157,8 @@ export function installFooter(
 
 				const lines = [firstLine];
 
-				// ---- extension statuses (from other extensions' setStatus) ----
-				const statuses = syncPermissionsMode(
-					footerData.getExtensionStatuses(),
-					permissionsMode,
-					() => queueMicrotask(() => tui.requestRender()),
-				);
-				if (statuses.length > 0) {
-					const merged = statuses
+				if (visible.length > 0) {
+					const merged = visible
 						.sort(([a], [b]) => a.localeCompare(b))
 						.map(([, text]) => text.replace(/[\r\n]+/g, " "))
 						.join(" ");
