@@ -3,8 +3,8 @@
  *
  * Line 1:  📁 ~/path  branch • name           CH66%  ██░░░░░░░░ 1.0k/192k
  *          └─ dim, icons accent ─┘          └─ meter threshold-colored ─┘
- * Line 1 right also inlines the pi-lens LSP state after usage.
- * Line 2 (optional): remaining extension statuses from setStatus()
+ * Line 2 (optional): extension statuses from other extensions' setStatus()
+ * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
  * Model info intentionally omitted — it lives in the editor's bottom border.
  */
@@ -16,8 +16,8 @@ import {
 	formatCwd,
 	formatTokens,
 	ICONS,
+	isHiddenExtensionStatus,
 	meterCells,
-	partitionLspStatus,
 } from "./format.ts";
 import { PermissionsModeState, syncPermissionsMode } from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
@@ -130,15 +130,9 @@ export function installFooter(
 					permissionsMode,
 					() => queueMicrotask(() => tui.requestRender()),
 				);
-				// pi-lens LSP state moves up to the first line (right side,
-				// after usage); remaining statuses share the second line.
-				// The LSP text carries its own ANSI colors; visibleWidth
-				// below strips them for layout, so it can join the parts.
-				const { lsp, rest: visible } = partitionLspStatus(statuses);
-				if (lsp) {
-					rightPlainParts.push(lsp);
-					rightColoredParts.push(lsp);
-				}
+				// pi-lens LSP state is dropped here (the widget surfaces it) —
+				// the footer owns presentation, upstream keeps publishing.
+				const visible = statuses.filter(([key]) => !isHiddenExtensionStatus(key));
 
 				const statsPlain = rightPlainParts.join("  ");
 				const statsColored = rightColoredParts.join("  ");
