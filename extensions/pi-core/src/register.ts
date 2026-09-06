@@ -1,5 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerBuiltInTools } from "./tools/index.ts";
 import { registerAutocompleteAbove } from "./tui/autocomplete-above.ts";
 import { registerCodexToolRendering } from "./tui/built-in-tools.ts";
 import { registerCanonicalBuiltinFallback } from "./tui/canonical-tool-fallback.ts";
@@ -12,7 +11,6 @@ import { registerWorkingTokenRate } from "./tui/working-token-rate.ts";
 
 export function registerExtension(pi: ExtensionAPI): void {
   registerOutputPaddingSync(pi);
-  registerBuiltInTools(pi);
   registerCodexToolRendering(pi);
   registerCanonicalBuiltinFallback(pi);
   registerAutocompleteAbove(pi);

@@ -10,7 +10,6 @@ layout or cross-extension contract changes.
 | `index.ts` | Package entry (`package.json` `pi.extensions`). Loads the register graph. |
 | `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-permissions, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
 | `src/register.ts` | Pure orchestration facade: calls every `register*` once, in order. |
-| `src/tools/index.ts` | `registerBuiltInTools`: activates every builtin tool found at session start (grep/find/ls alongside Pi's read/bash/edit/write defaults). |
 | `src/tui/*` | All rendering and UI state. Modules are named by concern; pure factories use `create*`, host patches use `apply*`/`install*`, extension hooks use `register*`. |
 
 ## Who registers what (tool registration is first-wins)
