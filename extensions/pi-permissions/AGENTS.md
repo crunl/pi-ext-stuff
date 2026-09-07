@@ -73,11 +73,16 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   exclusive lease per Pi host process. It serializes SRT mutation across every
   registration and ordinary sandboxed tool; the production Guardian does not
   enter this coordinator. Host SRT state lives in `processSandboxState` in
-  `src/sandbox/srt-enforcer.ts`, while the host poison latch lives on
-  `srtProcessCoordinator`. At a deadline the caller returns immediately and
-  the host executor is poisoned, but the detached drain keeps the lease until
-  every mutable SRT operation settles and child/cleanup completes. Cleanup or
-  policy-restore failure also poisons the host and later executions fail closed.
+  `src/sandbox/srt-enforcer.ts`, while host draining and persistent fault state
+  live on `srtProcessCoordinator`. Execution cancellation or timeout returns
+  to the caller immediately, but the detached drain keeps the lease until
+  every mutable SRT operation settles and child/cleanup completes. Successful
+  cancellation cleanup permits the next execution without clearing a global
+  fault or reactivating SRT. Draining is temporarily unhealthy for bare command
+  escalation; ordinary sandbox requests wait behind the lease with cancellation
+  and deadline handling. A drain deadline never releases an unsettled lease.
+  Cleanup, policy-restore, or drain failure poisons the host with its actual
+  lifecycle cause, and later executions fail closed.
   Only a successful `SrtSandboxManager.activate()` clears host poison after its
   bounded reset and base-policy initialization. `reset()` (including
   `yolo`/disabled transitions) tears down host SRT/base/connect state but does

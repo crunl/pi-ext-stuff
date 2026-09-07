@@ -1,4 +1,5 @@
 type Waiter = {
+  allowPoisoned: boolean;
   resolve: (release: () => void) => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
@@ -7,31 +8,72 @@ type Waiter = {
 
 export type DetachedAbortHandler = () => Error | undefined;
 
+export type SrtFaultReason = "initialization" | "reset" | "cleanup" | "restore" | "drain-timeout";
+
+/**
+ * The deadline is an internal lifecycle budget for a cancelled operation. It
+ * is deliberately independent of the caller's command timeout: that timeout
+ * only releases the caller, while this one decides when an unsettled SRT
+ * operation becomes a persistent host fault.
+ */
+export const SRT_DRAIN_TIMEOUT_MS = 15_000;
+
+type DetachedRunOptions = {
+  /** Activation/reset are the only operations allowed to run after a fault. */
+  allowPoisoned?: boolean;
+};
+
 /**
  * The SRT package exposes one mutable process-global manager. A lock scoped to
- * an extension instance is therefore insufficient: two Pi registrations (or
- * the Guardian and a normal tool) could otherwise swap the singleton's
- * config while a child is still alive.
+ * an extension instance is therefore insufficient: two Pi registrations or
+ * ordinary tools could otherwise swap its config while a child is still alive.
+ * The production Guardian uses its own worker and never enters this coordinator.
  */
 export class SrtProcessCoordinator {
   private active = false;
-  private poisoned = false;
+  private poisonReason: SrtFaultReason | undefined;
+  private drainingOwner: symbol | undefined;
   private readonly queue: Waiter[] = [];
 
   get isPoisoned(): boolean {
-    return this.poisoned;
+    return this.poisonReason !== undefined;
   }
 
-  markPoisoned(): void {
-    this.poisoned = true;
+  get isDraining(): boolean {
+    return this.drainingOwner !== undefined;
   }
 
+  poisonedError(): Error {
+    const reason = this.poisonReason ?? "unknown";
+    return new Error(`executor is poisoned after a previous SRT ${reason} failure`);
+  }
+
+  markPoisoned(reason: SrtFaultReason): void {
+    this.poisonReason ??= reason;
+    this.rejectPoisonedWaiters();
+  }
+
+  private beginDraining(): () => void {
+    const owner = Symbol("srt-drain");
+    this.drainingOwner = owner;
+    const timer = setTimeout(() => {
+      if (this.drainingOwner === owner) this.markPoisoned("drain-timeout");
+    }, SRT_DRAIN_TIMEOUT_MS);
+    timer.unref?.();
+    return () => {
+      if (this.drainingOwner !== owner) return;
+      this.drainingOwner = undefined;
+      clearTimeout(timer);
+    };
+  }
+
+  /** Clear only the persistent fault; a drain owner is always cleared by its lease. */
   clearPoison(): void {
-    this.poisoned = false;
+    this.poisonReason = undefined;
   }
 
   async runExclusive<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const release = await this.acquire(signal);
+    const release = await this.acquire(signal, false);
     try {
       return await operation();
     } finally {
@@ -50,12 +92,14 @@ export class SrtProcessCoordinator {
     operation: () => Promise<T>,
     signal?: AbortSignal,
     onAbort?: DetachedAbortHandler,
+    options: DetachedRunOptions = {},
   ): Promise<T> {
-    return this.acquire(signal).then(
+    return this.acquire(signal, options.allowPoisoned === true).then(
       (release) =>
         new Promise<T>((resolve, reject) => {
           let operationSettled = false;
           let callerSettled = false;
+          let finishDraining: (() => void) | undefined;
 
           const cleanupSignal = (): void => {
             if (signal) signal.removeEventListener("abort", handleAbort);
@@ -67,12 +111,15 @@ export class SrtProcessCoordinator {
           const finish = (callback: () => void): void => {
             if (operationSettled) return;
             operationSettled = true;
+            finishDraining?.();
+            finishDraining = undefined;
             releaseLease();
             callback();
           };
           const handleAbort = (): void => {
             if (operationSettled || callerSettled) return;
             callerSettled = true;
+            finishDraining = this.beginDraining();
             let error: Error;
             try {
               error = onAbort?.() ?? new Error("aborted");
@@ -119,11 +166,12 @@ export class SrtProcessCoordinator {
     );
   }
 
-  private acquire(signal?: AbortSignal): Promise<() => void> {
+  private acquire(signal: AbortSignal | undefined, allowPoisoned: boolean): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(new Error("aborted"));
+    if (this.isPoisoned && !allowPoisoned) return Promise.reject(this.poisonedError());
 
     return new Promise((resolve, reject) => {
-      const waiter: Waiter = { resolve, reject, signal };
+      const waiter: Waiter = { allowPoisoned, resolve, reject, signal };
       if (signal) {
         waiter.onAbort = () => {
           const index = this.queue.indexOf(waiter);
@@ -143,7 +191,14 @@ export class SrtProcessCoordinator {
     if (this.active) return;
     const waiter = this.queue.shift();
     if (!waiter) return;
+    if (this.isPoisoned && !waiter.allowPoisoned) {
+      this.removeWaiterAbortListener(waiter);
+      waiter.reject(this.poisonedError());
+      this.drain();
+      return;
+    }
     if (waiter.signal?.aborted) {
+      this.removeWaiterAbortListener(waiter);
       waiter.reject(new Error("aborted"));
       this.drain();
       return;
@@ -159,6 +214,25 @@ export class SrtProcessCoordinator {
       this.active = false;
       this.drain();
     });
+  }
+
+  private rejectPoisonedWaiters(): void {
+    if (this.queue.length === 0) return;
+    const retained: Waiter[] = [];
+    for (const waiter of this.queue) {
+      if (waiter.allowPoisoned) {
+        retained.push(waiter);
+        continue;
+      }
+      this.removeWaiterAbortListener(waiter);
+      waiter.reject(this.poisonedError());
+    }
+    this.queue.splice(0, this.queue.length, ...retained);
+    this.drain();
+  }
+
+  private removeWaiterAbortListener(waiter: Waiter): void {
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
   }
 }
 

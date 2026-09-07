@@ -1,10 +1,20 @@
+import { type ChildProcess, spawn as spawnProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import type {
   SandboxAskCallback,
   SandboxRuntimeConfig,
   SandboxViolationStore,
 } from "@anthropic-ai/sandbox-runtime";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
+
 import { SandboxConnectGuard } from "../src/sandbox/connect-guard.ts";
+import { SRT_DRAIN_TIMEOUT_MS, SrtProcessCoordinator } from "../src/sandbox/srt-coordinator.ts";
 import {
   assertSrtPolicySupported,
   denialCapabilityFromViolationLine,
@@ -30,6 +40,40 @@ function nodeProgram(source: string): { executable: string; args: string[] } {
   return { executable: process.execPath, args: ["-e", source] };
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function controlledChild(): {
+  child: ChildProcess;
+  stdout: PassThrough;
+  stderr: PassThrough;
+} {
+  const child = new EventEmitter() as unknown as ChildProcess;
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  Object.assign(child, {
+    pid: undefined,
+    stdout,
+    stderr,
+    stdin: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  return { child, stdout, stderr };
+}
+
 class FakeSrtRuntime implements SrtRuntimeLike {
   readonly initialized: SandboxRuntimeConfig[] = [];
   readonly updated: SandboxRuntimeConfig[] = [];
@@ -40,8 +84,13 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   activeWraps = 0;
   maxActiveWraps = 0;
   failCleanup = false;
+  failReset = false;
   failInitialize = false;
+  failUpdateCall: number | undefined;
+  updateCalls = 0;
   wrapDelayMs = 0;
+  wrapGate: Promise<void> | undefined;
+  onWrapComplete: (() => void) | undefined;
   output = "ok";
   source = "process.stdout.write(process.argv[1])";
   wrappedEnv: NodeJS.ProcessEnv = {};
@@ -81,7 +130,9 @@ class FakeSrtRuntime implements SrtRuntimeLike {
     if (this.wrapDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.wrapDelayMs));
     }
+    if (this.wrapGate) await this.wrapGate;
     this.activeWraps -= 1;
+    this.onWrapComplete?.();
     return {
       argv: [process.execPath, "-e", this.source, this.output],
       env: this.wrappedEnv,
@@ -90,6 +141,8 @@ class FakeSrtRuntime implements SrtRuntimeLike {
 
   updateConfig(config: SandboxRuntimeConfig): void {
     this.updated.push(config);
+    this.updateCalls += 1;
+    if (this.failUpdateCall === this.updateCalls) throw new Error("update sentinel");
   }
 
   cleanupAfterCommand(): void {
@@ -98,6 +151,7 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   }
 
   async reset(): Promise<void> {
+    if (this.failReset) throw new Error("reset sentinel");
     this.askNetwork = undefined;
   }
 
@@ -115,6 +169,8 @@ class FakeConnectGuard extends SandboxConnectGuard {
   resetCalls = 0;
   issueCalls = 0;
   activeTickets = 0;
+  failClose = false;
+  failResetExecutionAt: number | undefined;
 
   override get parentProxyUrl(): string {
     return "http://pi-permissions:test@127.0.0.1:43123";
@@ -126,11 +182,15 @@ class FakeConnectGuard extends SandboxConnectGuard {
 
   override async close(): Promise<void> {
     this.closeCalls += 1;
+    if (this.failClose) throw new Error("guard close sentinel");
     this.activeTickets = 0;
   }
 
   override resetExecution(): void {
     this.resetCalls += 1;
+    if (this.failResetExecutionAt === this.resetCalls) {
+      throw new Error("guard reset sentinel");
+    }
     this.activeTickets = 0;
   }
 
@@ -155,7 +215,7 @@ async function execute(
 }
 
 describe("SRT executor contract", () => {
-  it("detaches a timed-out caller while draining initialize under the process-global lease", async () => {
+  it("lets the next execution run after a timed-out initialization drains", async () => {
     const runtime = new FakeSrtRuntime();
     let releaseInitialize!: () => void;
     runtime.initialize = async (config) => {
@@ -171,29 +231,222 @@ describe("SRT executor contract", () => {
     });
     void first.catch(() => undefined);
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(firstSettled).toBe(true);
     await expect(first).rejects.toThrow("timeout:0.01");
+    expect(firstSettled).toBe(true);
+    expect(manager.isHealthy()).toBe(false);
 
     let secondSettled = false;
     const second = execute(manager).finally(() => {
       secondSettled = true;
     });
-    await expect(second).rejects.toThrow(/executor is poisoned/);
-
-    expect(secondSettled).toBe(true);
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
     expect(runtime.initialized).toHaveLength(1);
 
     runtime.initialize = async () => undefined;
-    let recoverySettled = false;
-    const recovery = manager.activate(basePolicy()).finally(() => {
-      recoverySettled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(recoverySettled).toBe(false);
-
     releaseInitialize();
-    await expect(recovery).resolves.toBeUndefined();
+    await expect(second).resolves.toMatchObject({ exitCode: 0 });
+    expect(secondSettled).toBe(true);
+    expect(manager.isHealthy()).toBe(true);
+    await manager.reset();
+  });
+
+  it("keeps the initialization lease through cancellation and drops a queued caller", async () => {
+    const runtime = new FakeSrtRuntime();
+    const initGate = deferred<void>();
+    runtime.initialize = async (config) => {
+      runtime.initialized.push(config);
+      await initGate.promise;
+    };
+    const manager = new SrtSandboxManager(runtime);
+    const firstController = new AbortController();
+    const first = execute(manager, basePolicy(), { signal: firstController.signal });
+    await flushMicrotasks();
+    expect(runtime.initialized).toHaveLength(1);
+
+    firstController.abort();
+    await expect(first).rejects.toThrow("aborted");
+    expect(manager.isHealthy()).toBe(false);
+
+    const queuedController = new AbortController();
+    const queued = execute(manager, basePolicy(), { signal: queuedController.signal });
+    queuedController.abort();
+    await expect(queued).rejects.toThrow("aborted");
+    expect(runtime.initialized).toHaveLength(1);
+
+    initGate.resolve(undefined);
+    await flushMicrotasks();
+    runtime.initialize = async () => undefined;
+    await expect(execute(manager)).resolves.toMatchObject({ exitCode: 0 });
+    expect(manager.isHealthy()).toBe(true);
+    await manager.reset();
+  });
+
+  it("keeps the wrapping lease through cancellation and prevents overlap", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    await manager.activate(basePolicy());
+    const wrapGate = deferred<void>();
+    runtime.wrapGate = wrapGate.promise;
+    const firstController = new AbortController();
+    const first = execute(manager, basePolicy(), { signal: firstController.signal });
+    await flushMicrotasks();
+    expect(runtime.activeWraps).toBe(1);
+
+    firstController.abort();
+    await expect(first).rejects.toThrow("aborted");
+    expect(manager.isHealthy()).toBe(false);
+
+    const queuedController = new AbortController();
+    const queued = execute(manager, basePolicy(), { signal: queuedController.signal });
+    queuedController.abort();
+    await expect(queued).rejects.toThrow("aborted");
+
+    wrapGate.resolve(undefined);
+    await flushMicrotasks();
+    runtime.wrapGate = undefined;
+    await expect(execute(manager)).resolves.toMatchObject({ exitCode: 0 });
+    expect(runtime.maxActiveWraps).toBe(1);
+    await manager.reset();
+  });
+
+  it("poisons a drain deadline without releasing an unsettled lease", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new SrtProcessCoordinator();
+      const operationGate = deferred<void>();
+      const ownerController = new AbortController();
+      let operationStarted = false;
+      const owner = coordinator.runExclusiveDetached(async () => {
+        operationStarted = true;
+        await operationGate.promise;
+      }, ownerController.signal);
+      await flushMicrotasks();
+      expect(operationStarted).toBe(true);
+
+      ownerController.abort();
+      await expect(owner).rejects.toThrow("aborted");
+      expect(coordinator.isDraining).toBe(true);
+
+      const queuedController = new AbortController();
+      const queued = coordinator.runExclusiveDetached(
+        async () => undefined,
+        queuedController.signal,
+      );
+      queuedController.abort();
+      await expect(queued).rejects.toThrow("aborted");
+
+      let activationStarted = false;
+      const activation = coordinator.runExclusiveDetached(
+        async () => {
+          activationStarted = true;
+        },
+        undefined,
+        undefined,
+        { allowPoisoned: true },
+      );
+      const waiting = coordinator.runExclusiveDetached(async () => undefined);
+      void waiting.catch(() => undefined);
+      await flushMicrotasks();
+      expect(activationStarted).toBe(false);
+
+      vi.advanceTimersByTime(SRT_DRAIN_TIMEOUT_MS - 1);
+      await flushMicrotasks();
+      expect(coordinator.isPoisoned).toBe(false);
+      vi.advanceTimersByTime(1);
+      await flushMicrotasks();
+      expect(coordinator.isPoisoned).toBe(true);
+      expect(coordinator.isDraining).toBe(true);
+      await expect(waiting).rejects.toThrow(/drain-timeout/);
+      await expect(coordinator.runExclusiveDetached(async () => undefined)).rejects.toThrow(
+        /executor is poisoned/,
+      );
+      expect(activationStarted).toBe(false);
+
+      operationGate.resolve(undefined);
+      await expect(activation).resolves.toBeUndefined();
+      expect(coordinator.isDraining).toBe(false);
+      expect(coordinator.isPoisoned).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the lease until a child error is followed by close", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    await manager.activate(basePolicy());
+    const { child } = controlledChild();
+    const spawnReady = deferred<void>();
+    vi.mocked(spawnProcess).mockImplementationOnce(() => {
+      spawnReady.resolve(undefined);
+      return child;
+    });
+
+    const first = execute(manager);
+    let firstSettled = false;
+    void first.then(
+      () => {
+        firstSettled = true;
+      },
+      () => {
+        firstSettled = true;
+      },
+    );
+    await spawnReady.promise;
+    child.emit("error", new Error("child sentinel"));
+    await flushMicrotasks();
+    expect(firstSettled).toBe(false);
+    const second = execute(manager);
+    let secondSettled = false;
+    void second.then(
+      () => {
+        secondSettled = true;
+      },
+      () => {
+        secondSettled = true;
+      },
+    );
+    await flushMicrotasks();
+    expect(secondSettled).toBe(false);
+
+    child.emit("close", -1);
+    await expect(first).rejects.toThrow("child sentinel");
+    await expect(second).resolves.toMatchObject({ exitCode: 0 });
+    await manager.reset();
+  });
+
+  it("does not forward output that arrives after cancellation", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    await manager.activate(basePolicy());
+    const { child, stdout, stderr } = controlledChild();
+    const spawnReady = deferred<void>();
+    vi.mocked(spawnProcess).mockImplementationOnce(() => {
+      spawnReady.resolve(undefined);
+      return child;
+    });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const caller = new AbortController();
+    const first = execute(manager, basePolicy(), {
+      signal: caller.signal,
+      onStdout: (chunk) => stdoutChunks.push(chunk),
+      onStderr: (chunk) => stderrChunks.push(chunk),
+    });
+    await spawnReady.promise;
+
+    caller.abort();
+    await expect(first).rejects.toThrow("aborted");
+    expect(manager.isHealthy()).toBe(false);
+    stdout.emit("data", Buffer.from("late stdout"));
+    stderr.emit("data", Buffer.from("late stderr"));
+    expect(stdoutChunks).toHaveLength(0);
+    expect(stderrChunks).toHaveLength(0);
+
+    const next = execute(manager);
+    child.emit("close", null);
+    await expect(next).resolves.toMatchObject({ exitCode: 0 });
     await manager.reset();
   });
 
@@ -382,6 +635,61 @@ describe("SRT executor contract", () => {
     await expect(execute(manager)).resolves.toMatchObject({ exitCode: 0 });
     await manager.reset();
   });
+
+  it("poisons after policy restore failure and recovers only through activation", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const changedPolicy: SandboxPolicy = {
+      ...basePolicy(),
+      filesystem: { allowWrite: ["/workspace"], denyRead: [], denyWrite: [] },
+    };
+    await manager.activate(basePolicy());
+    runtime.failUpdateCall = 2;
+
+    await expect(execute(manager, changedPolicy)).rejects.toThrow(/SRT restore failed/);
+    await expect(execute(manager, basePolicy())).rejects.toThrow(/executor is poisoned/);
+
+    runtime.failUpdateCall = undefined;
+    await manager.activate(basePolicy());
+    await expect(execute(manager, basePolicy())).resolves.toMatchObject({ exitCode: 0 });
+    await manager.reset();
+  });
+
+  it("poisons after reset or guard cleanup failure and activation recovers", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    runtime.failReset = true;
+
+    await expect(manager.reset()).rejects.toThrow(/SRT reset failed/);
+    await expect(execute(manager)).rejects.toThrow(/previous SRT reset failure/);
+
+    runtime.failReset = false;
+    await manager.activate(basePolicy());
+    await expect(execute(manager)).resolves.toMatchObject({ exitCode: 0 });
+    await manager.reset();
+
+    const guardedRuntime = new FakeSrtRuntime();
+    const guard = new FakeConnectGuard();
+    const guardedManager = new SrtSandboxManager(guardedRuntime, guard);
+    await guardedManager.activate(basePolicy());
+    guard.failResetExecutionAt = guard.resetCalls + 2;
+
+    await expect(execute(guardedManager)).rejects.toThrow(/SRT cleanup failed/);
+    await expect(execute(guardedManager)).rejects.toThrow(/previous SRT cleanup failure/);
+
+    guard.failResetExecutionAt = undefined;
+    await guardedManager.activate(basePolicy());
+    await expect(execute(guardedManager)).resolves.toMatchObject({ exitCode: 0 });
+    await guardedManager.reset();
+
+    guard.failClose = true;
+    await expect(guardedManager.reset()).rejects.toThrow(/SRT reset failed/);
+    await expect(execute(guardedManager)).rejects.toThrow(/previous SRT reset failure/);
+    guard.failClose = false;
+    await guardedManager.activate(basePolicy());
+    await expect(execute(guardedManager)).resolves.toMatchObject({ exitCode: 0 });
+    await guardedManager.reset();
+  });
 });
 
 describe("SRT network authorization seam", () => {
@@ -471,6 +779,39 @@ describe("SRT network authorization seam", () => {
       networkAuthorize: async () => authorization(undefined),
     });
     expect(runtime.networkDecision).toBe(false);
+    expect(guard.issueCalls).toBe(0);
+    await manager.reset();
+  });
+
+  it("rejects a delayed authorization that resolves after cancellation", async () => {
+    const runtime = new FakeSrtRuntime();
+    const guard = new FakeConnectGuard();
+    const manager = new SrtSandboxManager(runtime, guard);
+    const policy = networkPolicy();
+    runtime.networkRequest = { host: "allowed.example", port: 443 };
+    await manager.activate(policy);
+    const authorizationGate = deferred<SandboxNetworkAuthorization>();
+    let authorizationSignal: AbortSignal | undefined;
+    const caller = new AbortController();
+    const first = execute(manager, policy, {
+      signal: caller.signal,
+      networkAuthorize: async ({ signal }) => {
+        authorizationSignal = signal;
+        return authorizationGate.promise;
+      },
+    });
+    await flushMicrotasks();
+    expect(authorizationSignal).toBeDefined();
+
+    caller.abort();
+    await expect(first).rejects.toThrow("aborted");
+    expect(authorizationSignal?.aborted).toBe(true);
+
+    const next = execute(manager, policy);
+    authorizationGate.resolve(
+      authorization({ host: "allowed.example", port: 443, addresses: ["93.184.216.34"] }),
+    );
+    await expect(next).resolves.toMatchObject({ exitCode: 0 });
     expect(guard.issueCalls).toBe(0);
     await manager.reset();
   });
