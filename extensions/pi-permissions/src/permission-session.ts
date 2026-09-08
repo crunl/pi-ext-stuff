@@ -126,6 +126,22 @@ export class PermissionSession {
     return this.delegationStack.at(-1);
   }
 
+  /**
+   * Whether every active delegation scope permits another delegation.
+   *
+   * The audit chain is intentionally not consulted here: it is historical
+   * evidence, while this predicate describes only scopes that still govern
+   * the current nested turn.
+   */
+  activeDelegationAllowsReDelegate(): boolean {
+    return this.delegationStack.every((envelope) => envelope?.allowReDelegate !== false);
+  }
+
+  /** True when the innermost nested session layer owns an Engine turn. */
+  activeNestedTurnHasSnapshot(): boolean {
+    return this.turnDepth > 1 && this.nestedSnapshots.at(-1) !== undefined;
+  }
+
   /** Audit chain of parent → child delegations for the active turn. */
   delegationAuditTrail(): readonly DelegationAuditLink[] {
     return this.delegationAudit;

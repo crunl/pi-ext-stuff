@@ -1111,18 +1111,11 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("reviews and retries a native file mutation runtime denial exactly once", async () => {
-    const { engine, review } = createEngine(async (input) => {
-      expect(input.source).toBe("inline");
-      expect(input.requested).toEqual([
-        { kind: "filesystem", operation: "write", path: "/outside/result.txt" },
-      ]);
-      expect(input.baseline.policy?.filesystem.allowWrite).toContain("/approved/result.txt");
-      expect(input.effective.policy?.filesystem.allowWrite).toEqual(
-        expect.arrayContaining(["/approved/result.txt", "/outside/result.txt"]),
-      );
-      return { kind: "approve", rationale: "The exact file operation is acceptable." };
-    });
+  it("does not infer native replay safety from a typed write capability denial", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "Must not review",
+    }));
     const turn = engine.beginTurn(snapshot());
     let executions = 0;
     const execute = vi.fn(async (attempt) => {
@@ -1153,9 +1146,9 @@ describe("ApproveForMeEngine public seam", () => {
           runtimeDenialPolicy: "review-and-retry",
         }),
       ),
-    ).resolves.toEqual({ kind: "completed", value: "retried" });
-    expect(execute).toHaveBeenCalledTimes(2);
-    expect(review).toHaveBeenCalledOnce();
+    ).resolves.toMatchObject({ kind: "blocked", error: { code: "runtime-denied" } });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("does not re-review a runtime denial already covered by the first lease", async () => {
@@ -1186,7 +1179,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(result).toMatchObject({
       kind: "blocked",
       error: {
-        code: "enforcement-unavailable",
+        code: "runtime-denied",
         request: deniedWrite,
         effectsMayHaveOccurred: true,
       },
@@ -1223,7 +1216,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(result).toMatchObject({
       kind: "blocked",
       error: {
-        code: "enforcement-unavailable",
+        code: "runtime-denied",
         request: deniedWrite,
         effectsMayHaveOccurred: true,
       },
@@ -1232,7 +1225,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("keeps a runtime denial eligible for an exact manual retry", async () => {
+  it("does not mint a capability-only manual retry for a post-start denial", async () => {
     const { engine, review } = createEngine(async (input) => {
       if (input.source === "inline") return { kind: "deny", rationale: "Review it manually." };
       expect(input.source).toBe("manual-retry");
@@ -1260,31 +1253,11 @@ describe("ApproveForMeEngine public seam", () => {
     );
     expect(firstResult.kind).toBe("blocked");
     const retryHandle = firstResult.kind === "blocked" ? firstResult.retryHandle : undefined;
-    expect(retryHandle).toBeDefined();
-    first.close();
-    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(true);
-
-    const second = engine.beginTurn(snapshot({ turnId: "turn-2" }));
-    await expect(
-      second.execute(
-        call(
-          vi.fn(async () => completed("retried")),
-          {
-            call: {
-              id: "runtime-denial-manual-retry-2",
-              tool: "write",
-              input: { path: deniedWrite.path, content: "updated" },
-              cwd: "/workspace",
-            },
-            runtimeDenialPolicy: "review-and-retry",
-          },
-        ),
-      ),
-    ).resolves.toEqual({ kind: "completed", value: "retried" });
-    expect(review).toHaveBeenCalledTimes(2);
+    expect(retryHandle).toBeUndefined();
+    expect(review).not.toHaveBeenCalled();
   });
 
-  it("makes a second native file mutation denial terminal", async () => {
+  it("does not replay Edit from typed capability evidence alone", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
       rationale: "Approve one exact retry.",
@@ -1315,11 +1288,10 @@ describe("ApproveForMeEngine public seam", () => {
         code: "runtime-denied",
         request: deniedWrite,
         effectsMayHaveOccurred: true,
-        retryAttempted: true,
       },
     });
-    expect(execute).toHaveBeenCalledTimes(2);
-    expect(review).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("keeps network runtime denial terminal even for a retry-capable adapter", async () => {

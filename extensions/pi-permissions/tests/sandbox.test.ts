@@ -770,6 +770,60 @@ describe("sandbox integration", () => {
     }
   });
 
+  it("records invocation-local preparation identity and a sticky content-write latch", async () => {
+    const events: any[] = [];
+    const execute = vi.fn(async () => ({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from("EACCES unrelated path"),
+      exitCode: 1,
+    }));
+    const manager = { initialize: vi.fn(), reset: vi.fn(), execute };
+    const policy: SandboxPolicy = {
+      filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+      network: { allowedDomains: [], deniedDomains: [] },
+    };
+    const operations = createSandboxedFileOperations(
+      manager,
+      policy,
+      [],
+      undefined,
+      "local",
+      process.cwd(),
+      { observe: (event) => events.push(event) },
+    );
+    for (const operation of ["mkdir", "access", "readFile"] as const) {
+      await expect(operations[operation]("/tmp/ folder / file ")).rejects.toThrow(
+        "EACCES unrelated path",
+      );
+      expect(events.at(-1)).toMatchObject({
+        kind: "failed",
+        operation: operation === "readFile" ? "read" : operation,
+        path: "/tmp/ folder / file ",
+        cwd: process.cwd(),
+        contentWriteStarted: false,
+        exitCode: 1,
+      });
+    }
+    execute.mockResolvedValueOnce({
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      exitCode: 0,
+    });
+    await operations.access("/tmp/success");
+    expect(events.at(-1)).toMatchObject({ kind: "succeeded" });
+    await expect(operations.writeFile("/tmp/file", "content")).rejects.toThrow("EACCES");
+    expect(events.at(-1)).toMatchObject({
+      kind: "failed",
+      operation: "write",
+      contentWriteStarted: true,
+    });
+    await expect(operations.access("/tmp/file")).rejects.toThrow();
+    expect(events.at(-1)).toMatchObject({ contentWriteStarted: true });
+    execute.mockRejectedValueOnce(new Error("cleanup failed"));
+    await expect(operations.access("/tmp/file")).rejects.toThrow("cleanup failed");
+    expect(events.at(-1)).toMatchObject({ kind: "started" });
+  });
+
   it("runs native file operations through the sandbox with one-call write roots", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-native-"));
     const path = join(cwd, "nested", "note.txt");

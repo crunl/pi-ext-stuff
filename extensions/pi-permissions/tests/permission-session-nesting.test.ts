@@ -122,4 +122,42 @@ describe("PermissionSession nested delegation context", () => {
     expect(session.delegationAuditTrail()).toHaveLength(0);
     expect(session.activeDelegationCeiling()).toBeUndefined();
   });
+
+  it("checks only active delegation scopes for re-delegation", () => {
+    const session = new PermissionSession();
+    session.beginTurn(session.allocateTurnId());
+    const disallow = { writeRoots: [] as string[], networkHosts: [], allowReDelegate: false };
+    const allow = { writeRoots: [] as string[], networkHosts: [], allowReDelegate: true };
+
+    session.beginNestedTurn({
+      envelope: disallow,
+      audit: { parentSessionId: "s", parentTurnId: 1, childTurnId: 2, envelope: disallow },
+    });
+    session.beginNestedTurn({
+      envelope: allow,
+      audit: { parentSessionId: "s", parentTurnId: 2, childTurnId: 3, envelope: allow },
+    });
+    expect(session.activeDelegationAllowsReDelegate()).toBe(false);
+
+    session.finishNestedTurn();
+    expect(session.activeDelegationAllowsReDelegate()).toBe(false);
+    session.finishNestedTurn();
+    expect(session.activeDelegationAllowsReDelegate()).toBe(true);
+    expect(session.delegationAuditTrail()).toHaveLength(2);
+  });
+
+  it("reports whether the closing nested layer owns an Engine snapshot", () => {
+    const session = new PermissionSession();
+    session.beginTurn(session.allocateTurnId());
+
+    expect(session.beginNestedTurn()).toBe(true);
+    expect(session.activeNestedTurnHasSnapshot()).toBe(false);
+
+    const childSnapshot = outerSnapshot(2);
+    expect(session.beginNestedTurn({ snapshot: childSnapshot })).toBe(true);
+    expect(session.activeNestedTurnHasSnapshot()).toBe(true);
+
+    session.finishNestedTurn();
+    expect(session.activeNestedTurnHasSnapshot()).toBe(false);
+  });
 });

@@ -18,6 +18,7 @@ import {
   type GuardianAdapter,
   type Invocation,
   type InvocationOwnership,
+  type NativeActionFailure,
   type PermissionError,
   type PermissionPolicy,
   type ReviewEvent,
@@ -88,6 +89,7 @@ export interface PiExecutionAttempt<Input = unknown> {
 }
 
 export type PiActionOutcome<T> =
+  | NativeActionFailure
   | { kind: "completed"; value: T }
   | {
       kind: "capability-denied";
@@ -305,15 +307,21 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
   }
 
   beginNestedTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void {
+    // Build the child completely before changing the live engine or parking
+    // the parent. A malformed snapshot or engine-construction failure must
+    // leave the parent usable so the host can install its fail-closed
+    // session-only sentinel.
+    const childEngine = this.createEngine();
+    const childTurn = childEngine.beginTurn(snapshot);
     this.nestedLevels.push({
       engine: this.engine,
       turn: this.activeTurn,
       context: this.currentContext,
     });
-    this.engine = this.createEngine();
+    this.engine = childEngine;
     this.currentContext = context;
     this.circuitPauseNotified = false;
-    this.activeTurn = this.engine.beginTurn(snapshot);
+    this.activeTurn = childTurn;
   }
 
   closeNestedTurn(reason = "nested turn closed"): void {

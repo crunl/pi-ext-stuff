@@ -183,7 +183,7 @@ export interface SandboxExecutionResult {
   exitCode: number | null;
 }
 
-/** The exact capability enforcement denied at runtime, when recoverable. */
+/** An authoritative backend capability boundary, never inferred from diagnostic text. */
 export type SandboxDenialCapability =
   | { kind: "filesystem"; operation: "write"; path: string }
   | { kind: "network"; host: string };
@@ -191,7 +191,7 @@ export type SandboxDenialCapability =
 const SANDBOX_DENIAL_MARKERS =
   /operation not permitted|permission denied|read-only file system|sandbox denied|\bEPERM\b|\bEACCES\b|\bEROFS\b|connect tunnel failed/i;
 
-/** Cheap pre-filter only; the enforcement adapter's verdict is authoritative. */
+/** Cheap failure pre-filter only; matching text is not proof of a sandbox denial. */
 export function looksLikeSandboxDenial(text: string): boolean {
   return SANDBOX_DENIAL_MARKERS.test(text);
 }
@@ -210,10 +210,13 @@ export interface SandboxManagerLike {
   reset(): Promise<void>;
   /**
    * After a failed execution, report the exact capability enforcement
-   * denied for this invocation, when the backend tracks authoritative
-   * denial events. Absence means no escalation is possible.
+   * denied for this invocation, only when the backend has authoritative
+   * capability events. SRT diagnostics do not implement this seam, and a
+   * capability fact alone never proves that a native action can safely replay.
    */
   classifyDenial?(commandId: string): Promise<SandboxDenialCapability | undefined>;
+  /** Bounded observations for display only; never authorization or scope. */
+  readFailureDiagnostics?(commandId: string): Promise<string | undefined>;
 }
 
 export function createGuardianReadOnlySandboxConfig(scope: GuardianEvidenceScope): SandboxPolicy {
@@ -929,6 +932,24 @@ function fileOperationConfig(
   return writePaths.length === 0 ? baseConfig : withAdditionalWriteRoots(baseConfig, writePaths);
 }
 
+export interface NativeFileOperationFailure {
+  operation: "mkdir" | "write" | "read" | "access";
+  path: string;
+  cwd: string;
+  contentWriteStarted: boolean;
+  exitCode: number | null;
+  error: string;
+}
+
+export type NativeFileOperationEvent =
+  | ({ kind: "failed" } & NativeFileOperationFailure)
+  | { kind: "started" | "succeeded" };
+
+export interface SandboxedFileOperationOptions {
+  /** Trusted parent-side evidence, scoped to this factory/attempt, never syscall identity. */
+  observe?: (event: NativeFileOperationEvent) => void;
+}
+
 async function runSandboxedFileOperation(
   manager: SandboxManagerLike,
   config: SandboxPolicy,
@@ -938,7 +959,12 @@ async function runSandboxedFileOperation(
   signal?: AbortSignal,
   commandId?: string,
   cwd?: string,
+  failureContext?: {
+    contentWriteStarted: boolean;
+    observe?: SandboxedFileOperationOptions["observe"];
+  },
 ): Promise<Buffer> {
+  failureContext?.observe?.({ kind: "started" });
   const result = await executeSandboxProgram(manager, {
     policy: config,
     program: {
@@ -952,10 +978,20 @@ async function runSandboxedFileOperation(
     ...(commandId === undefined ? {} : { commandId }),
   });
   if (result.exitCode !== 0) {
-    throw new Error(
-      result.stderr.toString("utf8") || `sandboxed file operation exited with ${result.exitCode}`,
-    );
+    const error =
+      result.stderr.toString("utf8") || `sandboxed file operation exited with ${result.exitCode}`;
+    failureContext?.observe?.({
+      kind: "failed",
+      operation,
+      path,
+      cwd: cwd ?? process.cwd(),
+      contentWriteStarted: failureContext.contentWriteStarted,
+      exitCode: result.exitCode,
+      error,
+    });
+    throw new Error(error);
   }
+  failureContext?.observe?.({ kind: "succeeded" });
   return result.stdout;
 }
 
@@ -968,8 +1004,10 @@ export function createSandboxedFileOperations(
   signal?: AbortSignal,
   commandId?: string,
   cwd?: string,
+  options: SandboxedFileOperationOptions = {},
 ): SandboxedFileOperations {
   const config = fileOperationConfig(baseConfig, writePaths);
+  const failureContext = { contentWriteStarted: false, observe: options.observe };
   return {
     mkdir: async (path) => {
       await runSandboxedFileOperation(
@@ -981,9 +1019,12 @@ export function createSandboxedFileOperations(
         signal,
         commandId,
         cwd,
+        failureContext,
       );
     },
     writeFile: async (path, content) => {
+      // writeFile can truncate before failing; this latch never resets in an attempt.
+      failureContext.contentWriteStarted = true;
       await runSandboxedFileOperation(
         manager,
         config,
@@ -993,10 +1034,21 @@ export function createSandboxedFileOperations(
         signal,
         commandId,
         cwd,
+        failureContext,
       );
     },
     readFile: (path) =>
-      runSandboxedFileOperation(manager, config, "read", path, undefined, signal, commandId, cwd),
+      runSandboxedFileOperation(
+        manager,
+        config,
+        "read",
+        path,
+        undefined,
+        signal,
+        commandId,
+        cwd,
+        failureContext,
+      ),
     access: async (path) => {
       await runSandboxedFileOperation(
         manager,
@@ -1007,6 +1059,7 @@ export function createSandboxedFileOperations(
         signal,
         commandId,
         cwd,
+        failureContext,
       );
     },
   };

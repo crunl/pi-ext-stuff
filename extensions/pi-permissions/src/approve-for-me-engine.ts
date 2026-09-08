@@ -1,10 +1,15 @@
 import { isIP } from "node:net";
-import { relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
 import { hasGlobSyntax } from "./filesystem-policy.ts";
+import { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
-import type { SandboxPolicy } from "./sandbox.ts";
+import type { NativeFileOperationFailure, SandboxPolicy } from "./sandbox.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
+
+// Keep the historical Engine export for host adapters and third-party callers.
+export { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
@@ -15,10 +20,10 @@ export type CommandExecutionMode = "escalated";
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
 
 /**
- * Trusted adapter policy for a capability denial discovered after execution
- * has started. The default is terminal; only an adapter which can prove that
- * its runtime boundary is safe to re-enter may opt into one fresh review and
- * retry (the Engine, not the executor, owns that one-shot transition).
+ * Trusted adapter declaration for native failed-action preparation recovery.
+ * The default is terminal. Opt-in still requires attempt-local stage/identity
+ * evidence; a typed capability denial alone cannot authorize replay.
+ * The Engine owns fresh review and the one-shot transition.
  */
 export type RuntimeDenialPolicy = "terminal" | "review-and-retry";
 
@@ -89,7 +94,17 @@ export type CapabilityRequest =
 /** Adapter output is untrusted input even though the TypeScript shape is narrow. */
 export type CapabilityRequestInput = CapabilityRequest;
 
+/** Parent-side failed operation identity, not an exact denied syscall capability. */
+export interface NativeActionFailure {
+  kind: "native-action-failed";
+  error: unknown;
+  failure: NativeFileOperationFailure;
+  /** The adapter verified the backend can represent the immediate parent root. */
+  mkdirScopeSupported?: boolean;
+}
+
 export type RuntimeOutcome<T> =
+  | NativeActionFailure
   | { kind: "completed"; value: T }
   | {
       kind: "capability-denied";
@@ -399,6 +414,11 @@ function cloneLease(lease: CapabilityLease): CapabilityLease {
   };
 }
 
+function nativeFailureEvidence(outcome: NativeActionFailure): string {
+  const failure = outcome.failure;
+  return `${errorMessage(outcome.error)}${isRecord(failure) && typeof failure.error === "string" ? `\nHelper failure: ${failure.error}` : ""}\nEffects warning: preparation may have partial directory effects; any content-write attempt may have truncated the file.`;
+}
+
 function withExecutionEffects(error: PermissionError): PermissionError {
   return error.effectsMayHaveOccurred === true ? error : { ...error, effectsMayHaveOccurred: true };
 }
@@ -493,47 +513,6 @@ function pathMatches(pattern: string, path: string): boolean {
   return isPathWithin(pattern, path);
 }
 
-function splitDomainPatternPort(pattern: string): { host: string; port?: number } {
-  const value = pattern.trim();
-  if (value.startsWith("[")) {
-    const close = value.indexOf("]");
-    if (close >= 0) {
-      const host = value.slice(1, close);
-      const suffix = value.slice(close + 1);
-      if (suffix === "") {
-        return { host: normalizeNetworkHost(host) ?? host };
-      }
-      const match = /^:([1-9][0-9]{0,4})$/.exec(suffix);
-      const port = match ? Number(match[1]) : undefined;
-      return port !== undefined && port <= 65535
-        ? { host: normalizeNetworkHost(host) ?? host, port }
-        : { host: value };
-    }
-  }
-  const lastColon = value.lastIndexOf(":");
-  if (lastColon >= 0 && value.indexOf(":") === lastColon) {
-    const match = /^([1-9][0-9]{0,4})$/.exec(value.slice(lastColon + 1));
-    const port = match ? Number(match[1]) : undefined;
-    if (port !== undefined && port <= 65535) {
-      return { host: value.slice(0, lastColon), port };
-    }
-  }
-  return { host: normalizeNetworkHost(value) ?? value };
-}
-
-export function matchesNetworkDomainPattern(pattern: string, host: string, port?: number): boolean {
-  const parsed = splitDomainPatternPort(pattern);
-  if (parsed.port !== undefined && parsed.port !== port) return false;
-  const candidate = normalizeNetworkHost(host) ?? host.trim().toLowerCase();
-  const domain = normalizeNetworkHost(parsed.host) ?? parsed.host.toLowerCase();
-  if (domain === "*") return true;
-  if (domain.startsWith("*.")) {
-    if (isIP(normalizeNetworkHost(candidate) ?? candidate) !== 0) return false;
-    return candidate.endsWith(`.${domain.slice(2)}`);
-  }
-  return candidate === domain;
-}
-
 function exactLocalNetworkAllow(
   policy: SandboxPolicy | undefined,
   host: string,
@@ -568,9 +547,10 @@ function normalizeCapabilityRequest(
   if (!isRecord(raw) || typeof raw.kind !== "string") return undefined;
   if (raw.kind === "filesystem") {
     if (raw.operation !== "read" && raw.operation !== "write") return undefined;
-    if (typeof raw.path !== "string" || raw.path.trim().length === 0) return undefined;
+    if (typeof raw.path !== "string" || raw.path.length === 0 || raw.path.includes("\0"))
+      return undefined;
     if (hasGlobSyntax(raw.path) || raw.path.length > 4096) return undefined;
-    return { kind: "filesystem", operation: raw.operation, path: resolve(cwd, raw.path.trim()) };
+    return { kind: "filesystem", operation: raw.operation, path: resolve(cwd, raw.path) };
   }
   if (raw.kind === "network") {
     if (typeof raw.host !== "string") return undefined;
@@ -1377,14 +1357,27 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         authorizeCapability: (input) => authorizeInlineCapability(state, attemptCall.id, input),
         rejectCapability: (input) => rejectInlineCapability(state, attemptCall.id, input),
       });
-      if (inFlightAttempt.terminalError) return blocked(inFlightAttempt.terminalError);
+      const failureEvidence =
+        result.kind === "native-action-failed"
+          ? `\nOriginal action failure: ${nativeFailureEvidence(result)}`
+          : "";
+      if (inFlightAttempt.terminalError)
+        return blocked({
+          ...inFlightAttempt.terminalError,
+          reason: inFlightAttempt.terminalError.reason + failureEvidence,
+        });
       if (!isCurrent(state)) {
         return blocked(
-          withExecutionEffects({ code: "stale-invocation", reason: "Permission context changed" }),
+          withExecutionEffects({
+            code: "stale-invocation",
+            reason: `Permission context changed${failureEvidence}`,
+          }),
         );
       }
       if (signal.aborted) {
-        return blocked(withExecutionEffects({ code: "aborted", reason: "Operation aborted" }));
+        return blocked(
+          withExecutionEffects({ code: "aborted", reason: `Operation aborted${failureEvidence}` }),
+        );
       }
       if (result.kind === "failed") {
         return { kind: "failed", error: result.error, effectsMayHaveOccurred: true };
@@ -1416,6 +1409,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (outcome.kind === "blocked") return outcome;
     if (outcome.kind === "failed") return outcome;
     if (outcome.kind === "completed") return outcome;
+    if (outcome.kind === "native-action-failed")
+      return { kind: "failed", error: outcome.error, effectsMayHaveOccurred: true };
     const normalized = normalizeCapabilityRequest(outcome.request, request.call.cwd);
     return blocked(
       withExecutionEffects({
@@ -1423,6 +1418,144 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reason: outcome.detail ?? "Unrestricted execution reported a capability denial",
         ...(normalized === undefined ? {} : { request: normalized }),
       }),
+    );
+  };
+
+  const handleNativeActionFailure = async <T>(
+    state: TurnState,
+    request: Invocation<T, ReviewContext>,
+    outcome: NativeActionFailure,
+    attempt: RuntimeAttemptContext,
+    allowRetry: boolean,
+  ): Promise<ExecutionOutcome<T>> => {
+    const failure = outcome.failure;
+    const evidence = nativeFailureEvidence(outcome);
+    const terminal = (
+      reason: string,
+      code: PermissionError["code"] = "runtime-denied",
+      retryAttempted = false,
+    ): ExecutionOutcome<T> =>
+      blocked(
+        withExecutionEffects({
+          code,
+          reason: `${reason}\nOriginal action failure: ${evidence}`,
+          ...(retryAttempted ? { retryAttempted: true as const } : {}),
+        }),
+      );
+    const input = request.call.input;
+    if (
+      !allowRetry ||
+      request.runtimeDenialPolicy !== "review-and-retry" ||
+      request.ownership !== "sandbox-owned" ||
+      attempt.lease.mode !== "sandboxed" ||
+      !isRecord(failure) ||
+      failure.contentWriteStarted !== false ||
+      !Number.isInteger(failure.exitCode) ||
+      failure.exitCode === 0 ||
+      typeof failure.error !== "string" ||
+      // The fixed Node helper emits error.message with an errno prefix.
+      // Permission words later in that message can be part of the filename.
+      !/^(?:EACCES|EPERM|EROFS): /.test(failure.error) ||
+      failure.cwd !== request.call.cwd ||
+      !isRecord(input) ||
+      typeof input.path !== "string"
+    ) {
+      return terminal(
+        "Native recovery requires eligible preparation-stage access failure evidence; no replay",
+      );
+    }
+    const target = normalizeCapabilityRequest(
+      { kind: "filesystem", operation: "write", path: input.path },
+      request.call.cwd,
+    );
+    if (target?.kind !== "filesystem") return terminal("Invalid original file identity");
+    const mkdir = request.call.tool === "write" && failure.operation === "mkdir";
+    const edit =
+      request.call.tool === "edit" &&
+      (failure.operation === "access" || failure.operation === "read");
+    if ((!mkdir && !edit) || failure.path !== (mkdir ? dirname(target.path) : target.path))
+      return terminal("Failed operation does not match the frozen native action");
+    const root = mkdir ? dirname(target.path) : target.path;
+    if (
+      root === dirname(root) ||
+      isPathWithin(root, homedir()) ||
+      basename(root) === "Library" ||
+      hasGlobSyntax(root)
+    )
+      return terminal("Refusing a broad or unrepresentable native recovery root");
+    if (mkdir && outcome.mkdirScopeSupported !== true)
+      return terminal(
+        "Immediate-parent write root is not representable by this backend; no ancestor widening",
+      );
+    const delta: CapabilityRequest = { kind: "filesystem", operation: "write", path: root };
+    if (requestCovered(attempt.lease, delta))
+      return terminal(
+        "Proposed root is already covered by the execution lease; refusing a blind retry",
+        "enforcement-unavailable",
+      );
+    const effective = leaseWithAdditionalRequests(attempt.lease, [delta]);
+    if (
+      !requestCovered(effective, delta) ||
+      !requestCovered(effective, target) ||
+      (edit && !requestCovered(effective, { ...target, operation: "read" }))
+    )
+      return terminal("Native recovery cannot bypass denyWrite or denyRead", "policy-denied");
+    const check = async (): Promise<ExecutionOutcome<T> | undefined> => {
+      const decision = await policyCheck({
+        call: request.call,
+        ownership: request.ownership,
+        requested: [target, delta],
+        phase: "runtime",
+      });
+      if (!isCurrent(state)) return terminal("Permission context changed", "stale-invocation");
+      if (request.signal?.aborted) return terminal("Operation aborted", "aborted");
+      if (decision.kind !== "allow")
+        return terminal(
+          decision.reason,
+          decision.kind === "deny" ? "policy-denied" : "policy-error",
+        );
+      return undefined;
+    };
+    const ineligible = await check();
+    if (ineligible) return ineligible;
+    const decision = await runReview(
+      state,
+      request as Invocation<unknown, ReviewContext>,
+      attempt.lease,
+      {
+        source: "inline",
+        requested: [delta],
+        effective,
+        risk: "REVIEW",
+        summary: `${request.call.tool} native preparation recovery`,
+        reason: `Review re-entering the original complete ${request.call.tool} action once, not a proven sandbox denial. Observed ${failure.operation} access failure before any content write. Additional write root: ${JSON.stringify(root)}${mkdir ? " (immediate-parent subtree scope, not mkdir-only)" : " (original file write root)"}. Re-entry rereads current content and repeats native preparation; partial directory effects may already exist.\n${evidence}`,
+      },
+    );
+    if ("code" in decision) return terminal(decision.reason, decision.code);
+    // No capability-only /approve handle: it would lose this failed-action/effects context.
+    if (decision.kind === "deny") {
+      recordDenialStats();
+      return terminal(decision.rationale, "review-denied");
+    }
+    const changed = await check();
+    if (changed) return changed;
+    const retry = await executeAttempt(
+      state,
+      request,
+      [...attempt.requested, delta],
+      undefined,
+      effective,
+    );
+    if (retry.kind === "completed") return retry;
+    if (retry.kind === "blocked") return terminal(retry.error.reason, retry.error.code, true);
+    const retryError =
+      retry.kind === "capability-denied"
+        ? (retry.detail ?? "Capability denied")
+        : errorMessage(retry.error);
+    return terminal(
+      `Native second attempt failed; no further replay: ${retryError}`,
+      "runtime-denied",
+      true,
     );
   };
 
@@ -1435,6 +1568,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   ): Promise<ExecutionOutcome<T>> => {
     if (outcome.kind === "completed") return outcome;
     if (outcome.kind === "failed") return outcome;
+    if (outcome.kind === "native-action-failed")
+      return handleNativeActionFailure(state, request, outcome, attempt, allowRetry);
     const normalized = normalizeCapabilityRequest(outcome.request, request.call.cwd);
     if (!normalized) {
       return blocked(
@@ -1491,98 +1626,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         }),
       );
 
-    const retryableWrite =
-      allowRetry &&
-      request.runtimeDenialPolicy === "review-and-retry" &&
-      request.ownership === "sandbox-owned" &&
-      normalized.kind === "filesystem" &&
-      normalized.operation === "write";
-    if (retryableWrite && requestCovered(attempt.lease, normalized)) {
-      return blocked(
-        withExecutionEffects({
-          code: "enforcement-unavailable",
-          reason:
-            "Runtime denied a capability already covered by the execution lease; refusing a blind retry",
-          request: normalized,
-        }),
-      );
-    }
-
-    // Codex's native file mutation runtime can ask for one fresh exact
-    // capability review after SRT denies a write. Bash is deliberately
-    // terminal here: replaying a command would repeat arbitrary work, while
-    // a Write/Edit adapter can safely re-enter its single-file operation.
-    // The retry policy is a trusted invocation declaration; it is never
-    // inferred from the executor's denial payload.
-    if (retryableWrite) {
-      const retryEffective = leaseWithAdditionalRequests(attempt.lease, [normalized]);
-      if (!requestCovered(retryEffective, normalized)) {
-        return blocked(
-          withExecutionEffects({
-            code: "enforcement-unavailable",
-            reason: "The approved retry cannot be represented by the sandbox policy",
-            request: normalized,
-          }),
-        );
-      }
-      const retryDecision = await runReview(
-        state,
-        request as Invocation<unknown, ReviewContext>,
-        attempt.lease,
-        {
-          source: "inline",
-          requested: [normalized],
-          effective: retryEffective,
-          risk: "REVIEW",
-          reason:
-            outcome.detail ??
-            "Sandbox enforcement denied a filesystem write; review one exact retry",
-          summary: `${request.call.tool} runtime write retry`,
-        },
-      );
-      if ("code" in retryDecision) return blocked(withExecutionEffects(retryDecision));
-      if (retryDecision.kind === "deny") {
-        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
-          rationale: retryDecision.rationale,
-          requested: [normalized],
-          admissionRequested: attempt.admissionRequested,
-          risk: "REVIEW",
-          summary: `${request.call.tool} runtime write retry`,
-        });
-        return blocked(
-          withExecutionEffects({
-            code: "review-denied",
-            reason: retryDecision.rationale,
-            request: normalized,
-          }),
-          retryHandle,
-        );
-      }
-
-      // Do not grant the capability for the rest of the turn. This direct
-      // second attempt is the exact one-shot retry owned by the Engine.
-      const retryRequested = [...attempt.requested, normalized];
-      const retry = await executeAttempt(state, request, retryRequested, undefined, retryEffective);
-      if (retry.kind === "completed") return retry;
-      if (retry.kind === "blocked") {
-        return blocked(withExecutionEffects(retry.error), retry.retryHandle);
-      }
-      if (retry.kind === "failed") return retry;
-      // A second boundary denial is always terminal. Passing false prevents
-      // an executor from ever turning two denials into an unbounded loop.
-      return handleRuntimeOutcome(
-        state,
-        request,
-        retry,
-        {
-          requested: retryRequested,
-          admissionRequested: attempt.admissionRequested,
-          lease: retryEffective,
-        },
-        false,
-      );
-    }
-
+    // A typed capability denial alone cannot prove a safe native replay stage.
     return blocked(
       withExecutionEffects({
         code: "runtime-denied",

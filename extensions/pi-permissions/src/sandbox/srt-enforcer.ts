@@ -7,7 +7,6 @@ import {
 import { hasGlobSyntax } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
 import type {
-  SandboxDenialCapability,
   SandboxExecutionRequest,
   SandboxExecutionResult,
   SandboxManagerLike,
@@ -43,28 +42,6 @@ export type SrtRuntimeLike = Pick<
   | "reset"
   | "getSandboxViolationStore"
 >;
-
-const FILE_WRITE_DENIAL = /\bdeny\(\d+\)\s+file-write-[a-z-]+\s+(\S+)/;
-const NETWORK_OUTBOUND_DENIAL = /\bdeny\s+network-outbound\s+(\S+)/;
-
-/**
- * Map one authoritative denial line to the exact capability it proves.
- * Read denials never escalate: denyRead is a protective boundary.
- */
-export function denialCapabilityFromViolationLine(
-  line: string,
-): SandboxDenialCapability | undefined {
-  const write = line.match(FILE_WRITE_DENIAL);
-  if (write?.[1]) return { kind: "filesystem", operation: "write", path: write[1] };
-  const network = line.match(NETWORK_OUTBOUND_DENIAL);
-  if (network?.[1]) {
-    const target = network[1];
-    const portSplit = target.match(/^(.+):(\d+)$/);
-    const host = portSplit?.[1] && !portSplit[1].includes(":") ? portSplit[1] : target;
-    return { kind: "network", host };
-  }
-  return undefined;
-}
 
 /** State mirrors SRT's own process-global mutable singleton. */
 const processSandboxState: {
@@ -607,25 +584,35 @@ export class SrtSandboxManager implements SandboxManagerLike {
     );
   }
 
-  async classifyDenial(commandId: string): Promise<SandboxDenialCapability | undefined> {
+  async readFailureDiagnostics(commandId: string): Promise<string | undefined> {
     if (srtProcessCoordinator.isPoisoned) return undefined;
-    let store: ReturnType<SrtRuntimeLike["getSandboxViolationStore"]>;
     try {
-      store = this.runtime.getSandboxViolationStore();
-    } catch {
-      return undefined;
-    }
-    const deadline = Date.now() + DENIAL_DRAIN_TIMEOUT_MS;
-    for (;;) {
-      for (const violation of store.getViolationsForCommand(commandId)) {
-        const capability = denialCapabilityFromViolationLine(violation.line);
-        if (capability) return capability;
+      const store = this.runtime.getSandboxViolationStore();
+      const deadline = Date.now() + DENIAL_DRAIN_TIMEOUT_MS;
+      for (;;) {
+        const observations = store.getViolationsForCommand(commandId);
+        if (observations.length > 0) {
+          const label =
+            "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence):\n";
+          const lines = observations
+            .slice(0, 16)
+            .map(({ line }) => JSON.stringify(line.slice(0, 4096)).slice(1, -1));
+          const text = label + lines.join("\n");
+          const truncated =
+            observations.length > 16 ||
+            observations.some(({ line }) => line.length > 4096) ||
+            text.length > 4084;
+          return truncated ? `${text.slice(0, 4084)}\n[truncated]` : text;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return undefined;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(DENIAL_DRAIN_POLL_MS, remaining)),
+        );
       }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return undefined;
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(DENIAL_DRAIN_POLL_MS, remaining)),
-      );
+    } catch {
+      // Diagnostics must never replace the original execution error.
+      return undefined;
     }
   }
 

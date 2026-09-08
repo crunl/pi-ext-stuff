@@ -146,4 +146,27 @@ describe("PiPermissionsRuntime nested turns", () => {
     });
     runtime.closeTurn();
   });
+
+  it("keeps the parent unparked when child Engine creation fails", async () => {
+    const runtime = new PiPermissionsRuntime({
+      guardian: { review: async () => ({ kind: "approve" as const, rationale: "approved" }) },
+    });
+    const ctx = context();
+    runtime.beginTurn(snapshot("outer"), ctx);
+    (runtime as unknown as { createEngine: () => never }).createEngine = () => {
+      throw new Error("child Engine creation failed");
+    };
+
+    expect(() => runtime.beginNestedTurn(snapshot("child"), ctx)).toThrow(
+      "child Engine creation failed",
+    );
+    expect(runtime.hasNestedTurn()).toBe(false);
+    await expect(runtime.submit(hostAction(runtime, "outer-after-failure"))).resolves.toMatchObject(
+      {
+        kind: "completed",
+        value: "ok",
+      },
+    );
+    runtime.closeTurn();
+  });
 });

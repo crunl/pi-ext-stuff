@@ -8,12 +8,13 @@ import {
   isWriteCovered,
   resolveChildEnvelope,
 } from "../src/delegation.ts";
+import { intersectNetworkPatterns } from "../src/network-domain-pattern.ts";
 import type { SandboxPolicy } from "../src/sandbox.ts";
 
 function basePolicy(): SandboxPolicy {
   return {
     filesystem: {
-      allowWrite: ["/proj", "/proj/sub", "/other"],
+      allowWrite: ["/proj", "/other"],
       denyRead: ["/proj/secret"],
       denyWrite: ["/proj/secret"],
     },
@@ -81,7 +82,7 @@ describe("DelegationPlan", () => {
       writeRoots: ["/proj"],
       networkHosts: ["example.com"],
     });
-    expect(child.filesystem.allowWrite).toEqual(["/proj", "/proj/sub"]);
+    expect(child.filesystem.allowWrite).toEqual(["/proj"]);
     expect(child.filesystem.denyRead).toEqual(["/proj/secret"]);
     expect(child.filesystem.denyWrite).toEqual(["/proj/secret"]);
     expect(child.network.allowedDomains).toEqual(["example.com"]);
@@ -97,7 +98,7 @@ describe("DelegationPlan", () => {
       parentRemainingDepth: 8,
       childCwd: "/proj",
     });
-    expect([...envelope.writeRoots].sort()).toEqual(["/other", "/proj", "/proj/sub"]);
+    expect([...envelope.writeRoots].sort()).toEqual(["/other", "/proj"]);
     expect([...envelope.networkHosts].sort()).toEqual(["api.example.com", "example.com"]);
     expect(remainingDepth).toBe(7);
   });
@@ -121,11 +122,77 @@ describe("DelegationPlan", () => {
       configuredWriteRoots: ["sub"],
       configuredNetworkHosts: [],
       allowReDelegate: true,
-      parentBase: undefined,
+      parentBase: basePolicy(),
       parentRemainingDepth: 2,
       childCwd: "/proj",
     });
     expect(envelope.writeRoots).toEqual(["/proj/sub"]);
+  });
+
+  it("intersects nested and sibling roots without widening", () => {
+    const parent = {
+      filesystem: {
+        allowWrite: ["/proj/sub"],
+        denyRead: [],
+        denyWrite: [],
+      },
+      network: { allowedDomains: [], deniedDomains: [] },
+    } satisfies SandboxPolicy;
+    expect(
+      intersectSandboxPolicy(parent, { writeRoots: ["/proj"], networkHosts: [] }),
+    ).toMatchObject({ filesystem: { allowWrite: ["/proj/sub"] } });
+    expect(
+      intersectSandboxPolicy(parent, { writeRoots: ["/proj/other"], networkHosts: [] }),
+    ).toMatchObject({ filesystem: { allowWrite: [] } });
+    expect(
+      intersectSandboxPolicy(
+        { ...parent, filesystem: { ...parent.filesystem, allowWrite: ["/"] } },
+        { writeRoots: ["/var/tmp"], networkHosts: [] },
+      ),
+    ).toMatchObject({ filesystem: { allowWrite: ["/var/tmp"] } });
+  });
+
+  it("intersects network patterns semantically and preserves ports", () => {
+    expect(intersectNetworkPatterns(["*.example.com"], ["*.api.example.com"])).toEqual([
+      "*.api.example.com",
+    ]);
+    expect(intersectNetworkPatterns(["*.example.com:443"], ["api.example.com"])).toEqual([
+      "api.example.com:443",
+    ]);
+    expect(intersectNetworkPatterns(["api.example.com"], ["*.example.com:443"])).toEqual([
+      "api.example.com:443",
+    ]);
+    expect(intersectNetworkPatterns(["[2001:0db8::1]:443"], ["[2001:db8::1]"])).toEqual([
+      "[2001:db8::1]:443",
+    ]);
+    expect(intersectNetworkPatterns(["[2001:0db8::1]"], ["[2001:db8::1]"])).toEqual([
+      "[2001:db8::1]",
+    ]);
+    expect(intersectNetworkPatterns(["*.192.0.2.1"], ["a.192.0.2.1"])).toEqual(["a.192.0.2.1"]);
+    expect(intersectNetworkPatterns(["example.com"], ["api.example.com"])).toEqual([]);
+    expect(intersectNetworkPatterns([], ["*"])).toEqual([]);
+    expect(intersectNetworkPatterns(["*:443"], ["*.example.com:80"])).toEqual([]);
+  });
+
+  it("does not treat an empty parent policy as unrestricted", () => {
+    const emptyParent: SandboxPolicy = {
+      filesystem: { allowWrite: [], denyRead: [], denyWrite: [] },
+      network: { allowedDomains: [], deniedDomains: [] },
+    };
+    const resolved = resolveChildEnvelope({
+      configuredWriteRoots: ["/proj"],
+      configuredNetworkHosts: ["api.example.com"],
+      allowReDelegate: false,
+      parentBase: emptyParent,
+      parentRemainingDepth: 1,
+      childCwd: "/",
+    });
+    expect(resolved.envelope.writeRoots).toEqual([]);
+    expect(resolved.envelope.networkHosts).toEqual([]);
+    expect(resolved.childBasePolicy.filesystem.allowWrite).toEqual([]);
+    expect(resolved.childBasePolicy.network.allowedDomains).toEqual([]);
+    expect(resolved.droppedWriteRoots).toEqual(["/proj"]);
+    expect(resolved.droppedNetworkHosts).toEqual(["api.example.com"]);
   });
 
   it("floors remaining depth at zero", () => {

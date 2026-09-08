@@ -157,6 +157,17 @@ async function waitForExit(pid: number): Promise<void> {
   throw new Error(`worker fixture ${pid} did not exit`);
 }
 
+type SettledOutcome<T> =
+  | { status: "fulfilled"; value: T }
+  | { status: "rejected"; reason: unknown };
+
+function captureSettled<T>(promise: Promise<T>): Promise<SettledOutcome<T>> {
+  return promise.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason: unknown) => ({ status: "rejected" as const, reason }),
+  );
+}
+
 async function sourceWorkerWithFakeSandbox(
   options: {
     cleanupFails?: boolean;
@@ -345,17 +356,25 @@ describe("GuardianWorkerClient", () => {
       timeoutMs: 10_000,
     });
     const controller = new AbortController();
-    const pending = client.execute({
-      cwd: fixture.directory,
-      program: { executable: process.execPath, args: ["-e", ""] },
-      signal: controller.signal,
-    });
-    const pid = await waitForMarker(fixture.marker);
-    controller.abort();
+    try {
+      const settled = captureSettled(
+        client.execute({
+          cwd: fixture.directory,
+          program: { executable: process.execPath, args: ["-e", ""] },
+          signal: controller.signal,
+        }),
+      );
+      const pid = await waitForMarker(fixture.marker);
+      controller.abort();
 
-    await expect(pending).rejects.toBeInstanceOf(GuardianWorkerAbortError);
-    await waitForExit(pid);
-    await client.close();
+      const outcome = await settled;
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "fulfilled") throw new Error("expected worker cancellation");
+      expect(outcome.reason).toBeInstanceOf(GuardianWorkerAbortError);
+      await waitForExit(pid);
+    } finally {
+      await client.close();
+    }
   });
 
   it("terminates a pending worker when the per-call deadline expires", async () => {
@@ -364,19 +383,25 @@ describe("GuardianWorkerClient", () => {
       workerPath: fixture.workerPath,
       timeoutMs: 10_000,
     });
-    const pending = client.execute({
-      cwd: fixture.directory,
-      program: { executable: process.execPath, args: ["-e", ""] },
-      timeoutMs: 1_000,
-    });
-    const pid = await waitForMarker(fixture.marker);
+    try {
+      const settled = captureSettled(
+        client.execute({
+          cwd: fixture.directory,
+          program: { executable: process.execPath, args: ["-e", ""] },
+          timeoutMs: 1_000,
+        }),
+      );
+      const pid = await waitForMarker(fixture.marker);
 
-    await expect(pending).rejects.toBeInstanceOf(GuardianWorkerTimeoutError);
-    await expect(pending).rejects.toMatchObject({
-      failure: { stage: "transport", code: "timeout" },
-    });
-    await waitForExit(pid);
-    await client.close();
+      const outcome = await settled;
+      expect(outcome.status).toBe("rejected");
+      if (outcome.status === "fulfilled") throw new Error("expected worker timeout");
+      expect(outcome.reason).toBeInstanceOf(GuardianWorkerTimeoutError);
+      expect(outcome.reason).toMatchObject({ failure: { stage: "transport", code: "timeout" } });
+      await waitForExit(pid);
+    } finally {
+      await client.close();
+    }
   });
 
   it.skipIf(process.platform === "win32")(
@@ -387,18 +412,26 @@ describe("GuardianWorkerClient", () => {
         workerPath: fixture.workerPath,
         timeoutMs: 10_000,
       });
-      const pending = client.execute({
-        cwd: fixture.directory,
-        program: { executable: process.execPath, args: ["-e", ""] },
-        timeoutMs: 2_000,
-      });
-      const workerPid = await waitForMarker(fixture.marker);
-      const childPid = await waitForMarker(fixture.childMarker);
+      try {
+        const settled = captureSettled(
+          client.execute({
+            cwd: fixture.directory,
+            program: { executable: process.execPath, args: ["-e", ""] },
+            timeoutMs: 2_000,
+          }),
+        );
+        const workerPid = await waitForMarker(fixture.marker);
+        const childPid = await waitForMarker(fixture.childMarker);
 
-      await expect(pending).rejects.toBeInstanceOf(GuardianWorkerTimeoutError);
-      await waitForExit(workerPid);
-      await waitForExit(childPid);
-      await client.close();
+        const outcome = await settled;
+        expect(outcome.status).toBe("rejected");
+        if (outcome.status === "fulfilled") throw new Error("expected worker timeout");
+        expect(outcome.reason).toBeInstanceOf(GuardianWorkerTimeoutError);
+        await waitForExit(workerPid);
+        await waitForExit(childPid);
+      } finally {
+        await client.close();
+      }
     },
   );
 
@@ -417,26 +450,41 @@ describe("GuardianWorkerClient", () => {
       const descendantProgram = `const { writeFileSync } = require("node:fs");
 writeFileSync(${JSON.stringify(fixture.childMarker)}, String(process.pid));
 setInterval(() => {}, 1_000);`;
+      const releaseMarker = join(fixture.directory, "overflow-release");
       const command = `const { spawn } = require("node:child_process");
+const { existsSync } = require("node:fs");
 const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantProgram)}], {
   detached: false,
   shell: false,
   stdio: "ignore",
 });
 child.unref();
-setTimeout(() => process.stdout.write("x".repeat(128)), 100);
+const releasePoll = setInterval(() => {
+  if (!existsSync(${JSON.stringify(releaseMarker)})) return;
+  clearInterval(releasePoll);
+  process.stdout.write("x".repeat(128));
+}, 10);
 setInterval(() => {}, 1_000);`;
 
       try {
-        const pending = client.execute({
-          cwd: fixture.directory,
-          program: { executable: process.execPath, args: ["-e", command] },
-          maxStdoutBytes: 8,
-          timeoutMs: 10_000,
-        });
+        const settled = captureSettled(
+          client.execute({
+            cwd: fixture.directory,
+            program: { executable: process.execPath, args: ["-e", command] },
+            maxStdoutBytes: 8,
+            timeoutMs: 10_000,
+          }),
+        );
         const descendantPid = await waitForMarker(fixture.childMarker);
+        await writeFile(releaseMarker, "release");
 
-        await expect(pending).rejects.toBeInstanceOf(GuardianWorkerInfrastructureError);
+        const outcome = await settled;
+        expect(outcome.status).toBe("rejected");
+        if (outcome.status === "fulfilled") throw new Error("expected output-limit failure");
+        expect(outcome.reason).toBeInstanceOf(GuardianWorkerInfrastructureError);
+        expect(outcome.reason).toMatchObject({
+          failure: { stage: "transport", code: "failed" },
+        });
         await expect(readFile(fixture.configMarker, "utf8")).resolves.toBe(
           JSON.stringify({
             filesystem: {

@@ -1,5 +1,10 @@
-import { isAbsolute, resolve, sep } from "node:path";
-import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  intersectNetworkPatterns,
+  isNetworkPatternCoveredBy,
+  matchesNetworkDomainPattern,
+  normalizeNetworkDomainPattern,
+} from "./network-domain-pattern.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 
 /**
@@ -9,7 +14,8 @@ import type { SandboxPolicy } from "./sandbox.ts";
  *
  * Phase 2 status: register.ts mints a child snapshot whose base policy is
  * parent ∩ envelope and runs the child on an isolated Engine turn.
- * An empty envelope list means "inherit the parent policy" (no narrowing).
+ * Empty configured lists inherit the parent policy before resolution; an empty
+ * resolved envelope is an effective no-grant result.
  */
 export interface DelegationEnvelope {
   readonly writeRoots: readonly string[];
@@ -55,9 +61,16 @@ function normalizeRoots(roots: readonly string[]): string[] {
 function isCoveredBy(entry: string, roots: ReadonlySet<string>): boolean {
   const normalized = resolve(entry);
   for (const root of roots) {
-    if (normalized === root || normalized.startsWith(root + sep)) return true;
+    const path = relative(resolve(root), normalized);
+    if (path === "" || (path !== ".." && !path.startsWith(`..${sep}`))) {
+      return true;
+    }
   }
   return false;
+}
+
+function pathsIntersect(parent: string, requested: string): boolean {
+  return isCoveredBy(parent, new Set([requested])) || isCoveredBy(requested, new Set([parent]));
 }
 
 function normalizeHosts(hosts: readonly string[]): string[] {
@@ -66,7 +79,11 @@ function normalizeHosts(hosts: readonly string[]): string[] {
     if (typeof host !== "string" || host.trim().length === 0) {
       throw new Error("Delegation envelope networkHosts must be non-empty strings");
     }
-    seen.add(host.trim().toLowerCase());
+    const normalized = normalizeNetworkDomainPattern(host);
+    if (normalized === undefined) {
+      throw new Error(`Delegation envelope networkHosts contains an unsupported pattern: ${host}`);
+    }
+    seen.add(normalized);
   }
   return [...seen].sort();
 }
@@ -119,13 +136,30 @@ export function isEnvelopeSubset(child: DelegationEnvelope, parent: DelegationEn
   for (const root of childRoots) {
     if (!isCoveredBy(root, parentRoots)) return false;
   }
-  const childHosts = new Set(normalizeHosts(child.networkHosts ?? []));
-  const parentHosts = new Set(normalizeHosts(parent.networkHosts ?? []));
+  const childHosts = normalizeHosts(child.networkHosts ?? []);
+  const parentHosts = normalizeHosts(parent.networkHosts ?? []);
   for (const host of childHosts) {
-    if (!parentHosts.has(host)) return false;
+    if (!parentHosts.some((parentHost) => isNetworkPatternCoveredBy(parentHost, host))) {
+      return false;
+    }
   }
   if (child.allowReDelegate === true && parent.allowReDelegate !== true) return false;
   return true;
+}
+
+function intersectWriteRoots(
+  parentRoots: readonly string[],
+  requestedRoots: readonly string[],
+): string[] {
+  const result = new Set<string>();
+  for (const parentRoot of parentRoots) {
+    for (const requestedRoot of requestedRoots) {
+      if (!pathsIntersect(parentRoot, requestedRoot)) continue;
+      if (isCoveredBy(parentRoot, new Set([requestedRoot]))) result.add(resolve(parentRoot));
+      if (isCoveredBy(requestedRoot, new Set([parentRoot]))) result.add(resolve(requestedRoot));
+    }
+  }
+  return [...result].sort();
 }
 
 /**
@@ -136,14 +170,16 @@ export function intersectSandboxPolicy(
   base: SandboxPolicy,
   envelope: DelegationEnvelope,
 ): SandboxPolicy {
-  const envelopeRoots = new Set(normalizeRoots(envelope.writeRoots ?? []));
-  const allowWrite = base.filesystem.allowWrite.filter((entry) =>
-    isCoveredBy(entry, envelopeRoots),
+  const allowWrite = intersectWriteRoots(
+    normalizeRoots(base.filesystem.allowWrite),
+    normalizeRoots(envelope.writeRoots ?? []),
   );
-  const envelopeHosts = new Set(normalizeHosts(envelope.networkHosts ?? []));
-  const allowedDomains = base.network.allowedDomains.filter((entry) =>
-    envelopeHosts.has(entry.trim().toLowerCase()),
-  );
+  const allowedDomains = [
+    ...intersectNetworkPatterns(
+      normalizeHosts(base.network.allowedDomains),
+      normalizeHosts(envelope.networkHosts ?? []),
+    ),
+  ];
   return {
     filesystem: {
       allowWrite,
@@ -181,6 +217,8 @@ export function resolveEnvelopeRoots(roots: readonly string[], cwd: string): str
 
 export interface ResolvedChildEnvelope {
   readonly envelope: DelegationEnvelope;
+  /** Effective child sandbox policy: parent policy ∩ envelope. */
+  readonly childBasePolicy: SandboxPolicy;
   /** Remaining delegation levels allowed below this child. */
   readonly remainingDepth: number;
   /** Configured entries dropped for falling outside the parent policy. */
@@ -197,37 +235,46 @@ export function resolveChildEnvelope(input: {
   configuredWriteRoots: readonly string[];
   configuredNetworkHosts: readonly string[];
   allowReDelegate: boolean;
-  parentBase?: SandboxPolicy;
+  parentBase: SandboxPolicy;
   parentRemainingDepth: number;
   childCwd: string;
 }): ResolvedChildEnvelope {
-  const parentRoots = new Set(
-    (input.parentBase?.filesystem.allowWrite ?? []).map((entry) => resolve(entry)),
-  );
+  const parentRoots = normalizeRoots(input.parentBase.filesystem.allowWrite);
   const resolvedRoots = resolveEnvelopeRoots(input.configuredWriteRoots, input.childCwd);
-  const keptRoots =
+  const requestedRoots = normalizeRoots(resolvedRoots);
+  const effectiveRequestRoots =
+    input.configuredWriteRoots.length === 0 ? parentRoots : requestedRoots;
+  const droppedWriteRoots =
     input.configuredWriteRoots.length === 0
-      ? [...parentRoots].sort()
-      : resolvedRoots.filter((entry) =>
-          parentRoots.size === 0 ? true : isCoveredBy(entry, parentRoots),
+      ? []
+      : requestedRoots.filter(
+          (requestedRoot) =>
+            !parentRoots.some((parentRoot) => pathsIntersect(parentRoot, requestedRoot)),
         );
-  const droppedWriteRoots = resolvedRoots.filter((entry) => !keptRoots.includes(entry));
-  const parentHosts = new Set(
-    (input.parentBase?.network.allowedDomains ?? []).map((entry) => entry.trim().toLowerCase()),
-  );
-  const configuredHosts = input.configuredNetworkHosts.map((entry) => entry.trim().toLowerCase());
-  const networkHosts =
-    configuredHosts.length === 0
-      ? [...parentHosts].sort()
-      : configuredHosts.filter((entry) => parentHosts.size === 0 || parentHosts.has(entry));
-  const droppedNetworkHosts = configuredHosts.filter((entry) => !networkHosts.includes(entry));
+  const parentHosts = normalizeHosts(input.parentBase.network.allowedDomains);
+  const configuredHosts = normalizeHosts(input.configuredNetworkHosts);
+  const effectiveRequestHosts =
+    input.configuredNetworkHosts.length === 0 ? parentHosts : configuredHosts;
+  const droppedNetworkHosts =
+    input.configuredNetworkHosts.length === 0
+      ? []
+      : configuredHosts.filter(
+          (configuredHost) => intersectNetworkPatterns(parentHosts, [configuredHost]).length === 0,
+        );
+  const requestedEnvelope: DelegationEnvelope = {
+    writeRoots: effectiveRequestRoots,
+    networkHosts: effectiveRequestHosts,
+    allowReDelegate: input.allowReDelegate,
+  };
+  const childBasePolicy = intersectSandboxPolicy(input.parentBase, requestedEnvelope);
   const envelope: DelegationEnvelope = Object.freeze({
-    writeRoots: Object.freeze(keptRoots),
-    networkHosts: Object.freeze(networkHosts),
+    writeRoots: Object.freeze([...childBasePolicy.filesystem.allowWrite]),
+    networkHosts: Object.freeze([...childBasePolicy.network.allowedDomains]),
     allowReDelegate: input.allowReDelegate,
   });
   return {
     envelope,
+    childBasePolicy,
     remainingDepth: Math.max(0, input.parentRemainingDepth - 1),
     droppedWriteRoots: Object.freeze(droppedWriteRoots),
     droppedNetworkHosts: Object.freeze(droppedNetworkHosts),
@@ -250,11 +297,9 @@ export function isNetworkCovered(
   envelope: DelegationEnvelope,
   port?: number,
 ): boolean {
-  for (const entry of envelope.networkHosts ?? []) {
-    if (entry.trim().toLowerCase() === host.trim().toLowerCase()) return true;
-    if (matchesNetworkDomainPattern(entry, host, port)) return true;
-  }
-  return false;
+  return (envelope.networkHosts ?? []).some((entry) =>
+    matchesNetworkDomainPattern(entry, host, port),
+  );
 }
 
 export function createAuditLink(input: {

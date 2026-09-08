@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -47,9 +47,15 @@ interface HarnessOptions {
   risk?: RiskOverride;
   review?: ReviewOverride;
   eventBusError?: boolean;
+  useRealBashTool?: boolean;
   sandboxInitializeError?: Error;
   sandboxExecuteError?: Error;
+  sandboxExecute?: (
+    request: SandboxExecutionRequest,
+    ordinal: number,
+  ) => Promise<SandboxExecutionResult>;
   sandboxDenial?: SandboxDenialCapability;
+  sandboxDiagnostics?: string;
   sandboxNetworkAttempt?: { host: string; port: number };
   sandboxNetworkAnswers?: Record<string, readonly string[]>;
   sandboxResetErrorAfter?: number;
@@ -85,6 +91,7 @@ interface Harness {
     wrapWithSandbox: ReturnType<typeof vi.fn>;
     execute: ReturnType<typeof vi.fn>;
     classifyDenial: ReturnType<typeof vi.fn>;
+    readFailureDiagnostics: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   bashToolFactory: ReturnType<typeof vi.fn>;
@@ -197,6 +204,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     async (request: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
       executeOrdinal += 1;
       if (options.sandboxExecuteError) throw options.sandboxExecuteError;
+      if (options.sandboxExecute) return options.sandboxExecute(request, executeOrdinal);
       await wrapWithSandbox(
         [request.program.executable, ...request.program.args].map(shellQuote).join(" "),
         undefined,
@@ -234,7 +242,15 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     }
   });
   const isHealthy = vi.fn(() => options.sandboxHealthy ?? true);
-  const sandboxManager = { initialize, isHealthy, wrapWithSandbox, execute, classifyDenial, reset };
+  const sandboxManager = {
+    initialize,
+    isHealthy,
+    wrapWithSandbox,
+    execute,
+    classifyDenial,
+    reset,
+    readFailureDiagnostics: vi.fn(async () => options.sandboxDiagnostics),
+  };
 
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
@@ -354,7 +370,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   registerExtension(pi as never, {
     agentDir,
     sandboxManager: sandboxManager as never,
-    bashToolFactory: bashToolFactory as never,
+    bashToolFactory: options.useRealBashTool ? undefined : (bashToolFactory as never),
     sandboxCoordinator: sandboxCoordinator as never,
     autoReviewer,
     riskEvaluator: riskEvaluator as never,
@@ -427,6 +443,18 @@ async function executeWrite(app: Harness, id: string, path: string, content: str
   const write = app.tools.get("write");
   if (!write) throw new Error("missing write tool");
   return write.execute(id, { path, content }, undefined, undefined, app.context);
+}
+
+async function executeEdit(app: Harness, id: string, path: string) {
+  const edit = app.tools.get("edit");
+  if (!edit) throw new Error("missing edit tool");
+  return edit.execute(
+    id,
+    { path, edits: [{ oldText: "before", newText: "after" }] },
+    undefined,
+    undefined,
+    app.context,
+  );
 }
 
 async function executeRequestPermissions(app: Harness, id: string, host: string) {
@@ -884,32 +912,266 @@ describe("Permission mode registration", () => {
     expect(reviewStatusCalls(app)).toHaveLength(0);
   });
 
-  it("reviews and retries a native Write denial once", async () => {
-    const path = "/opt/pi-permissions-runtime-denial/native-write.txt";
+  it("reviews a registered native mkdir preparation failure and re-enters Write once under SRT", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "native retry parent "));
+    tempDirectories.push(parent);
+    const path = join(parent, " file .txt ");
+    const operations: string[] = [];
+    const policies: SandboxPolicy[] = [];
     const app = await makeHarness({
+      config: { sandbox: { filesystem: { allowWrite: ["."] } } },
       risk: () => lowRisk(),
-      sandboxDenial: { kind: "filesystem", operation: "write", path },
+      sandboxExecute: async (request, ordinal) => {
+        operations.push(request.program.args[2]);
+        policies.push(request.policy);
+        return {
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from(ordinal === 1 ? "EACCES: preparation failed, no denied path" : ""),
+          exitCode: ordinal === 1 ? 1 : 0,
+        };
+      },
     });
     await startSession(app);
     await startAgent(app);
-
-    await expect(executeWrite(app, "runtime-native-write", path, "retry once")).resolves.toEqual({
-      content: [
-        {
-          type: "text",
-          text: `Successfully wrote to ${path}`,
-        },
-      ],
-      details: undefined,
+    await expect(
+      executeWrite(app, "runtime-native-write", path, "retry once"),
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: `Successfully wrote to ${path}` }],
     });
-
+    expect(operations).toEqual(["mkdir", "mkdir", "write"]);
     expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([]);
-    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(path);
-    // A native write may perform a read-before-write on each adapter attempt;
-    // the single fresh Guardian review and successful result prove the Engine
-    // made exactly one retry without coupling this test to those internals.
-    expect(app.sandboxManager.execute.mock.calls.length).toBeGreaterThan(1);
+    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(parent);
+    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/subtree/);
+    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/partial directory effects/);
+    expect(JSON.stringify(app.reviewInputs[0])).toContain("retry once");
+    expect(policies[1]).toEqual({
+      ...policies[0],
+      filesystem: {
+        ...policies[0].filesystem,
+        allowWrite: [...policies[0].filesystem.allowWrite, parent],
+      },
+    });
+    await executeWrite(app, "next-write", join(app.cwd, "next.txt"), "next");
+    expect(policies[3].filesystem.allowWrite).not.toContain(parent);
+  });
+
+  it.each(["write", "edit"])(
+    "preserves registered %s helper evidence after cancellation without diagnostics or replay",
+    async (tool) => {
+      const controller = new AbortController();
+      const helperError = "EACCES: permission denied, native preparation";
+      const app = await makeHarness({
+        risk: () => lowRisk(),
+        sandboxExecute: async () => {
+          controller.abort();
+          return { stdout: Buffer.alloc(0), stderr: Buffer.from(helperError), exitCode: 1 };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      const nativeTool = app.tools.get(tool);
+      if (!nativeTool) throw new Error("missing native tool");
+      const params =
+        tool === "write"
+          ? { path: "/outside/file", content: "original" }
+          : { path: "/outside/file", edits: [{ oldText: "before", newText: "after" }] };
+      await expect(
+        nativeTool.execute(
+          "cancelled-preparation",
+          params,
+          controller.signal,
+          undefined,
+          app.context,
+        ),
+      ).rejects.toMatchObject({
+        code: "aborted",
+        effectsMayHaveOccurred: true,
+        reason: expect.stringMatching(
+          /EACCES: permission denied, native preparation[\s\S]*Effects warning/,
+        ),
+      });
+      expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+      expect(app.sandboxManager.readFailureDiagnostics).not.toHaveBeenCalled();
+      expect(app.reviewInputs).toHaveLength(0);
+    },
+  );
+
+  it.each(["access", "read"])(
+    "recovers registered Edit %s preparation using original action, not log scope",
+    async (stage) => {
+      const operations: string[] = [];
+      let failed = false;
+      const app = await makeHarness({
+        config: { sandbox: { filesystem: { allowWrite: ["."] } } },
+        risk: () => lowRisk(),
+        sandboxDiagnostics:
+          "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence): /unrelated wrong path",
+        sandboxExecute: async (request) => {
+          const operation = request.program.args[2];
+          operations.push(operation);
+          if (operation === stage && !failed) {
+            failed = true;
+            return {
+              stdout: Buffer.alloc(0),
+              stderr: Buffer.from("EACCES: helper preparation"),
+              exitCode: 1,
+            };
+          }
+          if (operation === "write") expect(request.stdin).toBe("after current");
+          return {
+            stdout: Buffer.from(operation === "read" ? "before current" : ""),
+            stderr: Buffer.alloc(0),
+            exitCode: 0,
+          };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await expect(executeEdit(app, "edit-preparation", "/outside/ file ")).resolves.toMatchObject({
+        content: [{ type: "text" }],
+      });
+      expect(operations).toEqual(
+        stage === "access"
+          ? ["access", "access", "read", "write"]
+          : ["access", "read", "access", "read", "write"],
+      );
+      expect(app.reviewInputs).toHaveLength(1);
+      expect(app.reviewInputs[0].permissionContext.filesystemWriteRoots).toContain(
+        "/outside/ file ",
+      );
+      expect(app.reviewInputs[0].permissionContext.filesystemWriteRoots).not.toContain(
+        "/unrelated",
+      );
+      const evidence = JSON.stringify(app.reviewInputs[0]);
+      expect(evidence).toContain("original complete edit");
+      expect(evidence).toContain("EACCES: helper preparation");
+      if (stage === "access") expect(evidence).toContain("Could not edit file");
+    },
+  );
+
+  it("does not reuse Edit preparation evidence after successful operations or retry native matching failures", async () => {
+    let ordinal = 0;
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecute: async (request) => {
+        ordinal++;
+        return {
+          stdout: Buffer.from(
+            request.program.args[2] === "read" ? "changed without matching text" : "",
+          ),
+          stderr: Buffer.from(ordinal === 1 ? "EACCES: access first" : ""),
+          exitCode: ordinal === 1 ? 1 : 0,
+        };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeEdit(app, "changed-match", "/outside/file")).rejects.toThrow(
+      /Could not find[\s\S]*EACCES: access first/,
+    );
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(3);
+    await expect(executeEdit(app, "next-match", "/outside/file")).rejects.toThrow(/Could not find/);
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(5);
+  });
+
+  it.each(["write", "edit"])(
+    "never replays registered %s after content-write entry despite misleading logs",
+    async (tool) => {
+      const operations: string[] = [];
+      const app = await makeHarness({
+        risk: () => lowRisk(),
+        sandboxDiagnostics:
+          "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence): deny file-write /unrelated",
+        sandboxExecute: async (request) => {
+          const operation = request.program.args[2];
+          operations.push(operation);
+          return {
+            stdout: Buffer.from(operation === "read" ? "before" : ""),
+            stderr: Buffer.from(operation === "write" ? "EPERM content may be truncated" : ""),
+            exitCode: operation === "write" ? 1 : 0,
+          };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await expect(
+        tool === "write"
+          ? executeWrite(app, "truncation", "/outside/file", "content")
+          : executeEdit(app, "truncation", "/outside/file"),
+      ).rejects.toThrow(
+        /EPERM content may be truncated[\s\S]*SRT diagnostic[\s\S]*Effects warning/,
+      );
+      expect(app.reviewInputs).toHaveLength(0);
+      expect(operations).toEqual(
+        tool === "write" ? ["mkdir", "write"] : ["access", "read", "write"],
+      );
+    },
+  );
+
+  it("keeps misleading Bash diagnostics terminal and retains the original failure", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      risk: () => lowRisk(),
+      sandboxDiagnostics:
+        "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence): deny file-write /wrong path",
+      sandboxExecute: async (request) => {
+        const stderr = Buffer.from("EPERM original Bash failure");
+        request.onStderr?.(stderr);
+        return { stdout: Buffer.alloc(0), stderr, exitCode: 1 };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeBash(app, "log-only-bash", "printf original")).rejects.toThrow(
+      /EPERM original Bash failure[\s\S]*SRT diagnostic/,
+    );
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.classifyDenial).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a retry parent outside the live file-only delegation ceiling", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["sub/file"] } },
+      risk: () => lowRisk(),
+      sandboxExecute: async () => ({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from("EACCES: mkdir partial"),
+        exitCode: 1,
+      }),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+    await expect(executeWrite(app, "parent-ceiling", "sub/file", "content")).rejects.toThrow(
+      /delegation envelope[\s\S]*EACCES: mkdir partial/,
+    );
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "/file",
+    `${process.env.HOME}/file`,
+    `${process.env.HOME}/Library/file`,
+    "/outside/[literal]/file",
+    "@/outside/file",
+  ])("does not recover broad or unsupported native path identity %s", async (path) => {
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecute: async () => ({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from("EACCES: mkdir preparation"),
+        exitCode: 1,
+      }),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeWrite(app, "unsafe-identity", path, "content")).rejects.toThrow();
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
   });
 
   it("captures bash input before async risk review and executes only the canonical value", async () => {
@@ -1473,6 +1735,7 @@ describe("Permission mode registration", () => {
       expect(policy.filesystem.allowWrite).not.toContain(app.cwd);
       expect(policy.filesystem.allowWrite).not.toContain("/tmp");
     }
+    expect(policies.at(-1)?.filesystem.allowWrite).toContain(resolve(app.cwd, "sub"));
 
     await expect(executeWrite(app, "child-write-out", "other.txt", "no")).rejects.toThrow(
       /delegation envelope/,
@@ -1482,6 +1745,189 @@ describe("Permission mode registration", () => {
     await settle();
     // The parent turn resumes with its full policy after the child closes.
     await executeWrite(app, "parent-write", "other.txt", "yes");
+  });
+
+  it.each([
+    {
+      label: "workspace parent to child link",
+      parentRoot: ".",
+      childRoot: "link",
+      requestPath: "link/escape.txt",
+    },
+    {
+      label: "lexical link parent to child link",
+      parentRoot: "link",
+      childRoot: "link",
+      requestPath: "link/escape.txt",
+    },
+    {
+      label: "lexical link parent to child link subpath",
+      parentRoot: "link",
+      childRoot: "link/sub",
+      requestPath: "link/sub/escape.txt",
+    },
+    {
+      label: "lexical link parent to external absolute root",
+      parentRoot: "link",
+      childRoot: "external",
+      requestPath: "escape.txt",
+    },
+  ])("keeps child delegation within the parent's lexical roots ($label)", async (scenario) => {
+    const outside = await mkdtemp(join(tmpdir(), "pi-permissions-register-outside-"));
+    tempDirectories.push(outside);
+    const app = await makeHarness({
+      config: {
+        sandbox: { filesystem: { allowWrite: [scenario.parentRoot] } },
+        delegation: {
+          writeRoots: [scenario.childRoot === "external" ? outside : scenario.childRoot],
+        },
+      },
+      risk: () => lowRisk(),
+    });
+    await symlink(outside, join(app.cwd, "link"), "dir");
+
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    await expect(
+      executeWrite(
+        app,
+        "child-symlink-escape",
+        scenario.childRoot === "external"
+          ? join(outside, scenario.requestPath)
+          : scenario.requestPath,
+        "no",
+      ),
+    ).rejects.toThrow(/delegation envelope/);
+  });
+
+  it("does not canonicalize a lexical parent symlink in an empty child scope", async () => {
+    const app = await makeHarness({
+      config: {
+        sandbox: {
+          filesystem: {
+            allowWrite: ["link"],
+            denyRead: ["read-secret"],
+            denyWrite: ["write-secret"],
+          },
+        },
+        delegation: { writeRoots: [] },
+      },
+      risk: () => lowRisk(),
+    });
+    const outside = await mkdtemp(join(tmpdir(), "pi-permissions-register-outside-"));
+    tempDirectories.push(outside);
+    const parentLink = join(app.cwd, "link");
+    await symlink(outside, parentLink, "dir");
+
+    await startSession(app);
+    await startAgent(app);
+    await executeWrite(app, "lexical-parent-link", "link/parent.txt", "yes");
+    const parentPolicy = app.sandboxManager.wrapWithSandbox.mock.calls.at(-1)?.[2] as SandboxPolicy;
+
+    await startAgent(app);
+    await executeWrite(app, "lexical-parent-link", "link/child.txt", "yes");
+
+    const childPolicy = app.sandboxManager.wrapWithSandbox.mock.calls.at(-1)?.[2] as SandboxPolicy;
+    expect(childPolicy.filesystem.allowWrite).toContain(parentLink);
+    expect(childPolicy.filesystem.allowWrite).not.toContain(outside);
+    expect(childPolicy.filesystem.denyRead).toEqual(parentPolicy.filesystem.denyRead);
+    expect(childPolicy.filesystem.denyWrite).toEqual(parentPolicy.filesystem.denyWrite);
+  });
+
+  it("fails closed through nested sentinel scopes and restores the parent", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["**/not-concrete"] } },
+      risk: () => lowRisk(),
+    });
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+
+    await expect(executeWrite(app, "failed-child-write", "child.txt", "no")).rejects.toThrow(
+      "The active permission context is unavailable",
+    );
+
+    await startAgent(app);
+    await expect(
+      executeWrite(app, "failed-grandchild-write", "grandchild.txt", "no"),
+    ).rejects.toThrow("The active permission context is unavailable");
+
+    await endAgent(app);
+    await settle();
+    await expect(
+      executeWrite(app, "still-failed-child-write", "child-again.txt", "no"),
+    ).rejects.toThrow("The active permission context is unavailable");
+
+    await endAgent(app);
+    await settle();
+    await executeWrite(app, "restored-parent-write", "parent.txt", "yes");
+  });
+
+  it("keeps a successful child Engine when a grandchild enters a sentinel", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["dynamic"] } },
+      risk: () => lowRisk(),
+    });
+    const dynamicRoot = join(app.cwd, "dynamic");
+    await mkdir(dynamicRoot);
+    const settle = (): Promise<unknown> => invoke(app, "agent_settled", { type: "agent_settled" });
+
+    await startSession(app);
+    await startAgent(app);
+    await startAgent(app);
+    await executeWrite(app, "successful-child-before-failure", "dynamic/child.txt", "yes");
+
+    await rm(dynamicRoot, { recursive: true, force: true });
+    await symlink(dynamicRoot, dynamicRoot, "dir");
+    await startAgent(app);
+
+    // Restore the child path so the successful child can continue after its
+    // failed grandchild is closed.
+    await rm(dynamicRoot, { recursive: true, force: true });
+    await mkdir(dynamicRoot);
+    await endAgent(app);
+    await settle();
+    await executeWrite(app, "successful-child-after-failure", "dynamic/child-again.txt", "yes");
+
+    await endAgent(app);
+    await settle();
+    await executeWrite(app, "restored-outer-after-failure", "outer.txt", "yes");
+  });
+
+  it("does not install a rejected child sentinel after reset", async () => {
+    const app = await makeHarness({
+      config: { delegation: { writeRoots: ["loop"] } },
+      risk: () => lowRisk(),
+    });
+    const loop = join(app.cwd, "loop");
+    await symlink(loop, loop, "dir");
+
+    await startSession(app);
+    await startAgent(app);
+    const pendingChild = startAgent(app);
+    await invoke(app, "session_before_tree", { type: "session_before_tree" });
+    await startAgent(app);
+    await pendingChild;
+
+    await executeWrite(app, "new-turn-after-rejected-child", "new-turn.txt", "yes");
+  });
+
+  it("does not install a child resolved before a session reset into the next turn", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    await startAgent(app);
+
+    const pendingChild = startAgent(app);
+    await invoke(app, "session_before_tree", { type: "session_before_tree" });
+    await startAgent(app);
+    await pendingChild;
+
+    await executeWrite(app, "new-turn-write", "new-turn.txt", "yes");
+    const policy = app.sandboxManager.wrapWithSandbox.mock.calls.at(-1)?.[2] as SandboxPolicy;
+    expect(policy.filesystem.allowWrite).toContain(app.cwd);
   });
 
   it("blocks command escalation inside an active delegation envelope", async () => {
@@ -1528,6 +1974,9 @@ describe("Permission mode registration", () => {
 
     await endAgent(app);
     await invoke(app, "agent_settled", { type: "agent_settled" });
+
+    // The closed child is historical audit only; a sibling may delegate.
+    await expect(executeHostCall(app, "subagent", "spawn-sibling")).resolves.toBeUndefined();
   });
 
   it("refuses subagent spawns when delegation maxDepth is 0", async () => {

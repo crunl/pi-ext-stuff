@@ -65,6 +65,11 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
 - `src/permission-session.ts` is the host lifecycle/barrier state machine. It
   tracks generations, turn lifecycle, execution snapshots, and mode mutation
   barriers; it does not own approval or capability state.
+- Delegated child scopes are effective intersections of the parent's current
+  sandbox policy and the child's requested envelope. Empty configured child
+  lists inherit the parent allow set; a resolved empty intersection grants
+  nothing. Active delegation ceilings are read from the live nested stack,
+  while the audit trail is historical only.
 - Sandbox enforcement is backed by the pinned `@anthropic-ai/sandbox-runtime`
   `0.0.74` adapter (`src/sandbox/srt-enforcer.ts`). The public seam is the
   backend-neutral `SandboxManagerLike.execute({ policy, program, cwd, env })`;
@@ -87,6 +92,24 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   bounded reset and base-policy initialization. `reset()` (including
   `yolo`/disabled transitions) tears down host SRT/base/connect state but does
   not itself clear the poison latch.
+- SRT violation logs are bounded, labelled diagnostics only: available spaces
+  are preserved, control characters escaped, and sanitized/unrelated observations
+  never select an authorization scope. Authoritative typed capability denials
+  remain distinct and do not prove a replay-safe native stage; Bash never replays.
+- Native Write/Edit recovery uses attempt-local parent-side operation evidence
+  from `createSandboxedFileOperations`, not a parsed denied path. Only access
+  failures before content-write entry can trigger fresh Engine review of the
+  frozen complete action. Write mkdir recovery adds only its immediate-parent
+  subtree, with an explicit partial-directory-effects/re-entry warning; Edit
+  access/read recovery requests only the original file write root and preserves
+  denyRead. Root/home/Library-wide, ambiguous/glob, already-covered, and
+  unsupported scopes fail closed. Linux missing-parent roots are unsupported;
+  no existing ancestor is substituted. Any writeFile entry may truncate and is
+  terminal. The Engine owns review, policy checks, and at most one SRT retry;
+  live delegation ceilings are rechecked for the proposed root and at execution.
+  No turn grant or capability-only `/approve` handle is created for this recovery;
+  refused reviews still count toward the Auto circuit. A second failure is terminal
+  and retains original failure evidence and effects warnings.
 - Production Guardian evidence tools run through
   `createIsolatedGuardianToolRuntime()` and `src/guardian-worker.mjs`. The
   worker process owns its own SRT singleton plus `srtReady`/`srtPoisoned`

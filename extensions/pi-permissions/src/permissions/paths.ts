@@ -25,7 +25,8 @@ function isWithin(path: string, root: string): boolean {
   return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
 }
 
-async function canonicalize(path: string): Promise<string> {
+/** Resolve existing path components while preserving the missing suffix. */
+export async function canonicalize(path: string): Promise<string> {
   const missing: string[] = [];
   let ancestor = path;
   while (true) {

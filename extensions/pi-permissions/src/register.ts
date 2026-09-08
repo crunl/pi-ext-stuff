@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 
@@ -35,12 +36,16 @@ import {
   createAuditLink,
   createDelegationPlan,
   type DelegationEnvelope,
-  intersectSandboxPolicy,
   isNetworkCovered,
   isWriteCovered,
   resolveChildEnvelope,
 } from "./delegation.ts";
-import { defaultProtectedWritePaths, resolvePolicyPath } from "./filesystem-policy.ts";
+import {
+  defaultProtectedWritePaths,
+  expandSymlinkAliases,
+  hasGlobSyntax,
+  resolvePolicyPath,
+} from "./filesystem-policy.ts";
 import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
@@ -60,6 +65,7 @@ import {
 } from "./permission-copy.ts";
 import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
 import { type PermissionExecutionSnapshot, PermissionSession } from "./permission-session.ts";
+import { canonicalize } from "./permissions/paths.ts";
 import {
   createPiGuardianAdapter,
   type PiGuardianReviewContext,
@@ -87,6 +93,8 @@ import {
   createSandboxedFileOperations,
   createSandboxRuntimeConfig,
   looksLikeSandboxDenial,
+  type NativeFileOperationFailure,
+  type SandboxedFileOperationOptions,
   type SandboxManagerLike,
   type SandboxNetworkAuthorize,
   type SandboxPolicy,
@@ -204,7 +212,7 @@ function nextMode(mode: PermissionMode): PermissionMode {
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
-  const sandboxManager = options.sandboxManager ?? new SrtSandboxManager();
+  const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
   const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
   const baseBash = bashToolFactory(process.cwd());
@@ -226,6 +234,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let guardianInvalidationAfterModeChange = false;
   const permissions = new PiPermissionsRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
+    policy: {
+      check: ({ requested, phase }) => {
+        if (phase !== "runtime") return { kind: "allow" };
+        if (!loaded || !modeRuntime)
+          return { kind: "deny", reason: "Permission context unavailable" };
+        for (const request of requested) {
+          const violation =
+            request.kind === "filesystem" && request.operation === "write"
+              ? checkDelegationWrite(request.path, modeRuntime.mode, loaded.config)
+              : request.kind === "network"
+                ? checkDelegationNetwork(request.host, modeRuntime.mode, loaded.config)
+                : undefined;
+          if (violation) return { kind: "deny", reason: violation };
+        }
+        return { kind: "allow" };
+      },
+    },
     reviewEventSink: (event) => {
       pi.events.emit("pi-permissions:review", event);
     },
@@ -459,14 +484,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     config: PermissionsConfig,
   ): { blocked: true; reason: string } | { blocked: false } => {
     if (!DELEGATED_TOOL_NAMES.has(tool)) return { blocked: false };
-    for (const link of session.delegationAuditTrail()) {
-      if (link.envelope.allowReDelegate === false) {
-        return {
-          blocked: true,
-          reason:
-            "Re-delegation is disabled by the active delegation envelope: this subagent may not spawn its own subagents.",
-        };
-      }
+    if (!session.activeDelegationAllowsReDelegate()) {
+      return {
+        blocked: true,
+        reason:
+          "Re-delegation is disabled by the active delegation envelope: this subagent may not spawn its own subagents.",
+      };
     }
     if (delegationRemainingDepth(config) <= 0) {
       return {
@@ -507,11 +530,29 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     );
   };
 
+  type NestedPermissionTurnResult = "opened" | "blocked" | "saturated" | "stale";
+
+  const materializeDelegationRoots = async (
+    roots: readonly string[],
+    cwd: string,
+  ): Promise<string[]> => {
+    const materialized = new Set<string>();
+    for (const root of roots) {
+      if (typeof root !== "string" || root.length === 0 || hasGlobSyntax(root)) {
+        throw new Error("Delegation write roots must be concrete paths");
+      }
+      const canonicalRoot = await canonicalize(resolvePolicyPath(root, cwd));
+      for (const alias of expandSymlinkAliases(canonicalRoot)) materialized.add(resolve(alias));
+    }
+    return [...materialized].sort();
+  };
+
   /**
    * Mint an isolated child turn for a nested agent: the base policy narrows
    * to parent ∩ delegation envelope and the Engine state starts fresh, so
-   * parent grants and amendments never leak into the child. Returns false
-   * when nesting saturated (caller falls back to sharing the parent turn).
+   * parent grants and amendments never leak into the child. Reports a
+   * saturated nesting level so the caller can apply the existing sharing
+   * fallback.
    *
    * Enforcement scope: the envelope binds sandbox-executed capabilities
    * (bash/write/edit/request_permissions, statically and at the network
@@ -521,10 +562,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * (sandboxEnforcesAction=false) and arbitrary host inputs have no
    * statically checkable capability shape.
    */
-  const mintNestedPermissionTurn = (
+  const mintNestedPermissionTurn = async (
     ctx: ExtensionContext,
     parentSnapshot: PermissionExecutionSnapshot,
-  ): boolean => {
+  ): Promise<NestedPermissionTurnResult> => {
+    const generation = session.getGeneration();
+    const parentAtStart = parentSnapshot;
+    const isParentCurrent = (): boolean =>
+      session.isCurrentGeneration(generation) &&
+      session.getTurnPhase() === "active" &&
+      session.currentExecutionSnapshot() === parentAtStart;
+    const beginSnapshotlessNestedTurn = (): NestedPermissionTurnResult => {
+      if (!isParentCurrent()) return "stale";
+      return session.beginNestedTurn() ? "blocked" : "saturated";
+    };
     const childTurnId = session.allocateTurnId();
     const delegation = parentSnapshot.config.delegation;
     const childCwd = resolve(ctx.cwd);
@@ -540,33 +591,37 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (parentSnapshot.mode !== "yolo" && delegation.enabled && childBase) {
       try {
         const parentCeiling = session.activeDelegationCeiling();
+        if (childBase.filesystem.allowWrite.some(hasGlobSyntax)) {
+          throw new Error("Parent delegation write roots must be concrete paths");
+        }
+        const materializedConfiguredWriteRoots = await materializeDelegationRoots(
+          delegation.writeRoots,
+          childCwd,
+        );
         const resolved = resolveChildEnvelope({
-          configuredWriteRoots: delegation.writeRoots,
+          configuredWriteRoots: materializedConfiguredWriteRoots,
           configuredNetworkHosts: delegation.networkHosts,
           allowReDelegate: delegation.allowReDelegate,
+          // Keep the parent's SRT path-rule identity; realpath could turn a
+          // symlink rule into a different, wider grant.
           parentBase: childBase,
           parentRemainingDepth: parentCeiling?.maxDepth ?? delegation.maxDepth,
           childCwd,
         });
         envelope = { ...resolved.envelope, maxDepth: resolved.remainingDepth };
-        childBase = intersectSandboxPolicy(childBase, resolved.envelope);
+        childBase = resolved.childBasePolicy;
         droppedWriteRoots = resolved.droppedWriteRoots;
         droppedNetworkHosts = resolved.droppedNetworkHosts;
       } catch {
-        // Config was validated at load; a resolution failure here must not
-        // break the subagent — fall back to inheriting the parent policy.
+        // A child with an unrepresentable or unresolvable scope keeps a
+        // session-only sentinel; controlled tools then fail closed without
+        // inheriting the parent's grants.
+        return beginSnapshotlessNestedTurn();
       }
     }
+    if (!isParentCurrent()) return "stale";
     const sessionId = stableSessionId(ctx, session.getGeneration());
-    const audit = createAuditLink({
-      parentSessionId: sessionId,
-      parentTurnId: parentSnapshot.turnId,
-      childTurnId,
-      envelope,
-    });
-    // Validate the plan shape (normalizes + freezes); enforcement reads the
-    // ceiling sets, so a validation miss falls back to the resolved envelope.
-    let auditedEnvelope = envelope;
+    let auditedEnvelope: DelegationEnvelope;
     try {
       const plan = createDelegationPlan({
         envelope: {
@@ -583,8 +638,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       });
       auditedEnvelope = plan.envelope;
     } catch {
-      // Fall back to the resolved envelope (see above).
+      return beginSnapshotlessNestedTurn();
     }
+    const audit = createAuditLink({
+      parentSessionId: sessionId,
+      parentTurnId: parentSnapshot.turnId,
+      childTurnId,
+      envelope: auditedEnvelope,
+    });
     const childSnapshot: PermissionExecutionSnapshot = {
       ...parentSnapshot,
       turnId: childTurnId,
@@ -597,15 +658,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         audit: { ...audit, envelope: auditedEnvelope },
       })
     ) {
-      return false;
+      return "saturated";
     }
-    permissions.beginNestedTurn(
-      buildTurnSnapshot(ctx, childSnapshot, {
-        turnId: childTurnId,
-        baseSandboxPolicy: childBase,
-      }),
-      ctx,
-    );
+    try {
+      permissions.beginNestedTurn(
+        buildTurnSnapshot(ctx, childSnapshot, {
+          turnId: childTurnId,
+          baseSandboxPolicy: childBase,
+        }),
+        ctx,
+      );
+    } catch {
+      // Do not leave a session snapshot installed when the host Engine could
+      // not open its matching nested turn. Replace it with the fail-closed
+      // sentinel while the original parent identity is still current.
+      session.finishNestedTurn();
+      return beginSnapshotlessNestedTurn();
+    }
     try {
       pi.events.emit("pi-permissions:delegation", {
         parentSessionId: sessionId,
@@ -618,7 +687,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     } catch {
       // Delegation audit events are best effort; enforcement never depends on observers.
     }
-    return true;
+    return "opened";
   };
 
   const finishPermissionTurn = (reason: string): number | undefined => {
@@ -627,8 +696,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // Engine levels pair with session levels except on the snapshot-less
     // fallback path, which never pushed an Engine turn.
     if (session.getTurnDepth() > 1) {
+      const closesEngineNestedTurn = session.activeNestedTurnHasSnapshot();
       session.finishNestedTurn();
-      if (permissions.hasNestedTurn()) permissions.closeNestedTurn(reason);
+      if (closesEngineNestedTurn) permissions.closeNestedTurn(reason);
       return undefined;
     }
     const closingTurnId = session.finishNestedTurn();
@@ -993,6 +1063,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const MAX_BASH_TIMEOUT_SECONDS = 2_147_483.647;
   const normalizeBashParams = (params: BashParams): BashParams => {
     if (!isRecord(params)) throw new Error("Bash parameters must be an object");
+    // SAFETY: isRecord above establishes string-keyed input; the host Bash type omits extension fields.
     const rawParams = params as unknown as Record<string, unknown>;
     if (rawParams.sandbox_permissions !== "require_escalated") return params;
     const timeout = params.timeout;
@@ -1401,6 +1472,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
+  const withFailureDiagnostics = async (commandId: string, error: unknown): Promise<unknown> => {
+    try {
+      const diagnostics = await sandboxManager.readFailureDiagnostics?.(commandId);
+      return diagnostics
+        ? new Error(`${errorMessage(error)}\n${diagnostics}`, { cause: error })
+        : error;
+    } catch {
+      return error;
+    }
+  };
+
   type RuntimeDenialOutcome = Extract<PiActionOutcome<never>, { kind: "capability-denied" }>;
 
   const runtimeDenialOutcome = async (
@@ -1414,7 +1496,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // would reopen an entire command rather than authorize one connection.
     if (capability?.kind !== "filesystem") return undefined;
     const operation = capability.operation === "write" ? "writing" : "reading";
-    const detail = `Sandbox enforcement denied ${operation} ${capability.path} during execution`;
+    const detail = `Sandbox enforcement denied ${operation} ${capability.path} during execution\nOriginal error: ${evidence}`;
     return { kind: "capability-denied", request: capability, detail };
   };
 
@@ -1596,8 +1678,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           };
         } catch (error: unknown) {
           if (mode === "sandboxed" && !attemptSignal.aborted) {
-            const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
+            const originalError = await withFailureDiagnostics(call.id, error);
+            const denied = await runtimeDenialOutcome(call.id, errorMessage(originalError));
             if (denied) return denied;
+            return { kind: "failed", error: originalError };
           }
           return { kind: "failed", error };
         }
@@ -1668,6 +1752,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       signal: AbortSignal | undefined,
       onUpdate: U,
       cwd: string,
+      options: SandboxedFileOperationOptions,
     ) => Promise<R>,
   ): Promise<R> => {
     const captured = permissions.captureAction({
@@ -1723,6 +1808,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         call,
         signal: attemptSignal,
       }): Promise<PiActionOutcome<R>> => {
+        let failure: NativeFileOperationFailure | undefined;
+        const operationOptions: SandboxedFileOperationOptions = {
+          observe: (event) => {
+            failure = event.kind === "failed" ? event : undefined;
+          },
+        };
         try {
           if (mode === "unrestricted") {
             return {
@@ -1744,23 +1835,54 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           return {
             kind: "completed",
-            value: await sandboxCoordinator.runShared(
-              () =>
-                sandboxed(
-                  policy,
-                  call.id,
-                  call.input,
-                  attemptSignal,
-                  reviewBridge.onUpdate as U,
-                  canonicalCwd,
-                ),
-              attemptSignal,
-            ),
+            value: await sandboxCoordinator.runShared(() => {
+              // A queued retry must still obey the live ceiling, including its new parent root.
+              for (const root of policy.filesystem.allowWrite) {
+                if (executionSnapshot.baseSandboxConfig?.filesystem.allowWrite.includes(root))
+                  continue;
+                const violation = checkDelegationWrite(
+                  root,
+                  executionSnapshot.mode,
+                  executionContext.config,
+                );
+                if (violation) throw new Error(violation);
+              }
+              return sandboxed(
+                policy,
+                call.id,
+                call.input,
+                attemptSignal,
+                reviewBridge.onUpdate as U,
+                canonicalCwd,
+                operationOptions,
+              );
+            }, attemptSignal),
           };
         } catch (error: unknown) {
+          if (mode === "sandboxed" && attemptSignal.aborted && failure) {
+            // The host may replace an access error with "Operation aborted".
+            // Preserve already-recorded evidence, but do not query diagnostics or probe retry scope.
+            return { kind: "native-action-failed", error, failure };
+          }
           if (mode === "sandboxed" && !attemptSignal.aborted) {
-            const denied = await runtimeDenialOutcome(call.id, errorMessage(error));
-            if (denied) return denied;
+            const originalError = await withFailureDiagnostics(call.id, error);
+            if (failure) {
+              let mkdirScopeSupported = process.platform === "darwin";
+              if (failure.operation === "mkdir" && process.platform === "linux") {
+                try {
+                  mkdirScopeSupported = statSync(failure.path).isDirectory();
+                } catch {
+                  mkdirScopeSupported = false;
+                }
+              }
+              return {
+                kind: "native-action-failed",
+                error: originalError,
+                failure,
+                mkdirScopeSupported,
+              };
+            }
+            return { kind: "failed", error: originalError };
           }
           return { kind: "failed", error };
         }
@@ -1785,7 +1907,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ctx,
       (callId, callParams, callSignal, callOnUpdate, cwd) =>
         createWriteTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
-      (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
+      (policy, callId, callParams, callSignal, callOnUpdate, cwd, operationOptions) =>
         createWriteTool(cwd, {
           operations: createSandboxedFileOperations(
             sandboxManager,
@@ -1794,6 +1916,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             callSignal,
             callId,
             cwd,
+            operationOptions,
           ),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
@@ -1814,7 +1937,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ctx,
       (callId, callParams, callSignal, callOnUpdate, cwd) =>
         createEditTool(cwd).execute(callId, callParams, callSignal, callOnUpdate),
-      (policy, callId, callParams, callSignal, callOnUpdate, cwd) =>
+      (policy, callId, callParams, callSignal, callOnUpdate, cwd, operationOptions) =>
         createEditTool(cwd, {
           operations: createSandboxedFileOperations(
             sandboxManager,
@@ -1823,6 +1946,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             callSignal,
             callId,
             cwd,
+            operationOptions,
           ),
         }).execute(callId, callParams, callSignal, callOnUpdate),
     );
@@ -2148,8 +2272,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("agent_start", async (_event, ctx) => {
     session.markLifecycleEvent();
     if (session.getTurnPhase() === "active") {
-      const parentSnapshot = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
-      if (parentSnapshot && mintNestedPermissionTurn(ctx, parentSnapshot)) return;
+      const nested = session.getTurnDepth() > 1;
+      const parentSnapshot = nested
+        ? session.currentExecutionSnapshot()
+        : (session.currentExecutionSnapshot() ?? session.getExecutionSnapshot());
+      if (parentSnapshot) {
+        const result = await mintNestedPermissionTurn(ctx, parentSnapshot);
+        if (result !== "saturated") return;
+      } else if (nested) {
+        // A failed nested start owns a session-only sentinel. Never fall back
+        // to the outer snapshot, or a grandchild could escape the closed scope.
+        session.beginNestedTurn();
+        return;
+      }
       session.beginNestedTurn();
       return;
     }
