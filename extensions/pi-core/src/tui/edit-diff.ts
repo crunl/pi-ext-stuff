@@ -100,6 +100,9 @@ class EditDiffRows implements Component {
   /** Row contents after optional syntax highlighting (computed once; rows are static). */
   private readonly styledContents: string[];
   private readonly rowBg: RowBackgrounds;
+  private readonly numberWidth: number;
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
 
   constructor(
     private readonly rows: readonly EditDiffRow[],
@@ -116,10 +119,12 @@ class EditDiffRows implements Component {
         return row.content;
       }
     });
+    this.numberWidth = Math.max(1, ...rows.map((row) => String(row.lineNumber ?? "").length));
   }
 
   render(width: number): string[] {
-    const numberWidth = Math.max(1, ...this.rows.map((row) => String(row.lineNumber ?? "").length));
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+    const numberWidth = this.numberWidth;
     const gutterWidth = numberWidth + 5;
     const contentWidth = Math.max(1, width - gutterWidth);
     const output: string[] = [];
@@ -157,10 +162,15 @@ class EditDiffRows implements Component {
       });
     });
 
+    this.cachedWidth = width;
+    this.cachedLines = output;
     return output;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
 }
 
 class IndentedComponent implements Component {

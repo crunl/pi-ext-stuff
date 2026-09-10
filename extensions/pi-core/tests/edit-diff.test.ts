@@ -156,4 +156,18 @@ describe("createEditDiffBox", () => {
     const component = createEditDiffBox("+10 x", theme, { outputPad: 0, highlight });
     expect(stripAnsi(component.render(60)[0])).toContain("+ 10 │ x");
   });
+
+  it("reuses cached lines for repeated renders at the same width", () => {
+    const diff = Array.from({ length: 120 }, (_, i) => `+${i + 1} content line ${i}`).join("\n");
+    const component = createEditDiffBox(diff, theme, { outputPad: 0 });
+
+    const first = component.render(80);
+    // IndentedComponent maps the inner cache into a new array, so compare content.
+    expect(component.render(80)).toEqual(first);
+
+    component.invalidate();
+    expect(component.render(80)).toEqual(first);
+
+    expect(component.render(40)).not.toEqual(first);
+  });
 });

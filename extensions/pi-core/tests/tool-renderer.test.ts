@@ -414,4 +414,37 @@ describe("createCodexToolRendering", () => {
 
     expect(result.render(80).join("\n")).toContain("oldText did not match");
   });
+
+  it("caches tool output lines across repeated renders at the same width", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: () => "npm test",
+        collapsed: "preview",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const body = Array.from({ length: 400 }, (_, i) => `line ${i} ${"x".repeat(40)}`).join("\n");
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: body }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context({}),
+    );
+
+    const first = result.render(80);
+    expect(first.length).toBeGreaterThan(0);
+    expect(result.render(80)).toBe(first);
+
+    result.invalidate();
+    const rebuilt = result.render(80);
+    expect(rebuilt).not.toBe(first);
+    expect(rebuilt).toEqual(first);
+
+    expect(result.render(40)).not.toBe(rebuilt);
+  });
 });
