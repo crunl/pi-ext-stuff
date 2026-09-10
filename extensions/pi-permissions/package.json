@@ -14,6 +14,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
+    "lint": "biome check .",
     "test": "vitest --run"
   },
   "peerDependencies": {
@@ -25,6 +26,7 @@
     "@anthropic-ai/sandbox-runtime": "0.0.74"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.4",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@types/node": "^24.0.0",

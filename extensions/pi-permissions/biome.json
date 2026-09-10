@@ -6,7 +6,15 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!node_modules", "!graphify-out", "!docs"]
+    "includes": [
+      "**",
+      "!node_modules",
+      "!graphify-out",
+      "!docs",
+      "!.pi",
+      "!.codex",
+      "!patches/srt-network-mode"
+    ]
   },
   "formatter": {
     "enabled": true,

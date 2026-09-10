@@ -10,6 +10,7 @@ tool execution, and an external "guardian" reviewer. Loaded directly from
 
 ```bash
 npm run check     # tsc --noEmit (type check)
+npm run lint      # biome check . (pinned @biomejs/biome)
 npm run diagnose:guardian # read-only real Guardian worker/SRT diagnostic (bounded JSONL)
 npm run test      # vitest --run (one-shot)
 npx vitest --run tests/<name>.test.ts   # single test file
@@ -22,10 +23,10 @@ JSONL schema v2 reports `failure.stage` and `failure.code` from structured
 worker/reviewer errors, never from message text. An unreported worker exit is
 `transport/failed`; only an owned deadline is `timeout`.
 
-Biome governs style/lint (`biome.json`) but there is **no `lint` script**; run
-`npx biome check .` if needed. Notable strict rules: `noExplicitAny`,
-`noConsole`, `noNonNullAssertion` are errors (relaxed only under `tests/**`);
-double quotes; imports must use explicit `.ts` extensions.
+Biome is a pinned devDependency (`@biomejs/biome` 2.5.4, matching `biome.json`);
+run `npm run lint`. Notable strict rules: `noExplicitAny`, `noConsole`,
+`noNonNullAssertion` are errors (relaxed only under `tests/**`); double quotes;
+imports must use explicit `.ts` extensions.
 
 ## Product boundaries
 
@@ -162,8 +163,24 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   bash/write/edit and permission-amendment executions. Temporary scratch
   follows the SRT backend defaults and is not treated as a workspace grant.
 - Permission rule evaluation lives under `src/permissions/`.
-- Design history: `docs/superpowers/{plans,specs}` and dated notes in
-  `docs/research/`; task briefs and review diffs in `.superpowers/sdd/`.
+- Dependency patch: the pinned `@anthropic-ai/sandbox-runtime@0.0.74` network-mode
+  patch lives in `patches/anthropic-ai__sandbox-runtime@0.0.74.patch` and is
+  registered via `pnpm-workspace.yaml` `patchedDependencies`. The committed
+  product contract is `tests/srt-network-mode-patch.test.ts` (static package
+  entrypoint). The draft native/static harness under `patches/srt-network-mode/`
+  is **outside product acceptance**; `npm test` does not run it. Do not treat a
+  green suite as proof those helpers were exercised.
+- Design history: dated notes in `docs/research/` only. Each note must state
+  scope, the standing upstream pin (or an explicit day-of snapshot), and what it
+  does not claim. Re-check when the pinned upstream moves or a cited tree path
+  disappears; retire a note by deleting it and keeping any still-needed
+  assertions in a newer dated note. Host API limits live in
+  `docs/host-api-boundaries.md`. Task briefs and review diffs under
+  `.superpowers/` are session-local and are not product evidence.
+- Acceptance for a revision is: `npm run check`, `npm run lint`, and `npm test`
+  pass on that tree, plus any slice-specific checks named in the change. Record
+  the commit SHA with the result when leaving evidence outside the commit body.
+  There is no CI; green checks are voluntary until a remote gate exists.
 
 Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.85.1 —
 check its API surface before upgrading assumptions about extension hooks. Use pnpm
