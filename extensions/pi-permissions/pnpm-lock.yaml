@@ -4,13 +4,16 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@anthropic-ai/sandbox-runtime@0.0.74': 5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4
+
 importers:
 
   .:
     dependencies:
       '@anthropic-ai/sandbox-runtime':
         specifier: 0.0.74
-        version: 0.0.74
+        version: 0.0.74(patch_hash=5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4)
     devDependencies:
       '@earendil-works/pi-ai':
         specifier: 0.85.1
@@ -1190,7 +1193,7 @@ packages:
 
 snapshots:
 
-  '@anthropic-ai/sandbox-runtime@0.0.74':
+  '@anthropic-ai/sandbox-runtime@0.0.74(patch_hash=5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4)':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0
