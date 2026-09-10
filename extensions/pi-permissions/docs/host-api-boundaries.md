@@ -93,7 +93,7 @@ paper over them in docs as if the host already offered them.
 | --- | --- |
 | `pi.on("tool_call")` | Block or pass host-only tools after risk/Guardian |
 | `pi.registerTool()` | Own bash/write/edit/request_permissions execution |
-| `ctx.ui.setStatus` | Approve for me / Full access |
+| `ctx.ui.setStatus` | Approve for me / Bypass permissions |
 | `ctx.ui.confirm/select/notify` | `/approve` and mode notices (not the default Auto path) |
 | `ctx.abort()` | Circuit-breaker turn interrupt |
 | session/agent lifecycle events | Turn snapshot, grant expiry, cleanup |

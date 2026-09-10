@@ -1582,7 +1582,7 @@ describe("Permission mode registration", () => {
     await writer;
     await downshift;
     expect(await amendment).toMatchObject({
-      content: [{ text: expect.stringContaining("Full access is already active") }],
+      content: [{ text: expect.stringContaining("Bypass permissions is already active") }],
     });
     expect(app.abort).not.toHaveBeenCalled();
     await endAgent(app);

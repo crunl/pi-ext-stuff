@@ -1117,7 +1117,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     review: ReviewRequest,
   ): Promise<GuardianDecision | PermissionError> => {
     if (state.snapshot.mode === "yolo") {
-      return { kind: "approve", rationale: "Full access is active" };
+      return { kind: "approve", rationale: "Bypass permissions is active" };
     }
     if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
     const reviewId = `review-${++reviewSequence}`;

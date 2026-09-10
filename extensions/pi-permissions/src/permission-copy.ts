@@ -64,8 +64,8 @@ export interface PermissionSummary {
   writeRoots: readonly string[];
 }
 
-export function permissionModeLabel(mode: PermissionMode): "Approve for me" | "Full access" {
-  return mode === "auto" ? "Approve for me" : "Full access";
+export function permissionModeLabel(mode: PermissionMode): "Approve for me" | "Bypass permissions" {
+  return mode === "auto" ? "Approve for me" : "Bypass permissions";
 }
 
 function renderFailureReason(reason: string): string {
@@ -222,7 +222,7 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
 }
 
 export function renderPermissionSummary(summary: PermissionSummary): string {
-  if (summary.mode === "yolo") return "Full access · sandbox off · approvals off";
+  if (summary.mode === "yolo") return "Bypass permissions · sandbox off · approvals off";
   const reviewer = summary.reviewer
     ? `${summary.reviewer.kind === "active" ? "active reviewer" : "reviewer preference"}: ${summary.reviewer.provider}/${summary.reviewer.model}`
     : "reviewer preference: current session model";

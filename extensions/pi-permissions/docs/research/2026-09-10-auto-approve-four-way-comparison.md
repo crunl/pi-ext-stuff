@@ -42,7 +42,7 @@
 | Codex | `AskForApproval{UnlessTrusted,OnRequest,Granular,Never}` × `ApprovalsReviewer{User,AutoReview}` | Read Only / Default / **Approve for me** / Full Access | Default（人审） |
 | kimi-code | `'manual' \| 'yolo' \| 'auto'` | **Always Ask** / **Ask When Needed** / **Never Ask** | `manual` |
 | MiMo-Code | 无 mode 枚举；tri-state 规则 + 3 个运行时开关 | 无模式名 | `allow` 为主的宽松默认 |
-| **Pi** | `"auto" \| "yolo"` | **Approve for me** / **Full access** | `auto` |
+| **Pi** | `"auto" \| "yolo"` | **Approve for me** / **Bypass permissions** | `auto` |
 
 取证：
 

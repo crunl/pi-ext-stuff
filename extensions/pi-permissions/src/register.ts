@@ -2223,7 +2223,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                   content: [
                     {
                       type: "text",
-                      text: "Full access is already active; no additional permission grant was recorded.",
+                      text: "Bypass permissions is already active; no additional permission grant was recorded.",
                     },
                   ],
                   details: undefined,

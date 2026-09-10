@@ -10,7 +10,7 @@ import {
 describe("permission copy", () => {
   it("uses the Codex permission labels", () => {
     expect(permissionModeLabel("auto")).toBe("Approve for me");
-    expect(permissionModeLabel("yolo")).toBe("Full access");
+    expect(permissionModeLabel("yolo")).toBe("Bypass permissions");
   });
 
   it("renders an explicit denial with the Codex no-circumvention instruction", () => {
@@ -175,6 +175,6 @@ describe("permission copy", () => {
         ruleCount: 0,
         writeRoots: [],
       }),
-    ).toBe("Full access · sandbox off · approvals off");
+    ).toBe("Bypass permissions · sandbox off · approvals off");
   });
 });

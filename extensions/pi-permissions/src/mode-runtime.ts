@@ -52,7 +52,7 @@ export class PermissionModeRuntime {
     return structuredClone(this.state.auto);
   }
 
-  get statusLabel(): "Approve for me" | "Full access" {
+  get statusLabel(): "Approve for me" | "Bypass permissions" {
     return permissionModeLabel(this.mode);
   }
 
