@@ -45,6 +45,12 @@ Evidence in this extension:
 Do not claim that a Guardian approval sandboxes an MCP/custom tool. The
 approval only satisfies the review gate for that exact call.
 
+**Ask-user is orthogonal to Approve for me.** Codex `request_user_input` and
+MCP elicitation still pause the turn under `OnRequest + AutoReview`; the
+reviewer axis only replaces *who approves permissions*, not whether the agent
+may ask conversational questions. Pi therefore does not hard-block
+question-style host tools in auto.
+
 ## Parallel tool calls vs attempt freeze
 
 Host semantics (`docs/extensions.md` in the host package):

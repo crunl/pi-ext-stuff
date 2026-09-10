@@ -46,7 +46,7 @@ Do **not** treat any of the following as delivered by the 1079-test suite:
 ## Open items (still out of this audit’s proof)
 
 1. **Escalated vs denyRead** — Codex suppresses unsandboxed execution when denied reads exist (`sandboxing.rs` `unsandboxed_execution_allowed`); the command still runs sandboxed. Pi now matches that shape: `denyRead` downgrades `require_escalated` to the ordinary sandboxed path (`risk-policy.ts`) and keeps escalated eligibility false (`register.ts`). `denyWrite` / `deniedDomains` alone do not suppress escalation (Codex also drops those on bypass).
-2. **auto still allows human-blocking question tools** — host has no built-in question tool; extension policy may still allow custom/question to block on humans. Candidate P1.
+2. **Ask-user tools are not blocked by Approve for me** — intentional. Codex `request_user_input` is orthogonal to `AskForApproval`×`ApprovalsReviewer`; auto replaces the **permission reviewer**, not conversational Q&A. Pi has no built-in question tool; host/MCP tools that call `ui.*` remain normal host-admission tools.
 3. **Dangerous-command blacklist vs Guardian** — static list still overlaps Guardian judgment (P2).
 4. **Native acceptance gates** — any claim of “real offline / real TLS / real kernel isolation” needs a separate, explicitly authorized native plan.
 
@@ -55,4 +55,4 @@ Do **not** treat any of the following as delivered by the 1079-test suite:
 - Hermetic Approve-for-me semantics (R1–R9) are **supported by the current suite**.
 - R10 network claims are **policy/hermetic**, not native isolation proof.
 - **Do not close the goal as delivered** on this audit alone; G3 is a boundary map, not a ship gate.
-- Escalated `denyRead` suppression is implemented (Codex-parity downgrade, not HARD block). Next code work, if any, should stay on the remaining P1 list (auto human-block tools) rather than expanding design surface.
+- Next code work, if any, should stay on the remaining P2 list rather than expanding design surface. Ask-user tools are intentionally out of scope for Approve for me. Escalated `denyRead` suppression is implemented (Codex-parity downgrade, not HARD block).
