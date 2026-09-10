@@ -11,7 +11,12 @@ import type {
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import type { PermissionsConfig } from "./config.ts";
-import { fingerprintValue } from "./config.ts";
+import {
+  fingerprintValue,
+  type NetworkAccess,
+  validateNetworkAccess,
+  validateNetworkPolicy,
+} from "./config.ts";
 import {
   createFilesystemPolicy,
   expandSymlinkAliases,
@@ -19,6 +24,57 @@ import {
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
 import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
+import { isNetworkPatternCoveredBy } from "./network-domain-pattern.ts";
+
+/** An attempt's required network enforcement, not an authorization ledger. */
+export type ExecutionNetwork =
+  | { readonly kind: "restricted" }
+  | { readonly kind: "proxy"; readonly inlineReview: boolean; readonly tls?: "system" }
+  | { readonly kind: "direct" };
+
+/** Pure projection of already-authorized policy, never a grant or a review decision. */
+export function projectExecutionNetwork(policy: SandboxPolicy): ExecutionNetwork {
+  const network = policy.network;
+  const access = "access" in network ? validateNetworkAccess(network.access) : undefined;
+  validateNetworkPolicy(network);
+  const tls = network.macosTls === "system" ? { tls: "system" as const } : {};
+  if (access?.kind !== "explicit")
+    return Object.freeze({ kind: "proxy", inlineReview: true, ...tls });
+  const hasAuthority =
+    (network.enabled === true && !network.deniedDomains.includes("*")) ||
+    network.allowedDomains.some(
+      (allowed) =>
+        !network.deniedDomains.some((denied) => isNetworkPatternCoveredBy(denied, allowed)),
+    );
+  if (!hasAuthority) return Object.freeze({ kind: "restricted" });
+  if (access.transport === "direct") {
+    if (network.enabled !== true)
+      throw new Error("Direct requires whole-network authority, not a host grant");
+    return Object.freeze({ kind: "direct" });
+  }
+  return Object.freeze({ kind: "proxy", inlineReview: false, ...tls });
+}
+
+/** Defensive derived evidence, shared by review and read-only status. Absent TLS means strict. */
+export function describeExecutionNetwork(policy: SandboxPolicy) {
+  const required = projectExecutionNetwork(policy);
+  return {
+    requestPath: policy.network.access?.kind ?? "inline-proxy",
+    wholeNetwork: policy.network.enabled === true,
+    hosts: [...policy.network.allowedDomains],
+    denies: [...policy.network.deniedDomains],
+    required,
+    configuredTls: policy.network.macosTls ?? "strict",
+    effectiveTls: required.kind === "proxy" && required.tls === "system" ? "system" : "strict",
+    privateTargets:
+      policy.network.allowPrivateTargets === true || policy.network.allowLocalBinding === true,
+    localBindingAndInbound: policy.network.allowLocalBinding === true,
+    helperEgressRisk: required.kind === "proxy" && required.tls === "system",
+    delegated: policy.network.delegated === true,
+    policyFingerprint: fingerprintValue(policy),
+  };
+}
+export type NetworkPolicyView = ReturnType<typeof describeExecutionNetwork>;
 
 /**
  * Our own sandbox policy — the complete description of what a sandboxed
@@ -32,6 +88,14 @@ export interface SandboxPolicy {
     denyWrite: string[];
   };
   network: {
+    access?: NetworkAccess;
+    enabled?: boolean;
+    allowPrivateTargets?: boolean;
+    macosTls?: "strict" | "system";
+    /** Resolved finite child ceiling; never broad delegation consent. */
+    delegated?: true;
+    /** Engine-derived, immutable for this execution attempt; absent on base policies. */
+    execution?: ExecutionNetwork;
     allowedDomains: string[];
     deniedDomains: string[];
     trustedFakeIpRanges?: string[];
@@ -196,6 +260,18 @@ export function looksLikeSandboxDenial(text: string): boolean {
   return SANDBOX_DENIAL_MARKERS.test(text);
 }
 
+export interface SandboxBackendState {
+  initialized: boolean;
+  healthy: boolean;
+  draining: boolean;
+  fault?: string;
+  networkSupport?: { apiVersion: number; platform: string; modes: readonly string[] };
+  execution: "idle" | "active-lifecycle";
+  requiredNetwork?: ExecutionNetwork;
+  /** Public backend does not attest kernel installation or TLS success. */
+  nativeEnforcement: "unknown";
+}
+
 export interface SandboxManagerLike {
   initialize(config: SandboxPolicy): Promise<void>;
   /**
@@ -207,6 +283,9 @@ export interface SandboxManagerLike {
   activate?(config: SandboxPolicy): Promise<void>;
   /** Live health of the backend process/coordinator, when available. */
   isHealthy?(): boolean;
+  /** Wait for execution and detached cleanup/drain without mutation or fault recovery. */
+  waitForIdle?(signal?: AbortSignal): Promise<void>;
+  describeState?(): SandboxBackendState;
   reset(): Promise<void>;
   /**
    * After a failed execution, report the exact capability enforcement
@@ -299,6 +378,14 @@ export function createSandboxRuntimeConfig(
       denyWrite: finalDenyWrite,
     },
     network: {
+      ...("access" in config.network
+        ? { access: validateNetworkAccess(config.network.access) }
+        : {}),
+      ...(config.network.enabled === undefined ? {} : { enabled: config.network.enabled }),
+      ...(config.network.allowPrivateTargets === undefined
+        ? {}
+        : { allowPrivateTargets: config.network.allowPrivateTargets }),
+      ...(config.network.macosTls === undefined ? {} : { macosTls: config.network.macosTls }),
       allowedDomains: [...config.network.allowedDomains],
       deniedDomains: [...config.network.deniedDomains],
       trustedFakeIpRanges: [...config.network.trustedFakeIpRanges],
@@ -364,6 +451,7 @@ function policyWithGitMetadataProtection(
     },
     network: {
       ...policy.network,
+      ...(policy.network.access ? { access: { ...policy.network.access } } : {}),
       allowedDomains: [...policy.network.allowedDomains],
       deniedDomains: [...policy.network.deniedDomains],
       ...(policy.network.trustedFakeIpRanges === undefined

@@ -1,5 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { GuardianReviewInput } from "./approve-for-me-engine.ts";
 import type { PermissionsConfig } from "./config.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
 import {
@@ -10,6 +11,7 @@ import {
 } from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
+import type { NetworkPolicyView } from "./sandbox.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export type AutoReviewRisk = GuardianRiskLevel;
@@ -63,6 +65,16 @@ export interface GuardianPermissionContext {
   }>;
   allowedNetworkHosts: string[];
   deniedNetworkHosts: string[];
+  requestedWholeNetwork?: boolean;
+  authorityFreezePoint?: "execution-attempt-after-review";
+  baselineNetwork?: NetworkPolicyView;
+  effectiveNetwork?: NetworkPolicyView;
+  authority?: GuardianReviewInput["authority"];
+  permissionLifetime?:
+    | "turn-end-after-confirmation"
+    | "pending-connection-only"
+    | "exact-action-only";
+  networkWarning?: string;
   staticRisk?: "LOW" | "REVIEW" | "HARD";
   staticReason?: string;
   justification?: string;
@@ -110,7 +122,7 @@ export function buildAutoReviewRequest(
 ): AutoReviewRequest {
   const untrustedAction = guardianActionFromToolCall(event, cwd);
   const enrichedPermissionContext: GuardianPermissionContext = {
-    ...permissionContext,
+    ...structuredClone(permissionContext),
     requestedNetworkTargets: permissionContext.requestedNetworkTargets.map((target) => ({
       ...target,
     })),

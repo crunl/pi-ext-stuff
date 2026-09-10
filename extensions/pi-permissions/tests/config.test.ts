@@ -33,7 +33,200 @@ function globalConfigPath(agentDir: string): string {
   return join(agentDir, "extensions", "pi-permissions", "config.json");
 }
 
+// Host-policy fixture only: fake SRT advertises macOS, never kernel support.
+// Keep the exact original descriptor through all awaited work and cleanup.
+function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
+  return async (...args: T): Promise<void> => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "darwin" });
+    try {
+      await run(...args);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+}
+
 describe("permissions config", () => {
+  it.each(["linux", "win32"])(
+    "rejects real non-macOS policy validation on simulated %s and restores positive fixtures",
+    async (platform) => {
+      const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { ...original, value: platform });
+      const simulated = Object.getOwnPropertyDescriptor(process, "platform");
+      try {
+        expect(() =>
+          validatePermissionsConfig({ sandbox: { network: { macosTls: "system" } } }),
+        ).toThrow(/macOS/);
+        await withDarwin(async () => {
+          expect(
+            validatePermissionsConfig({ sandbox: { network: { macosTls: "system" } } }).sandbox
+              .network.macosTls,
+          ).toBe("system");
+        })();
+        expect(Object.getOwnPropertyDescriptor(process, "platform")).toEqual(simulated);
+        await expect(
+          withDarwin(async () => {
+            throw new Error("fixture failure");
+          })(),
+        ).rejects.toThrow("fixture failure");
+        expect(Object.getOwnPropertyDescriptor(process, "platform")).toEqual(simulated);
+      } finally {
+        Object.defineProperty(process, "platform", original);
+      }
+    },
+  );
+
+  it("accepts explicit proxy opt-in without changing legacy defaults", () => {
+    expect(validatePermissionsConfig({}).sandbox.network.access).toBeUndefined();
+    const input = { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } };
+    const config = validatePermissionsConfig(input);
+    expect(config.sandbox.network.access).toEqual({ kind: "explicit", transport: "proxy" });
+    expect(fingerprintConfig(config)).not.toBe(fingerprintConfig(DEFAULT_CONFIG));
+    input.sandbox.network.access.kind = "inline-proxy";
+    expect(config.sandbox.network.access?.kind).toBe("explicit");
+  });
+
+  it.each([
+    null,
+    undefined,
+    {},
+    { kind: "direct" },
+    { kind: "explicit" },
+    { kind: "inline-proxy", transport: "proxy" },
+    { kind: "explicit", transport: "proxy", unknown: true },
+    Object.assign(Object.create({ kind: "inline-proxy" }), { unknown: true }),
+    Object.assign(Object.create({ kind: "explicit" }), { transport: "proxy", unknown: true }),
+  ])("rejects unsupported network access rather than downgrading: %j", (access) => {
+    expect(() => validatePermissionsConfig({ sandbox: { network: { access } } })).toThrow(/access/);
+  });
+
+  it("requires independent private eligibility for direct, even with broad baseline authority", () => {
+    for (const enabled of [false, true]) {
+      expect(() =>
+        validatePermissionsConfig({
+          sandbox: { network: { enabled, access: { kind: "explicit", transport: "direct" } } },
+        }),
+      ).toThrow(/private\/special/);
+    }
+    const input = {
+      sandbox: {
+        network: {
+          access: { kind: "explicit", transport: "direct" },
+          enabled: true,
+          allowPrivateTargets: true,
+          macosTls: "strict",
+        },
+      },
+    };
+    const config = validatePermissionsConfig(input);
+    expect(config.sandbox.network).toMatchObject({
+      enabled: true,
+      allowPrivateTargets: true,
+      allowLocalBinding: false,
+    });
+    input.sandbox.network.enabled = false;
+    expect(config.sandbox.network.enabled).toBe(true);
+    expect(fingerprintConfig(config)).not.toBe(fingerprintConfig(validatePermissionsConfig(input)));
+  });
+
+  it.each([
+    { allowedDomains: ["api.example.com"] },
+    { deniedDomains: ["blocked.example.com"] },
+    { macosTls: "system" },
+    { allowLocalBinding: true, enabled: false },
+  ])(
+    "rejects direct policy conflicts before activation: %j",
+    withDarwin(async (conflict) => {
+      expect(() =>
+        validatePermissionsConfig({
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "direct" },
+              allowPrivateTargets: true,
+              ...conflict,
+            },
+          },
+        }),
+      ).toThrow();
+    }),
+  );
+
+  it.each([{ enabled: true }, { allowPrivateTargets: true }, { macosTls: "system" }])(
+    "fingerprints and clones each independent network authority/profile dimension: %j",
+    withDarwin(async (network) => {
+      const input = { sandbox: { network } };
+      const config = validatePermissionsConfig(input);
+      expect(fingerprintConfig(config)).not.toBe(fingerprintConfig(DEFAULT_CONFIG));
+      expect(fingerprintConfig(config)).toBe(fingerprintConfig(structuredClone(config)));
+      Object.assign(input.sandbox.network, {
+        enabled: false,
+        allowPrivateTargets: false,
+        macosTls: "strict",
+      });
+      expect(fingerprintConfig(config)).not.toBe(
+        fingerprintConfig(validatePermissionsConfig(input)),
+      );
+    }),
+  );
+
+  it("supports broad baseline direct binding only as an explicit separate high-privilege choice", () => {
+    const config = validatePermissionsConfig({
+      sandbox: {
+        network: {
+          access: { kind: "explicit", transport: "direct" },
+          enabled: true,
+          allowLocalBinding: true,
+        },
+      },
+    });
+    expect(config.sandbox.network.allowPrivateTargets).toBeUndefined();
+    expect(config.sandbox.network.allowLocalBinding).toBe(true);
+  });
+
+  it.each([
+    { deniedDomains: ["*"] },
+    { deniedDomains: ["blocked.example.com"] },
+    { allowLocalBinding: true },
+    { allowedDomains: ["localhost"] },
+    { allowedDomains: ["localhost:443"] },
+    { allowedDomains: ["[::1]"] },
+    { allowedDomains: ["[::1]:443"] },
+  ])(
+    "rejects system helper policy conflicts: %j",
+    withDarwin(async (conflict) => {
+      expect(() =>
+        validatePermissionsConfig({ sandbox: { network: { macosTls: "system", ...conflict } } }),
+      ).toThrow(/System TLS/);
+    }),
+  );
+
+  it.each([
+    { enabled: "true" },
+    { enabled: null },
+    { enabled: undefined },
+    { allowPrivateTargets: "true" },
+    { allowPrivateTargets: null },
+    { macosTls: false },
+    { macosTls: null },
+    { macosTls: "automatic" },
+  ])("rejects malformed network authority/startup fields: %j", (network) => {
+    expect(() => validatePermissionsConfig({ sandbox: { network } })).toThrow();
+  });
+
+  it("rejects explicit local socket bypass authority", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            allowLocalBinding: true,
+          },
+        },
+      }),
+    ).toThrow(/allowLocalBinding/);
+  });
+
   it("defaults to a sandboxed Auto session", () => {
     expect(DEFAULT_CONFIG.sandbox.enabled).toBe(true);
     expect(DEFAULT_CONFIG.sandbox.filesystem.allowWrite).toEqual([".", "/tmp"]);

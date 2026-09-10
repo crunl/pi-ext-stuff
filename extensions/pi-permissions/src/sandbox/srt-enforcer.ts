@@ -6,11 +6,14 @@ import {
 } from "@anthropic-ai/sandbox-runtime";
 import { hasGlobSyntax } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
-import type {
-  SandboxExecutionRequest,
-  SandboxExecutionResult,
-  SandboxManagerLike,
-  SandboxPolicy,
+import {
+  type ExecutionNetwork,
+  projectExecutionNetwork,
+  type SandboxBackendState,
+  type SandboxExecutionRequest,
+  type SandboxExecutionResult,
+  type SandboxManagerLike,
+  type SandboxPolicy,
 } from "../sandbox.ts";
 import { errorMessage } from "../unknown-value.ts";
 import { SandboxConnectGuard, shouldBypassParentProxy } from "./connect-guard.ts";
@@ -41,7 +44,8 @@ export type SrtRuntimeLike = Pick<
   | "cleanupAfterCommand"
   | "reset"
   | "getSandboxViolationStore"
->;
+> &
+  Partial<Pick<typeof SrtManager, "getNetworkModeCapabilities">>;
 
 /** State mirrors SRT's own process-global mutable singleton. */
 const processSandboxState: {
@@ -49,7 +53,7 @@ const processSandboxState: {
   initialized: boolean;
   networkAuthorize?: SandboxExecutionRequest["networkAuthorize"];
   networkSignal?: AbortSignal;
-  networkExecution?: object;
+  networkExecution?: { requiredNetwork: ExecutionNetwork };
   connectGuard?: SandboxConnectGuard;
 } = { initialized: false };
 
@@ -172,7 +176,11 @@ function clonePolicy(policy: SandboxPolicy): SandboxPolicy {
 }
 
 function samePolicy(left: SandboxPolicy, right: SandboxPolicy): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const withoutProjection = (policy: SandboxPolicy) => {
+    const { execution: _execution, ...network } = policy.network;
+    return { ...policy, network };
+  };
+  return JSON.stringify(withoutProjection(left)) === JSON.stringify(withoutProjection(right));
 }
 
 function shellQuote(value: string): string {
@@ -201,7 +209,16 @@ function serializeProgram(
   return command;
 }
 
-function killProcessTree(child: ChildProcess): void {
+/**
+ * Signal a sandbox-owned child tree only while the parent still owns a live
+ * identity. After observed exit/close the numeric PID/PGID may already have
+ * been reused; those windows must not emit signals.
+ */
+function killProcessTree(
+  child: ChildProcess,
+  lifecycle?: { exitObserved?: boolean; closeObserved?: boolean },
+): void {
+  if (lifecycle?.closeObserved || lifecycle?.exitObserved) return;
   if (!child.pid) return;
   try {
     process.kill(-child.pid, "SIGKILL");
@@ -239,11 +256,21 @@ function executeWrappedArgv(
     let childError: Error | undefined;
     let settled = false;
     let aborted = signal.aborted;
+    let exitObserved = false;
+    let closeObserved = false;
+    const lifecycle = {
+      get exitObserved() {
+        return exitObserved;
+      },
+      get closeObserved() {
+        return closeObserved;
+      },
+    };
 
     const cleanup = (): void => signal.removeEventListener("abort", onAbort);
     const onAbort = (): void => {
       aborted = true;
-      killProcessTree(child);
+      killProcessTree(child, lifecycle);
     };
     const ingest = (
       chunks: Buffer[],
@@ -260,7 +287,7 @@ function executeWrappedArgv(
         maximumBytes ?? (streamName === "stdout" ? DEFAULT_STDOUT_BOUND : DEFAULT_STDERR_BOUND);
       if (nextBytes > bound) {
         outputError = new Error(`${streamName} exceeded the sandbox output bound`);
-        killProcessTree(child);
+        killProcessTree(child, lifecycle);
         return bound;
       }
       chunks.push(chunk);
@@ -295,9 +322,14 @@ function executeWrappedArgv(
     child.once("error", (error) => {
       childError = error;
     });
+    child.once("exit", () => {
+      exitObserved = true;
+    });
     child.once("close", (exitCode) => {
       if (settled) return;
       settled = true;
+      exitObserved = true;
+      closeObserved = true;
       cleanup();
       if (aborted || signal.aborted) {
         reject(new Error("aborted"));
@@ -386,6 +418,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           if (dependency.errors.length > 0) {
             throw sandboxUnavailable(dependency.errors.join("; "));
           }
+          this.executionNetworkMode(snapshot);
           await this.connectGuard?.start();
           if (activation.signal.aborted) throw new Error("aborted");
           processSandboxState.connectGuard = this.connectGuard;
@@ -457,10 +490,13 @@ export class SrtSandboxManager implements SandboxManagerLike {
     );
   }
 
-  async execute(request: SandboxExecutionRequest): Promise<SandboxExecutionResult> {
+  async execute(input: SandboxExecutionRequest): Promise<SandboxExecutionResult> {
+    // Capture before waiting for the process lease: callers cannot mutate a queued attempt.
+    const request = { ...input, policy: clonePolicy(input.policy) };
     if (srtProcessCoordinator.isPoisoned) {
       throw poisonedSandboxUnavailable();
     }
+    const networkMode = this.executionNetworkMode(request.policy);
     const { signal, timedOut } = deadlineSignal(request.timeoutMs, request.signal);
     return srtProcessCoordinator.runExclusiveDetached(
       async () => {
@@ -470,7 +506,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
         if (signal.aborted) throw new Error("aborted");
         const previousNetworkAuthorize = processSandboxState.networkAuthorize;
         const previousNetworkSignal = processSandboxState.networkSignal;
-        const networkExecution = {};
+        const networkExecution = { requiredNetwork: projectExecutionNetwork(request.policy) };
         processSandboxState.networkAuthorize = request.networkAuthorize;
         processSandboxState.networkSignal = signal;
         processSandboxState.networkExecution = networkExecution;
@@ -516,12 +552,22 @@ export class SrtSandboxManager implements SandboxManagerLike {
           try {
             if (changed) this.runtime.updateConfig(toSrtConfig(derived, this.connectGuard));
             const command = serializeProgram(request.program, {
-              forceProxyForLocalTargets: request.networkAuthorize !== undefined,
+              forceProxyForLocalTargets:
+                request.networkAuthorize !== undefined &&
+                networkMode !== "restricted" &&
+                networkMode !== "direct",
             });
             const wrapped = await this.runtime.wrapWithSandboxArgv(
               command,
               POSIX_SHELL,
-              undefined,
+              networkMode === undefined
+                ? undefined
+                : {
+                    network: { mode: networkMode },
+                    ...(request.policy.network.macosTls === "system"
+                      ? { enableWeakerNetworkIsolation: networkMode === "proxy" }
+                      : {}),
+                  },
               signal,
               request.cwd,
               {
@@ -584,6 +630,26 @@ export class SrtSandboxManager implements SandboxManagerLike {
     );
   }
 
+  describeState(): SandboxBackendState {
+    return structuredClone({
+      initialized: processSandboxState.initialized,
+      healthy: this.isHealthy(),
+      draining: srtProcessCoordinator.isDraining,
+      ...(srtProcessCoordinator.isPoisoned
+        ? { fault: srtProcessCoordinator.poisonedError().message }
+        : {}),
+      networkSupport: this.runtime.getNetworkModeCapabilities?.(),
+      execution: processSandboxState.networkExecution ? "active-lifecycle" : "idle",
+      requiredNetwork: processSandboxState.networkExecution?.requiredNetwork,
+      nativeEnforcement: "unknown",
+    });
+  }
+
+  /** Observe real quiescence, including detached cancellation drain; never reset or clear poison. */
+  async waitForIdle(signal?: AbortSignal): Promise<void> {
+    await srtProcessCoordinator.runExclusive(async () => {}, signal);
+  }
+
   async readFailureDiagnostics(commandId: string): Promise<string | undefined> {
     if (srtProcessCoordinator.isPoisoned) return undefined;
     try {
@@ -616,7 +682,33 @@ export class SrtSandboxManager implements SandboxManagerLike {
     }
   }
 
+  private executionNetworkMode(
+    policy: SandboxPolicy,
+  ): "restricted" | "proxy" | "direct" | undefined {
+    const projection = projectExecutionNetwork(policy);
+    const frozen = policy.network.execution;
+    if (frozen && JSON.stringify(frozen) !== JSON.stringify(projection)) {
+      throw sandboxUnavailable("execution network projection does not match its frozen policy");
+    }
+    if (projection.kind === "proxy" && projection.inlineReview && projection.tls !== "system")
+      return undefined;
+    const capabilities = this.runtime.getNetworkModeCapabilities?.();
+    if (
+      capabilities?.apiVersion !== 1 ||
+      !capabilities.modes.includes("restricted") ||
+      !capabilities.modes.includes("proxy") ||
+      !capabilities.modes.includes(projection.kind) ||
+      (policy.network.macosTls === "system" && capabilities.platform !== "macos")
+    ) {
+      throw sandboxUnavailable(
+        "explicit network access requires public restricted/proxy mode capability and the requested transport/platform",
+      );
+    }
+    return projection.kind;
+  }
+
   private async initializeSrt(config: SandboxPolicy, signal?: AbortSignal): Promise<void> {
+    this.executionNetworkMode(config);
     if (!this.runtime.isSupportedPlatform()) {
       throw sandboxUnavailable(`unsupported platform: ${process.platform}`);
     }

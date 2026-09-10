@@ -104,6 +104,134 @@ function createEngine(
 }
 
 describe("ApproveForMeEngine public seam", () => {
+  it.each(["completed", "failed", "aborted", "stale"] as const)(
+    "commits whole-network authority only after a current successful acknowledgement (%s)",
+    async (outcome) => {
+      const { engine, review } = createEngine(async () => ({
+        kind: "approve",
+        rationale: "whole outbound subject to hard policy",
+      }));
+      const turn = engine.beginTurn(
+        snapshot({
+          baseSandboxPolicy: {
+            ...basePolicy,
+            network: {
+              access: { kind: "explicit", transport: "proxy" },
+              allowedDomains: [],
+              deniedDomains: ["blocked.example"],
+            },
+          },
+        }),
+      );
+      const controller = new AbortController();
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const requested: CapabilityRequest[] = [{ kind: "network-all" }];
+      const amendment = turn.execute(
+        call(
+          async () => {
+            entered();
+            await gate;
+            return outcome === "failed"
+              ? failed(new Error("ack failed"))
+              : completed("acknowledged");
+          },
+          {
+            ownership: "permission-amendment",
+            call: {
+              id: "all-amendment",
+              tool: "request_permissions",
+              input: { permissions: { network: { enabled: true } } },
+              cwd: "/workspace",
+            },
+            admission: reviewAdmission(requested),
+            intent: { kind: "permission-amendment", requested },
+            signal: controller.signal,
+          },
+        ),
+      );
+      await entry;
+      expect(engine.inspect()?.turn.networkAll).toBe(false);
+      expect(engine.inspect()?.attempts[0].lease.policy?.network.enabled).toBe(true);
+      const inspection = engine.inspect()!;
+      inspection.turn.networkAll = true;
+      inspection.baseline!.network.allowedDomains.push("forged.example");
+      requested.push({ kind: "network", host: "forged.example" });
+      expect(engine.inspect()?.turn.networkAll).toBe(false);
+      expect(engine.inspect()?.baseline?.network.allowedDomains).toEqual([]);
+      if (outcome === "aborted") controller.abort();
+      if (outcome === "stale") turn.close();
+      release();
+      const result = await amendment;
+      expect(result.kind).toBe(
+        outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : "blocked",
+      );
+      expect(engine.inspect()?.turn.networkAll ?? false).toBe(outcome === "completed");
+      expect(engine.inspect()?.turn.networkHosts ?? []).toEqual([]);
+      expect(review).toHaveBeenCalledOnce();
+      turn.close();
+      expect(engine.inspect()).toBeUndefined();
+    },
+  );
+
+  it("refuses broad authority from action-risk approval, runtime denial or a constrained baseline", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "approve action",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const action = await turn.execute(
+      call(async () => completed("must not run"), {
+        admission: {
+          kind: "review",
+          requested: [{ kind: "network-all" }],
+          risk: "REVIEW",
+          reason: "review action",
+          review: "action",
+        },
+      }),
+    );
+    expect(action).toMatchObject({ kind: "blocked", error: { code: "policy-denied" } });
+    await expect(
+      turn.execute(
+        call(async () => completed("must not run"), {
+          ownership: "permission-amendment",
+          admission: reviewAdmission([{ kind: "network-all" }]),
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "blocked", error: { code: "policy-denied" } });
+    expect(review).not.toHaveBeenCalled();
+    expect(engine.inspect()?.turn.networkAll).toBe(false);
+    await expect(
+      turn.execute(call(async () => denied({ kind: "network-all" }))),
+    ).resolves.toMatchObject({ kind: "blocked", error: { code: "enforcement-unavailable" } });
+    const child = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: { allowedDomains: [], deniedDomains: [], delegated: true },
+        },
+      }),
+    );
+    const requested: CapabilityRequest[] = [{ kind: "network-all" }];
+    await expect(
+      child.execute(
+        call(async () => completed("must not run"), {
+          ownership: "permission-amendment",
+          admission: reviewAdmission(requested),
+          intent: { kind: "permission-amendment", requested },
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "blocked", error: { code: "policy-denied" } });
+    expect(review).not.toHaveBeenCalled();
+  });
+
   it("matches network patterns with SRT's exact, wildcard, and port semantics", () => {
     expect(matchesNetworkDomainPattern("example.com", "example.com", 443)).toBe(true);
     expect(matchesNetworkDomainPattern("example.com", "api.example.com", 443)).toBe(false);

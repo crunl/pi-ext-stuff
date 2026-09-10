@@ -5,6 +5,7 @@ import type {
   SandboxAskCallback,
   SandboxRuntimeConfig,
   SandboxViolationStore,
+  SandboxWrapConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -77,6 +78,12 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   readonly initialized: SandboxRuntimeConfig[] = [];
   readonly updated: SandboxRuntimeConfig[] = [];
   readonly wrapped: string[] = [];
+  readonly wrapConfigs: Array<SandboxWrapConfig | undefined> = [];
+  getNetworkModeCapabilities: SrtRuntimeLike["getNetworkModeCapabilities"] = () => ({
+    apiVersion: 1,
+    platform: "macos",
+    modes: ["restricted", "proxy"],
+  });
   readonly violationsByCommand = new Map<string, Array<{ line: string }>>();
   lastWrapOptions: { commandId?: string; commandText?: string } | undefined;
   cleanupCalls = 0;
@@ -114,12 +121,13 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   async wrapWithSandboxArgv(
     command: string,
     _binShell?: string,
-    _customConfig?: Partial<SandboxRuntimeConfig>,
+    customConfig?: SandboxWrapConfig,
     _abortSignal?: AbortSignal,
     _cwd?: string,
     options?: { commandId?: string; commandText?: string },
   ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }> {
     this.wrapped.push(command);
+    this.wrapConfigs.push(customConfig);
     this.lastWrapOptions = options;
     if (this.networkRequest && this.askNetwork) {
       this.networkDecision = await this.askNetwork(this.networkRequest);
@@ -213,7 +221,257 @@ async function execute(
   });
 }
 
+// Host-policy fixture only: fake SRT advertises macOS, never kernel support.
+// Keep the exact original descriptor through all awaited work and cleanup.
+function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
+  return async (...args: T): Promise<void> => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "darwin" });
+    try {
+      await run(...args);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+}
+
 describe("SRT executor contract", () => {
+  it("runs the hermetic system fake-SRT fixture from a simulated Linux host descriptor", async () => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "linux" });
+    const simulated = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      await withDarwin(async () => {
+        const runtime = new FakeSrtRuntime();
+        const manager = new SrtSandboxManager(runtime);
+        const policy = basePolicy();
+        policy.network.macosTls = "system";
+        try {
+          await manager.activate(policy);
+          await execute(manager, policy);
+          expect(runtime.wrapConfigs).toEqual([
+            { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
+          ]);
+        } finally {
+          await manager.reset();
+        }
+      })();
+      expect(Object.getOwnPropertyDescriptor(process, "platform")).toEqual(simulated);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  });
+
+  it(
+    "maps eligible direct and startup system TLS per attempt without widening the initialized base",
+    withDarwin(async () => {
+      const runtime = new FakeSrtRuntime();
+      runtime.getNetworkModeCapabilities = () => ({
+        apiVersion: 1,
+        platform: "macos",
+        modes: ["restricted", "proxy", "direct"],
+      });
+      const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
+      const configuredSystem = basePolicy();
+      configuredSystem.network.access = { kind: "explicit", transport: "proxy" };
+      configuredSystem.network.macosTls = "system";
+      await manager.activate(configuredSystem);
+      await execute(manager, configuredSystem);
+      const authorized = structuredClone(configuredSystem);
+      authorized.network.enabled = true;
+      await execute(manager, authorized);
+      const direct = basePolicy();
+      Object.assign(direct.network, {
+        access: { kind: "explicit", transport: "direct" },
+        enabled: true,
+        allowPrivateTargets: true,
+      });
+      await execute(manager, direct, { networkAuthorize: async () => ({ allowed: false }) });
+      expect(runtime.wrapped[2]).not.toContain("NO_PROXY");
+      expect(runtime.wrapConfigs).toEqual([
+        { network: { mode: "restricted" }, enableWeakerNetworkIsolation: false },
+        { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
+        { network: { mode: "direct" } },
+      ]);
+      expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
+      expect(runtime.updated.every((config) => config.enableWeakerNetworkIsolation !== true)).toBe(
+        true,
+      );
+      expect(runtime.updated.every((config) => config.network.allowedDomains.length === 0)).toBe(
+        true,
+      );
+      await manager.reset();
+    }),
+  );
+
+  it.each(["direct-missing", "system-platform", "system-api-missing"] as const)(
+    "fails closed before wrap when the public backend cannot provide %s",
+    withDarwin(async (surface) => {
+      const runtime = new FakeSrtRuntime();
+      const manager = new SrtSandboxManager(runtime);
+      const policy = basePolicy();
+      if (surface === "direct-missing")
+        Object.assign(policy.network, {
+          access: { kind: "explicit", transport: "direct" },
+          enabled: true,
+          allowPrivateTargets: true,
+        });
+      else {
+        policy.network.macosTls = "system";
+        runtime.getNetworkModeCapabilities =
+          surface === "system-api-missing"
+            ? undefined
+            : () => ({ apiVersion: 1, platform: "linux", modes: ["restricted", "proxy"] });
+      }
+      await expect(execute(manager, policy)).rejects.toThrow(
+        /public restricted\/proxy mode capability/,
+      );
+      expect(runtime.wrapped).toEqual([]);
+      expect(runtime.initialized).toEqual([]);
+      await manager.reset();
+    }),
+  );
+
+  it(
+    "selects opted-in legacy inline system helpers before any future connection review",
+    withDarwin(async () => {
+      const runtime = new FakeSrtRuntime();
+      const manager = new SrtSandboxManager(runtime);
+      const policy = basePolicy();
+      policy.network.macosTls = "system";
+      await manager.activate(policy);
+      await execute(manager, policy);
+      expect(runtime.wrapConfigs).toEqual([
+        { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
+      ]);
+      expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
+      await manager.reset();
+    }),
+  );
+
+  it("maps frozen explicit attempts to public per-wrap modes and keeps legacy absent", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
+    const restricted = basePolicy();
+    restricted.network.access = { kind: "explicit", transport: "proxy" };
+    await manager.activate(restricted);
+    await execute(manager, restricted);
+    const proxy = structuredClone(restricted);
+    proxy.network.allowedDomains = ["api.example.com"];
+    await execute(manager, proxy);
+    await execute(manager, basePolicy());
+    expect(runtime.wrapConfigs).toEqual([
+      { network: { mode: "restricted" } },
+      { network: { mode: "proxy" } },
+      undefined,
+    ]);
+    expect(runtime.initialized[0]?.network).not.toHaveProperty("mode");
+    expect(runtime.updated.every((config) => !("mode" in config.network))).toBe(true);
+    expect(manager.isHealthy()).toBe(true);
+    await manager.reset();
+  });
+
+  it("captures queued explicit policy before caller mutation and restores the initialized base", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const restricted = basePolicy();
+    restricted.network.access = { kind: "explicit", transport: "proxy" };
+    await manager.activate(restricted);
+    const entered = deferred();
+    const release = deferred();
+    const wrap = runtime.wrapWithSandboxArgv.bind(runtime);
+    let ordinal = 0;
+    runtime.wrapWithSandboxArgv = async (...args) => {
+      if (++ordinal === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return wrap(...args);
+    };
+    const a = execute(manager, restricted);
+    await entered.promise;
+    const proxy = structuredClone(restricted);
+    proxy.network.allowedDomains = ["api.example.com"];
+    const b = execute(manager, proxy);
+    proxy.network.allowedDomains.push("other.example.com");
+    proxy.network.access = { kind: "inline-proxy" };
+    release.resolve();
+    await Promise.all([a, b]);
+    expect(runtime.wrapConfigs).toEqual([
+      { network: { mode: "restricted" } },
+      { network: { mode: "proxy" } },
+    ]);
+    expect(runtime.updated.map((config) => config.network.allowedDomains)).toEqual([
+      ["api.example.com"],
+      [],
+    ]);
+    expect(manager.isHealthy()).toBe(true);
+    await manager.reset();
+  });
+
+  it.each(["cleanup", "restore"])(
+    "preserves explicit %s failure poison and activation recovery",
+    async (stage) => {
+      const runtime = new FakeSrtRuntime();
+      const manager = new SrtSandboxManager(runtime);
+      const restricted = basePolicy();
+      restricted.network.access = { kind: "explicit", transport: "proxy" };
+      await manager.activate(restricted);
+      const proxy = structuredClone(restricted);
+      proxy.network.allowedDomains = ["api.example.com"];
+      if (stage === "cleanup") runtime.failCleanup = true;
+      else runtime.failUpdateCall = 2;
+      await expect(execute(manager, proxy)).rejects.toThrow(`SRT ${stage} failed`);
+      expect(runtime.wrapConfigs).toEqual([{ network: { mode: "proxy" } }]);
+      expect(runtime.updated.at(-1)?.network.allowedDomains).toEqual([]);
+      expect(manager.isHealthy()).toBe(false);
+      await expect(execute(manager, restricted)).rejects.toThrow(/poison|cleanup|restore/);
+      expect(runtime.wrapConfigs).toHaveLength(1);
+      runtime.failCleanup = false;
+      runtime.failUpdateCall = undefined;
+      await manager.activate(restricted);
+      expect(manager.isHealthy()).toBe(true);
+      await execute(manager, restricted);
+      expect(runtime.wrapConfigs.at(-1)).toEqual({ network: { mode: "restricted" } });
+      await manager.reset();
+    },
+  );
+
+  it("rejects a forged attempt projection before public wrapping", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    await manager.activate(basePolicy());
+    const policy = basePolicy();
+    policy.network.access = { kind: "explicit", transport: "proxy" };
+    policy.network.execution = { kind: "proxy", inlineReview: false };
+    await expect(execute(manager, policy)).rejects.toThrow(/projection/);
+    expect(runtime.wrapped).toEqual([]);
+    await manager.reset();
+  });
+
+  it.each(["missing", "unsupported"])(
+    "rejects %s explicit mode capability before launch",
+    async (capability) => {
+      const runtime = new FakeSrtRuntime();
+      runtime.getNetworkModeCapabilities =
+        capability === "missing"
+          ? undefined
+          : () => ({
+              apiVersion: 1,
+              platform: "linux",
+              modes: [],
+            });
+      const manager = new SrtSandboxManager(runtime);
+      await manager.activate(basePolicy());
+      const policy = basePolicy();
+      policy.network.access = { kind: "explicit", transport: "proxy" };
+      await expect(execute(manager, policy)).rejects.toThrow(/explicit network/);
+      expect(runtime.wrapped).toEqual([]);
+      expect(manager.isHealthy()).toBe(true);
+      await manager.reset();
+    },
+  );
+
   it("lets the next execution run after a timed-out initialization drains", async () => {
     const runtime = new FakeSrtRuntime();
     let releaseInitialize!: () => void;
@@ -281,32 +539,123 @@ describe("SRT executor contract", () => {
     await manager.reset();
   });
 
-  it("keeps the wrapping lease through cancellation and prevents overlap", async () => {
+  it.each([false, true])(
+    "keeps the wrapping lease through cancellation and prevents overlap (explicit=%s)",
+    async (explicit) => {
+      const runtime = new FakeSrtRuntime();
+      const manager = new SrtSandboxManager(runtime);
+      const policy = basePolicy();
+      if (explicit) policy.network.access = { kind: "explicit", transport: "proxy" };
+      await manager.activate(policy);
+      const wrapGate = deferred<void>();
+      runtime.wrapGate = wrapGate.promise;
+      const firstController = new AbortController();
+      const first = execute(manager, policy, { signal: firstController.signal });
+      await flushMicrotasks();
+      expect(runtime.activeWraps).toBe(1);
+
+      firstController.abort();
+      await expect(first).rejects.toThrow("aborted");
+      expect(manager.isHealthy()).toBe(false);
+
+      const queuedController = new AbortController();
+      const queued = execute(manager, policy, { signal: queuedController.signal });
+      queuedController.abort();
+      await expect(queued).rejects.toThrow("aborted");
+
+      wrapGate.resolve(undefined);
+      await flushMicrotasks();
+      runtime.wrapGate = undefined;
+      await expect(execute(manager, policy)).resolves.toMatchObject({ exitCode: 0 });
+      expect(runtime.maxActiveWraps).toBe(1);
+      expect(runtime.wrapConfigs).toEqual(
+        explicit
+          ? [{ network: { mode: "restricted" } }, { network: { mode: "restricted" } }]
+          : [undefined, undefined],
+      );
+      await manager.reset();
+    },
+  );
+
+  it.each(["direct", "system"] as const)(
+    "keeps the public idle barrier behind cancelled %s wrapping and cleanup",
+    withDarwin(async (surface) => {
+      const runtime = new FakeSrtRuntime();
+      runtime.getNetworkModeCapabilities = () => ({
+        apiVersion: 1,
+        platform: "macos",
+        modes: ["restricted", "proxy", "direct"],
+      });
+      const manager = new SrtSandboxManager(runtime);
+      const policy = basePolicy();
+      Object.assign(policy.network, {
+        enabled: true,
+        access: { kind: "explicit", transport: surface === "direct" ? "direct" : "proxy" },
+        ...(surface === "direct" ? { allowPrivateTargets: true } : { macosTls: "system" }),
+      });
+      await manager.activate(policy);
+      const gate = deferred();
+      runtime.wrapGate = gate.promise;
+      const controller = new AbortController();
+      const first = execute(manager, policy, { signal: controller.signal });
+      await flushMicrotasks();
+      controller.abort();
+      await expect(first).rejects.toThrow("aborted");
+      let idle = false;
+      const drained = manager.waitForIdle().then(() => {
+        idle = true;
+      });
+      await flushMicrotasks();
+      expect(idle).toBe(false);
+      expect(manager.describeState()).toMatchObject({
+        initialized: true,
+        healthy: false,
+        draining: true,
+        execution: "active-lifecycle",
+        nativeEnforcement: "unknown",
+      });
+      gate.resolve();
+      await drained;
+      expect(manager.describeState()).toMatchObject({
+        healthy: true,
+        draining: false,
+        execution: "idle",
+      });
+      expect(runtime.cleanupCalls).toBeGreaterThan(0);
+      await manager.reset();
+    }),
+  );
+
+  it("rejects the public idle barrier on drain poison without releasing the unsettled native lease", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime);
     await manager.activate(basePolicy());
-    const wrapGate = deferred<void>();
-    runtime.wrapGate = wrapGate.promise;
-    const firstController = new AbortController();
-    const first = execute(manager, basePolicy(), { signal: firstController.signal });
-    await flushMicrotasks();
-    expect(runtime.activeWraps).toBe(1);
-
-    firstController.abort();
-    await expect(first).rejects.toThrow("aborted");
-    expect(manager.isHealthy()).toBe(false);
-
-    const queuedController = new AbortController();
-    const queued = execute(manager, basePolicy(), { signal: queuedController.signal });
-    queuedController.abort();
-    await expect(queued).rejects.toThrow("aborted");
-
-    wrapGate.resolve(undefined);
-    await flushMicrotasks();
-    runtime.wrapGate = undefined;
-    await expect(execute(manager)).resolves.toMatchObject({ exitCode: 0 });
-    expect(runtime.maxActiveWraps).toBe(1);
-    await manager.reset();
+    vi.useFakeTimers();
+    const gate = deferred();
+    runtime.wrapGate = gate.promise;
+    try {
+      const controller = new AbortController();
+      const first = execute(manager, basePolicy(), { signal: controller.signal });
+      await flushMicrotasks();
+      controller.abort();
+      await expect(first).rejects.toThrow("aborted");
+      const idle = manager.waitForIdle();
+      void idle.catch(() => {});
+      await vi.advanceTimersByTimeAsync(SRT_DRAIN_TIMEOUT_MS);
+      await expect(idle).rejects.toThrow(/drain-timeout/);
+      expect(manager.describeState()).toMatchObject({
+        healthy: false,
+        draining: true,
+        execution: "active-lifecycle",
+      });
+      gate.resolve();
+      await flushMicrotasks();
+    } finally {
+      gate.resolve();
+      vi.useRealTimers();
+      await manager.activate(basePolicy());
+      await manager.reset();
+    }
   });
 
   it("poisons a drain deadline without releasing an unsettled lease", async () => {

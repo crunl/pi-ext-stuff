@@ -21,6 +21,7 @@ import {
   type NativeActionFailure,
   type PermissionError,
   type PermissionPolicy,
+  type PermissionStateView,
   type ReviewEvent,
   type RuntimeDenialPolicy,
   type TurnHandle,
@@ -226,6 +227,7 @@ export interface PiPermissions<ReviewContext = undefined> {
   /** True while at least one delegated child turn is open. */
   hasNestedTurn(): boolean;
   hasActiveTurn(): boolean;
+  inspect(): PermissionStateView | undefined;
   /**
    * Submit an opaque action capture produced at host ingress. The action's
    * executor receives the Engine's canonical call rather than any mutable
@@ -296,6 +298,10 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
       onReviewEvent: (event) => this.handleReviewEvent(event),
       onAutoStateChange: (state) => this.handleAutoStateChange(state),
     });
+  }
+
+  inspect(): PermissionStateView | undefined {
+    return this.engine.inspect();
   }
 
   beginTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void {

@@ -13,6 +13,7 @@ import {
   type AutoReviewerContext,
   type AutoReviewResult,
   buildAutoReviewRequest,
+  type GuardianPermissionContext,
 } from "./auto-review-request.ts";
 import {
   type AutoReviewer,
@@ -25,6 +26,7 @@ import type { RiskDecision } from "./risk-policy.ts";
 import {
   createGuardianEvidencePolicyCeiling,
   createGuardianEvidenceScope,
+  describeExecutionNetwork,
   type GuardianEvidenceScope,
   type SandboxPolicy,
 } from "./sandbox.ts";
@@ -57,7 +59,7 @@ const INVALID_GUARDIAN_IDENTITY =
 
 export function toolCallEventMetadata(event: ToolCallEvent): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(event as unknown as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(event)) {
     if (key === "type" || key === "toolCallId" || key === "toolName" || key === "input") continue;
     metadata[key] = value;
   }
@@ -68,6 +70,7 @@ function requestedCapabilities(
   decision: Extract<RiskDecision, { action: "prompt" }>,
 ): CapabilityRequestInput[] {
   return [
+    ...(decision.networkAll ? [{ kind: "network-all" } as const] : []),
     ...(decision.networkHosts ?? []).map(
       (host): CapabilityRequestInput => ({ kind: "network", host }),
     ),
@@ -190,24 +193,7 @@ function evidenceScopeForReview(
 function guardianPermissionContext(
   input: GuardianReviewInput<PiGuardianReviewContext>,
   decision: PromptRiskDecision,
-): {
-  sandboxProfile: "workspace-write" | "read-only";
-  executionMode: "sandboxed" | "escalated" | "host-admitted";
-  sandboxEnforcesAction: boolean;
-  filesystemWriteRoots: string[];
-  filesystemDenyRead: string[];
-  filesystemDenyWrite: string[];
-  requestedNetworkTargets: Array<{
-    host: string;
-    port?: number;
-    protocol?: string;
-  }>;
-  allowedNetworkHosts: string[];
-  deniedNetworkHosts: string[];
-  staticRisk: "LOW" | "REVIEW" | "HARD";
-  staticReason: string;
-  justification?: string;
-} {
+): GuardianPermissionContext {
   const policy = policyForReview(input);
   const escalated = input.effective.mode === "escalated";
   const hostAdmitted = input.ownership === "host-admission";
@@ -232,6 +218,24 @@ function guardianPermissionContext(
     filesystemDenyRead: escalated ? [] : [...(policy?.filesystem.denyRead ?? [])],
     filesystemDenyWrite: escalated ? [] : [...(policy?.filesystem.denyWrite ?? [])],
     requestedNetworkTargets,
+    requestedWholeNetwork: input.requested.some((request) => request.kind === "network-all"),
+    authorityFreezePoint: "execution-attempt-after-review",
+    ...(input.baseline.policy
+      ? { baselineNetwork: describeExecutionNetwork(input.baseline.policy) }
+      : {}),
+    ...(policy ? { effectiveNetwork: describeExecutionNetwork(policy) } : {}),
+    ...(input.authority ? { authority: structuredClone(input.authority) } : {}),
+    permissionLifetime:
+      input.ownership === "permission-amendment"
+        ? "turn-end-after-confirmation"
+        : input.source === "inline"
+          ? "pending-connection-only"
+          : "exact-action-only",
+    networkWarning: !policy
+      ? "This action has no sandbox network/TLS profile (host-admitted or escalated). Baseline evidence is not enforcement; execution and TLS success are unknown."
+      : policy.network.macosTls === "system"
+        ? "Host opted into startup system TLS: authorized proxy processes permit trustd/helper-mediated egress outside proxy destination/ticket enforcement. Restricted attempts remain strict. Inline/system enables helpers before future connection reviews. Approval does not prove TLS success or execution success."
+        : "Strict startup TLS; approval does not prove execution or TLS success. Pending connection approval is not a future exemption.",
     allowedNetworkHosts: escalated ? [] : [...(policy?.network.allowedDomains ?? [])],
     deniedNetworkHosts: escalated ? [] : [...(policy?.network.deniedDomains ?? [])],
     staticRisk: decision.risk,

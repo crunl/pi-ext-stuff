@@ -26,6 +26,8 @@ export interface NetworkBoundaryOptions {
 export interface NetworkEndpointResolutionOptions {
   /** Explicit high-privilege Codex-compatible local/private allowance. */
   allowLocalBinding?: boolean;
+  /** Independent outbound private/special eligibility; no bind/inbound authority. */
+  allowPrivateTargets?: boolean;
   /** An exact static allow for a raw local address or `localhost`. */
   allowExactLocalAllow?: boolean;
 }
@@ -169,7 +171,8 @@ export class NetworkBoundary {
       return Promise.resolve({ kind: "deny", reason: "Malformed network endpoint" });
     }
 
-    const allowLocalBinding = options.allowLocalBinding === true;
+    const allowLocalBinding =
+      options.allowLocalBinding === true || options.allowPrivateTargets === true;
     const allowExactLocalAllow = options.allowExactLocalAllow === true;
     const allowPrivateTarget = allowLocalBinding || allowExactLocalAllow;
 

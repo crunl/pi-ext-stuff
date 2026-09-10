@@ -2,8 +2,81 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
+import { networkPatternHasLocalException } from "./network-domain-pattern.ts";
 import { isValidNetworkCidr } from "./network-host.ts";
 import { isRecord } from "./unknown-value.ts";
+
+export type NetworkAccess =
+  | { readonly kind: "inline-proxy" }
+  | { readonly kind: "explicit"; readonly transport: "proxy" | "direct" };
+
+/** Only supported request paths are accepted; presence never downgrades to legacy. */
+export function validateNetworkAccess(input: unknown): NetworkAccess {
+  if (isRecord(input)) {
+    const keys = Object.keys(input);
+    if (input.kind === "inline-proxy" && keys.length === 1 && keys[0] === "kind") {
+      return { kind: "inline-proxy" };
+    }
+    if (
+      input.kind === "explicit" &&
+      (input.transport === "proxy" || input.transport === "direct") &&
+      keys.length === 2 &&
+      keys.includes("kind") &&
+      keys.includes("transport")
+    ) {
+      return { kind: "explicit", transport: input.transport };
+    }
+  }
+  throw new ConfigError(
+    "sandbox.network.access must be inline-proxy or explicit with transport proxy or direct",
+  );
+}
+
+/** Shared structural eligibility for configuration, Engine plans and backend mapping. */
+export function validateNetworkPolicy(network: {
+  access?: NetworkAccess;
+  enabled?: boolean;
+  allowPrivateTargets?: boolean;
+  macosTls?: "strict" | "system";
+  allowLocalBinding?: boolean;
+  allowedDomains: readonly string[];
+  deniedDomains: readonly string[];
+  delegated?: true;
+}): void {
+  const direct = network.access?.kind === "explicit" && network.access.transport === "direct";
+  if (direct) {
+    if (!network.allowPrivateTargets && !network.allowLocalBinding)
+      throw new ConfigError(
+        "Direct requires unrestricted private/special outbound eligibility (allowPrivateTargets)",
+      );
+    if (network.allowedDomains.length || network.deniedDomains.length || network.delegated)
+      throw new ConfigError("Direct cannot enforce domain constraints or delegation");
+    if (network.macosTls === "system") throw new ConfigError("Direct/system TLS is unsupported");
+  }
+  if (
+    network.access?.kind === "explicit" &&
+    network.allowLocalBinding &&
+    !(direct && network.enabled === true)
+  ) {
+    throw new ConfigError(
+      "sandbox.network.allowLocalBinding is incompatible with grant-dependent explicit access",
+    );
+  }
+  if (network.macosTls === "system") {
+    if (process.platform !== "darwin") throw new ConfigError("System TLS requires macOS");
+    const localException = network.allowedDomains.some(networkPatternHasLocalException);
+    if (
+      network.deniedDomains.length ||
+      network.delegated ||
+      network.allowLocalBinding ||
+      localException
+    ) {
+      throw new ConfigError(
+        "System TLS helper egress conflicts with destination denies, delegated confinement or native local exceptions",
+      );
+    }
+  }
+}
 
 export interface PermissionsConfig {
   version: 1;
@@ -21,6 +94,10 @@ export interface PermissionsConfig {
       denyWrite: string[];
     };
     network: {
+      access?: NetworkAccess;
+      enabled?: boolean;
+      allowPrivateTargets?: boolean;
+      macosTls?: "strict" | "system";
       allowedDomains: string[];
       deniedDomains: string[];
       /** CIDRs reserved for a user-managed TUN/fake-IP resolver. */
@@ -60,6 +137,10 @@ export type PermissionsConfigOverlay = {
       denyWrite?: string[];
     };
     network?: {
+      access?: NetworkAccess;
+      enabled?: boolean;
+      allowPrivateTargets?: boolean;
+      macosTls?: "strict" | "system";
       allowedDomains?: string[];
       deniedDomains?: string[];
       trustedFakeIpRanges?: string[];
@@ -307,10 +388,32 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         throw new ConfigError("sandbox.network must be an object");
       rejectUnknownKeys(
         input.sandbox.network,
-        ["allowedDomains", "deniedDomains", "trustedFakeIpRanges", "allowLocalBinding"],
+        [
+          "access",
+          "enabled",
+          "allowPrivateTargets",
+          "macosTls",
+          "allowedDomains",
+          "deniedDomains",
+          "trustedFakeIpRanges",
+          "allowLocalBinding",
+        ],
         "sandbox.network",
       );
       const network: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["network"]> = {};
+      for (const key of ["enabled", "allowPrivateTargets"] as const) {
+        if (key in input.sandbox.network)
+          network[key] = expectBoolean(input.sandbox.network[key], `sandbox.network.${key}`);
+      }
+      if ("macosTls" in input.sandbox.network) {
+        const tls = input.sandbox.network.macosTls;
+        if (tls !== "strict" && tls !== "system")
+          throw new ConfigError("sandbox.network.macosTls must be strict or system");
+        network.macosTls = tls;
+      }
+      if ("access" in input.sandbox.network) {
+        network.access = validateNetworkAccess(input.sandbox.network.access);
+      }
       if (
         "allowedDomains" in input.sandbox.network &&
         input.sandbox.network.allowedDomains !== undefined
@@ -423,6 +526,12 @@ function applyOverlay(
       config.sandbox.filesystem.denyRead = [...overlay.sandbox.filesystem.denyRead];
     if (overlay.sandbox.filesystem?.denyWrite !== undefined)
       config.sandbox.filesystem.denyWrite = [...overlay.sandbox.filesystem.denyWrite];
+    for (const key of ["enabled", "allowPrivateTargets", "macosTls"] as const) {
+      const value = overlay.sandbox.network?.[key];
+      if (value !== undefined) Object.assign(config.sandbox.network, { [key]: value });
+    }
+    if (overlay.sandbox.network && "access" in overlay.sandbox.network)
+      config.sandbox.network.access = validateNetworkAccess(overlay.sandbox.network.access);
     if (overlay.sandbox.network?.allowedDomains !== undefined)
       config.sandbox.network.allowedDomains = [...overlay.sandbox.network.allowedDomains];
     if (overlay.sandbox.network?.deniedDomains !== undefined)
@@ -445,6 +554,7 @@ function applyOverlay(
     if (overlay.delegation.networkHosts !== undefined)
       config.delegation.networkHosts = [...overlay.delegation.networkHosts];
   }
+  validateNetworkPolicy(config.sandbox.network);
   return config;
 }
 

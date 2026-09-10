@@ -87,7 +87,31 @@ describe("NetworkBoundary", () => {
     ).resolves.toMatchObject({ kind: "deny" });
   });
 
-  it("allows private DNS answers only with explicit local-binding mode", async () => {
+  it("keeps independent private-outbound eligibility in the coalescing identity without granting binding", async () => {
+    let release!: (value: string[]) => void;
+    const gate = new Promise<string[]>((resolve) => {
+      release = resolve;
+    });
+    const resolveHost = vi.fn(() => gate);
+    const boundary = new NetworkBoundary({ resolveHost });
+    const strict = boundary.resolveEndpoint("mixed.example", 443);
+    const eligible = boundary.resolveEndpoint("mixed.example", 443, [], undefined, {
+      allowPrivateTargets: true,
+      allowLocalBinding: false,
+    });
+    expect(resolveHost).toHaveBeenCalledTimes(2);
+    release(["93.184.216.34", "10.0.0.1"]);
+    await expect(strict).resolves.toMatchObject({ kind: "deny" });
+    await expect(eligible).resolves.toEqual({
+      kind: "allow",
+      endpoint: { host: "mixed.example", port: 443, addresses: ["93.184.216.34", "10.0.0.1"] },
+    });
+    await expect(
+      boundary.resolveEndpoint("198.18.0.1", 443, [], undefined, { allowPrivateTargets: true }),
+    ).resolves.toMatchObject({ kind: "allow" });
+  });
+
+  it("allows private DNS answers with legacy explicit local-binding mode", async () => {
     const resolveHost = vi.fn(async () => ["192.168.1.20"]);
     const boundary = new NetworkBoundary({ resolveHost });
 

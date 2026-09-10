@@ -133,6 +133,12 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
         return `Sandbox enforcement could not verify the requested action after execution started. Earlier effects may have occurred; inspect the result before considering a retry.\nReason: ${reason}`;
       }
       return `Sandbox enforcement could not verify that the requested action stayed within the approved scope. The action was not run.\nReason: ${reason}`;
+    case "permission-required":
+      return [
+        "Network permission is required for a later new invocation.",
+        `Reason: ${reason}`,
+        "Use request_permissions to request host authority. This execution is not expanded or automatically replayed; earlier effects may have occurred.",
+      ].join("\n");
     case "runtime-denied":
       if (effectsMayHaveOccurred) {
         return [

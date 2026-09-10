@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { normalizeNetworkHost } from "./network-host.ts";
+import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 
 interface ParsedNetworkDomainPattern {
   readonly kind: "any" | "wildcard" | "exact";
@@ -65,6 +65,29 @@ function formatNetworkDomainPattern(pattern: ParsedNetworkDomainPattern): string
     return pattern.port === undefined ? `[${host}]` : `[${host}]:${pattern.port}`;
   }
   return pattern.port === undefined ? host : `${host}:${pattern.port}`;
+}
+
+/** Exact local exceptions never include wildcard or port-widening authority. */
+export function isExactLocalNetworkAllowed(
+  patterns: readonly string[],
+  host: string,
+  port?: number,
+): boolean {
+  const candidate = normalizeNetworkHost(host);
+  if (!candidate || (candidate !== "localhost" && isIP(candidate) === 0)) return false;
+  return patterns.some((pattern) => {
+    const parsed = parseNetworkDomainPattern(pattern);
+    return parsed?.kind === "exact" && matchesNetworkDomainPattern(pattern, candidate, port);
+  });
+}
+
+/** Whether a configured exact pattern relaxes private/special endpoint protection. */
+export function networkPatternHasLocalException(pattern: string): boolean {
+  const parsed = parseNetworkDomainPattern(pattern);
+  return (
+    parsed?.kind === "exact" &&
+    (parsed.host === "localhost" || (isIP(parsed.host) !== 0 && !isPublicNetworkHost(parsed.host)))
+  );
 }
 
 /** Return a canonical form, or undefined when the pattern is unsupported. */

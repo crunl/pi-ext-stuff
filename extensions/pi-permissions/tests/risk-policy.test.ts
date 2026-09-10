@@ -4,7 +4,11 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
-import { evaluateHostRiskRequest, evaluateRiskRequest } from "../src/risk-policy.ts";
+import {
+  evaluateHostRiskRequest,
+  evaluateRiskRequest,
+  isSupportedPermissionRequestShape,
+} from "../src/risk-policy.ts";
 
 function config(overrides: Partial<PermissionsConfig> = {}): PermissionsConfig {
   return {
@@ -20,6 +24,128 @@ async function createGitDirectory(path: string, contents = ""): Promise<void> {
   await mkdir(join(path, "objects"));
   await mkdir(join(path, "refs"));
 }
+
+describe("Permission request own-property shape", () => {
+  function request() {
+    return {
+      scope: "turn",
+      reason: "bounded access",
+      permissions: {
+        network: { hosts: ["narrow.example"] },
+        filesystem: { write: ["/tmp/request-shape"] },
+      },
+    };
+  }
+
+  it.each(["hidden-hosts", "hidden-port"] as const)(
+    "rejects clone-erased network constraints: %s",
+    (shape) => {
+      const network = shape === "hidden-hosts" ? { enabled: true } : { hosts: ["narrow.example"] };
+      Object.defineProperty(network, shape === "hidden-hosts" ? "hosts" : "port", {
+        value: shape === "hidden-hosts" ? ["narrow.example"] : 443,
+        enumerable: false,
+      });
+      const input = { permissions: { network } };
+      expect(isSupportedPermissionRequestShape(input)).toBe(false);
+      // The clone alone is valid: the raw ingress check must precede capture.
+      expect(isSupportedPermissionRequestShape(structuredClone(input))).toBe(true);
+    },
+  );
+
+  // These descriptor forms are rejected for JSON-like schema consistency;
+  // not every layer independently represents an authority-widening exploit.
+  describe.each(["root", "permissions", "network", "filesystem", "hosts", "write"] as const)(
+    "%s layer",
+    (layer) => {
+      it.each(["hidden", "accessor", "unknown", "hidden-unknown", "symbol"] as const)(
+        "rejects %s own properties without invoking accessors",
+        (form) => {
+          const input = request();
+          const [target, key, value] =
+            layer === "root"
+              ? [input, "scope", input.scope]
+              : layer === "permissions"
+                ? [input.permissions, "network", input.permissions.network]
+                : layer === "network"
+                  ? [input.permissions.network, "hosts", input.permissions.network.hosts]
+                  : layer === "filesystem"
+                    ? [input.permissions.filesystem, "write", input.permissions.filesystem.write]
+                    : layer === "hosts"
+                      ? [input.permissions.network.hosts, "0", "narrow.example"]
+                      : [input.permissions.filesystem.write, "0", "/tmp/request-shape"];
+          let reads = 0;
+          if (form === "accessor") {
+            Object.defineProperty(target, key, {
+              enumerable: true,
+              get: () => {
+                reads += 1;
+                return value;
+              },
+            });
+          } else {
+            Object.defineProperty(
+              target,
+              form === "symbol"
+                ? Symbol("scope")
+                : form === "unknown" || form === "hidden-unknown"
+                  ? "unsupported"
+                  : key,
+              { value, enumerable: form === "unknown" || form === "symbol" },
+            );
+          }
+          expect(isSupportedPermissionRequestShape(input)).toBe(false);
+          expect(reads).toBe(0);
+        },
+      );
+    },
+  );
+
+  it.each(["hosts", "write"] as const)("rejects sparse or custom-prototype %s lists", (key) => {
+    const wrap = (list: string[]) => ({
+      permissions: key === "hosts" ? { network: { hosts: list } } : { filesystem: { write: list } },
+    });
+    const sparse = new Array<string>(2);
+    sparse[1] = "narrow.example";
+    expect(isSupportedPermissionRequestShape(wrap(sparse))).toBe(false);
+    const inherited = ["narrow.example"];
+    Object.setPrototypeOf(inherited, Object.assign(Object.create(Array.prototype), { port: 443 }));
+    expect(isSupportedPermissionRequestShape(wrap(inherited))).toBe(false);
+  });
+
+  it.each(["ordinary", "frozen", "null-prototype"] as const)(
+    "preserves unambiguous %s data at every record and list layer",
+    (form) => {
+      const input = request();
+      const records = [
+        input,
+        input.permissions,
+        input.permissions.network,
+        input.permissions.filesystem,
+      ];
+      const lists = [input.permissions.network.hosts, input.permissions.filesystem.write];
+      if (form === "frozen") {
+        for (const value of [...records, ...lists]) Object.freeze(value);
+      }
+      if (form === "null-prototype") {
+        for (const value of records) Object.setPrototypeOf(value, null);
+      }
+      expect(isSupportedPermissionRequestShape(input)).toBe(true);
+      expect(isSupportedPermissionRequestShape(structuredClone(input))).toBe(true);
+      const broad = { permissions: { network: { enabled: true } } };
+      for (const value of [broad, broad.permissions, broad.permissions.network]) {
+        if (form === "frozen") Object.freeze(value);
+        if (form === "null-prototype") Object.setPrototypeOf(value, null);
+      }
+      expect(isSupportedPermissionRequestShape(broad)).toBe(true);
+    },
+  );
+
+  it("preserves empty ordinary lists for the later semantic permission check", () => {
+    expect(isSupportedPermissionRequestShape({ permissions: { network: { hosts: [] } } })).toBe(
+      true,
+    );
+  });
+});
 
 describe("Risk policy gate", () => {
   it("leaves every host-owned tool to its owner unless a rule opts into review", async () => {

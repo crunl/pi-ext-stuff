@@ -1,5 +1,4 @@
 import { statSync } from "node:fs";
-import { isIP } from "node:net";
 import { resolve } from "node:path";
 
 import type {
@@ -36,6 +35,7 @@ import {
   createAuditLink,
   createDelegationPlan,
   type DelegationEnvelope,
+  intersectSandboxPolicy,
   isNetworkCovered,
   isWriteCovered,
   resolveChildEnvelope,
@@ -56,7 +56,7 @@ import {
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { NetworkBoundary } from "./network-boundary.ts";
-import { normalizeNetworkHost } from "./network-host.ts";
+import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
 import {
   renderExactRetryInstruction,
   renderPermissionErrorForAgent,
@@ -86,12 +86,18 @@ import {
   type ReviewPartialResult,
   type ReviewRenderResult,
 } from "./review-renderer.ts";
-import { evaluateHostRiskRequest, evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
+import {
+  evaluateHostRiskRequest,
+  evaluateRiskRequest,
+  isSupportedPermissionRequestShape,
+  type RiskDecision,
+} from "./risk-policy.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
   createSandboxRuntimeConfig,
+  describeExecutionNetwork,
   looksLikeSandboxDenial,
   type NativeFileOperationFailure,
   type SandboxedFileOperationOptions,
@@ -406,6 +412,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
     session.currentExecutionSnapshot() === snapshot;
 
+  const requiresNetworkQuiescence = (network: SandboxPolicy["network"] | undefined): boolean =>
+    (network?.access?.kind === "explicit" && network.access.transport === "direct") ||
+    network?.macosTls === "system" ||
+    network?.allowLocalBinding === true;
+
+  const assertUnmediatedExecutionCurrent = (
+    policy: SandboxPolicy,
+    snapshot: PermissionExecutionSnapshot,
+  ): void => {
+    if (
+      requiresNetworkQuiescence(policy.network) &&
+      (!getEffectiveExecutionContext(snapshot) || session.activeDelegationCeiling())
+    ) {
+      throw new Error("Unmediated network execution is outside the current permission scope");
+    }
+  };
+
   const getEffectiveExecutionContext = (
     snapshot: PermissionExecutionSnapshot,
   ): EffectiveExecutionContext | undefined => {
@@ -508,9 +531,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const checkDelegationNetwork = (
     host: string,
     mode: ExecutablePermissionMode,
-    config: PermissionsConfig,
+    _config: PermissionsConfig,
   ): string | undefined => {
-    if (mode === "yolo" || !config.delegation.enabled) return undefined;
+    if (mode === "yolo") return undefined;
     const ceiling = session.activeDelegationCeiling();
     if (!ceiling || isNetworkCovered(host, ceiling)) return undefined;
     const hosts = ceiling.networkHosts.length === 0 ? "(none)" : ceiling.networkHosts.join(", ");
@@ -552,7 +575,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * (sandboxEnforcesAction=false) and arbitrary host inputs have no
    * statically checkable capability shape.
    */
-  const mintNestedPermissionTurn = async (
+  const mintNestedPermissionTurnOwned = async (
     ctx: ExtensionContext,
     parentSnapshot: PermissionExecutionSnapshot,
   ): Promise<NestedPermissionTurnResult> => {
@@ -570,6 +593,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const delegation = parentSnapshot.config.delegation;
     const childCwd = resolve(ctx.cwd);
     let childBase = parentSnapshot.baseSandboxConfig;
+    // Only the Engine can supply broad turn authority. Host grants remain
+    // non-inheriting; a broad parent may be intersected into an explicit finite envelope.
+    if (childBase && permissions.inspect()?.turn.networkAll) {
+      childBase = structuredClone(childBase);
+      childBase.network.enabled = true;
+    }
     let envelope: DelegationEnvelope = {
       writeRoots: [...(childBase?.filesystem.allowWrite ?? [])],
       networkHosts: [...(childBase?.network.allowedDomains ?? [])],
@@ -609,6 +638,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return beginSnapshotlessNestedTurn();
       }
     }
+    // Even with configured delegation enforcement disabled, an actual nested
+    // Engine owns only its finite resolved envelope, never raw/helper authority.
+    if (parentSnapshot.mode !== "yolo" && childBase)
+      childBase = intersectSandboxPolicy(childBase, envelope);
     if (!isParentCurrent()) return "stale";
     const sessionId = stableSessionId(ctx, session.getGeneration());
     let auditedEnvelope: DelegationEnvelope;
@@ -678,6 +711,43 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       // Delegation audit events are best effort; enforcement never depends on observers.
     }
     return "opened";
+  };
+
+  const mintNestedPermissionTurn = async (
+    ctx: ExtensionContext,
+    parent: PermissionExecutionSnapshot,
+  ): Promise<NestedPermissionTurnResult> => {
+    const network = parent.baseSandboxConfig?.network;
+    const needsDrain = requiresNetworkQuiescence(network);
+    if (parent.mode === "yolo" || !needsDrain) return mintNestedPermissionTurnOwned(ctx, parent);
+    const generation = session.getGeneration();
+    // A proxy callback cannot tighten a raw/helper profile already installed at
+    // spawn. Hold off new execution, then wait for real backend quiescence.
+    return sandboxCoordinator.runExclusive(async () => {
+      try {
+        if (!sandboxManager.waitForIdle)
+          throw new Error("Backend cannot drain unmediated networking before delegation");
+        await sandboxManager.waitForIdle(AbortSignal.timeout(15_000));
+        if (
+          !session.isCurrentGeneration(generation) ||
+          session.currentExecutionSnapshot() !== parent
+        )
+          throw new Error("Delegation preparation became stale");
+        if (!sandboxManagerHealthy()) throw new Error("Backend unhealthy after delegation drain");
+        return await mintNestedPermissionTurnOwned(ctx, parent);
+      } catch (error) {
+        // Merely returning from agent_start would let the child borrow the
+        // parent's snapshot. Invalidate all admission and abort instead.
+        resetBranchPermissionContext("Unmediated network delegation could not drain");
+        ctx.abort();
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            `Delegation blocked: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        return "blocked";
+      }
+    });
   };
 
   const finishPermissionTurn = (reason: string): number | undefined => {
@@ -822,6 +892,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     baseSandboxConfig = candidateSandbox;
     sandboxState = nextSandboxState;
     setDefaultStatus(ctx);
+    if (candidateSandbox?.network.macosTls === "system") {
+      try {
+        ctx.ui.notify(
+          "WARNING: configured system TLS accepts startup trustd/helper-mediated egress outside proxy destination/ticket enforcement. Explicit ungranted attempts remain strict restricted; authorized proxy attempts may enable helpers before spawn (inline mode: before future connection review). Application private checks still apply. This is not a TLS-success guarantee or a network permission grant. Guardian stays independently strict.",
+          "warning",
+        );
+      } catch {
+        /* Disclosure is observational, never another approval ledger. */
+      }
+    }
     return candidate;
   };
 
@@ -975,18 +1055,45 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     );
   };
 
-  const activateConfig = (
+  const activateConfig = async (
     ctx: Pick<ExtensionContext, "cwd" | "ui" | "hasUI">,
     force = false,
     targetMode?: ExecutablePermissionMode,
     candidateOverride?: LoadedPermissionsConfig,
     expectedGeneration = session.getGeneration(),
-  ): Promise<LoadedPermissionsConfig> =>
-    targetMode === "yolo"
+  ): Promise<LoadedPermissionsConfig> => {
+    // A cache read shares running executions, but still queues behind every
+    // exclusive activation/reset. Recheck all facts only after acquiring it;
+    // never upgrade a shared lease into a mutable activation.
+    if (!force && !candidateOverride && targetMode !== "yolo") {
+      const cached = await sandboxCoordinator.runShared(async () => {
+        assertActivationCurrent(expectedGeneration);
+        if (configFailure) throw configFailure;
+        if (
+          loaded &&
+          loadedKey === configKey(ctx) &&
+          requiresSandbox(targetMode ?? modeRuntime?.mode ?? "auto", loaded.config) &&
+          sandboxState.kind === "ready"
+        ) {
+          if (
+            loaded.config.sandbox.network.access?.kind === "explicit" &&
+            !sandboxManagerHealthy()
+          ) {
+            const reason = "Sandbox executor is unavailable or poisoned";
+            throw Object.assign(new Error(reason), { code: "enforcement-unavailable", reason });
+          }
+          return loaded;
+        }
+        return undefined;
+      });
+      if (cached) return cached;
+    }
+    return targetMode === "yolo"
       ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration)
       : sandboxCoordinator.runExclusive(() =>
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
+  };
 
   const MODE_RANK: Record<PermissionMode, number> = {
     auto: 1,
@@ -1239,18 +1346,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: decision.kind === "deny" ? decision.error.reason : reason,
         };
       }
-      const normalizedHost = normalizeNetworkHost(host);
-      const exactLocalAllow =
-        normalizedHost !== undefined &&
-        (isIP(normalizedHost) !== 0 || normalizedHost === "localhost") &&
-        policy.network.allowedDomains.some((pattern) => {
-          const normalizedPattern = pattern.trim().toLowerCase();
-          return (
-            normalizedPattern !== "*" &&
-            !normalizedPattern.startsWith("*.") &&
-            matchesNetworkDomainPattern(pattern, host, port)
-          );
-        });
+      const exactLocalAllow = isExactLocalNetworkAllowed(policy.network.allowedDomains, host, port);
       const endpoint = await networkBoundary.resolveEndpoint(
         host,
         port,
@@ -1258,6 +1354,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         activeSignal,
         {
           allowLocalBinding: policy.network.allowLocalBinding === true,
+          allowPrivateTargets: policy.network.allowPrivateTargets === true,
           allowExactLocalAllow: exactLocalAllow,
         },
       );
@@ -1655,16 +1752,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           });
           return {
             kind: "completed",
-            value: await sandboxCoordinator.runShared(
-              () =>
-                sandboxedBash.execute(
-                  call.id,
-                  call.input,
-                  attemptSignal,
-                  reviewBridge.onUpdate as BashOnUpdate,
-                ),
-              attemptSignal,
-            ),
+            value: await sandboxCoordinator.runShared(() => {
+              assertUnmediatedExecutionCurrent(policy, executionSnapshot);
+              return sandboxedBash.execute(
+                call.id,
+                call.input,
+                attemptSignal,
+                reviewBridge.onUpdate as BashOnUpdate,
+              );
+            }, attemptSignal),
           };
         } catch (error: unknown) {
           if (mode === "sandboxed" && !attemptSignal.aborted) {
@@ -1826,6 +1922,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return {
             kind: "completed",
             value: await sandboxCoordinator.runShared(() => {
+              assertUnmediatedExecutionCurrent(policy, executionSnapshot);
               // A queued retry must still obey the live ceiling, including its new parent root.
               for (const root of policy.filesystem.allowWrite) {
                 if (executionSnapshot.baseSandboxConfig?.filesystem.allowWrite.includes(root))
@@ -1972,13 +2069,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     name: "request_permissions",
     label: "request_permissions",
     description:
-      "Request a turn-scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for the current turn and does not disable the sandbox. Protected paths and prohibited targets remain blocked.",
+      "Request a turn-scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for execution attempts created afterwards in the current turn and does not disable the sandbox. Network authority freezes at attempt creation after action review, not invocation submission; a still-reviewing invocation may see an intervening grant. It does not expand an existing attempt or replay an action. Protected paths and prohibited targets remain blocked.",
     promptSnippet: "Request explicit filesystem/network permissions",
     parameters: Type.Object({
       reason: Type.Optional(Type.String()),
+      scope: Type.Optional(Type.Literal("turn")),
       permissions: Type.Object({
         filesystem: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
-        network: Type.Optional(Type.Object({ hosts: Type.Array(Type.String()) })),
+        network: Type.Optional(
+          Type.Union([
+            Type.Object({ hosts: Type.Array(Type.String()) }),
+            Type.Object({ enabled: Type.Literal(true) }),
+          ]),
+        ),
       }),
     }),
     // SAFETY: same renderer-wrapper contract as addReviewResultRenderer —
@@ -1987,6 +2090,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ToolDefinition<TSchema>["renderResult"]
     >,
     async execute(id, params, _signal, _onUpdate, ctx) {
+      if (!isSupportedPermissionRequestShape(params)) {
+        const reason =
+          "request_permissions requires an unambiguous turn-scoped network.hosts OR network.enabled:true request, and/or filesystem.write";
+        throw Object.assign(
+          new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
+          { code: "policy-denied", reason },
+        );
+      }
       const actionSignal = _signal;
       const captured = permissions.captureAction({
         id,
@@ -2016,7 +2127,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       if (
         decision.action !== "prompt" ||
-        ((decision.networkHosts?.length ?? 0) === 0 &&
+        (!decision.networkAll &&
+          (decision.networkHosts?.length ?? 0) === 0 &&
           (decision.filesystemWriteRoots?.length ?? 0) === 0)
       ) {
         const error = new Error(
@@ -2030,6 +2142,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           reason: "request_permissions requires a non-empty capability request",
         });
         throw error;
+      }
+      if (decision.networkAll && session.activeDelegationCeiling()) {
+        throw Object.assign(
+          new Error("Whole-network authority is outside the delegation envelope"),
+          { code: "policy-denied" },
+        );
       }
       // A nested amendment may only request capabilities inside its
       // delegation envelope; the child Engine would otherwise accumulate
@@ -2126,7 +2244,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 content: [
                   {
                     type: "text",
-                    text: `Granted turn permissions${
+                    text: `Granted turn permissions${decision.networkAll ? "; whole-network outbound authority subject to hard domain/private policy (not bind or TLS authority)" : ""}${
                       grantedHosts.length > 0 ? `; hosts: ${grantedHosts.join(", ")}` : ""
                     }${grantedRoots.length > 0 ? `; write roots: ${grantedRoots.join(", ")}` : ""}`,
                   },
@@ -2485,9 +2603,50 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.registerCommand("permissions", {
-    description: "Show the active permission policy",
-    handler: async (_args, ctx) =>
-      session.runModeMutation(async (generation) => {
+    description:
+      "Reload permission policy, or inspect live authority with /permissions status (read-only)",
+    handler: async (args, ctx) => {
+      if (args.trim() === "status") {
+        let configured:
+          | { fingerprint: string; network: PermissionsConfig["sandbox"]["network"] }
+          | { error: string };
+        try {
+          const candidate = await loadPermissionsConfig(agentDir);
+          configured = {
+            fingerprint: fingerprintConfig(candidate.config),
+            network: structuredClone(candidate.config.sandbox.network),
+          };
+        } catch (error) {
+          configured = { error: error instanceof Error ? error.message : String(error) };
+        }
+        // Inspection never activates, mutates grants or poisons a working config.
+        const authority = permissions.inspect();
+        const state = {
+          configured,
+          activeGeneration: session.getGeneration(),
+          activeConfigFingerprint: loaded ? fingerprintConfig(loaded.config) : undefined,
+          activation: sandboxState,
+          mode: modeRuntime?.mode ?? "unknown",
+          authority,
+          baselineNetwork: authority?.baseline
+            ? describeExecutionNetwork(authority.baseline)
+            : undefined,
+          nextAttemptNetwork: authority?.effective
+            ? describeExecutionNetwork(authority.effective)
+            : undefined,
+          backend: sandboxManager.describeState?.() ?? {
+            initialized: sandboxState.kind === "ready",
+            healthy: sandboxManager.isHealthy?.() ?? "unknown",
+            networkSupport: "unknown",
+            execution: "unknown",
+            nativeEnforcement: "unknown",
+          },
+          note: "Call identity freezes at invocation capture; network authority freezes at execution-attempt creation after review, before the backend queue. Review evidence is a plan, not a guarantee that an invocation still awaiting review cannot see intervening turn grants. Attempt plans are not proof of spawn, native enforcement or TLS success. Pending connection approvals are AllowOnce, not future exemptions. Turn grants expire at turn end; approval does not imply execution success. System TLS accepts helper-mediated egress outside proxy destination/ticket enforcement. Guardian remains independently strict, zero-write and zero-authorizable-network.",
+        };
+        ctx.ui.notify(`Permission status (read-only)\n${JSON.stringify(state, null, 2)}`, "info");
+        return;
+      }
+      return session.runModeMutation(async (generation) => {
         let candidateLoaded = false;
         try {
           const previousMode = modeRuntime ? modeRuntime.mode : undefined;
@@ -2544,6 +2703,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 : sandboxState.kind === "failed"
                   ? `sandbox error: ${sandboxState.error}`
                   : "sandbox pending";
+          const networkView = baseSandboxConfig
+            ? describeExecutionNetwork(baseSandboxConfig)
+            : undefined;
+          const networkSummary = networkView
+            ? `; ${networkView.requestPath}, required ${networkView.required.kind}, TLS ${networkView.effectiveTls} (configured ${networkView.configuredTls})${networkView.helperEgressRisk ? "; WARNING: startup trustd/helper egress bypasses destination/ticket enforcement" : ""}${networkView.localBindingAndInbound ? "; bind/inbound and raw loopback enabled" : ""}; backend execution/native enforcement not attested`
+            : "";
           const configFingerprint = fingerprintConfig(config);
           const activeReviewer =
             lastGuardianSelection !== undefined &&
@@ -2554,7 +2719,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           ctx.ui.notify(
             renderPermissionSummary({
               mode: runtime.mode,
-              sandbox: sandboxSummary,
+              sandbox: sandboxSummary + networkSummary,
               reviewer: activeReviewer
                 ? {
                     kind: "active",
@@ -2582,6 +2747,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           if (modeRuntime?.mode === "yolo" && !ctx.isIdle()) ctx.abort();
           reportPermissionSetupError(ctx, error);
         }
-      }),
+      });
+    },
   });
 }

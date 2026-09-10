@@ -4,16 +4,21 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AutoReviewRequest, AutoReviewResult } from "../src/auto-review-request.ts";
-import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
+import { type AutoReviewer, AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { NetworkBoundary } from "../src/network-boundary.ts";
 import { registerExtension } from "../src/register.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
+import { SandboxConnectGuard } from "../src/sandbox/connect-guard.ts";
+import { SRT_DRAIN_TIMEOUT_MS } from "../src/sandbox/srt-coordinator.ts";
+import { type SrtRuntimeLike, SrtSandboxManager } from "../src/sandbox/srt-enforcer.ts";
 import type {
   SandboxDenialCapability,
   SandboxExecutionRequest,
   SandboxExecutionResult,
+  SandboxManagerLike,
   SandboxPolicy,
 } from "../src/sandbox.ts";
+import { SandboxExecutionCoordinator } from "../src/sandbox-coordinator.ts";
 
 type RiskOverride = (
   tool: string,
@@ -48,6 +53,9 @@ interface HarnessOptions {
   review?: ReviewOverride;
   eventBusError?: boolean;
   useRealBashTool?: boolean;
+  /** Keep both production risk classification and activation/execution barriers. */
+  useRealPermissionRuntime?: boolean;
+  useRealCoordinator?: boolean;
   sandboxInitializeError?: Error;
   sandboxExecuteError?: Error;
   sandboxExecute?: (
@@ -60,6 +68,11 @@ interface HarnessOptions {
   sandboxNetworkAnswers?: Record<string, readonly string[]>;
   sandboxResetErrorAfter?: number;
   sandboxHealthy?: boolean;
+  sandboxManagerOverride?: SandboxManagerLike;
+  /** Replace the default stub reviewer (e.g. production PiAutoReviewer). */
+  autoReviewer?: AutoReviewer;
+  model?: unknown;
+  modelRegistry?: unknown;
 }
 
 interface Harness {
@@ -88,6 +101,7 @@ interface Harness {
   sandboxManager: {
     initialize: ReturnType<typeof vi.fn>;
     isHealthy: ReturnType<typeof vi.fn>;
+    waitForIdle: ReturnType<typeof vi.fn>;
     wrapWithSandbox: ReturnType<typeof vi.fn>;
     execute: ReturnType<typeof vi.fn>;
     classifyDenial: ReturnType<typeof vi.fn>;
@@ -95,6 +109,7 @@ interface Harness {
     reset: ReturnType<typeof vi.fn>;
   };
   bashToolFactory: ReturnType<typeof vi.fn>;
+  executionCoordinator: SandboxExecutionCoordinator;
   sandboxCoordinator: {
     runShared: ReturnType<typeof vi.fn>;
     runExclusive: ReturnType<typeof vi.fn>;
@@ -106,6 +121,7 @@ interface Harness {
   select: ReturnType<typeof vi.fn>;
   abort: ReturnType<typeof vi.fn>;
   appendEntry: ReturnType<typeof vi.fn>;
+  emit: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
 }
 
@@ -245,6 +261,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const sandboxManager = {
     initialize,
     isHealthy,
+    waitForIdle: vi.fn(async (_signal?: AbortSignal) => {}),
     wrapWithSandbox,
     execute,
     classifyDenial,
@@ -252,6 +269,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     readFailureDiagnostics: vi.fn(async () => options.sandboxDiagnostics),
   };
 
+  const executionCoordinator = new SandboxExecutionCoordinator();
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const sandboxCoordinator = { runShared, runExclusive };
@@ -303,7 +321,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     return options.review ? options.review(request, reviewOrdinal) : approved();
   });
   const invalidateSession = vi.fn();
-  const autoReviewer: AutoReviewer = { invalidateSession, review };
+  const autoReviewer: AutoReviewer = options.autoReviewer ?? { invalidateSession, review };
 
   const riskEvaluator = vi.fn(
     async (tool: string, input: Record<string, unknown>): Promise<RiskDecision> => {
@@ -358,8 +376,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     isProjectTrusted: () => false,
     isIdle: () => true,
     sessionManager,
-    modelRegistry: {},
-    model: undefined,
+    modelRegistry: options.modelRegistry ?? {},
+    model: options.model,
     scopedModels: [],
     signal: undefined,
     abort,
@@ -369,11 +387,14 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
 
   registerExtension(pi as never, {
     agentDir,
-    sandboxManager: sandboxManager as never,
+    sandboxManager: options.sandboxManagerOverride ?? (sandboxManager as never),
     bashToolFactory: options.useRealBashTool ? undefined : (bashToolFactory as never),
-    sandboxCoordinator: sandboxCoordinator as never,
+    sandboxCoordinator:
+      options.useRealPermissionRuntime || options.useRealCoordinator
+        ? executionCoordinator
+        : (sandboxCoordinator as never),
     autoReviewer,
-    riskEvaluator: riskEvaluator as never,
+    riskEvaluator: options.useRealPermissionRuntime ? undefined : (riskEvaluator as never),
     networkBoundary,
   });
 
@@ -393,6 +414,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sandboxManager,
     bashToolFactory,
     sandboxCoordinator,
+    executionCoordinator,
+    emit,
     bareBashExecute,
     sandboxBashExecute,
     setStatus,
@@ -464,6 +487,7 @@ async function executeRequestPermissions(app: Harness, id: string, host: string)
     id,
     {
       reason: `Allow ${host}`,
+      scope: "turn",
       permissions: { network: { hosts: [host] } },
     },
     undefined,
@@ -481,7 +505,49 @@ async function executeHostCall(app: Harness, toolName: string, id: string): Prom
   });
 }
 
+// Host-policy fixture only: fake SRT advertises macOS, never kernel support.
+// Keep the exact original descriptor through all awaited work and cleanup.
+function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
+  return async (...args: T): Promise<void> => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "darwin" });
+    try {
+      await run(...args);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  };
+}
+
 describe("Permission mode registration", () => {
+  it("runs the hermetic system registration fixture from a simulated Linux host descriptor", async () => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...original, value: "linux" });
+    const simulated = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      await withDarwin(async () => {
+        const app = await makeHarness({
+          useRealBashTool: true,
+          useRealPermissionRuntime: true,
+          config: { sandbox: { network: { macosTls: "system" } } },
+        });
+        try {
+          await startSession(app);
+          await startAgent(app);
+          await executeBash(app, "simulated-host-system", "printf ok");
+          expect(
+            app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution,
+          ).toMatchObject({ kind: "proxy", tls: "system" });
+        } finally {
+          await invoke(app, "session_shutdown");
+        }
+      })();
+      expect(Object.getOwnPropertyDescriptor(process, "platform")).toEqual(simulated);
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  });
+
   it("registers Auto status and initializes the sandbox on session_start", async () => {
     const app = await makeHarness();
 
@@ -947,7 +1013,7 @@ describe("Permission mode registration", () => {
     expect(reviewStatusCalls(app)).toHaveLength(0);
   });
 
-  it("reviews a registered native mkdir preparation failure and re-enters Write once under SRT", async () => {
+  it("reviews a registered native mkdir preparation failure and re-enters Write once with real risk and coordinator", async () => {
     const parent = await mkdtemp(join(tmpdir(), "native retry parent "));
     tempDirectories.push(parent);
     const path = join(parent, " file .txt ");
@@ -955,7 +1021,7 @@ describe("Permission mode registration", () => {
     const policies: SandboxPolicy[] = [];
     const app = await makeHarness({
       config: { sandbox: { filesystem: { allowWrite: ["."] } } },
-      risk: () => lowRisk(),
+      useRealPermissionRuntime: true,
       sandboxExecute: async (request, ordinal) => {
         operations.push(request.program.args[2]);
         policies.push(request.policy);
@@ -974,11 +1040,12 @@ describe("Permission mode registration", () => {
       content: [{ type: "text", text: `Successfully wrote to ${path}` }],
     });
     expect(operations).toEqual(["mkdir", "mkdir", "write"]);
-    expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(parent);
-    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/subtree/);
-    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/partial directory effects/);
-    expect(JSON.stringify(app.reviewInputs[0])).toContain("retry once");
+    expect(app.reviewInputs).toHaveLength(2);
+    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).not.toContain(parent);
+    expect(app.reviewInputs[1]?.permissionContext.filesystemWriteRoots).toContain(parent);
+    expect(JSON.stringify(app.reviewInputs[1])).toMatch(/subtree/);
+    expect(JSON.stringify(app.reviewInputs[1])).toMatch(/partial directory effects/);
+    expect(JSON.stringify(app.reviewInputs[1])).toContain("retry once");
     expect(policies[1]).toEqual({
       ...policies[0],
       filesystem: {
@@ -1038,6 +1105,7 @@ describe("Permission mode registration", () => {
       let failed = false;
       const app = await makeHarness({
         config: { sandbox: { filesystem: { allowWrite: ["."] } } },
+        useRealCoordinator: true,
         risk: () => lowRisk(),
         sandboxDiagnostics:
           "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence): /unrelated wrong path",
@@ -1084,6 +1152,40 @@ describe("Permission mode registration", () => {
     },
   );
 
+  it.each(["access", "read"])(
+    "does not retry registered Edit %s when real risk already granted its exact file",
+    async (stage) => {
+      const operations: string[] = [];
+      const app = await makeHarness({
+        useRealPermissionRuntime: true,
+        config: { sandbox: { filesystem: { allowWrite: ["."] } } },
+        sandboxExecute: async (request) => {
+          const operation = request.program.args[2];
+          operations.push(operation);
+          return {
+            stdout: Buffer.alloc(0),
+            stderr: Buffer.from(
+              operation === stage ? "EACCES: original already-covered file failure" : "",
+            ),
+            exitCode: operation === stage ? 1 : 0,
+          };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await expect(executeEdit(app, "real-edit-covered", "/outside/file")).rejects.toMatchObject({
+        code: "enforcement-unavailable",
+        reason: expect.stringMatching(
+          /already covered[\s\S]*original already-covered file failure/,
+        ),
+      });
+      expect(app.reviewInputs).toHaveLength(1);
+      expect(app.reviewInputs[0].permissionContext.filesystemWriteRoots).toContain("/outside/file");
+      expect(operations).toEqual(stage === "access" ? ["access"] : ["access", "read"]);
+      expect(app.sandboxManager.execute).toHaveBeenCalledTimes(operations.length);
+    },
+  );
+
   it("does not reuse Edit preparation evidence after successful operations or retry native matching failures", async () => {
     let ordinal = 0;
     const app = await makeHarness({
@@ -1116,7 +1218,7 @@ describe("Permission mode registration", () => {
     async (tool) => {
       const operations: string[] = [];
       const app = await makeHarness({
-        risk: () => lowRisk(),
+        useRealPermissionRuntime: true,
         sandboxDiagnostics:
           "SRT diagnostic observations (potentially sanitized or unrelated; not authorization evidence): deny file-write /unrelated",
         sandboxExecute: async (request) => {
@@ -1138,7 +1240,7 @@ describe("Permission mode registration", () => {
       ).rejects.toThrow(
         /EPERM content may be truncated[\s\S]*SRT diagnostic[\s\S]*Effects warning/,
       );
-      expect(app.reviewInputs).toHaveLength(0);
+      expect(app.reviewInputs).toHaveLength(1); // Initial action-risk review only; no recovery after content entry.
       expect(operations).toEqual(
         tool === "write" ? ["mkdir", "write"] : ["access", "read", "write"],
       );
@@ -1444,6 +1546,54 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.initialize).toHaveBeenCalledOnce();
   });
 
+  it("rechecks queued preparation across a real-coordinator mode transition while preserving the active YOLO snapshot", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+    });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab")!;
+    await shortcut.handler(app.context);
+    await startAgent(app);
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writer = app.executionCoordinator.runExclusive(async () => {
+      entered();
+      await gate;
+    });
+    await entry;
+    const activations = app.sandboxManager.initialize.mock.calls.length;
+    const downshift = shortcut.handler(app.context);
+    const amendment = executeRequestPermissions(app, "queued-yolo-request", "api.example.com");
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(activations);
+      expect(app.reviewInputs).toHaveLength(0);
+    } finally {
+      release();
+    }
+    await writer;
+    await downshift;
+    expect(await amendment).toMatchObject({
+      content: [{ text: expect.stringContaining("Full access is already active") }],
+    });
+    expect(app.abort).not.toHaveBeenCalled();
+    await endAgent(app);
+    await startAgent(app);
+    await executeBash(app, "new-auto-after-queue", "printf auto");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toEqual({
+      kind: "restricted",
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+  });
+
   it("keeps the active YOLO snapshot when cycling down to Auto", async () => {
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
@@ -1560,6 +1710,1633 @@ describe("Permission mode registration", () => {
     expect(hardCall).toMatchObject({ block: true });
     expect(app.reviewInputs).toHaveLength(reviewCount);
   });
+
+  it("retains real permissions-command activation and rollback for explicit policy", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const command = app.commands.get("permissions")!;
+    await writeFile(
+      join(app.agentDir, "extensions", "pi-permissions", "config.json"),
+      JSON.stringify({
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            allowedDomains: ["api.example.com"],
+          },
+        },
+      }),
+    );
+    app.sandboxManager.initialize.mockRejectedValueOnce(
+      new Error("explicit backend activation sentinel"),
+    );
+    await command.handler("", app.context);
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("previous sandbox remains active"),
+      "error",
+    );
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
+    expect(app.sandboxManager.initialize.mock.calls[1]?.[0].network.allowedDomains).toEqual([
+      "api.example.com",
+    ]);
+    expect(app.sandboxManager.initialize.mock.calls[2]?.[0].network.allowedDomains).toEqual([]);
+    await executeBash(app, "rollback-old-policy", "printf old");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toEqual({
+      kind: "restricted",
+    });
+    await command.handler("", app.context);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(4);
+    await expect(executeBash(app, "stale-after-reload", "printf stale")).rejects.toThrow(
+      /permission context is unavailable/,
+    );
+    await endAgent(app);
+    await startAgent(app);
+    await executeBash(app, "activated-new-policy", "printf new");
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
+      execution: { kind: "proxy", inlineReview: false },
+      allowedDomains: ["api.example.com"],
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it.each(["unchanged", "generation", "fault"])(
+    "queues cached preparation behind an existing exclusive writer (%s)",
+    async (mutation) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+      });
+      await startSession(app);
+      await startAgent(app);
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reader = app.executionCoordinator.runShared(async () => {
+        entered();
+        await gate;
+      });
+      await entry;
+      let writerRan = false;
+      const writer = app.executionCoordinator.runExclusive(async () => {
+        writerRan = true;
+        if (mutation === "generation") await invoke(app, "session_before_tree");
+        if (mutation === "fault") app.sandboxManager.isHealthy.mockReturnValue(false);
+      });
+      const amendment = executeRequestPermissions(app, "behind-writer", "api.example.com").then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      try {
+        // Drain the current event-loop turn, not an elapsed-time sleep. The old
+        // uncoordinated cache path could finish its host-only review in this turn.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(writerRan).toBe(false);
+        expect(app.reviewInputs).toHaveLength(0);
+      } finally {
+        release();
+      }
+      await Promise.all([reader, writer]);
+      const result = await amendment;
+      if (mutation === "generation")
+        expect(result).toMatchObject({ error: { name: "ActivationSupersededError" } });
+      else if (mutation === "fault")
+        expect(result).toMatchObject({ error: { code: "enforcement-unavailable" } });
+      else expect(result).toHaveProperty("value");
+      expect(app.reviewInputs).toHaveLength(mutation === "unchanged" ? 1 : 0);
+      expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it("waits for actual forced activation and refuses its obsolete permission snapshot", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await writeFile(
+      join(app.agentDir, "extensions", "pi-permissions", "config.json"),
+      JSON.stringify({
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            deniedDomains: ["api.example.com"],
+          },
+        },
+      }),
+    );
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    app.sandboxManager.initialize.mockImplementationOnce(async () => {
+      entered();
+      await gate;
+    });
+    const activation = app.commands.get("permissions")!.handler("", app.context);
+    await entry;
+    const amendment = executeRequestPermissions(app, "during-activation", "api.example.com").then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(app.reviewInputs).toHaveLength(0);
+    } finally {
+      release();
+    }
+    await activation;
+    expect(await amendment).toMatchObject({
+      error: { message: expect.stringContaining("permission context is unavailable") },
+    });
+    await endAgent(app);
+    await startAgent(app);
+    await expect(
+      executeRequestPermissions(app, "after-activation", "api.example.com"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    ["direct", "system", "binding"].flatMap((surface) =>
+      ["bash", "write", "edit"].flatMap((tool) =>
+        [false, true].map((childInstalled) => ({ surface, tool, childInstalled })),
+      ),
+    ),
+  )(
+    "checks late parent review at actual shared launch: $surface / $tool / child=$childInstalled",
+    withDarwin(async ({ surface, tool, childInstalled }) => {
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            filesystem: { allowWrite: ["."] },
+            network: {
+              access: { kind: "explicit", transport: surface !== "system" ? "direct" : "proxy" },
+              enabled: true,
+              ...(surface === "system"
+                ? { macosTls: "system" }
+                : { allowPrivateTargets: true, allowLocalBinding: surface === "binding" }),
+            },
+          },
+          delegation: { enabled: true, networkHosts: ["api.example.com"] },
+        },
+        sandboxExecute: async (request) => ({
+          stdout: Buffer.from(request.program.args[2] === "read" ? "before" : ""),
+          stderr: Buffer.alloc(0),
+          exitCode: 0,
+        }),
+        review: async () => {
+          entered();
+          await gate;
+          return approved();
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      let reviewed = false;
+      const launchEntries: boolean[] = [];
+      const shared = app.executionCoordinator.runShared.bind(app.executionCoordinator);
+      vi.spyOn(app.executionCoordinator, "runShared").mockImplementation((operation, signal) =>
+        shared(async () => {
+          launchEntries.push(reviewed);
+          return operation();
+        }, signal),
+      );
+      const path = join(app.agentDir, "late-parent-file");
+      const parent = (
+        tool === "bash"
+          ? executeBash(app, "late-raw-review", "rm -rf /tmp/risk-only-fixture")
+          : tool === "write"
+            ? executeWrite(app, "late-write-review", path, "after")
+            : executeEdit(app, "late-edit-review", path)
+      ).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await entry;
+      try {
+        if (childInstalled) await startAgent(app);
+      } finally {
+        reviewed = true;
+        release();
+      }
+      const result = await parent;
+      expect(launchEntries).toContain(true); // Real shared callback entered after review, not a pre-queue check.
+      expect(app.reviewInputs).toHaveLength(1);
+      if (!childInstalled) {
+        expect(result).toHaveProperty("value");
+        expect(app.sandboxManager.execute).toHaveBeenCalled();
+        return;
+      }
+      expect(result).toMatchObject({
+        error: { reason: expect.stringContaining("outside the current permission scope") },
+      });
+      expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+      await executeBash(app, "child-after-late-review", "printf child");
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+        enabled: false,
+        macosTls: "strict",
+        execution: { kind: "proxy", inlineReview: false },
+      });
+    }),
+  );
+
+  it.each(["success", "poison", "stale"] as const)(
+    "handles %s cancelled registered drain through the real SRT manager and process coordinator",
+    async (outcome) => {
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const configs: unknown[] = [];
+      const runtime: SrtRuntimeLike = {
+        getNetworkModeCapabilities: () => ({
+          apiVersion: 1,
+          platform: "macos",
+          modes: ["restricted", "proxy", "direct"],
+        }),
+        isSupportedPlatform: () => true,
+        checkDependenciesAsync: async () => ({ errors: [], warnings: [] }),
+        initialize: async () => {},
+        updateConfig: () => {},
+        cleanupAfterCommand: () => {},
+        reset: async () => {},
+        getSandboxViolationStore: () => {
+          throw new Error("No diagnostic authority in this fake backend");
+        },
+        wrapWithSandboxArgv: async (_command, _shell, config) => {
+          configs.push(structuredClone(config));
+          if (configs.length === 1) {
+            entered();
+            await gate;
+          }
+          return { argv: [process.execPath, "-e", ""], env: {} };
+        },
+      };
+      const guard = new SandboxConnectGuard();
+      vi.spyOn(guard, "start").mockResolvedValue(undefined);
+      vi.spyOn(guard, "close").mockResolvedValue(undefined);
+      const manager = new SrtSandboxManager(runtime, guard);
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        sandboxManagerOverride: manager,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "direct" },
+              enabled: true,
+              allowPrivateTargets: true,
+            },
+          },
+          delegation: { enabled: true, networkHosts: ["api.example.com"] },
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      const controller = new AbortController();
+      const parent = app.tools
+        .get("bash")!
+        .execute(
+          "cancelled-raw",
+          { command: "printf parent" },
+          controller.signal,
+          undefined,
+          app.context,
+        )
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      await entry;
+      if (outcome === "poison") vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      controller.abort();
+      expect(await parent).toHaveProperty("error");
+      expect(manager.describeState()).toMatchObject({ healthy: false, draining: true });
+      const child = startAgent(app);
+      const blockedTool =
+        outcome === "success"
+          ? undefined
+          : executeBash(app, "while-real-drain", "printf no").then(
+              (value) => ({ value }),
+              (error: unknown) => ({ error }),
+            );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(
+          app.emit.mock.calls.filter(([name]) => name === "pi-permissions:delegation"),
+        ).toHaveLength(0);
+        expect(manager.describeState().draining).toBe(true);
+        if (outcome === "stale") await endAgent(app);
+        if (outcome === "poison") {
+          await vi.advanceTimersByTimeAsync(SRT_DRAIN_TIMEOUT_MS);
+          await child;
+          expect(manager.describeState()).toMatchObject({
+            healthy: false,
+            draining: true,
+            execution: "active-lifecycle",
+          });
+          await expect(manager.waitForIdle()).rejects.toThrow(/drain-timeout/);
+          expect(configs).toHaveLength(1); // Caller rejected, but unsettled native lease is still owned.
+        }
+      } finally {
+        release();
+        vi.useRealTimers();
+      }
+      try {
+        await child;
+        if (outcome !== "success") {
+          expect(await blockedTool).toHaveProperty("error");
+          expect(app.abort).toHaveBeenCalled();
+          await expect(executeBash(app, "after-real-failed-drain", "printf no")).rejects.toThrow();
+          expect(configs).toHaveLength(1);
+          if (outcome === "poison") {
+            await vi.waitFor(() => expect(manager.describeState().draining).toBe(false));
+            expect(manager.describeState().healthy).toBe(false);
+            await expect(manager.waitForIdle()).rejects.toThrow(/drain-timeout/);
+          }
+          return;
+        }
+        expect(manager.describeState()).toMatchObject({ healthy: true, draining: false });
+        await executeBash(app, "post-drain-child", "printf child");
+        expect(configs).toEqual([{ network: { mode: "direct" } }, { network: { mode: "proxy" } }]);
+        expect(app.reviewInputs).toHaveLength(0);
+      } finally {
+        // Teardown only after the detached operation settles and failure assertions;
+        // reset is not an admission retry and never releases the held wrap gate.
+        await manager.reset();
+      }
+    },
+  );
+
+  it("freezes attempt authority after initial review, not invocation submission, then resists queued widening", async () => {
+    let enterAction!: () => void;
+    const actionEntered = new Promise<void>((resolve) => {
+      enterAction = resolve;
+    });
+    let releaseAction!: () => void;
+    const actionGate = new Promise<void>((resolve) => {
+      releaseAction = resolve;
+    });
+    let enterBroad!: () => void;
+    const broadEntered = new Promise<void>((resolve) => {
+      enterBroad = resolve;
+    });
+    let releaseBroad!: () => void;
+    const broadGate = new Promise<void>((resolve) => {
+      releaseBroad = resolve;
+    });
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+      review: async (_request, ordinal) => {
+        if (ordinal === 1) {
+          enterAction();
+          await actionGate;
+        }
+        if (ordinal === 3) {
+          enterBroad();
+          await broadGate;
+        }
+        return approved();
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const params = { command: "rm -rf /tmp/risk-only-fixture" };
+    const first = executeBashWithParams(app, "pending-action", params);
+    await actionEntered;
+    params.command = "printf changed";
+    const status = async () => {
+      await app.commands.get("permissions")!.handler("status", app.context);
+      return JSON.parse(String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"));
+    };
+    expect((await status()).authority).toMatchObject({
+      attempts: [],
+      pendingReviews: 1,
+      turn: { networkAll: false, networkHosts: [] },
+    });
+    expect(app.reviewInputs[0]?.permissionContext).toMatchObject({
+      baselineNetwork: { wholeNetwork: false },
+      effectiveNetwork: { wholeNetwork: false },
+    });
+    await executeRequestPermissions(app, "intervening-host", "api.example.com");
+    const broad = app.tools
+      .get("request_permissions")!
+      .execute(
+        "later-broad",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      );
+    await broadEntered;
+    let enterWriter!: () => void;
+    const writerEntered = new Promise<void>((resolve) => {
+      enterWriter = resolve;
+    });
+    let releaseWriter!: () => void;
+    const writerGate = new Promise<void>((resolve) => {
+      releaseWriter = resolve;
+    });
+    const writer = app.executionCoordinator.runExclusive(async () => {
+      enterWriter();
+      await writerGate;
+    });
+    await writerEntered;
+    try {
+      releaseAction();
+      await vi.waitFor(async () => {
+        expect((await status()).authority.attempts).toHaveLength(1);
+      });
+      const queued = (await status()).authority.attempts[0];
+      expect(queued).toMatchObject({
+        callId: "pending-action",
+        phase: "planned-or-executing",
+        lease: { policy: { network: { allowedDomains: ["api.example.com"] } } },
+      });
+      expect(queued.lease.policy.network.enabled).not.toBe(true);
+      releaseBroad();
+      await broad;
+      const observed = await status();
+      expect(observed.authority.turn.networkAll).toBe(true);
+      expect(observed.authority.attempts[0].lease.policy.network.enabled).not.toBe(true);
+      observed.authority.attempts[0].lease.policy.network.enabled = true;
+      expect((await status()).authority.attempts[0].lease.policy.network.enabled).not.toBe(true);
+      expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+    } finally {
+      releaseAction();
+      releaseBroad();
+      releaseWriter();
+    }
+    await Promise.all([writer, first, broad]);
+    const request = app.sandboxManager.execute.mock.calls[0]?.[0];
+    expect(request.program.args).toContain("rm -rf /tmp/risk-only-fixture");
+    expect(request.policy.network.allowedDomains).toEqual(["api.example.com"]);
+    expect(request.policy.network.enabled).not.toBe(true);
+    await executeBash(app, "after-queued-grant", "printf B");
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.enabled).toBe(true);
+    expect(app.reviewInputs).toHaveLength(3);
+  });
+
+  it("reports pending inline AllowOnce without inventing a future exemption", async () => {
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      sandboxNetworkAttempt: { host: "api.example.com", port: 443 },
+      review: async (_request, ordinal) => {
+        if (ordinal === 1) {
+          entered();
+          await gate;
+        }
+        return approved();
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const first = executeBash(app, "pending-inline", "printf A");
+    await entry;
+    try {
+      await app.commands.get("permissions")!.handler("status", app.context);
+      const view = JSON.parse(
+        String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+      );
+      expect(view.authority).toMatchObject({
+        pendingReviews: 1,
+        pendingConnections: 1,
+        actionGrants: [],
+        turn: { networkAll: false, networkHosts: [] },
+      });
+      expect(app.reviewInputs[0]?.permissionContext.permissionLifetime).toBe(
+        "pending-connection-only",
+      );
+    } finally {
+      release();
+    }
+    await first;
+    await executeBash(app, "new-inline", "printf B");
+    expect(app.reviewInputs).toHaveLength(2);
+    await app.commands.get("permissions")!.handler("status", app.context);
+    const view = JSON.parse(
+      String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+    );
+    expect(view.authority).toMatchObject({
+      pendingReviews: 0,
+      pendingConnections: 0,
+      actionGrants: [],
+      turn: { networkAll: false, networkHosts: [] },
+    });
+  });
+
+  it("does not show a turn grant invalidated by default permissions activation", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await app.tools
+      .get("request_permissions")!
+      .execute(
+        "reload-grant",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      );
+    await app.commands.get("permissions")!.handler("", app.context);
+    await app.commands.get("permissions")!.handler("status", app.context);
+    const view = JSON.parse(
+      String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+    );
+    expect(view).not.toHaveProperty("authority");
+    await executeBash(app, "after-default-reload", "printf A");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toEqual({
+      kind: "restricted",
+    });
+  });
+
+  it("reviews a risky action independently under broad baseline authority without granting another scope", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: { network: { access: { kind: "explicit", transport: "proxy" }, enabled: true } },
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "broad-risk", "rm -rf /tmp/risk-only-fixture");
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext).toMatchObject({
+      permissionLifetime: "exact-action-only",
+      requestedWholeNetwork: false,
+      baselineNetwork: { wholeNetwork: true },
+      effectiveNetwork: { wholeNetwork: true },
+    });
+    await app.commands.get("permissions")!.handler("status", app.context);
+    const view = JSON.parse(
+      String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+    );
+    expect(view.authority.turn.networkAll).toBe(false);
+    expect(view.authority.actionGrants).toEqual([]);
+  });
+
+  it(
+    "reports Engine authority read-only without reload, poisoning or leaking expired grants",
+    withDarwin(async () => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: { access: { kind: "explicit", transport: "proxy" }, macosTls: "system" },
+          },
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await app.commands.get("permissions")!.handler("status", app.context);
+      const status = () =>
+        JSON.parse(String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"));
+      expect(status().nextAttemptNetwork).toMatchObject({
+        configuredTls: "system",
+        effectiveTls: "strict",
+        required: { kind: "restricted" },
+        wholeNetwork: false,
+      });
+      await app.tools
+        .get("request_permissions")!
+        .execute(
+          "status-broad",
+          { permissions: { network: { enabled: true } } },
+          undefined,
+          undefined,
+          app.context,
+        );
+      expect(app.reviewInputs[0]?.permissionContext).toMatchObject({
+        requestedWholeNetwork: true,
+        permissionLifetime: "turn-end-after-confirmation",
+        baselineNetwork: { wholeNetwork: false, effectiveTls: "strict" },
+        effectiveNetwork: { wholeNetwork: true, effectiveTls: "system", helperEgressRisk: true },
+      });
+      const initialized = app.sandboxManager.initialize.mock.calls.length;
+      const persisted = app.appendEntry.mock.calls.length;
+      await writeFile(
+        join(app.agentDir, "extensions", "pi-permissions", "config.json"),
+        "{invalid",
+      );
+      await app.commands.get("permissions")!.handler("status", app.context);
+      const observed = status();
+      expect(observed.configured.error).toBeTypeOf("string");
+      expect(observed.authority.turn).toMatchObject({
+        networkAll: true,
+        networkHosts: [],
+        expires: "turn-end",
+      });
+      expect(observed.nextAttemptNetwork).toMatchObject({
+        required: { kind: "proxy", tls: "system" },
+        helperEgressRisk: true,
+      });
+      expect(observed.backend.nativeEnforcement).toBe("unknown");
+      expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(initialized);
+      expect(app.appendEntry).toHaveBeenCalledTimes(persisted);
+      observed.authority.effective.network.enabled = false;
+      await app.commands.get("permissions")!.handler("status", app.context);
+      expect(status().authority.turn.networkAll).toBe(true);
+      await writeFile(
+        join(app.agentDir, "extensions", "pi-permissions", "config.json"),
+        JSON.stringify({
+          sandbox: {
+            network: { access: { kind: "explicit", transport: "proxy" }, macosTls: "system" },
+          },
+        }),
+      );
+      await executeBash(app, "after-status", "printf ok");
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toEqual({
+        kind: "proxy",
+        inlineReview: false,
+        tls: "system",
+      });
+      await endAgent(app);
+      await app.commands.get("permissions")!.handler("status", app.context);
+      expect(status()).not.toHaveProperty("authority");
+      expect(app.reviewInputs).toHaveLength(1);
+    }),
+  );
+
+  it.each([false, true])(
+    "keeps private eligibility independent of authority and binding (private=%s)",
+    async (allowPrivateTargets) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: { access: { kind: "explicit", transport: "proxy" }, allowPrivateTargets },
+          },
+        },
+        sandboxNetworkAttempt: { host: "10.1.2.3", port: 443 },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await expect(executeBash(app, "private-ungranted", "printf A")).rejects.toMatchObject({
+        code: allowPrivateTargets ? "permission-required" : "policy-denied",
+      });
+      if (!allowPrivateTargets) {
+        await expect(
+          executeRequestPermissions(app, "private-host-rejected", "10.1.2.3"),
+        ).rejects.toMatchObject({ code: "policy-denied" });
+      }
+      await app.tools
+        .get("request_permissions")!
+        .execute(
+          "public-broad",
+          { permissions: { network: { enabled: true } } },
+          undefined,
+          undefined,
+          app.context,
+        );
+      const execution = executeBash(app, "private-broad", "printf B");
+      if (allowPrivateTargets) await expect(execution).resolves.toBeDefined();
+      else await expect(execution).rejects.toMatchObject({ code: "policy-denied" });
+      expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.allowLocalBinding).toBe(
+        false,
+      );
+      expect(app.reviewInputs).toHaveLength(1);
+    },
+  );
+
+  it.each(["localhost", "localhost:443"])(
+    "keeps exact-local amendment eligibility consistent without widening %s",
+    async (baseline) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "proxy" },
+              allowedDomains: [baseline],
+            },
+          },
+        },
+        sandboxNetworkAttempt: { host: "localhost", port: 443 },
+        sandboxNetworkAnswers: { localhost: ["127.0.0.1"] },
+      });
+      await startSession(app);
+      await startAgent(app);
+      const amendment = executeRequestPermissions(app, "exact-local-request", "localhost");
+      if (baseline === "localhost") await expect(amendment).resolves.toBeDefined();
+      else await expect(amendment).rejects.toMatchObject({ code: "policy-denied" });
+      await executeBash(app, "exact-local-covered", "printf A");
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+      expect(app.reviewInputs).toHaveLength(baseline === "localhost" ? 1 : 0);
+    },
+  );
+
+  it(
+    "rejects all-denied broad authority and system/private-host conflicts before review",
+    withDarwin(async () => {
+      for (const system of [false, true]) {
+        const app = await makeHarness({
+          useRealBashTool: true,
+          useRealPermissionRuntime: true,
+          config: {
+            sandbox: {
+              network: {
+                access: { kind: "explicit", transport: "proxy" },
+                ...(system
+                  ? { macosTls: "system", allowPrivateTargets: true }
+                  : { deniedDomains: ["*"] }),
+              },
+            },
+          },
+        });
+        await startSession(app);
+        await startAgent(app);
+        await expect(
+          app.tools
+            .get("request_permissions")!
+            .execute(
+              "hard-network-conflict",
+              { permissions: { network: system ? { hosts: ["127.0.0.1"] } : { enabled: true } } },
+              undefined,
+              undefined,
+              app.context,
+            ),
+        ).rejects.toMatchObject({ code: "policy-denied" });
+        expect(app.reviewInputs).toHaveLength(0);
+        expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+      }
+    }),
+  );
+
+  it("grants one eligible private host without silently granting all-network", async () => {
+    const target = { host: "10.1.2.3", port: 443 };
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: {
+          network: { access: { kind: "explicit", transport: "proxy" }, allowPrivateTargets: true },
+        },
+      },
+      sandboxNetworkAttempt: target,
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeRequestPermissions(app, "one-private", target.host);
+    await executeBash(app, "private-covered", "printf yes");
+    target.host = "10.1.2.4";
+    await expect(executeBash(app, "private-uncovered", "printf no")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+      allowedDomains: ["10.1.2.3"],
+      allowLocalBinding: false,
+    });
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+    expect(app.reviewInputs).toHaveLength(1);
+  });
+
+  it.each([true, false])(
+    "intersects broad configured parent into a finite child even with delegation.enabled=%s",
+    async (enabled) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              enabled: true,
+              allowedDomains: ["api.example.com"],
+              access: { kind: "explicit", transport: "proxy" },
+            },
+          },
+          delegation: { enabled, networkHosts: ["api.example.com"] },
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await startAgent(app);
+      await expect(
+        app.tools
+          .get("request_permissions")!
+          .execute(
+            "child-broad",
+            { permissions: { network: { enabled: true } } },
+            undefined,
+            undefined,
+            app.context,
+          ),
+      ).rejects.toMatchObject({ code: "policy-denied" });
+      await executeBash(app, "child-host-only", "printf child");
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+        enabled: false,
+        delegated: true,
+        allowedDomains: ["api.example.com"],
+        execution: { kind: "proxy", inlineReview: false },
+      });
+      expect(app.reviewInputs).toHaveLength(0);
+    },
+  );
+
+  it("intersects a broad turn grant without reintroducing it through the child lease", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } },
+        delegation: { enabled: true, networkHosts: ["api.example.com"] },
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await app.tools
+      .get("request_permissions")!
+      .execute(
+        "parent-broad",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      );
+    await startAgent(app);
+    await executeBash(app, "child-finite", "printf child");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+      enabled: false,
+      allowedDomains: ["api.example.com"],
+    });
+    await endAgent(app);
+    await executeBash(app, "parent-resumed", "printf parent");
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.enabled).toBe(true);
+  });
+
+  it.each(["direct", "system"] as const)(
+    "drains an active %s parent before installing a tighter child",
+    withDarwin(async (surface) => {
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: surface === "direct" ? "direct" : "proxy" },
+              enabled: true,
+              ...(surface === "direct" ? { allowPrivateTargets: true } : { macosTls: "system" }),
+            },
+          },
+          delegation: { enabled: true, networkHosts: ["api.example.com"] },
+        },
+        sandboxExecute: async (_request, ordinal) => {
+          if (ordinal === 1) {
+            entered();
+            await gate;
+          }
+          return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      const parent = executeBash(app, "raw-parent", "printf parent");
+      await entry;
+      const child = startAgent(app);
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(app.sandboxManager.waitForIdle).not.toHaveBeenCalled();
+        expect(
+          app.emit.mock.calls.filter(([name]) => name === "pi-permissions:delegation"),
+        ).toHaveLength(0);
+      } finally {
+        release();
+      }
+      await parent;
+      await child;
+      expect(app.sandboxManager.waitForIdle).toHaveBeenCalledTimes(1);
+      await executeBash(app, "tight-child", "printf child");
+      expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
+        enabled: false,
+        macosTls: "strict",
+        delegated: true,
+        allowedDomains: ["api.example.com"],
+        allowLocalBinding: false,
+        execution: { kind: "proxy", inlineReview: false },
+      });
+    }),
+  );
+
+  it.each(["pending", "poison", "stale"] as const)(
+    "handles %s backend drain before nested admission without borrowing a raw parent",
+    async (outcome) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "direct" },
+              enabled: true,
+              allowPrivateTargets: true,
+            },
+          },
+          delegation: { enabled: true, networkHosts: ["api.example.com"] },
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      let entered!: () => void;
+      const entry = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      app.sandboxManager.waitForIdle.mockImplementationOnce(async () => {
+        entered();
+        await gate;
+        if (outcome === "poison") throw new Error("poisoned after drain failure");
+      });
+      const child = startAgent(app);
+      await entry;
+      const tool = executeBash(app, "while-draining", "printf child").then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+        if (outcome === "stale") await endAgent(app);
+      } finally {
+        release();
+      }
+      await child;
+      if (outcome === "pending") {
+        expect(await tool).toHaveProperty("value");
+        expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toEqual({
+          kind: "proxy",
+          inlineReview: false,
+        });
+      } else {
+        expect(await tool).toHaveProperty("error");
+        expect(app.abort).toHaveBeenCalled();
+        await expect(executeBash(app, "after-failed-drain", "printf no")).rejects.toThrow();
+        expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("starts restricted then selects direct only after a whole-network amendment", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: {
+          network: { access: { kind: "explicit", transport: "direct" }, allowPrivateTargets: true },
+        },
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "direct-A", "printf A");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.execution).toMatchObject({
+      kind: "restricted",
+    });
+    await expect(
+      executeRequestPermissions(app, "narrow-direct", "api.example.com"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    expect(app.reviewInputs).toHaveLength(0);
+    await app.tools
+      .get("request_permissions")!
+      .execute(
+        "direct-grant",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      );
+    await executeBash(app, "direct-B", "printf B");
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
+      enabled: true,
+      execution: { kind: "direct" },
+      allowLocalBinding: false,
+    });
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.filesystem.denyWrite).toContain(
+      join(app.cwd, ".git"),
+    );
+    expect(app.reviewInputs).toHaveLength(1);
+  });
+
+  it("grants whole-network authority only to later invocations and retains hard policy", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            deniedDomains: ["blocked.example.com"],
+          },
+        },
+      },
+      sandboxNetworkAttempt: { host: "other.example.com", port: 443 },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeBash(app, "no-broad", "printf A")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    await app.tools
+      .get("request_permissions")!
+      .execute(
+        "broad",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      );
+    await executeBash(app, "broad-B", "printf B");
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
+      enabled: true,
+      allowedDomains: [],
+      deniedDomains: ["blocked.example.com"],
+    });
+    await endAgent(app);
+    await startAgent(app);
+    await expect(executeBash(app, "expired-broad", "printf C")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+  });
+
+  it.each(["host", "whole"] as const)(
+    "freezes running real Bash A while explicit %s confirmation grants only new B",
+    async (scope) => {
+      let entered!: (request: SandboxExecutionRequest) => void;
+      const entry = new Promise<SandboxExecutionRequest>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const decisions: boolean[] = [];
+      const plans: SandboxPolicy[] = [];
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "proxy" },
+              deniedDomains: ["blocked.example.com"],
+            },
+          },
+        },
+        sandboxExecute: async (request, ordinal) => {
+          plans.push(structuredClone(request.policy));
+          if (ordinal === 1) {
+            entered(request);
+            await gate;
+          }
+          const authorization = await request.networkAuthorize!({
+            host: "api.example.com",
+            port: 443,
+          });
+          decisions.push(authorization.allowed);
+          return {
+            stdout: Buffer.alloc(0),
+            stderr: Buffer.alloc(0),
+            exitCode: authorization.allowed ? 0 : 1,
+          };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      const a = executeBash(app, "explicit-A", "printf A").then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      const running = await entry;
+      try {
+        expect(running.policy.network.execution).toEqual({ kind: "restricted" });
+        expect(app.reviewInputs).toHaveLength(0);
+        const activations = app.sandboxManager.initialize.mock.calls.length;
+        if (scope === "host")
+          await executeRequestPermissions(app, "explicit-grant", "api.example.com");
+        else
+          await app.tools
+            .get("request_permissions")!
+            .execute(
+              "explicit-grant",
+              { permissions: { network: { enabled: true } } },
+              undefined,
+              undefined,
+              app.context,
+            );
+        expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(activations);
+        expect(app.sandboxManager.execute).toHaveBeenCalledTimes(1);
+        expect(running.policy.network.allowedDomains).toEqual([]);
+        expect(running.policy.network.enabled).not.toBe(true);
+        expect(running.policy.network.execution).toEqual({ kind: "restricted" });
+        await app.commands.get("permissions")!.handler("status", app.context);
+        const view = JSON.parse(
+          String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+        );
+        expect(view.authority.attempts[0].lease.policy.network.execution).toEqual({
+          kind: "restricted",
+        });
+        expect(view.nextAttemptNetwork.required.kind).toBe("proxy");
+      } finally {
+        release();
+      }
+      expect(await a).toMatchObject({ error: { code: "permission-required" } });
+      await executeBash(app, "explicit-B", "printf B");
+      expect(decisions).toEqual([false, true]);
+      expect(plans[1]?.network).toMatchObject({
+        execution: { kind: "proxy", inlineReview: false },
+        allowedDomains: scope === "host" ? ["api.example.com"] : [],
+        deniedDomains: ["blocked.example.com"],
+      });
+      expect(app.reviewInputs).toHaveLength(1);
+      await expect(
+        executeRequestPermissions(app, "explicit-hard", "blocked.example.com"),
+      ).rejects.toMatchObject({ code: "policy-denied" });
+      expect(app.reviewInputs).toHaveLength(1);
+      await endAgent(app);
+      await startAgent(app);
+      await expect(executeBash(app, "explicit-expired", "printf C")).rejects.toMatchObject({
+        code: "permission-required",
+      });
+      expect(plans[2]?.network.execution).toEqual({ kind: "restricted" });
+      expect(app.sandboxManager.execute).toHaveBeenCalledTimes(3);
+      expect(app.reviewInputs).toHaveLength(1);
+    },
+  );
+
+  it("freezes A and grants B through production PiAutoReviewer without host sandbox mutation", async () => {
+    let entered!: (request: SandboxExecutionRequest) => void;
+    const entry = new Promise<SandboxExecutionRequest>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const complete = vi.fn(async () => ({
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            risk_level: "low",
+            user_authorization: "high",
+            outcome: "allow",
+            rationale: "Authorized by production auto-review.",
+          }),
+        },
+      ],
+      stopReason: "stop",
+    }));
+    // Default createTools is createIsolatedGuardianToolRuntime. Approve without
+    // tool rounds so close() retires an unstarted worker (no spawn).
+    const productionReviewer = new PiAutoReviewer(complete as never);
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      autoReviewer: productionReviewer,
+      model: { provider: "openai", id: "guardian-test" },
+      modelRegistry: {
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "token" }),
+      },
+      config: {
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            deniedDomains: ["blocked.example.com"],
+          },
+        },
+      },
+      sandboxExecute: async (request, ordinal) => {
+        if (ordinal === 1) {
+          entered(request);
+          await gate;
+        }
+        const authorization = await request.networkAuthorize!({
+          host: "api.example.com",
+          port: 443,
+        });
+        return {
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.alloc(0),
+          exitCode: authorization.allowed ? 0 : 1,
+        };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const a = executeBash(app, "prod-A", "printf A").then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    const running = await entry;
+    const activations = app.sandboxManager.initialize.mock.calls.length;
+    const hostExecutes = app.sandboxManager.execute.mock.calls.length;
+    try {
+      expect(running.policy.network.execution).toEqual({ kind: "restricted" });
+      await executeRequestPermissions(app, "prod-grant", "api.example.com");
+      // Production review must not touch the host SRT manager while A is running.
+      expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(activations);
+      expect(app.sandboxManager.execute).toHaveBeenCalledTimes(hostExecutes);
+      expect(running.policy.network.execution).toEqual({ kind: "restricted" });
+      expect(complete).toHaveBeenCalledOnce();
+    } finally {
+      release();
+    }
+    expect(await a).toMatchObject({ error: { code: "permission-required" } });
+    await executeBash(app, "prod-B", "printf B");
+    expect(app.sandboxManager.execute.mock.calls.at(-1)?.[0].policy.network).toMatchObject({
+      execution: { kind: "proxy", inlineReview: false },
+      allowedDomains: ["api.example.com"],
+    });
+    await expect(
+      executeRequestPermissions(app, "prod-hard", "blocked.example.com"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+  });
+
+  it.each(
+    ["denied", "aborted", "stale"].flatMap((outcome) =>
+      ["host", "whole"].map((scope) => ({ outcome, scope })),
+    ),
+  )("does not give new Bash a $outcome explicit $scope grant", async ({ outcome, scope }) => {
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+      review: async () => {
+        entered();
+        await gate;
+        return outcome === "denied" ? denied() : approved();
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const controller = new AbortController();
+    const amendment = app.tools
+      .get("request_permissions")!
+      .execute(
+        "not-granted",
+        {
+          permissions: {
+            network: scope === "host" ? { hosts: ["api.example.com"] } : { enabled: true },
+          },
+        },
+        controller.signal,
+        undefined,
+        app.context,
+      )
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+    await entry;
+    if (outcome === "aborted") controller.abort();
+    if (outcome === "stale") {
+      await endAgent(app);
+      await startAgent(app);
+    }
+    release();
+    expect(await amendment).toMatchObject({
+      error: {
+        code:
+          outcome === "denied"
+            ? "review-denied"
+            : outcome === "aborted"
+              ? "aborted"
+              : "stale-invocation",
+      },
+    });
+    await executeBash(app, "after-failed-grant", "printf ok");
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+      execution: { kind: "restricted" },
+      allowedDomains: [],
+    });
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+    expect(app.reviewInputs).toHaveLength(1);
+  });
+
+  it("tightens running explicit attempts at the live child ceiling without widening child hosts", async () => {
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const decisions: boolean[] = [];
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            allowedDomains: ["api.example.com", "other.example.com"],
+            deniedDomains: ["blocked.example.com"],
+          },
+          filesystem: { denyRead: ["/explicit-secret"], denyWrite: ["/explicit-secret"] },
+        },
+        delegation: { networkHosts: ["api.example.com"] },
+      },
+      sandboxExecute: async (request, ordinal) => {
+        if (ordinal === 1) {
+          decisions.push(
+            (await request.networkAuthorize!({ host: "other.example.com", port: 443 })).allowed,
+          );
+          entered();
+          await gate;
+        }
+        decisions.push(
+          (
+            await request.networkAuthorize!({
+              host: ordinal === 1 ? "other.example.com" : "api.example.com",
+              port: 443,
+            })
+          ).allowed,
+        );
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const a = executeBash(app, "parent-A", "printf A").then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await entry;
+    try {
+      await startAgent(app);
+    } finally {
+      release();
+    }
+    expect(await a).toMatchObject({ error: { code: "policy-denied" } });
+    await executeBash(app, "child-B", "printf B");
+    expect(decisions).toEqual([true, false, true]);
+    const childPolicy = app.sandboxManager.execute.mock.calls[1]?.[0].policy;
+    expect(childPolicy.network).toMatchObject({
+      access: { kind: "explicit", transport: "proxy" },
+      execution: { kind: "proxy", inlineReview: false },
+      allowedDomains: ["api.example.com"],
+      deniedDomains: ["blocked.example.com"],
+    });
+    expect(childPolicy.filesystem.denyRead).toContain("/explicit-secret");
+    expect(childPolicy.filesystem.denyWrite).toContain(join(app.cwd, ".git"));
+    await expect(
+      executeRequestPermissions(app, "child-outside", "other.example.com"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    await expect(
+      executeWrite(app, "child-hard-write", "/explicit-secret", "no"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    await expect(
+      executeWrite(app, "child-git-hooks", ".git/hooks/pre-commit", "no"),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])(
+    "reviews risky real Bash independently without synthesizing network (baseline=%s)",
+    async (baseline) => {
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: {
+          sandbox: {
+            network: {
+              access: { kind: "explicit", transport: "proxy" },
+              allowedDomains: baseline ? ["api.example.com"] : [],
+            },
+          },
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await executeBash(app, "ordinary-before", "printf ok");
+      expect(app.reviewInputs).toHaveLength(0);
+      await executeBash(app, "risky-action", "rm -rf scratch");
+      expect(app.reviewInputs).toHaveLength(1);
+      await executeBash(app, "ordinary-after", "printf ok");
+      expect(app.reviewInputs).toHaveLength(1);
+      for (const [request] of app.sandboxManager.execute.mock.calls) {
+        expect(request.policy.network.allowedDomains).toEqual(baseline ? ["api.example.com"] : []);
+        expect(request.policy.network.execution).toEqual(
+          baseline ? { kind: "proxy", inlineReview: false } : { kind: "restricted" },
+        );
+      }
+    },
+  );
+
+  it("retains port-limited baseline authority without inline review or host widening", async () => {
+    let target = { host: "api.example.com", port: 443 };
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: {
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            allowedDomains: ["api.example.com:443"],
+          },
+        },
+      },
+      sandboxExecute: async (request) => {
+        const decision = await request.networkAuthorize!(target);
+        return {
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.alloc(0),
+          exitCode: decision.allowed ? 0 : 1,
+        };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "covered-port", "printf ok");
+    target = { host: "api.example.com", port: 80 };
+    await expect(executeBash(app, "other-port", "printf ok")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    target = { host: "other.example.com", port: 443 };
+    await expect(executeBash(app, "other-host", "printf ok")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps legacy real Bash inline AllowOnce separate from durable host grants", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      sandboxNetworkAttempt: { host: "api.example.com", port: 443 },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "legacy-A", "printf A");
+    await executeBash(app, "legacy-B", "printf B");
+    expect(app.reviewInputs).toHaveLength(2);
+    await executeRequestPermissions(app, "legacy-turn", "api.example.com");
+    await executeBash(app, "legacy-C", "printf C");
+    expect(app.reviewInputs).toHaveLength(3);
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+      execution: { kind: "proxy", inlineReview: true },
+      allowedDomains: [],
+    });
+    expect(app.sandboxManager.execute.mock.calls[2]?.[0].policy.network.allowedDomains).toEqual([
+      "api.example.com",
+    ]);
+  });
+
+  it.each([
+    { scope: "session", permissions: { network: { hosts: ["api.example.com"] } } },
+    { permissions: { network: { hosts: ["api.example.com"], enabled: true } } },
+    { permissions: { network: { enabled: false } } },
+    { permissions: { network: { enabled: "true" } } },
+    { permissions: { network: { enabled: true, port: 443 } } },
+    { permissions: { network: { hosts: ["*"] } } },
+    {
+      permissions: {
+        network: Object.assign(Object.create({ hosts: ["api.example.com"] }), { enabled: true }),
+      },
+    },
+    { permissions: { network: { hosts: ["api.example.com"], protocol: "udp" } } },
+    { permissions: { network: { hosts: ["api.example.com"], port: 443 } } },
+    { permissions: { network: { hosts: ["api.example.com:443"] } } },
+    { permissions: { network: { hosts: ["api.example.com", null] } } },
+  ])("rejects unsupported explicit scope without granting a broader host: %j", async (params) => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+      config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(
+      app.tools
+        .get("request_permissions")!
+        .execute("unsupported", params, undefined, undefined, app.context),
+    ).rejects.toMatchObject({ code: "policy-denied" });
+    await executeBash(app, "after-unsupported", "printf ok");
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+      execution: { kind: "restricted" },
+      allowedDomains: [],
+    });
+  });
+
+  it.each(["hidden-hosts", "hidden-port"] as const)(
+    "rejects clone-erased network scope before review and grants: %s",
+    async (shape) => {
+      const network = shape === "hidden-hosts" ? { enabled: true } : { hosts: ["narrow.example"] };
+      Object.defineProperty(network, shape === "hidden-hosts" ? "hosts" : "port", {
+        value: shape === "hidden-hosts" ? ["narrow.example"] : 443,
+        enumerable: false,
+      });
+      const app = await makeHarness({
+        useRealBashTool: true,
+        useRealPermissionRuntime: true,
+        config: { sandbox: { network: { access: { kind: "explicit", transport: "proxy" } } } },
+        sandboxNetworkAttempt: { host: "narrow.example", port: 80 },
+      });
+      await startSession(app);
+      await startAgent(app);
+      await expect(
+        app.tools
+          .get("request_permissions")!
+          .execute(shape, { permissions: { network } }, undefined, undefined, app.context),
+      ).rejects.toMatchObject({ code: "policy-denied" });
+      expect(app.reviewInputs).toHaveLength(0);
+      expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+      const expectNoGrants = async () => {
+        await app.commands.get("permissions")!.handler("status", app.context);
+        const view = JSON.parse(
+          String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
+        );
+        expect(view.authority.turn).toMatchObject({ networkAll: false, networkHosts: [] });
+        expect(view.authority.actionGrants).toEqual([]);
+        expect(view.nextAttemptNetwork.required).toEqual({ kind: "restricted" });
+      };
+      await expectNoGrants();
+      await expect(executeBash(app, "after-hidden-scope", "printf ok")).rejects.toMatchObject({
+        code: "permission-required",
+      });
+      expect(app.reviewInputs).toHaveLength(0);
+      expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
+        execution: { kind: "restricted" },
+        allowedDomains: [],
+      });
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+      await expectNoGrants();
+    },
+  );
 
   it("keeps request_permissions grants within the current turn", async () => {
     const firstTurnHost = "api.example.com";

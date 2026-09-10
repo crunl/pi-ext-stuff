@@ -174,12 +174,15 @@ export function intersectSandboxPolicy(
     normalizeRoots(base.filesystem.allowWrite),
     normalizeRoots(envelope.writeRoots ?? []),
   );
-  const allowedDomains = [
-    ...intersectNetworkPatterns(
-      normalizeHosts(base.network.allowedDomains),
-      normalizeHosts(envelope.networkHosts ?? []),
-    ),
-  ];
+  const allowedDomains =
+    base.network.enabled === true
+      ? normalizeHosts(envelope.networkHosts ?? [])
+      : [
+          ...intersectNetworkPatterns(
+            normalizeHosts(base.network.allowedDomains),
+            normalizeHosts(envelope.networkHosts ?? []),
+          ),
+        ];
   return {
     filesystem: {
       allowWrite,
@@ -187,14 +190,28 @@ export function intersectSandboxPolicy(
       denyWrite: [...base.filesystem.denyWrite],
     },
     network: {
+      ...("access" in base.network
+        ? {
+            access:
+              base.network.access?.kind === "explicit"
+                ? { kind: "explicit" as const, transport: "proxy" as const }
+                : structuredClone(base.network.access),
+          }
+        : {}),
+      enabled: false,
+      delegated: true,
+      macosTls: "strict",
+      ...(base.network.allowPrivateTargets === undefined
+        ? {}
+        : { allowPrivateTargets: base.network.allowPrivateTargets }),
+      // An execution projection belongs to its attempt, not a child baseline.
       allowedDomains,
       deniedDomains: [...base.network.deniedDomains],
       ...(base.network.trustedFakeIpRanges === undefined
         ? {}
         : { trustedFakeIpRanges: [...base.network.trustedFakeIpRanges] }),
-      ...(base.network.allowLocalBinding === undefined
-        ? {}
-        : { allowLocalBinding: base.network.allowLocalBinding }),
+      // Finite destination ceilings cannot permit native local socket bypasses.
+      allowLocalBinding: false,
     },
   };
 }
@@ -256,7 +273,7 @@ export function resolveChildEnvelope(input: {
   const effectiveRequestHosts =
     input.configuredNetworkHosts.length === 0 ? parentHosts : configuredHosts;
   const droppedNetworkHosts =
-    input.configuredNetworkHosts.length === 0
+    input.configuredNetworkHosts.length === 0 || input.parentBase.network.enabled === true
       ? []
       : configuredHosts.filter(
           (configuredHost) => intersectNetworkPatterns(parentHosts, [configuredHost]).length === 0,

@@ -14,6 +14,10 @@
       "denyWrite": []
     },
     "network": {
+      "access": { "kind": "inline-proxy" },
+      "enabled": false,
+      "allowPrivateTargets": false,
+      "macosTls": "strict",
       "allowedDomains": [],
       "deniedDomains": [],
       "trustedFakeIpRanges": [],

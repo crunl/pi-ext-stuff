@@ -77,6 +77,20 @@ describe("DelegationPlan", () => {
     ).toThrow(/absolute/);
   });
 
+  it("inherits explicit request paths without aliasing or carrying an old execution projection", () => {
+    const parent = basePolicy();
+    parent.network.access = { kind: "explicit", transport: "proxy" };
+    parent.network.execution = { kind: "proxy", inlineReview: false };
+    const child = intersectSandboxPolicy(parent, { writeRoots: ["/proj"], networkHosts: [] });
+    expect(child.network.access).toEqual({ kind: "explicit", transport: "proxy" });
+    expect(child.network.access).not.toBe(parent.network.access);
+    expect(child.network.allowedDomains).toEqual([]);
+    expect(child.network.execution).toBeUndefined();
+    parent.network.access = { kind: "inline-proxy" };
+    expect(child.network.access?.kind).toBe("explicit");
+    expect(child.network.deniedDomains).toEqual(["evil.example"]);
+  });
+
   it("intersects sandbox policy with envelope (deny lists preserved)", () => {
     const child = intersectSandboxPolicy(basePolicy(), {
       writeRoots: ["/proj"],

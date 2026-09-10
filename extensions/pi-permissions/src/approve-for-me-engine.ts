@@ -1,11 +1,17 @@
-import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fingerprintValue } from "./config.ts";
 import { hasGlobSyntax } from "./filesystem-policy.ts";
-import { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
+import {
+  isExactLocalNetworkAllowed,
+  matchesNetworkDomainPattern,
+} from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
-import type { NativeFileOperationFailure, SandboxPolicy } from "./sandbox.ts";
+import {
+  type NativeFileOperationFailure,
+  projectExecutionNetwork,
+  type SandboxPolicy,
+} from "./sandbox.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.
@@ -87,6 +93,7 @@ export interface CapabilityLease {
 export type CapabilityRequest =
   | { kind: "filesystem"; operation: "read" | "write"; path: string }
   | { kind: "network"; host: string; port?: number; protocol?: string }
+  | { kind: "network-all" }
   | { kind: "credential"; name: string }
   | { kind: "process"; executable: string; argv?: readonly string[] }
   | { kind: "external-tool"; provider: string; name: string };
@@ -170,6 +177,12 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   executionMode?: CommandExecutionMode;
   justification?: string;
   context: ReviewContext;
+  authority?: {
+    generation: number;
+    turnId: string | number;
+    configFingerprint: string;
+    turn: PermissionStateView["turn"];
+  };
   approvalOverride?: ApprovalOverride;
 }
 
@@ -258,6 +271,7 @@ export type PermissionErrorCode =
   | "review-timeout"
   | "review-unavailable"
   | "runtime-denied"
+  | "permission-required"
   | "circuit-open"
   | "concurrent-invocation"
   | "enforcement-unavailable"
@@ -315,10 +329,34 @@ export type CapabilityAuthorizationDecision =
   | { readonly kind: "allow"; readonly capability: CapabilityRequest }
   | { readonly kind: "deny"; readonly error: PermissionError };
 
+export interface PermissionStateView {
+  readonly turnId: string | number;
+  readonly generation: number;
+  readonly configFingerprint: string;
+  readonly mode: ApproveForMeMode;
+  readonly baseline?: SandboxPolicy;
+  readonly effective?: SandboxPolicy;
+  readonly turn: {
+    networkAll: boolean;
+    networkHosts: string[];
+    writeRoots: string[];
+    expires: "turn-end";
+  };
+  readonly actionGrants: readonly (readonly CapabilityRequest[])[];
+  readonly attempts: readonly {
+    callId: string;
+    lease: CapabilityLease;
+    phase: "planned-or-executing";
+  }[];
+  readonly pendingReviews: number;
+  readonly pendingConnections: number;
+}
+
 export interface ApproveForMeEngine<ReviewContext = undefined> {
   beginTurn(snapshot: TurnSnapshot): TurnHandle<ReviewContext>;
   invalidate(reason: string): void;
   listDenials(): readonly DenialNotice[];
+  inspect(): PermissionStateView | undefined;
   armRetry(handle: RetryHandle): boolean;
 }
 
@@ -326,6 +364,7 @@ interface TurnState {
   readonly generation: number;
   readonly snapshot: TurnSnapshot;
   readonly turnNetworkHosts: Set<string>;
+  turnNetworkAll: boolean;
   readonly turnWriteRoots: string[];
   readonly grants: Map<string, GrantRecord>;
   closed: boolean;
@@ -518,17 +557,9 @@ function exactLocalNetworkAllow(
   host: string,
   port: number | undefined,
 ): boolean {
-  if (!policy) return false;
-  const normalizedHost = normalizeNetworkHost(host);
-  if (!normalizedHost) return false;
-  if (isIP(normalizedHost) === 0 && normalizedHost !== "localhost") return false;
-  return policy.network.allowedDomains.some((pattern) => {
-    const normalizedPattern = pattern.trim().toLowerCase();
-    // A wildcard is never an exact local exception. In particular, an
-    // accidentally broad `*` must not turn loopback into an implicit grant.
-    if (normalizedPattern === "*" || normalizedPattern.startsWith("*.")) return false;
-    return matchesNetworkDomainPattern(pattern, normalizedHost, port);
-  });
+  return (
+    policy !== undefined && isExactLocalNetworkAllowed(policy.network.allowedDomains, host, port)
+  );
 }
 
 function localNetworkAllowed(
@@ -536,7 +567,11 @@ function localNetworkAllowed(
   host: string,
   port: number | undefined,
 ): boolean {
-  return policy?.network.allowLocalBinding === true || exactLocalNetworkAllow(policy, host, port);
+  return (
+    policy?.network.allowPrivateTargets === true ||
+    policy?.network.allowLocalBinding === true ||
+    exactLocalNetworkAllow(policy, host, port)
+  );
 }
 
 function normalizeCapabilityRequest(
@@ -552,6 +587,8 @@ function normalizeCapabilityRequest(
     if (hasGlobSyntax(raw.path) || raw.path.length > 4096) return undefined;
     return { kind: "filesystem", operation: raw.operation, path: resolve(cwd, raw.path) };
   }
+  if (raw.kind === "network-all")
+    return Object.keys(raw).length === 1 ? { kind: "network-all" } : undefined;
   if (raw.kind === "network") {
     if (typeof raw.host !== "string") return undefined;
     const host = normalizeNetworkHost(raw.host);
@@ -610,7 +647,7 @@ function normalizeRequests(
   if (raw === undefined) return { ok: true, requests: [] };
   const requests: CapabilityRequest[] = [];
   for (const item of raw) {
-    const request = normalizeCapabilityRequest(item, cwd);
+    const request = normalizeCapabilityRequest(item, cwd, { allowPrivateNetwork: true });
     if (!request) return { ok: false };
     const fingerprint = fingerprintValue(request);
     if (!requests.some((existing) => fingerprintValue(existing) === fingerprint)) {
@@ -697,16 +734,23 @@ function requestCovered(lease: CapabilityLease, request: CapabilityRequest): boo
     if (request.operation === "read") return true;
     return policy.filesystem.allowWrite.some((root) => isPathWithin(root, request.path));
   }
+  if (request.kind === "network-all")
+    return policy.network.enabled === true && !networkPolicyDenies(policy, request);
   if (request.kind === "network") {
     if (networkPolicyDenies(policy, request)) return false;
-    return policy.network.allowedDomains.some((pattern) =>
-      matchesNetworkDomainPattern(pattern, request.host, request.port),
+    return (
+      policy.network.enabled === true ||
+      policy.network.allowedDomains.some((pattern) =>
+        matchesNetworkDomainPattern(pattern, request.host, request.port),
+      )
     );
   }
   return false;
 }
 
 function networkPolicyDenies(policy: SandboxPolicy, request: CapabilityRequest): boolean {
+  if (request.kind === "network-all")
+    return policy.network.deniedDomains.includes("*") || policy.network.delegated === true;
   return (
     request.kind === "network" &&
     policy.network.deniedDomains.some((pattern) =>
@@ -770,6 +814,8 @@ function leaseWithRequests(
   if (ownership === "host-admission") return { mode: "host-admitted" };
   const policy = clonePolicy(state.snapshot.baseSandboxPolicy);
   if (!policy) return { mode: "sandboxed" };
+  if (state.turnNetworkAll || requested.some((item) => item.kind === "network-all"))
+    policy.network.enabled = true;
   const turnHosts = [...state.turnNetworkHosts];
   const turnRoots = [...state.turnWriteRoots];
   const extraHosts = [...turnHosts];
@@ -793,6 +839,7 @@ function leaseWithAdditionalRequests(
 ): CapabilityLease {
   const next = cloneLease(lease);
   if (next.mode !== "sandboxed" || next.policy === undefined) return next;
+  if (requested.some((item) => item.kind === "network-all")) next.policy.network.enabled = true;
   const extraHosts: string[] = [];
   const extraRoots: string[] = [];
   for (const request of requested) {
@@ -1032,6 +1079,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (wasActive) abortAttempts(reason);
     inFlightAttempts.clear();
     state.turnNetworkHosts.clear();
+    state.turnNetworkAll = false;
     state.turnWriteRoots.length = 0;
     if (wasActive) {
       abortReviews(reason);
@@ -1113,6 +1161,17 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           ownership: request.ownership,
           requested: review.requested.map((item) => structuredClone(item)),
           source: review.source,
+          authority: {
+            generation: state.generation,
+            turnId: state.snapshot.turnId,
+            configFingerprint: state.snapshot.configFingerprint,
+            turn: {
+              networkAll: state.turnNetworkAll,
+              networkHosts: [...state.turnNetworkHosts],
+              writeRoots: [...state.turnWriteRoots],
+              expires: "turn-end",
+            },
+          },
           risk: review.risk,
           baseline: cloneLease(baseline),
           effective:
@@ -1335,6 +1394,15 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const lease =
       leaseOverride ??
       leaseWithRequests(state, request.ownership, [...requested, ...(grant?.requested ?? [])]);
+    if (lease.policy) {
+      const network = lease.policy.network;
+      network.execution = projectExecutionNetwork(lease.policy);
+      if (network.access) Object.freeze(network.access);
+      Object.freeze(network.allowedDomains);
+      Object.freeze(network.deniedDomains);
+      if (network.trustedFakeIpRanges) Object.freeze(network.trustedFakeIpRanges);
+      Object.freeze(network);
+    }
     const attemptCall = cloneInvocationCall(request.call);
     const controller = new AbortController();
     const signal = request.signal
@@ -1720,7 +1788,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
     if (
-      admission.requested.some((item) => item.kind === "network" && !isPublicNetworkHost(item.host))
+      admission.requested.some(
+        (item) =>
+          item.kind === "network" &&
+          !isPublicNetworkHost(item.host) &&
+          !localNetworkAllowed(state.snapshot.baseSandboxPolicy, item.host, item.port),
+      )
     ) {
       return blocked({
         code: "policy-denied",
@@ -1730,7 +1803,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (
       admission.requested.some(
         (item) =>
-          item.kind === "network" &&
+          (item.kind === "network" || item.kind === "network-all") &&
           state.snapshot.baseSandboxPolicy !== undefined &&
           networkPolicyDenies(state.snapshot.baseSandboxPolicy, item),
       )
@@ -1766,7 +1839,36 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reason: "Host admission accepts only exact external-tool previews",
       });
     }
+    if (
+      admission.requested.some((item) => item.kind === "network-all") &&
+      request.ownership !== "permission-amendment"
+    ) {
+      return blocked({
+        code: "policy-denied",
+        reason: "Whole-network authority requires an explicit permission amendment",
+      });
+    }
+    const networkPolicy = state.snapshot.baseSandboxPolicy?.network;
+    if (
+      networkPolicy?.access?.kind === "explicit" &&
+      networkPolicy.access.transport === "direct" &&
+      admission.requested.some((item) => item.kind === "network")
+    ) {
+      return blocked({
+        code: "policy-denied",
+        reason: "Direct requires a whole-network amendment; host-only requests cannot be widened",
+      });
+    }
     const baseline = leaseWithRequests(state, request.ownership, []);
+    try {
+      const proposed = leaseWithRequests(state, request.ownership, admission.requested);
+      if (proposed.policy) projectExecutionNetwork(proposed.policy);
+    } catch (error) {
+      return blocked({
+        code: "policy-denied",
+        reason: `Network policy conflict: ${errorMessage(error)}`,
+      });
+    }
     const hardPreview = await policyCheck({
       call: request.call,
       ownership: request.ownership,
@@ -1787,7 +1889,33 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         });
       }
       if (
-        amendment.requests.some((item) => item.kind !== "filesystem" && item.kind !== "network")
+        amendment.requests.some(
+          (item) =>
+            item.kind === "network" &&
+            !isPublicNetworkHost(item.host) &&
+            !localNetworkAllowed(state.snapshot.baseSandboxPolicy, item.host, item.port),
+        )
+      ) {
+        return blocked({
+          code: "policy-denied",
+          reason: "Private or special-use network target is blocked",
+        });
+      }
+      if (
+        networkPolicy?.access?.kind === "explicit" &&
+        networkPolicy.access.transport === "direct" &&
+        amendment.requests.some((item) => item.kind === "network")
+      ) {
+        return blocked({
+          code: "policy-denied",
+          reason: "Direct requires a whole-network amendment; host-only requests cannot be widened",
+        });
+      }
+      if (
+        amendment.requests.some(
+          (item) =>
+            item.kind !== "filesystem" && item.kind !== "network" && item.kind !== "network-all",
+        )
       ) {
         return blocked({
           code: "enforcement-unavailable",
@@ -1797,7 +1925,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       if (
         amendment.requests.some(
           (item) =>
-            item.kind === "network" &&
+            (item.kind === "network" || item.kind === "network-all") &&
             state.snapshot.baseSandboxPolicy !== undefined &&
             networkPolicyDenies(state.snapshot.baseSandboxPolicy, item),
         )
@@ -1824,10 +1952,23 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
       if (policy.kind === "error") return blocked({ code: "policy-error", reason: policy.reason });
       if (policy.kind === "deny") return blocked({ code: "policy-denied", reason: policy.reason });
+      try {
+        const proposed = leaseWithRequests(state, request.ownership, amendment.requests);
+        if (proposed.policy) projectExecutionNetwork(proposed.policy);
+      } catch (error) {
+        return blocked({
+          code: "policy-denied",
+          reason: `Network policy conflict: ${errorMessage(error)}`,
+        });
+      }
       let amendmentRequests = amendment.requests;
       let amendmentSource: ReviewRequest["source"] = "permission-amendment";
       let amendmentReason = request.intent.reason;
-      let amendmentSummary: string | undefined;
+      let amendmentSummary: string | undefined = amendment.requests.some(
+        (item) => item.kind === "network-all",
+      )
+        ? "Whole-network outbound authority for this turn, subject to hard domain/private/delegation policy"
+        : undefined;
       let amendmentApprovalOverride: ApprovalOverride | undefined;
       const armed = armedRetry;
       const armedRecord =
@@ -1885,6 +2026,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         return amended;
       if (amended.kind === "completed") {
         for (const item of amendmentRequests) {
+          if (item.kind === "network-all") state.turnNetworkAll = true;
           if (item.kind === "network") state.turnNetworkHosts.add(item.host);
           if (item.kind === "filesystem" && item.operation === "write") {
             appendUnique(state.turnWriteRoots, [item.path]);
@@ -2189,6 +2331,19 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return { kind: "allow", capability: normalized };
     }
 
+    if (
+      baseline.policy?.network.execution?.kind === "restricted" ||
+      (baseline.policy?.network.execution?.kind === "proxy" &&
+        !baseline.policy.network.execution.inlineReview)
+    ) {
+      return denyAttemptForAttempt({
+        code: "permission-required",
+        reason:
+          "Network authority was not granted for this execution. Use request_permissions for a later new invocation; this Bash action is not replayed.",
+        request: normalized,
+      });
+    }
+
     const capabilityKey = requestKey(normalized);
     const key = `${state.generation}:${attempt.call.id}:${capabilityKey}`;
     const existing = inlineCapabilityReviews.get(key);
@@ -2300,6 +2455,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       generation: ++generation,
       snapshot,
       turnNetworkHosts: new Set<string>(),
+      turnNetworkAll: false,
       turnWriteRoots: [],
       grants: new Map<string, GrantRecord>(),
       closed: false,
@@ -2327,5 +2483,30 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     abortReviews(reason);
   };
 
-  return { beginTurn, invalidate, listDenials, armRetry };
+  const inspect = (): PermissionStateView | undefined => {
+    if (!active || !isCurrent(active)) return undefined;
+    return structuredClone({
+      turnId: active.snapshot.turnId,
+      generation: active.generation,
+      configFingerprint: active.snapshot.configFingerprint,
+      mode: active.snapshot.mode,
+      baseline: active.snapshot.baseSandboxPolicy,
+      effective: leaseWithRequests(active, "sandbox-owned", []).policy,
+      turn: {
+        networkAll: active.turnNetworkAll,
+        networkHosts: [...active.turnNetworkHosts],
+        writeRoots: [...active.turnWriteRoots],
+        expires: "turn-end" as const,
+      },
+      actionGrants: [...active.grants.values()].map((grant) => grant.requested),
+      attempts: [...inFlightAttempts.values()].map((attempt) => ({
+        callId: attempt.call.id,
+        lease: attempt.baseline,
+        phase: "planned-or-executing" as const,
+      })),
+      pendingReviews: reviewControllers.size,
+      pendingConnections: inlineCapabilityReviews.size,
+    });
+  };
+  return { beginTurn, invalidate, listDenials, armRetry, inspect };
 }

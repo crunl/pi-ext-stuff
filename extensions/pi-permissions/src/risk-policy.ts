@@ -26,6 +26,7 @@ export type RiskDecision =
       reason: string;
       summary: string;
       networkHosts?: string[];
+      networkAll?: true;
       filesystemWriteRoots?: string[];
       justification?: string;
       executionMode?: "escalated";
@@ -38,16 +39,92 @@ function stringList(value: unknown): string[] {
     : [];
 }
 
+/** Reject clone-erased scope and accessor evaluation before canonical capture. */
+export function isSupportedPermissionRequestShape(
+  input: unknown,
+): input is Record<string, unknown> & { permissions: Record<string, unknown> } {
+  const dataRecord = (
+    value: unknown,
+    allowedKeys: readonly string[],
+  ): value is Record<string, unknown> => {
+    if (
+      !isRecord(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    )
+      return false;
+    return Reflect.ownKeys(value).every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return (
+        typeof key === "string" &&
+        allowedKeys.includes(key) &&
+        descriptor?.enumerable === true &&
+        Object.hasOwn(descriptor, "value")
+      );
+    });
+  };
+  const stringArray = (value: unknown): boolean => {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
+    // Only dense own string elements plus the array's intrinsic length are JSON-like.
+    // Never call caller-owned iteration methods or read an element accessor.
+    if (Reflect.ownKeys(value).length !== value.length + 1) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        descriptor?.enumerable !== true ||
+        !Object.hasOwn(descriptor, "value") ||
+        typeof descriptor.value !== "string"
+      )
+        return false;
+    }
+    return true;
+  };
+  const validScope = (value: unknown, key: string): boolean =>
+    dataRecord(value, [key]) && Object.hasOwn(value, key) && stringArray(value[key]);
+  if (
+    !dataRecord(input, ["permissions", "reason", "scope"]) ||
+    !Object.hasOwn(input, "permissions") ||
+    (Object.hasOwn(input, "scope") && input.scope !== "turn") ||
+    (Object.hasOwn(input, "reason") && typeof input.reason !== "string") ||
+    !dataRecord(input.permissions, ["network", "filesystem"]) ||
+    (Object.hasOwn(input.permissions, "network") &&
+      !validScope(input.permissions.network, "hosts") &&
+      !(
+        dataRecord(input.permissions.network, ["enabled"]) &&
+        Object.hasOwn(input.permissions.network, "enabled") &&
+        input.permissions.network.enabled === true
+      )) ||
+    (Object.hasOwn(input.permissions, "filesystem") &&
+      !validScope(input.permissions.filesystem, "write"))
+  )
+    return false;
+  return true;
+}
+
 async function evaluateRequestPermissions(
   input: Record<string, unknown>,
   cwd: string,
   protectedWritePaths: readonly string[],
+  networkPolicy: PermissionsConfig["sandbox"]["network"],
 ): Promise<RiskDecision> {
-  const permissions = isRecord(input.permissions) ? input.permissions : {};
+  if (!isSupportedPermissionRequestShape(input)) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason:
+        "request_permissions supports turn-scoped network.hosts OR network.enabled:true, and filesystem.write lists",
+    };
+  }
+  const permissions = input.permissions;
   const network = isRecord(permissions.network) ? permissions.network : {};
   const filesystem = isRecord(permissions.filesystem) ? permissions.filesystem : {};
   const normalized = await normalizePermissionAmendment(
-    { hosts: stringList(network.hosts), writeRoots: stringList(filesystem.write) },
+    {
+      hosts: stringList(network.hosts),
+      writeRoots: stringList(filesystem.write),
+      allowPrivateTargets:
+        networkPolicy.allowPrivateTargets === true || networkPolicy.allowLocalBinding,
+      allowedDomains: networkPolicy.allowedDomains,
+    },
     cwd,
     protectedWritePaths,
   );
@@ -55,6 +132,7 @@ async function evaluateRequestPermissions(
     return { action: "block", risk: "HARD", reason: normalized.reason };
   }
   if (
+    network.enabled !== true &&
     normalized.amendment.networkHosts.length === 0 &&
     normalized.amendment.writeRoots.length === 0
   ) {
@@ -68,7 +146,11 @@ async function evaluateRequestPermissions(
     action: "prompt",
     risk: "REVIEW",
     reason: "REVIEW operation",
-    summary: summarize("request_permissions", input),
+    summary:
+      network.enabled === true
+        ? "Whole-network outbound authority (subject to hard destination and private-target policy), current turn only"
+        : summarize("request_permissions", input),
+    ...(network.enabled === true ? { networkAll: true as const } : {}),
     ...(normalized.amendment.networkHosts.length > 0
       ? { networkHosts: normalized.amendment.networkHosts }
       : {}),
@@ -147,6 +229,7 @@ export async function evaluateRiskRequest(
       input,
       cwd,
       protectedWritePaths ? [...protectedWritePaths] : defaultProtectedWritePaths(cwd),
+      config.sandbox.network,
     );
   }
   const request = normalizeToolCall(tool, input, cwd);

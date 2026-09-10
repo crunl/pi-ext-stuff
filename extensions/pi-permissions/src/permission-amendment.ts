@@ -1,4 +1,5 @@
 import { expandSymlinkAliases, resolvePolicyPath } from "./filesystem-policy.ts";
+import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 
@@ -13,14 +14,24 @@ export type NormalizePermissionAmendmentResult =
 
 /** Normalize and validate the explicit filesystem/network request. */
 export async function normalizePermissionAmendment(
-  input: { hosts?: readonly string[]; writeRoots?: readonly string[] },
+  input: {
+    hosts?: readonly string[];
+    writeRoots?: readonly string[];
+    allowPrivateTargets?: boolean;
+    allowedDomains?: readonly string[];
+  },
   cwd: string,
   protectedWritePaths: readonly string[],
 ): Promise<NormalizePermissionAmendmentResult> {
   const networkHosts: string[] = [];
   for (const raw of input.hosts ?? []) {
     const host = normalizeNetworkHost(raw);
-    if (!host || !isPublicNetworkHost(host)) {
+    if (
+      !host ||
+      (!input.allowPrivateTargets &&
+        !isPublicNetworkHost(host) &&
+        !isExactLocalNetworkAllowed(input.allowedDomains ?? [], host))
+    ) {
       return { ok: false, reason: `Private or special-use network target is blocked: ${raw}` };
     }
     if (!networkHosts.includes(host)) networkHosts.push(host);
