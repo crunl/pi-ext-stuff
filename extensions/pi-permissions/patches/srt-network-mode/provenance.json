@@ -57,8 +57,8 @@
     }
   ],
   "programs": {
-    "artifacts.mjs": "ae7805d3f03091e2b9d229d110a4b498b274fe2f0ac300579b48f9ffe9ef8082",
-    "prepare.mjs": "0b13430215fee94f143c7cc5362397a2c7dae5e5fd9dd82aa708c30c4741f10b",
+    "artifacts.mjs": "61df9401fe2869d046bc0f2fb620d1be75570662bb0651c55f76b4665271addb",
+    "prepare.mjs": "29a14356f47ae808eba0b8a9f8473345f4e37815059d53aa80a8ecf6b167fc10",
     "verify.mjs": "74102154f020406f9b6e7f0f934e592bb535d8ef6a8f3e71c47bb22b99e645ab",
     "network-mode-harness.mjs": "5b8b1504e1d0ad20f9897921bdb6203cbc927750da2b67285ac30ee282295f1e",
     "network-mode-workload.mjs": "ab26c5b4c553477c60dcd06a3e3a4db411b6f2f82e5e44570a50a5fc961b7170",

@@ -20,12 +20,25 @@ assert.equal(
   "prepare only creates isolated packages; use verify for installed",
 );
 const ctx = context(root, selection, true);
-const source = fs.realpathSync(path.join(ctx.repo, "node_modules/@anthropic-ai/sandbox-runtime"));
+// Resolve the *unpatched* pnpm store copy. The project's node_modules link
+// points at the patched snapshot; preparing from that copy cannot satisfy
+// provenance originals (and NETWORK_MODES.md must be absent).
+const pristineRelative = path.join(
+  "node_modules/.pnpm",
+  "@anthropic-ai+sandbox-runtime@0.0.74",
+  "node_modules/@anthropic-ai/sandbox-runtime",
+);
+const source = fs.realpathSync(path.join(ctx.repo, pristineRelative));
+assert.ok(
+  !source.includes("_patch_hash="),
+  `prepare requires the unpatched store copy at ${pristineRelative}; got ${source}`,
+);
 assert.equal(hash(path.join(source, "package.json")), ctx.provenance.packageJsonSha256);
 assert.equal(hash(path.join(source, "LICENSE")), ctx.provenance.licenseSha256);
 for (const file of ctx.provenance.files) {
   const original = path.join(source, file.path);
-  if (file.originalSha256 === null) assert.equal(fs.existsSync(original), false);
+  if (file.originalSha256 === null)
+    assert.equal(fs.existsSync(original), false, `pristine input must be absent: ${file.path}`);
   else assert.equal(hash(original), file.originalSha256, `pristine input: ${file.path}`);
 }
 const original = inventory(source);

@@ -28,12 +28,33 @@ change is included. Full Goal remains open.
 Run from this repository with existing Node/dependencies. Choose a fresh absolute
 output directory beneath an existing writable parent; it must not already contain
 unowned output. Use a short path (under about 65 bytes) for macOS Unix sockets.
-Examples below use this reviewed session's root, but programs do not hard-code it.
 An owned marker binds UID, checkout and patch hash. Symlink/ownership/hash/version
 mismatches fail closed. Deletion is confined to the owned isolated package and
 fresh per-run fixtures only when process disappearance and clean worker exits are
 proven. Failed/unproven cleanup retains fixtures. Do not delete prior evidence.
-The parent c1 attempt failed before any positive/case result (ECONNRESET followed
+
+**Pristine source:** `prepare.mjs --package isolated` copies the **unpatched**
+pnpm store package
+`node_modules/.pnpm/@anthropic-ai+sandbox-runtime@0.0.74/node_modules/@anthropic-ai/sandbox-runtime`,
+then applies `patches/anthropic-ai__sandbox-runtime@0.0.74.patch` once. The
+project's `node_modules/@anthropic-ai/sandbox-runtime` link is the **patched**
+snapshot and is never used as prepare input.
+
+Plain commands (replace `$ROOT` with a fresh owned absolute directory):
+
+```sh
+node patches/srt-network-mode/prepare.mjs --root "$ROOT" --package isolated
+node patches/srt-network-mode/verify.mjs --root "$ROOT" --package isolated
+SRT_NETWORK_MODE_PACKAGE="$ROOT/package" node node_modules/vitest/vitest.mjs run tests/srt-network-mode-patch.test.ts
+SRT_NETWORK_MODE_PACKAGE="$ROOT/package" node node_modules/vitest/vitest.mjs run
+npm run check
+npm run lint
+```
+
+Historical c1/c4/c5/c6 session roots and `rtk run` wrappers are **not** part of
+the supported procedure; keep them only as past evidence.
+
+The c1 attempt failed before any positive/case result (ECONNRESET followed
 by cleanup EPERM); its log, copies and c1/nm-qbUqUK are historical failed evidence.
 Separate parent signal controls passed for live and orphan-leader groups; they do
 not identify c1's EPERM cause, nor establish SRT as that cause.
@@ -54,20 +75,6 @@ owned fixture; offline/no-update remain set. Its complete local native gate, 863
 suite (one skipped), six static regressions and type checks passed. No source patch
 or native permission assertion changed for this environment correction.
 
-The c6 commands below are historical evidence, not instructions to reprepare or
-reuse that root with current program hashes. After installation, use a fresh
-installed verification root as described below.
-
-```sh
-rtk run -c 'node patches/srt-network-mode/prepare.mjs --root /tmp/pi-codex-align-impl.dXaPsR/c6 --package isolated'
-rtk run -c 'node patches/srt-network-mode/verify.mjs --root /tmp/pi-codex-align-impl.dXaPsR/c6 --package isolated'
-rtk run -c 'SRT_NETWORK_MODE_PACKAGE=/tmp/pi-codex-align-impl.dXaPsR/c6/package node node_modules/vitest/vitest.mjs run tests/srt-network-mode-patch.test.ts'
-rtk run -c 'SRT_NETWORK_MODE_PACKAGE=/tmp/pi-codex-align-impl.dXaPsR/c6/package node node_modules/vitest/vitest.mjs run'
-rtk run -c 'npm run check'
-rtk run -c 'node node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext --types node --typeRoots ./node_modules/@types /tmp/pi-codex-align-impl.dXaPsR/c6/public-api-types.mts'
-rtk run -c '/opt/homebrew/bin/biome check patches/srt-network-mode/*.mjs patches/srt-network-mode/provenance.json tests/srt-network-mode-patch.test.ts'
-```
-
 Preparation uses only pristine installed bytes and their existing dependency
 links, `/usr/bin/patch`, hashes and file copies; no SRT initialization or sockets.
 Verification is also static unless the **explicit** `--run-native` flag is present.
@@ -75,6 +82,10 @@ Canonical and copied programs are verified before execution. After a fresh check
 or scratch cleanup, repeat preparation with a fresh root. After installation use
 `verify.mjs --root <fresh-root> --package installed`: this reconstructs canonical
 program copies and verifies the installed patched package without modifying it.
+Identity mismatches name every diverging path and expected/actual digest. A
+digest-only mismatch on patched documentation usually means a **double-applied**
+hunk; reinstall from the lockfile (or re-apply once). A missing patched file means
+a **lost** patch — do not treat the two the same way.
 No executable bytes, package paths, network targets or policy must be edited.
 Only the two package selections are accepted; no arbitrary package/target option.
 Package inventory rejects every nested node_modules entry and rejects root
@@ -119,7 +130,7 @@ limitation, not a reason to remove those assertions. Use a separate fresh native
 Static regression command (no shim or package fixture bytes are imported/executed):
 
 ```sh
-rtk run -c 'SRT_ARTIFACT_TEST_ROOT=/tmp/pi-codex-align-impl.dXaPsR node --test patches/srt-network-mode/artifacts-static-check.mjs'
+SRT_ARTIFACT_TEST_ROOT="$(mktemp -d /tmp/srt-art.XXXXXX)" node --test patches/srt-network-mode/artifacts-static-check.mjs
 ```
 
 Connectivity-only TCP/Unix sentinels now send no payload, count expected peer
@@ -139,7 +150,7 @@ After fresh independent review, through the separately approved macOS boundary
 **outside** the outer tool Seatbelt sandbox, run exactly:
 
 ```sh
-rtk run -c 'node patches/srt-network-mode/verify.mjs --root <fresh-owned-root> --package installed --run-native'
+node patches/srt-network-mode/verify.mjs --root <fresh-owned-root> --package installed --run-native
 ```
 
 This requires reviewed pnpm integration and actual project installation first.

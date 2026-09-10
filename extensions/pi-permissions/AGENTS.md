@@ -24,8 +24,9 @@ worker/reviewer errors, never from message text. An unreported worker exit is
 `transport/failed`; only an owned deadline is `timeout`.
 
 Biome is a pinned devDependency (`@biomejs/biome` 2.5.4, matching `biome.json`);
-run `npm run lint`. Notable strict rules: `noExplicitAny`, `noConsole`,
-`noNonNullAssertion` are errors (relaxed only under `tests/**`); double quotes;
+run `npm run lint`. Notable strict rules: `noExplicitAny`, `noConsole`, and
+`noNonNullAssertion` are errors; under `tests/**` only `noExplicitAny` and
+`noNonNullAssertion` are relaxed (`noConsole` stays an error). Double quotes;
 imports must use explicit `.ts` extensions.
 
 ## Product boundaries
@@ -170,8 +171,9 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   entrypoint). The native/static harness under `patches/srt-network-mode/` is
   tracked for provenance but stays **outside product acceptance**; `npm test`
   does not run it. Run its `README.md` procedures from that directory only when
-  explicitly verifying the patch. Do not treat a green suite as proof those
-  helpers were exercised.
+  explicitly verifying the patch. `prepare.mjs --package isolated` copies the
+  **unpatched** pnpm store package (not the patched project link). Do not treat
+  a green suite as proof those helpers were exercised.
 - Design history: dated notes in `docs/research/` only. Each note must state
   scope, the standing upstream pin (or an explicit day-of snapshot), and what it
   does not claim. Re-check when the pinned upstream moves or a cited tree path

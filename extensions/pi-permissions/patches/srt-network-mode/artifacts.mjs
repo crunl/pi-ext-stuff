@@ -201,6 +201,23 @@ export function verifyCopies(ctx) {
     assert.equal(hash(path.join(ctx.root, name)), digest, `runnable copy: ${name}`);
   }
 }
+export function diffInventories(actual, expected) {
+  const paths = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+  const diverged = [];
+  for (const file of [...paths].sort()) {
+    const a = actual[file];
+    const e = expected[file];
+    if (a === e) continue;
+    diverged.push({
+      path: file,
+      actual: a ?? null,
+      expected: e ?? null,
+      kind: a === undefined ? "missing" : e === undefined ? "extra" : "digest",
+    });
+  }
+  return diverged;
+}
+
 export function verifyPackage(ctx) {
   assert.ok(
     ["isolated", "installed"].includes(ctx.selection),
@@ -208,10 +225,17 @@ export function verifyPackage(ctx) {
   );
   let rootDependencies;
   if (ctx.selection === "isolated") {
-    const installed = fs.realpathSync(
-      path.join(ctx.repo, "node_modules/@anthropic-ai/sandbox-runtime"),
+    // Isolated packages are prepared from the unpatched store copy; their
+    // dependency link must resolve to that same store sibling directory.
+    const pristine = fs.realpathSync(
+      path.join(
+        ctx.repo,
+        "node_modules/.pnpm",
+        "@anthropic-ai+sandbox-runtime@0.0.74",
+        "node_modules/@anthropic-ai/sandbox-runtime",
+      ),
     );
-    rootDependencies = path.dirname(path.dirname(installed));
+    rootDependencies = path.dirname(path.dirname(pristine));
     // Isolated verification still requires the exact prepared dependency link.
     // Installed verification permits only the separately validated generated self-bin.
     assert.equal(
@@ -223,11 +247,26 @@ export function verifyPackage(ctx) {
   const pkg = JSON.parse(fs.readFileSync(path.join(ctx.packagePath, "package.json"), "utf8"));
   assert.equal(pkg.name, "@anthropic-ai/sandbox-runtime");
   assert.equal(pkg.version, "0.0.74");
-  assert.deepEqual(
-    inventory(ctx.packagePath, rootDependencies, { installed: ctx.selection === "installed" }),
-    ctx.provenance.packageFiles,
-    "complete pinned patched package identity",
-  );
+  const actual = inventory(ctx.packagePath, rootDependencies, {
+    installed: ctx.selection === "installed",
+  });
+  const diverged = diffInventories(actual, ctx.provenance.packageFiles);
+  if (diverged.length > 0) {
+    const detail = diverged
+      .map((entry) => `${entry.path}: expected ${entry.expected}, actual ${entry.actual} (${entry.kind})`)
+      .join("; ");
+    const hint =
+      ctx.selection === "installed" &&
+      diverged.every((entry) => entry.kind === "digest")
+        ? " If only patched docs diverge with a double-applied hunk, reinstall from the lockfile (or re-apply the patch once) rather than treating this as a lost patch."
+        : "";
+    throw new assert.AssertionError({
+      message: `pinned patched package identity mismatch (${diverged.length} path(s)): ${detail}.${hint}`,
+      actual: diverged,
+      expected: [],
+      operator: "deepEqual",
+    });
+  }
 }
 export function options(argv = process.argv.slice(2)) {
   assert.equal(argv.length, 4, "usage: --root <owned-output-dir> --package isolated|installed");
