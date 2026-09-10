@@ -135,8 +135,10 @@ export class GuardianWorkerProtocolError extends GuardianWorkerInfrastructureErr
 }
 
 type WorkerRequest = {
-  type: "bootstrap" | "execute" | "cancel" | "shutdown";
+  type: "bootstrap" | "execute" | "cancel" | "shutdown" | "retirement-ack";
   id?: string;
+  /** Cooperative retirement nonce for shutdown/retirement-ack. */
+  nonce?: string;
   evidenceScope?: GuardianEvidenceScope;
   authorityFingerprint?: string;
   cwd?: string;
@@ -162,7 +164,36 @@ type WorkerResponse =
       id?: string;
       error: string;
       failure: GuardianWorkerFailure;
+    }
+  | {
+      type: "retirement-proposal";
+      nonce: string;
     };
+
+type ChildPhase = "starting" | "workload" | "retiring" | "closed";
+
+/**
+ * One owned worker child. The reference is released only after actual close.
+ * Exit status alone is never treated as close or as a signal authority.
+ */
+interface ChildLifecycle {
+  readonly child: ChildProcess;
+  readonly pid: number | undefined;
+  phase: ChildPhase;
+  exitObserved: boolean;
+  closeObserved: boolean;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  primaryError?: GuardianWorkerInfrastructureError;
+  retirementError?: GuardianWorkerInfrastructureError;
+  expectedTerminalSignal?: NodeJS.Signals;
+  retirementNonce?: string;
+  retirementProposalReceived: boolean;
+  retirementAcknowledged: boolean;
+  emergencyTeardown: boolean;
+  readonly closed: Promise<void>;
+  readonly markClosed: () => void;
+}
 
 interface PendingRequest {
   readonly resolve: (result: GuardianWorkerExecutionResult) => void;
@@ -192,29 +223,58 @@ function workerEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-function killProcessGroup(child: ChildProcess): void {
-  if (!child.pid) return;
+/**
+ * Signal the worker's process group only while the parent still owns a live
+ * identity. Never signal after observed exit/close: the numeric PID/PGID may
+ * already belong to another process. A direct-child fallback is emergency-only
+ * and does not establish group cleanup.
+ */
+function signalOwnedWorker(lifecycle: ChildLifecycle): { signalled: boolean; reason?: string } {
+  if (lifecycle.closeObserved || lifecycle.exitObserved) {
+    return { signalled: false, reason: "worker already exited" };
+  }
+  const child = lifecycle.child;
+  if (!child.pid) return { signalled: false, reason: "worker has no pid" };
   if (process.platform === "win32") {
-    // The isolated Guardian evidence surface is intentionally not exposed on
-    // Windows until the worker -> runner tree can be proven safe to kill.
-    // Keep this direct fallback for defensive cleanup if a worker is already
-    // present (for example, a future caller bypasses that platform gate).
     try {
       child.kill("SIGKILL");
+      return { signalled: true };
     } catch {
-      // The worker already exited.
+      return { signalled: false, reason: "direct worker kill failed" };
     }
-    return;
   }
   try {
     process.kill(-child.pid, "SIGKILL");
+    return { signalled: true };
   } catch {
     try {
       child.kill("SIGKILL");
+      return { signalled: true, reason: "used direct-child fallback" };
     } catch {
-      // The worker already exited.
+      return { signalled: false, reason: "worker group kill failed" };
     }
   }
+}
+
+function createChildLifecycle(child: ChildProcess): ChildLifecycle {
+  let markClosed = (): void => {};
+  const closed = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
+  return {
+    child,
+    pid: child.pid,
+    phase: "starting",
+    exitObserved: false,
+    closeObserved: false,
+    exitCode: null,
+    signalCode: null,
+    retirementProposalReceived: false,
+    retirementAcknowledged: false,
+    emergencyTeardown: false,
+    closed,
+    markClosed,
+  };
 }
 
 function boundedTimeout(value: number | undefined, fallback: number): number {
@@ -257,6 +317,9 @@ function decodeBase64(value: string | undefined, label: string): Buffer {
 function isWorkerResponse(value: unknown): value is WorkerResponse {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
+  if (record.type === "retirement-proposal") {
+    return typeof record.nonce === "string" && record.nonce.length > 0 && record.nonce.length <= 64;
+  }
   const validId =
     typeof record.id === "string" && record.id.length > 0 && record.id.length <= MAX_ID_LENGTH;
   if (record.type === "result") return validId;
@@ -280,7 +343,7 @@ export class GuardianWorkerClient {
   private readonly timeoutMs: number;
   private readonly maxFrameBytes: number;
   private readonly spawnProcess: GuardianWorkerSpawn;
-  private child?: ChildProcess;
+  private lifecycle?: ChildLifecycle;
   private starting?: Promise<ChildProcess>;
   private output = "";
   private stderrBytes = 0;
@@ -306,6 +369,9 @@ export class GuardianWorkerClient {
   async execute(request: GuardianWorkerExecutionRequest): Promise<GuardianWorkerExecutionResult> {
     if (this.closed) throw new GuardianWorkerProtocolError("client is closed");
     if (this.terminalFailure) throw this.terminalFailure;
+    if (this.lifecycle?.phase === "retiring" || this.lifecycle?.phase === "closed") {
+      throw new GuardianWorkerProtocolError("client worker is retiring");
+    }
     if (request.signal?.aborted) throw new GuardianWorkerAbortError();
     if (!request.cwd || typeof request.cwd !== "string") {
       throw new GuardianWorkerProtocolError("missing working directory");
@@ -356,6 +422,10 @@ export class GuardianWorkerClient {
     }
 
     const child = await this.ensureChild();
+    const lifecycle = this.lifecycle;
+    if (!lifecycle || lifecycle.child !== child || lifecycle.phase !== "workload") {
+      throw new GuardianWorkerProtocolError("client worker is not accepting executions");
+    }
     return new Promise<GuardianWorkerExecutionResult>((resolve, reject) => {
       const timeout = boundedTimeout(request.timeoutMs, this.timeoutMs);
       const onAbort = (): void => {
@@ -396,17 +466,27 @@ export class GuardianWorkerClient {
   }
 
   private async ensureChild(): Promise<ChildProcess> {
-    // `startChild()` assigns `this.child` before its bootstrap ACK arrives.
+    // `startChild()` assigns the lifecycle before its bootstrap ACK arrives.
     // Share that pending promise first so concurrent first executions cannot
     // write an execute frame ahead of the fixed evidence scope.
     if (this.starting) return this.starting;
-    if (
-      this.child &&
-      !this.child.killed &&
-      this.child.exitCode === null &&
-      this.child.signalCode === null
-    ) {
-      return this.child;
+    if (this.lifecycle && this.lifecycle.phase === "workload" && !this.lifecycle.exitObserved) {
+      return this.lifecycle.child;
+    }
+    // Retired, exited-but-not-closed, or never started: only a fresh client
+    // may start another worker. A retiring lifecycle never replaces itself.
+    if (this.lifecycle && this.lifecycle.phase !== "closed") {
+      if (this.lifecycle.phase === "retiring") {
+        throw new GuardianWorkerProtocolError("client worker is retiring");
+      }
+      // Exit without close still owns the old identity; wait for close.
+      if (this.lifecycle.exitObserved && !this.lifecycle.closeObserved) {
+        throw new GuardianWorkerInfrastructureError(
+          "worker exited without close; replacement is not permitted",
+          undefined,
+          { stage: "transport", code: "failed" },
+        );
+      }
     }
     this.starting = this.startChild();
     try {
@@ -417,6 +497,10 @@ export class GuardianWorkerClient {
   }
 
   private async startChild(): Promise<ChildProcess> {
+    if (this.closed) throw new GuardianWorkerProtocolError("client is closed");
+    if (this.lifecycle && this.lifecycle.phase !== "closed") {
+      throw new GuardianWorkerProtocolError("client already owns a worker lifecycle");
+    }
     let child: ChildProcess;
     try {
       child = this.spawnProcess(process.execPath, [this.workerPath], {
@@ -433,7 +517,8 @@ export class GuardianWorkerClient {
         { stage: "bootstrap", code: "failed" },
       );
     }
-    this.child = child;
+    const lifecycle = createChildLifecycle(child);
+    this.lifecycle = lifecycle;
     this.output = "";
     this.stderrBytes = 0;
     child.stdout?.setEncoding("utf8");
@@ -443,33 +528,46 @@ export class GuardianWorkerClient {
       void this.terminate(new GuardianWorkerProtocolError(`worker stdin failed: ${error.message}`));
     });
     child.once("error", (error) => {
-      void this.terminate(
-        new GuardianWorkerInfrastructureError(`worker process failed: ${error.message}`, error, {
+      lifecycle.primaryError = new GuardianWorkerInfrastructureError(
+        `worker process failed: ${error.message}`,
+        error,
+        {
           stage: "bootstrap",
           code: "failed",
-        }),
+        },
       );
+      // Error is not close. Keep the reference until the close event.
+      if (!this.closed && !this.closing) {
+        this.latchFailure(lifecycle.primaryError);
+      }
+    });
+    child.once("exit", (exitCode, signalCode) => {
+      if (this.lifecycle !== lifecycle) return;
+      lifecycle.exitObserved = true;
+      lifecycle.exitCode = exitCode;
+      lifecycle.signalCode = signalCode;
     });
     child.once("close", (exitCode, signalCode) => {
-      if (this.child !== child) return;
-      // The close event is the last safe point at which the detached PGID is
-      // known. Kill it before forgetting the ChildProcess so descendants
-      // cannot outlive an unexpected worker crash.
-      killProcessGroup(child);
-      this.child = undefined;
-      // closeInternal() marks the client closed before writing the shutdown
-      // frame. A test double (or a very fast child) may emit `close`
-      // synchronously before the close() promise has been assigned.
+      if (this.lifecycle !== lifecycle) return;
+      lifecycle.exitObserved = true;
+      lifecycle.closeObserved = true;
+      lifecycle.phase = "closed";
+      lifecycle.exitCode = exitCode;
+      lifecycle.signalCode = signalCode;
+      lifecycle.markClosed();
+      // Never signal from the close handler: the numeric identity may already
+      // have been reused. Unexpected close still fails the active review.
       if (this.closed || this.closing) return;
+      if (lifecycle.phase === "closed" && lifecycle.retirementAcknowledged) return;
       const detail =
         signalCode === null
           ? exitCode === null
             ? "without an exit status"
             : `with exit code ${exitCode}`
           : `with signal ${signalCode}`;
-      const failure = new GuardianWorkerInfrastructureError(
-        `worker process exited unexpectedly ${detail}`,
-      );
+      const failure =
+        lifecycle.primaryError ??
+        new GuardianWorkerInfrastructureError(`worker process exited unexpectedly ${detail}`);
       this.latchFailure(failure);
       this.rejectPending(failure);
     });
@@ -489,7 +587,10 @@ export class GuardianWorkerClient {
     }
     await new Promise<void>((resolve, reject) => {
       const pending: PendingRequest = {
-        resolve: () => resolve(),
+        resolve: () => {
+          lifecycle.phase = "workload";
+          resolve();
+        },
         reject,
         onAbort: () => undefined,
         maxStdoutBytes: 1,
@@ -513,11 +614,12 @@ export class GuardianWorkerClient {
         );
       }
     });
+    if (lifecycle.phase === "starting") lifecycle.phase = "workload";
     return child;
   }
 
   private onStdout(chunk: string | Buffer): void {
-    if (!this.child) return;
+    if (!this.lifecycle) return;
     this.output += typeof chunk === "string" ? chunk : chunk.toString("utf8");
     if (Buffer.byteLength(this.output) > this.maxFrameBytes) {
       void this.terminate(
@@ -554,6 +656,52 @@ export class GuardianWorkerClient {
   }
 
   private resolveResponse(response: WorkerResponse): void {
+    const lifecycle = this.lifecycle;
+    if (response.type === "retirement-proposal") {
+      if (lifecycle?.phase !== "retiring") {
+        void this.terminate(new GuardianWorkerProtocolError("unsolicited retirement proposal"));
+        return;
+      }
+      if (
+        lifecycle.retirementProposalReceived ||
+        lifecycle.retirementNonce === undefined ||
+        response.nonce !== lifecycle.retirementNonce
+      ) {
+        lifecycle.retirementError =
+          lifecycle.retirementError ??
+          new GuardianWorkerProtocolError("invalid retirement proposal");
+        void this.terminate(lifecycle.retirementError);
+        return;
+      }
+      if (lifecycle.exitObserved) {
+        lifecycle.retirementError =
+          lifecycle.retirementError ??
+          new GuardianWorkerProtocolError("retirement proposal after exit");
+        void this.terminate(lifecycle.retirementError);
+        return;
+      }
+      lifecycle.retirementProposalReceived = true;
+      lifecycle.expectedTerminalSignal = "SIGKILL";
+      try {
+        if (!lifecycle.child.stdin || lifecycle.child.stdin.destroyed) {
+          throw new GuardianWorkerProtocolError("worker stdin is unavailable for retirement ACK");
+        }
+        lifecycle.child.stdin.write(
+          frame({ type: "retirement-ack", nonce: lifecycle.retirementNonce }),
+        );
+        lifecycle.retirementAcknowledged = true;
+      } catch (error) {
+        lifecycle.retirementError =
+          lifecycle.retirementError ??
+          new GuardianWorkerInfrastructureError(
+            `retirement ACK failed: ${error instanceof Error ? error.message : String(error)}`,
+            error,
+            { stage: "cleanup", code: "failed" },
+          );
+        void this.terminate(lifecycle.retirementError);
+      }
+      return;
+    }
     if (response.type === "error") {
       if (response.id !== undefined && !this.pending.has(response.id)) {
         void this.terminate(
@@ -633,8 +781,9 @@ export class GuardianWorkerClient {
   private async cancelAndTerminate(id: string, error: Error): Promise<void> {
     const pending = this.pending.get(id);
     if (!pending) return;
-    const child = this.child;
-    if (child?.stdin && !child.stdin.destroyed) {
+    const lifecycle = this.lifecycle;
+    const child = lifecycle?.child;
+    if (child?.stdin && !child.stdin.destroyed && lifecycle && !lifecycle.exitObserved) {
       try {
         child.stdin.write(frame({ type: "cancel", id }));
       } catch {
@@ -644,6 +793,11 @@ export class GuardianWorkerClient {
     await this.terminate(error);
   }
 
+  /**
+   * Failure teardown. Enters RETIRING, may signal only a still-owned live
+   * identity, and retains the child reference until actual close. A deadline
+   * is failure evidence, never close evidence.
+   */
   private async terminate(error: unknown): Promise<void> {
     const failure =
       error instanceof GuardianWorkerInfrastructureError
@@ -661,113 +815,183 @@ export class GuardianWorkerClient {
         ? error
         : failure;
     if (this.pending.size > 0 && rejection === error) this.terminalFailureReported = true;
-    const child = this.child;
-    if (!child) {
-      this.rejectPending(rejection);
-      return;
-    }
-    this.child = undefined;
     this.rejectPending(rejection);
-    killProcessGroup(child);
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        resolve();
-        return;
-      }
-      child.once("close", () => resolve());
+    const lifecycle = this.lifecycle;
+    if (!lifecycle) return;
+    if (lifecycle.phase === "closed") return;
+    if (lifecycle.phase !== "retiring") lifecycle.phase = "retiring";
+    lifecycle.emergencyTeardown = true;
+    const signalResult = signalOwnedWorker(lifecycle);
+    if (!signalResult.signalled && !lifecycle.exitObserved && !lifecycle.closeObserved) {
+      lifecycle.retirementError =
+        lifecycle.retirementError ??
+        new GuardianWorkerInfrastructureError(
+          `failed to signal worker: ${signalResult.reason ?? "unknown"}`,
+          undefined,
+          { stage: "cleanup", code: "failed" },
+        );
+      this.latchFailure(lifecycle.retirementError);
+    }
+    const closeDeadline = new Promise<void>((resolve) => {
       setTimeout(resolve, WORKER_TERMINATE_WAIT_MS);
     });
+    await Promise.race([lifecycle.closed, closeDeadline]);
+    if (!lifecycle.closeObserved) {
+      const timeoutFailure = new GuardianWorkerInfrastructureError(
+        "worker did not close before the termination deadline",
+        undefined,
+        { stage: "cleanup", code: "timeout" },
+      );
+      lifecycle.retirementError = lifecycle.retirementError ?? timeoutFailure;
+      this.latchFailure(timeoutFailure);
+    }
   }
 
+  /**
+   * Cooperative retirement: shutdown(nonce) → proposal → ACK → worker
+   * self-SIGKILL → actual close with the expected terminal signal.
+   * Exit zero without the handshake is not a successful shutdown.
+   */
   private async closeInternal(): Promise<void> {
     this.closed = true;
-    const child = this.child;
-    if (!child) {
+    const lifecycle = this.lifecycle;
+    if (!lifecycle || lifecycle.phase === "closed") {
       this.rejectPending(
         this.terminalFailure ?? new GuardianWorkerAbortError("Guardian worker closed"),
       );
       if (this.terminalFailure && !this.terminalFailureReported) throw this.terminalFailure;
       return;
     }
+    if (lifecycle.phase === "starting" || lifecycle.phase === "workload") {
+      lifecycle.phase = "retiring";
+    }
+    // Emergency teardown already signalled, or the process already exited.
+    // Wait for close and surface the original failure. A structured error
+    // frame alone still prefers cooperative shutdown so the worker can finish
+    // SRT reset before exit.
+    if (
+      lifecycle.emergencyTeardown ||
+      (lifecycle.exitObserved && !lifecycle.retirementAcknowledged)
+    ) {
+      if (!lifecycle.exitObserved && !lifecycle.closeObserved) {
+        const emergency = signalOwnedWorker(lifecycle);
+        if (!emergency.signalled && !lifecycle.exitObserved) {
+          lifecycle.retirementError =
+            lifecycle.retirementError ??
+            new GuardianWorkerInfrastructureError(
+              `emergency worker signal failed: ${emergency.reason ?? "unknown"}`,
+              undefined,
+              { stage: "cleanup", code: "failed" },
+            );
+          this.latchFailure(lifecycle.retirementError);
+        }
+      }
+      await Promise.race([
+        lifecycle.closed,
+        new Promise<void>((resolve) => setTimeout(resolve, WORKER_TERMINATE_WAIT_MS)),
+      ]);
+      this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
+      const failure =
+        this.terminalFailure ??
+        lifecycle.retirementError ??
+        lifecycle.primaryError ??
+        new GuardianWorkerInfrastructureError("worker process exited unexpectedly");
+      this.latchFailure(failure);
+      // Cleanup remains visible on close even after the request already
+      // reported the first execution error.
+      if (!this.terminalFailureReported || failure.failure.stage === "cleanup") {
+        throw failure;
+      }
+      return;
+    }
     let closeError: GuardianWorkerInfrastructureError | undefined;
-    await new Promise<void>((resolve) => {
-      let finished = false;
-      let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
-      let onClose:
-        | ((exitCode: number | null, signalCode: NodeJS.Signals | null) => void)
-        | undefined;
-      const finish = (
-        exitCode: number | null = child.exitCode,
-        signalCode: NodeJS.Signals | null = child.signalCode,
-      ): void => {
-        if (finished) return;
-        finished = true;
-        if (fallbackTimer) clearTimeout(fallbackTimer);
-        if (onClose) child.removeListener("close", onClose);
-        // An exit status alone cannot prove an SRT cleanup failure. Only a
-        // structured worker report or our own close deadline can identify it.
-        const failure: GuardianWorkerFailure =
-          this.terminalFailure?.failure.stage === "cleanup"
-            ? this.terminalFailure.failure
-            : { stage: "transport", code: "failed" };
-        if (signalCode !== null) {
-          closeError = new GuardianWorkerInfrastructureError(
-            `worker shutdown failed with signal ${signalCode}`,
-            undefined,
-            failure,
-          );
-        } else if (exitCode !== null && exitCode !== 0) {
-          closeError = new GuardianWorkerInfrastructureError(
-            `worker shutdown failed with exit code ${exitCode}`,
-            undefined,
-            failure,
-          );
-        }
-        resolve();
-      };
-      onClose = (exitCode, signalCode): void => finish(exitCode, signalCode);
-      child.once("close", onClose);
-      fallbackTimer = setTimeout(() => {
-        if (child.exitCode !== null || child.signalCode !== null || this.child !== child) {
-          finish();
-          return;
-        }
-        this.child = undefined;
-        this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
+    const nonce = `r-${Date.now().toString(36)}-${(++this.sequence).toString(36)}`;
+    lifecycle.retirementNonce = nonce;
+    const stdin = lifecycle.child.stdin;
+    if (!lifecycle.exitObserved && stdin && !stdin.destroyed) {
+      try {
+        stdin.write(frame({ type: "shutdown", nonce }));
+      } catch {
+        closeError = new GuardianWorkerInfrastructureError(
+          "failed to start cooperative retirement",
+          undefined,
+          { stage: "cleanup", code: "failed" },
+        );
+      }
+    } else if (!lifecycle.exitObserved) {
+      closeError = new GuardianWorkerInfrastructureError(
+        "worker stdin is unavailable for cooperative retirement",
+        undefined,
+        { stage: "cleanup", code: "failed" },
+      );
+    }
+    if (!closeError) {
+      const deadline = new Promise<"deadline">((resolve) => {
+        setTimeout(() => resolve("deadline"), WORKER_SHUTDOWN_TIMEOUT_MS);
+      });
+      const outcome = await Promise.race([
+        lifecycle.closed.then(() => "closed" as const),
+        deadline,
+      ]);
+      if (outcome === "deadline") {
         closeError = new GuardianWorkerInfrastructureError(
           "worker did not shut down cleanly",
           undefined,
-          {
-            stage: "cleanup",
-            code: "timeout",
-          },
+          { stage: "cleanup", code: "timeout" },
         );
         this.latchFailure(closeError);
-        finish();
-        killProcessGroup(child);
-      }, WORKER_SHUTDOWN_TIMEOUT_MS);
-      // Install the listener before asking the worker to exit. The child can
-      // close synchronously in tests and some spawn implementations, so also
-      // observe the already-exited state after listener installation.
-      if (child.exitCode !== null || child.signalCode !== null) {
-        finish();
-        return;
-      }
-      if (child.stdin && !child.stdin.destroyed) {
-        try {
-          child.stdin.write(frame({ type: "shutdown" }));
-        } catch {
-          // Fall through to the bounded force-close timer.
+        const emergency = signalOwnedWorker(lifecycle);
+        if (!emergency.signalled && !lifecycle.exitObserved) {
+          lifecycle.retirementError =
+            lifecycle.retirementError ??
+            new GuardianWorkerInfrastructureError(
+              `emergency worker signal failed: ${emergency.reason ?? "unknown"}`,
+              undefined,
+              { stage: "cleanup", code: "failed" },
+            );
+          this.latchFailure(lifecycle.retirementError);
         }
+        await Promise.race([
+          lifecycle.closed,
+          new Promise<void>((resolve) => setTimeout(resolve, WORKER_TERMINATE_WAIT_MS)),
+        ]);
+      } else if (lifecycle.retirementAcknowledged) {
+        if (lifecycle.signalCode !== "SIGKILL" || lifecycle.exitCode !== null) {
+          closeError = new GuardianWorkerInfrastructureError(
+            `worker retirement ended with unexpected status signal=${String(lifecycle.signalCode)} exit=${String(lifecycle.exitCode)}`,
+            undefined,
+            { stage: "cleanup", code: "failed" },
+          );
+        } else if (this.terminalFailure?.failure.stage === "cleanup") {
+          // Cleanup/reset remains authoritative on close even after a clean
+          // cooperative retirement.
+          closeError = this.terminalFailure;
+        }
+      } else if (this.terminalFailure) {
+        closeError = this.terminalFailure;
+      } else if (lifecycle.retirementError) {
+        closeError = lifecycle.retirementError;
+      } else if (lifecycle.primaryError) {
+        closeError = lifecycle.primaryError;
+      } else if (lifecycle.signalCode !== null) {
+        closeError = new GuardianWorkerInfrastructureError(
+          `worker shutdown failed with signal ${lifecycle.signalCode}`,
+          undefined,
+          { stage: "transport", code: "failed" },
+        );
+      } else if (lifecycle.exitCode !== null && lifecycle.exitCode !== 0) {
+        closeError = new GuardianWorkerInfrastructureError(
+          `worker shutdown failed with exit code ${lifecycle.exitCode}`,
+          undefined,
+          { stage: "transport", code: "failed" },
+        );
+      } else {
+        closeError = new GuardianWorkerInfrastructureError(
+          "worker exited without cooperative retirement handshake",
+          undefined,
+          { stage: "transport", code: "failed" },
+        );
       }
-    });
-    // If the process reported an exit code but its `close` event has not
-    // arrived yet, the startChild listener may have intentionally deferred
-    // cleanup. Retain the identity check and kill the group before dropping
-    // it; never use a stale PID after the child reference is gone.
-    if (this.child === child) {
-      killProcessGroup(child);
-      this.child = undefined;
     }
     this.rejectPending(new GuardianWorkerAbortError("Guardian worker closed"));
     if (closeError) {

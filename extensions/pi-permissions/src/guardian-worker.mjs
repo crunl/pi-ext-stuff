@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, realpathSync } from "node:fs";
+import { constants, fstatSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute } from "node:path";
+import { isAbsolute, normalize, parse } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 // This file is intentionally self-contained. Pi loads the extension through
@@ -44,6 +44,10 @@ let input = "";
 let fatalStarted = false;
 let shuttingDown = false;
 let pumping = false;
+/** Cooperative retirement: parent nonce once shutdown starts. */
+let shutdownNonce;
+let retirementProposalSent = false;
+let retirementAckReceived = false;
 const queue = [];
 const active = new Map();
 
@@ -120,6 +124,119 @@ function validateEvidenceScope(value) {
   });
 }
 
+// These are SRT's existing output/device exceptions, not ordinary write roots.
+// stdout/stderr must be the worker's non-file output endpoints; the other
+// exceptions must be actual, non-symlink character devices on a Unix platform.
+function isOutputDevice(path) {
+  if (process.platform !== "darwin" && process.platform !== "linux") return false;
+  if (path === "/dev/stdout" || path === "/dev/stderr") {
+    const target = statSync(path, { bigint: true });
+    const fd = path === "/dev/stdout" ? 1 : 2;
+    const output = fstatSync(fd, { bigint: true });
+    // Darwin fdescfs stat and fstat report different device IDs for the
+    // same socket. Require the exact OS fd alias and matching endpoint
+    // identity/type instead; never exempt an ordinary redirected file.
+    const sameDevice =
+      process.platform === "darwin"
+        ? realpathSync(path) === `/dev/fd/${fd}`
+        : target.dev === output.dev;
+    return (
+      (output.isFIFO() || output.isSocket() || output.isCharacterDevice()) &&
+      sameDevice &&
+      target.ino === output.ino &&
+      target.mode === output.mode &&
+      target.rdev === output.rdev
+    );
+  }
+  if (
+    path !== "/dev/null" &&
+    path !== "/dev/tty" &&
+    !(
+      process.platform === "darwin" &&
+      (path === "/dev/dtracehelper" || path === "/dev/autofs_nowait")
+    )
+  )
+    return false;
+  try {
+    return lstatSync(path).isCharacterDevice() && realpathSync(path) === path;
+  } catch (error) {
+    // A missing device is not an exception: deny its spelling against future
+    // creation. Other identity failures make bootstrap unavailable.
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function publicMethod(name) {
+  const descriptor = Object.getOwnPropertyDescriptor(SandboxManager, name);
+  if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function") {
+    throw new Error(`reviewer worker requires public ${name}`);
+  }
+  return descriptor.value.bind(SandboxManager);
+}
+
+function defaultWriteDenials() {
+  const getConfig = publicMethod("getConfig");
+  const assertFresh = () => {
+    if (srtReady || srtPoisoned || getConfig() !== undefined) {
+      throw new Error("reviewer worker requires a fresh sandbox singleton");
+    }
+  };
+  assertFresh();
+  const defaults = publicMethod("getFsWriteConfig")();
+  assertFresh();
+  if (
+    !defaults ||
+    typeof defaults !== "object" ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(defaults)) ||
+    Reflect.ownKeys(defaults).length !== 2
+  )
+    throw new Error("reviewer worker default write config is invalid");
+  const lists = {};
+  for (const key of ["allowOnly", "denyWithinAllow"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(defaults, key);
+    const list = descriptor && "value" in descriptor ? descriptor.value : undefined;
+    if (
+      !Array.isArray(list) ||
+      Object.getPrototypeOf(list) !== Array.prototype ||
+      list.length > 256 ||
+      Reflect.ownKeys(list).length !== list.length + 1
+    )
+      throw new Error("reviewer worker default write list is invalid");
+    const copy = [];
+    for (let index = 0; index < list.length; index += 1) {
+      const entry = Object.getOwnPropertyDescriptor(list, String(index));
+      const path = entry && "value" in entry ? entry.value : undefined;
+      if (
+        typeof path !== "string" ||
+        !isAbsolute(path) ||
+        path === parse(path).root ||
+        normalize(path) !== path ||
+        byteLength(path) > 4096 ||
+        Buffer.from(path, "utf8").toString("utf8") !== path ||
+        /[*?[\]{}\\~]/.test(path) ||
+        [...path].some(
+          (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+        )
+      )
+        throw new Error("reviewer worker default write path is unrepresentable");
+      copy.push(path);
+    }
+    lists[key] = copy;
+  }
+  if (
+    lists.allowOnly.length === 0 ||
+    lists.denyWithinAllow.length !== 0 ||
+    byteLength(JSON.stringify(lists)) > 64 * 1024
+  ) {
+    throw new Error("reviewer worker default write config is not fresh or exceeds the bound");
+  }
+  // New public defaults are denied automatically. Never fall back to empty
+  // denies on a missing API or unrepresentable policy, and never copy SRT's
+  // private ordinary-path list. All derivation finishes before bootstrap ack.
+  return Object.freeze([...new Set(lists.allowOnly.filter((path) => !isOutputDevice(path)))]);
+}
+
 async function bootstrap(request) {
   if (bootstrapStarted || evidenceScope || active.size > 0 || queue.length > 0 || shuttingDown) {
     throw infrastructureFailure(
@@ -143,20 +260,34 @@ async function bootstrap(request) {
     throw infrastructureFailure(error, "bootstrap", "protocol");
   }
   const canonicalScopeCwd = await canonicalCwd(scope.cwd);
-  evidenceScope = scope;
-  evidenceScopeCwd = canonicalScopeCwd;
+  const denyWrite = defaultWriteDenials();
+  if (fatalStarted || shuttingDown) throw new Error("reviewer worker bootstrap interrupted");
+  // This worker owns its own singleton and policy. Host TLS/network authority
+  // never crosses bootstrap; feature detection selects stronger isolation only
+  // where the public backend advertises it, retaining strict legacy elsewhere.
+  const capabilities =
+    typeof SandboxManager.getNetworkModeCapabilities === "function"
+      ? SandboxManager.getNetworkModeCapabilities()
+      : undefined;
+  const restricted =
+    capabilities?.apiVersion === 1 &&
+    capabilities.platform === "macos" &&
+    capabilities.modes.includes("restricted");
   readOnlySandboxConfig = Object.freeze({
     filesystem: Object.freeze({
       denyRead: Object.freeze([...scope.denyRead]),
       allowWrite: Object.freeze([]),
-      denyWrite: Object.freeze([]),
+      denyWrite,
     }),
     network: Object.freeze({
+      ...(restricted ? { mode: "restricted" } : {}),
       allowedDomains: Object.freeze([]),
       deniedDomains: Object.freeze(["*"]),
       allowLocalBinding: false,
     }),
   });
+  evidenceScope = scope;
+  evidenceScopeCwd = canonicalScopeCwd;
   send({ type: "result", id: request.id, stdout: "", stderr: "", exitCode: 0 });
 }
 
@@ -407,6 +538,7 @@ function runWrapped(wrapped, request, state) {
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let outputError;
+    let primaryError;
     let aborted = false;
     let settled = false;
     const timeout = boundedInteger(request.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
@@ -417,15 +549,30 @@ function runWrapped(wrapped, request, state) {
       );
       killWorkerProcessTree(child);
     }, timeout);
-    const cleanup = () => {
-      clearTimeout(timer);
-      state.child = undefined;
-    };
-    const finishError = (error) => {
+    // Ownership stays until actual close. An `error` event is primary evidence
+    // only; clearing state.child earlier lets cleanup race the close.
+    const finishFromClose = (exitCode, signalCode) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      reject(error);
+      clearTimeout(timer);
+      state.child = undefined;
+      if (state.controller.signal.aborted || aborted) {
+        reject(primaryError ?? cancellationFailure(state));
+      } else if (outputError) {
+        reject(outputError);
+      } else if (primaryError) {
+        reject(primaryError);
+      } else if (signalCode !== null) {
+        reject(infrastructureFailure(`reviewer inspect command terminated by ${signalCode}`));
+      } else if (exitCode === null) {
+        reject(infrastructureFailure("reviewer inspect command exited without a status"));
+      } else {
+        resolve({
+          stdout: Buffer.concat(stdout),
+          stderr: Buffer.concat(stderr),
+          exitCode,
+        });
+      }
     };
     const collect = (chunks, chunk, current, limit, streamName) => {
       if (outputError) return current;
@@ -457,27 +604,10 @@ function runWrapped(wrapped, request, state) {
         "stderr",
       );
     });
-    child.once("error", (error) => finishError(outputError ?? infrastructureFailure(error)));
-    child.once("close", (exitCode, signalCode) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (state.controller.signal.aborted || aborted) {
-        reject(cancellationFailure(state));
-      } else if (outputError) {
-        reject(outputError);
-      } else if (signalCode !== null) {
-        reject(infrastructureFailure(`reviewer inspect command terminated by ${signalCode}`));
-      } else if (exitCode === null) {
-        reject(infrastructureFailure("reviewer inspect command exited without a status"));
-      } else {
-        resolve({
-          stdout: Buffer.concat(stdout),
-          stderr: Buffer.concat(stderr),
-          exitCode,
-        });
-      }
+    child.once("error", (error) => {
+      primaryError = primaryError ?? outputError ?? infrastructureFailure(error);
     });
+    child.once("close", (exitCode, signalCode) => finishFromClose(exitCode, signalCode));
     if (state.controller.signal.aborted) {
       aborted = true;
       killWorkerProcessTree(child);
@@ -586,10 +716,14 @@ async function handleRequest(request, state) {
     // failures (ENOENT, EACCES, and child non-zero exits) are transported as
     // ordinary result frames and converted to tool evidence by the caller.
     sendFailure(infrastructureFailure(error, "execution", "protocol"), responseId);
-    // A worker-reported infrastructure error is already delivered to the
-    // client. Exit cleanly when reset succeeds; shutdown itself upgrades the
-    // exit to 1 if cleanup/reset cannot restore the SRT boundary.
-    await shutdown();
+    // Restore SRT if possible, but stay alive so the parent can start
+    // cooperative retirement with a nonce. Immediate self-exit would make
+    // close() observe exit-zero without a handshake.
+    try {
+      await resetSrt();
+    } catch (resetError) {
+      sendFailure(infrastructureFailure(resetError, "cleanup"));
+    }
   } finally {
     active.delete(id);
   }
@@ -611,7 +745,8 @@ async function pump() {
     }
   } finally {
     pumping = false;
-    if (shuttingDown && queue.length === 0 && active.size === 0) await shutdown();
+    // Cooperative shutdown is parent-driven via shutdown(nonce). Do not exit
+    // here after a request error; the parent close() owns the handshake.
   }
 }
 
@@ -638,11 +773,52 @@ async function shutdown(exitCode = 0) {
   queue.length = 0;
   let finalExitCode = exitCode;
   try {
+    // Wait for any still-owned wrapped children to close before proposing
+    // retirement. Cancellation above already requested their teardown.
+    for (const state of active.values()) {
+      if (state.child && typeof state.child.once === "function") {
+        await new Promise((resolve) => {
+          if (state.child.exitCode !== null || state.child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          state.child.once("close", () => resolve());
+          setTimeout(resolve, 1_000);
+        });
+      }
+    }
     await resetSrt();
   } catch (error) {
     finalExitCode = 1;
     sendFailure(infrastructureFailure(error, "cleanup"));
     process.stderr.write(`guardian worker sandbox reset failed: ${errorMessage(error)}`);
+  }
+  if (finalExitCode === 0 && shutdownNonce && !retirementProposalSent) {
+    retirementProposalSent = true;
+    send({ type: "retirement-proposal", nonce: shutdownNonce });
+    // Wait for the parent ACK before self-signalling. Without an ACK this is
+    // failed teardown, not successful cooperative retirement.
+    const ackDeadline = Date.now() + 2_000;
+    while (!retirementAckReceived && Date.now() < ackDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (retirementAckReceived) {
+      if (!process.stdout.destroyed) {
+        await new Promise((resolve) => process.stdout.write("", resolve));
+      }
+      // Successful cooperative retirement: the worker signals its own group.
+      if (process.platform !== "win32" && process.pid > 0) {
+        try {
+          process.kill(-process.pid, "SIGKILL");
+        } catch {
+          process.kill(process.pid, "SIGKILL");
+        }
+      } else {
+        process.kill(process.pid, "SIGKILL");
+      }
+      return;
+    }
+    finalExitCode = 1;
   }
   // Flush terminal metadata before exit. The parent's existing bounded close
   // deadline still owns termination if this pipe or SRT reset cannot drain.
@@ -655,9 +831,10 @@ async function shutdown(exitCode = 0) {
 async function fatalFailure(error) {
   if (fatalStarted) return;
   sendFailure(error);
-  // The error frame already fails the review. A non-zero exit is reserved
-  // for failed shutdown, so it cannot relabel a protocol error as cleanup.
-  await shutdown();
+  // Do not self-exit. The parent close() owns cooperative retirement so SRT
+  // reset and the nonce handshake stay ordered. Emergency teardown is the
+  // parent's deadline path.
+  shuttingDown = true;
 }
 
 async function protocolFatal(message) {
@@ -711,8 +888,31 @@ function parseInput(chunk) {
       cancel(request.id);
     } else if (request.type === "shutdown") {
       shuttingDown = true;
-      void pump();
+      if (
+        typeof request.nonce === "string" &&
+        request.nonce.length > 0 &&
+        request.nonce.length <= 64
+      ) {
+        shutdownNonce = request.nonce;
+      }
+      void pump().then(() => shutdown());
+    } else if (request.type === "retirement-ack") {
+      if (
+        typeof request.nonce !== "string" ||
+        !shutdownNonce ||
+        request.nonce !== shutdownNonce ||
+        !retirementProposalSent ||
+        retirementAckReceived
+      ) {
+        void protocolFatal("invalid retirement ACK");
+        return;
+      }
+      retirementAckReceived = true;
     } else if (request.type === "execute") {
+      if (shuttingDown || fatalStarted) {
+        void protocolFatal("execution request during retirement");
+        return;
+      }
       if (
         typeof request.id !== "string" ||
         request.id.length < 1 ||
@@ -752,5 +952,5 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", parseInput);
 process.stdin.on("end", () => {
   shuttingDown = true;
-  void pump();
+  void pump().then(() => shutdown());
 });
