@@ -167,9 +167,11 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   patch lives in `patches/anthropic-ai__sandbox-runtime@0.0.74.patch` and is
   registered via `pnpm-workspace.yaml` `patchedDependencies`. The committed
   product contract is `tests/srt-network-mode-patch.test.ts` (static package
-  entrypoint). The draft native/static harness under `patches/srt-network-mode/`
-  is **outside product acceptance**; `npm test` does not run it. Do not treat a
-  green suite as proof those helpers were exercised.
+  entrypoint). The native/static harness under `patches/srt-network-mode/` is
+  tracked for provenance but stays **outside product acceptance**; `npm test`
+  does not run it. Run its `README.md` procedures from that directory only when
+  explicitly verifying the patch. Do not treat a green suite as proof those
+  helpers were exercised.
 - Design history: dated notes in `docs/research/` only. Each note must state
   scope, the standing upstream pin (or an explicit day-of snapshot), and what it
   does not claim. Re-check when the pinned upstream moves or a cited tree path
