@@ -173,7 +173,10 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   does not run it. Run its `README.md` procedures from that directory only when
   explicitly verifying the patch. `prepare.mjs --package isolated` copies the
   **unpatched** pnpm store package (not the patched project link). Do not treat
-  a green suite as proof those helpers were exercised.
+  a green suite as proof those helpers were exercised. If
+  `verify.mjs --package installed` reports a digest-only mismatch on a patched
+  package file (often README), restore from the lockfile with `pnpm install`
+  and re-run verify; do not hand-edit the installed copy.
 - Design history: dated notes in `docs/research/` only. Each note must state
   scope, the standing upstream pin (or an explicit day-of snapshot), and what it
   does not claim. Re-check when the pinned upstream moves or a cited tree path

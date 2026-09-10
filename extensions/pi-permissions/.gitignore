@@ -7,3 +7,4 @@ coverage/
 # Local coding-agent output (reports, harness artifacts). Keep out of product history.
 .codex/
 .pi/
+graphify-out/
