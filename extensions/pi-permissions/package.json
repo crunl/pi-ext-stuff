@@ -15,6 +15,7 @@
     "check": "tsc --noEmit",
     "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
     "lint": "biome check .",
+    "preflight:sibling": "node scripts/preflight-sibling.mjs",
     "test": "vitest --run"
   },
   "peerDependencies": {

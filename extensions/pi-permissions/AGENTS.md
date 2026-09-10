@@ -9,6 +9,7 @@ tool execution, and an external "guardian" reviewer. Loaded directly from
 ## Commands
 
 ```bash
+npm run preflight:sibling # sibling pi-core present + clean (see Cross-extension dependency)
 npm run check     # tsc --noEmit (type check)
 npm run lint      # biome check . (pinned @biomejs/biome)
 npm run diagnose:guardian # read-only real Guardian worker/SRT diagnostic (bounded JSONL)
@@ -43,7 +44,13 @@ boundary note without an explicit product decision.
 
 - `src/register.ts` imports from `../../pi-core/standalone.ts` (relative to
   `src/`), i.e. the **sibling extension** `extensions/pi-core`. Typecheck and
-  tests fail if that checkout is missing.
+  tests fail if that checkout is missing. This repository does **not** pin a
+  sibling SHA; green `check`/`test` therefore describe this revision **plus**
+  whatever `../pi-core` is on disk.
+- Run `npm run preflight:sibling` before recording acceptance. It fails when
+  the sibling is absent or its working tree is dirty, and prints the sibling
+  short SHA when clean. A dirty sibling means results are not attributable to
+  this revision alone.
 - Per `pi-core/AGENTS.md`: import only from its `standalone.ts` — never its
   `index.ts` or `src/**` deep paths (index re-registers the extension).
 
@@ -184,10 +191,12 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   assertions in a newer dated note. Host API limits live in
   `docs/host-api-boundaries.md`. Task briefs and review diffs under
   `.superpowers/` are session-local and are not product evidence.
-- Acceptance for a revision is: `npm run check`, `npm run lint`, and `npm test`
+- Acceptance for a revision is: `npm run preflight:sibling` (sibling `pi-core`
+  present and clean), then `npm run check`, `npm run lint`, and `npm test`
   pass on that tree, plus any slice-specific checks named in the change. Record
-  the commit SHA with the result when leaving evidence outside the commit body.
-  There is no CI; green checks are voluntary until a remote gate exists.
+  the commit SHA **and** the sibling short SHA with the result when leaving
+  evidence outside the commit body. There is no CI; green checks are voluntary
+  until a remote gate exists.
 
 Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.85.1 —
 check its API surface before upgrading assumptions about extension hooks. Use pnpm
