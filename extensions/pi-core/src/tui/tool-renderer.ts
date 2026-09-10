@@ -183,6 +183,9 @@ function headerText<TPreviewState = unknown>(
 }
 
 class ToolOutputComponent implements Component {
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
+
   constructor(
     private readonly text: string,
     private readonly expanded: boolean,
@@ -192,13 +195,19 @@ class ToolOutputComponent implements Component {
   ) {}
 
   render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const lines = this.expanded
       ? buildExpandedOutput(this.text, width, this.outputPad)
       : buildOutputPreview(this.text, width, this.maxRows, this.outputPad);
-    return lines.map(this.style);
+    this.cachedWidth = width;
+    this.cachedLines = lines.map(this.style);
+    return this.cachedLines;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
 }
 
 function updateHeader<TPreviewState = unknown>(
