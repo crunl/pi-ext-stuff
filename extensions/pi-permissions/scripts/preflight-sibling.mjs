@@ -34,7 +34,9 @@ if (!fs.existsSync(sibling) || !fs.statSync(sibling).isDirectory()) {
     });
     dirty = status.trim().length > 0;
   } catch (error) {
-    fail(`sibling is not a readable git checkout: ${error instanceof Error ? error.message : error}`);
+    fail(
+      `sibling is not a readable git checkout: ${error instanceof Error ? error.message : error}`,
+    );
   }
   if (process.exitCode !== 1) {
     process.stdout.write(`preflight:sibling OK: ${sibling} @ ${sha}${dirty ? " (dirty)" : ""}\n`);
