@@ -321,22 +321,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         reason: "Sandbox executor is unavailable or poisoned",
       };
     }
+    // Codex parity: only denied reads make unsandboxed execution illegal.
+    // denyWrite / deniedDomains are dropped on a Codex-style bypass as well.
     if (snapshot.config.sandbox.filesystem.denyRead.length > 0) {
       return {
         eligible: false,
         reason: "Command escalation cannot preserve configured denyRead rules",
-      };
-    }
-    if (snapshot.config.sandbox.filesystem.denyWrite.length > 0) {
-      return {
-        eligible: false,
-        reason: "Command escalation cannot preserve configured denyWrite rules",
-      };
-    }
-    if (snapshot.config.sandbox.network.deniedDomains.length > 0) {
-      return {
-        eligible: false,
-        reason: "Command escalation cannot preserve configured deniedDomains rules",
       };
     }
     if (session.activeDelegationCeiling()) {
@@ -347,7 +337,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
     return {
       eligible: true,
-      reason: "Sandbox is healthy and no explicit deny rules or delegation ceiling apply",
+      reason: "Sandbox is healthy and neither denyRead nor a delegation ceiling apply",
     };
   };
 

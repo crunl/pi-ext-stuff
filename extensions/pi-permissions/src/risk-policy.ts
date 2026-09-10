@@ -155,26 +155,20 @@ export async function evaluateRiskRequest(
   if ("error" in escalation) {
     return { action: "block", risk: "HARD", reason: escalation.error };
   }
-  const escalationRequested = escalation.requested;
-  if (escalationRequested && (tool.toLowerCase() !== "bash" || command === undefined)) {
+  if (escalation.requested && (tool.toLowerCase() !== "bash" || command === undefined)) {
     return {
       action: "block",
       risk: "HARD",
       reason: "Command escalation is supported only for Bash executions",
     };
   }
-  if (
-    escalationRequested &&
-    (config.sandbox.filesystem.denyRead.length > 0 ||
-      config.sandbox.filesystem.denyWrite.length > 0 ||
-      config.sandbox.network.deniedDomains.length > 0)
-  ) {
-    return {
-      action: "block",
-      risk: "HARD",
-      reason: "Command escalation cannot preserve explicit sandbox deny rules",
-    };
-  }
+  // Codex parity (`sandboxing.rs` `unsandboxed_execution_allowed`): denied
+  // reads only exist inside the sandbox. Keep the command runnable under the
+  // ordinary sandboxed path instead of blocking or issuing an unsandboxed
+  // lease. denyWrite / deniedDomains alone do not suppress escalation (Codex
+  // drops write restrictions and the managed network proxy on bypass).
+  const escalationRequested =
+    escalation.requested && config.sandbox.filesystem.denyRead.length === 0;
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
     return {

@@ -337,7 +337,7 @@ Pi `approve-for-me-engine.ts:439-441,950-959`；Codex `ext/guardian-reviewer/src
 | 4 | **"不可分析 → ask" fail-safe** | kimi `UNSAFE_OPERAND` | 静态分析不确定时应偏向问人 |
 | 5 | **规则优先级差异显式文档化** | — | 三家语义各不相同，静默差异会导致误配置 |
 | 6 | **per-agent 权限覆盖** | kimi frontmatter / MiMo agent 段 | 子代理比主代理更严是常见需求 |
-| 7 | **Codex 的 denied-read 抑制 bypass** | Codex `sandboxing.rs:255-260,283-295` | 本项目 escalated bash 缺等价的自动抑制检查 |
+| 7 | **Codex 的 denied-read 抑制 bypass** | Codex `sandboxing.rs:255-260,283-295` | 已对齐：`denyRead` 时 `require_escalated` 降级为沙箱路径，不发 unsandboxed lease（`risk-policy.ts` / `register.ts`）。`denyWrite`/`deniedDomains` 单独存在时不抑制（与 Codex 一致） |
 
 **不建议借鉴**：kimi/MiMo 的"策略链短路"范式。它们的 auto 把 `dangerous-command-ask`
 **整条从链上摘掉**（`dangerous-command-ask.ts:122`），配合无沙箱兜底，等于 auto 模式下 `rm -rf` 直接执行

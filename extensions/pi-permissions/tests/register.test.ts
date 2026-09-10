@@ -631,6 +631,41 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
   });
 
+  it("does not bare-execute when risk still marks escalated but denyRead makes eligibility false", async () => {
+    const justification = "Run a controlled command";
+    const app = await makeHarness({
+      config: {
+        sandbox: {
+          filesystem: { denyRead: ["/explicit-secret"] },
+        },
+      },
+      // Defense in depth: production risk already suppresses escalated under
+      // denyRead. If a stale/incorrect escalated admission still arrives,
+      // eligibility must refuse the unsandboxed lease.
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification,
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeBashWithParams(app, "escalated-deny-read", {
+        command: "printf no",
+        sandbox_permissions: "require_escalated",
+        justification,
+      }),
+    ).rejects.toMatchObject({ code: "enforcement-unavailable" });
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
+    expect(app.sandboxBashExecute).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       label: "denied",

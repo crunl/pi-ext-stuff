@@ -145,9 +145,12 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   exact Bash call explicitly requests `sandbox_permissions=require_escalated`;
   then the Engine routes that one frozen command/cwd through Guardian action
   review and a one-shot bare Pi executor. Default Git/.agents/.codex carveouts
-  are not permanent hard denies on that reviewed escalated executor; explicit
-  configured denies and active delegation ceilings still make escalation
-  ineligible. No Git-specific write grant or unsandboxed fallback is created.
+  are not permanent hard denies on that reviewed escalated executor; configured
+  `denyRead` and active delegation ceilings still make escalation ineligible
+  (Codex parity: denied reads only exist in-sandbox, so `require_escalated` is
+  downgraded to the ordinary sandboxed path rather than HARD-blocked).
+  `denyWrite` / `deniedDomains` alone do not suppress escalation. No
+  Git-specific write grant or unsandboxed fallback is created.
   Guardian's `rg` path is realpath-resolved by the parent and the child executes
   that absolute identity. The shared sandbox Bash/file execution entrypoint
   re-discovers metadata roots from the actual `cwd` for each execution and only

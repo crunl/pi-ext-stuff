@@ -878,8 +878,9 @@ describe("Risk policy gate", () => {
     });
   });
 
-  it.each<Partial<PermissionsConfig>>([
-    {
+  it("suppresses unsandboxed escalation when denyRead is configured (Codex parity)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const configured = config({
       sandbox: {
         ...structuredClone(DEFAULT_CONFIG.sandbox),
         filesystem: {
@@ -887,7 +888,100 @@ describe("Risk policy gate", () => {
           denyRead: ["/secret"],
         },
       },
-    },
+    });
+    // denyRead only exists inside the sandbox, so require_escalated is
+    // downgraded to the ordinary sandboxed path instead of HARD-blocked.
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "printf escalated",
+          sandbox_permissions: "require_escalated",
+          justification: "Run a controlled command",
+        },
+        cwd,
+        configured,
+      ),
+    ).resolves.toMatchObject({
+      action: "allow",
+      risk: "LOW",
+    });
+  });
+
+  it("lets an allow rule short-circuit a denyRead-suppressed escalation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const configured = config({
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        filesystem: {
+          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
+          denyRead: ["/secret"],
+        },
+      },
+      rules: [{ action: "allow", tool: "bash", pattern: "printf *" }],
+    });
+    // Suppressed escalation is an ordinary sandboxed bash, so allow rules apply.
+    // Unlike Codex (still one RequireEscalated approval), Pi does not force a prompt.
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "printf escalated",
+          sandbox_permissions: "require_escalated",
+          justification: "Run a controlled command",
+        },
+        cwd,
+        configured,
+      ),
+    ).resolves.toMatchObject({
+      action: "allow",
+      risk: "LOW",
+      reason: "Allowed by permissions rule",
+    });
+  });
+
+  it("still prompts a dangerous command when denyRead suppresses escalation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+    const configured = config({
+      sandbox: {
+        ...structuredClone(DEFAULT_CONFIG.sandbox),
+        filesystem: {
+          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
+          denyRead: ["/secret"],
+        },
+      },
+      rules: [{ action: "allow", tool: "bash", pattern: "printf *" }],
+    });
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        {
+          command: "rm -rf /tmp/does-not-matter",
+          sandbox_permissions: "require_escalated",
+          justification: "Delete a scratch tree",
+        },
+        cwd,
+        configured,
+      ),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      reason: "HARD operation",
+    });
+    const decision = await evaluateRiskRequest(
+      "bash",
+      {
+        command: "rm -rf /tmp/does-not-matter",
+        sandbox_permissions: "require_escalated",
+        justification: "Delete a scratch tree",
+      },
+      cwd,
+      configured,
+    );
+    expect(decision).not.toMatchObject({ executionMode: "escalated" });
+  });
+
+  it.each<Partial<PermissionsConfig>>([
     {
       sandbox: {
         ...structuredClone(DEFAULT_CONFIG.sandbox),
@@ -906,26 +1000,29 @@ describe("Risk policy gate", () => {
         },
       },
     },
-  ])("fails closed when explicit sandbox deny rules cannot be preserved", async (override) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
-    const configured = config(override);
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "printf escalated",
-          sandbox_permissions: "require_escalated",
-          justification: "Run a controlled command",
-        },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
-      action: "block",
-      risk: "HARD",
-      reason: expect.stringContaining("explicit sandbox deny rules"),
-    });
-  });
+  ])(
+    "still issues an escalated lease when only denyWrite or deniedDomains are configured",
+    async (override) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
+      const configured = config(override);
+      await expect(
+        evaluateRiskRequest(
+          "bash",
+          {
+            command: "printf escalated",
+            sandbox_permissions: "require_escalated",
+            justification: "Run a controlled command",
+          },
+          cwd,
+          configured,
+        ),
+      ).resolves.toMatchObject({
+        action: "prompt",
+        executionMode: "escalated",
+        reason: "Command requires escalated sandbox permissions",
+      });
+    },
+  );
 
   it("rejects escalation for non-Bash tools and malformed requests", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-escalated-"));
