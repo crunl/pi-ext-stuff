@@ -27,6 +27,16 @@ Biome governs style/lint (`biome.json`) but there is **no `lint` script**; run
 `noConsole`, `noNonNullAssertion` are errors (relaxed only under `tests/**`);
 double quotes; imports must use explicit `.ts` extensions.
 
+## Product boundaries
+
+Approve for me runs entirely in this extension; the Pi host has no first-class
+permission mode, grant store, or sandbox. Standing Codex pin for alignment
+claims is `129fd21687fbd4ac48133b7abfdcaf52cb6cb01f`. Host API limits
+(owned tools vs host-admission review-only, parallel execute vs attempt
+freeze, missing host primitives) are documented in
+`docs/host-api-boundaries.md`. Do not schedule work that contradicts that
+boundary note without an explicit product decision.
+
 ## Cross-extension dependency
 
 - `src/register.ts` imports from `../../pi-core/standalone.ts` (relative to
