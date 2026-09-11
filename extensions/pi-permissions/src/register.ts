@@ -63,7 +63,7 @@ import {
   renderPermissionNotice,
   renderPermissionSummary,
 } from "./permission-copy.ts";
-import type { ModeTransitionBarrier, PendingModeTransition } from "./permission-session.ts";
+import type { ModeTransitionBarrier } from "./permission-session.ts";
 import { type PermissionExecutionSnapshot, PermissionSession } from "./permission-session.ts";
 import { canonicalize } from "./permissions/paths.ts";
 import {
@@ -238,6 +238,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   let guardianInvalidationAfterModeChange = false;
+  /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
+  let pendingModeRefresh = false;
   const permissions = new PiPermissionsRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
     policy: {
@@ -372,6 +374,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     guardianInvalidationAfterModeChange = false;
     session.resetTurn();
     session.clearPending();
+    pendingModeRefresh = false;
     invalidatePermissionContext(reason);
   };
 
@@ -445,24 +448,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     };
   };
 
-  // The pending token never defers activation: the mode switch runs immediately
-  // inside runModeMutation (activateConfig + runtime.activate). During an
-  // active turn it prevents the mutation from invalidating the current
-  // execution snapshot; agent_end/agent_settled clears it so the next turn
-  // captures the new mode.
-  const scheduleModeTransition = (): PendingModeTransition | undefined => {
-    return session.schedulePendingTransition();
-  };
-
   const clearPendingModeTransition = (turnId: number): void => {
     session.clearPendingForTurn(turnId);
-  };
-
-  const isPendingModeTransitionCurrent = (transition: PendingModeTransition): boolean =>
-    session.isPendingCurrent(transition);
-
-  const clearPendingModeTransitionIfCurrent = (transition: PendingModeTransition): void => {
-    session.clearPendingIfCurrent(transition);
   };
 
   const createModeTransitionBarrier = (): ModeTransitionBarrier => session.createBarrier();
@@ -1095,11 +1082,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         );
   };
 
-  const MODE_RANK: Record<PermissionMode, number> = {
-    auto: 1,
-    yolo: 2,
-  };
-
   /**
    * pi-core resolves its own physical copy of @earendil-works/pi-coding-agent,
    * so Codex-rendered tools reference a nominal Theme twin (private-field
@@ -1185,15 +1167,111 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     executionContext: EffectiveExecutionContext;
   }
 
+  /**
+   * Codex step-boundary mode apply. Desired mode is `modeRuntime.mode`;
+   * applied mode is the live execution snapshot. Divergence is resolved only
+   * here (turn_start) or at the preparePermissionExecution safety drain —
+   * never by hot-swapping the sandbox profile mid-attempt.
+   */
+  const applyPendingTurnModeRefresh = async (ctx: ExtensionContext): Promise<void> => {
+    if (!modeRuntime || !loaded) return;
+    if (session.getTurnPhase() !== "active") return;
+    const snapshot = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
+    if (!snapshot) return;
+    const targetMode = modeRuntime.mode;
+    if (snapshot.mode === targetMode) return;
+
+    const generation = session.getGeneration();
+    if (!session.isCurrentGeneration(generation)) return;
+    const config = loaded.config;
+
+    try {
+      if (requiresSandbox(targetMode, config)) {
+        // Activate SRT first; fail closed before switching authorization.
+        await activateConfig(ctx, true, targetMode, undefined, generation);
+        if (!session.isCurrentGeneration(generation) || session.getTurnPhase() !== "active") {
+          return;
+        }
+        if (sandboxState.kind !== "ready") {
+          throw Object.assign(new Error("Sandbox executor is unavailable or poisoned"), {
+            code: "enforcement-unavailable",
+            reason: "Sandbox executor is unavailable or poisoned",
+          });
+        }
+        session.refreshExecutionSnapshotMode(targetMode, {
+          sandboxReady: true,
+          baseSandboxConfig,
+        });
+        const applied = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
+        if (applied) {
+          permissions.refreshTurnMode({
+            mode: targetMode,
+            sandboxReady: true,
+            baseSandboxPolicy: baseSandboxConfig,
+            escalationEligibility: escalationEligibility(applied),
+          });
+        }
+      } else {
+        // yolo: authorization first, then tear down SRT for the applied mode.
+        session.refreshExecutionSnapshotMode(targetMode, { sandboxReady: false });
+        const applied = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
+        if (applied) {
+          permissions.refreshTurnMode({
+            mode: targetMode,
+            sandboxReady: false,
+            escalationEligibility: escalationEligibility(applied),
+          });
+        }
+        await activateConfig(ctx, false, targetMode, undefined, generation);
+      }
+      // Mode actually applied at this step boundary: retire deferred Guardian trunk.
+      pendingModeRefresh = false;
+      if (guardianInvalidationAfterModeChange) {
+        guardianInvalidationAfterModeChange = false;
+        invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
+      }
+    } catch (error: unknown) {
+      if (!session.isCurrentGeneration(generation)) return;
+      // Leave the prior applied mode; the next prepare/turn_start will retry.
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(
+        renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
+        "error",
+      );
+    }
+  };
+
   const preparePermissionExecution = async (
     ctx: ExtensionContext,
   ): Promise<PreparedPermissionExecution> => {
+    // Host turns apply at turn_start. Direct tool-hook paths without lifecycle
+    // events drain here; same-step tools after a host turn_start keep the
+    // prior applied mode until the next step boundary.
+    if (pendingModeRefresh && !session.hasObservedLifecycle()) {
+      await applyPendingTurnModeRefresh(ctx);
+    }
     const activationGeneration = session.getGeneration();
-    await activateConfig(ctx, false, undefined, undefined, activationGeneration);
+    const appliedMode =
+      session.currentExecutionSnapshot()?.mode ??
+      session.getExecutionSnapshot()?.mode ??
+      modeRuntime?.mode;
+    await activateConfig(ctx, false, appliedMode, undefined, activationGeneration);
     assertActivationCurrent(activationGeneration);
     const executionSnapshot = ensureExecutionSnapshot(ctx);
     if (!executionSnapshot) {
       throw new Error(ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE);
+    }
+    // Activation can repair a stale sandboxReady bit minted before SRT came up.
+    const ready =
+      requiresSandbox(executionSnapshot.mode, executionSnapshot.config) &&
+      sandboxState.kind === "ready";
+    if (executionSnapshot.sandboxReady !== ready) {
+      session.refreshExecutionSnapshotMode(executionSnapshot.mode, { sandboxReady: ready });
+      permissions.refreshTurnMode({
+        mode: executionSnapshot.mode,
+        sandboxReady: ready,
+        escalationEligibility: escalationEligibility(executionSnapshot),
+      });
     }
     const executionContext = getEffectiveExecutionContext(executionSnapshot);
     if (!executionContext) {
@@ -2411,8 +2489,33 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     }
     modeRuntime?.beginAgentTurn();
+    // A prior mid-turn cycle may have left SRT on the old mode. Align before
+    // minting so the fresh snapshot's sandboxReady bit is truthful.
+    pendingModeRefresh = false;
+    const activationGeneration = session.getGeneration();
+    if (modeRuntime && session.isCurrentTurn(startingTurnId)) {
+      try {
+        await activateConfig(ctx, false, modeRuntime.mode, undefined, activationGeneration);
+      } catch {
+        // Fail closed: capture the actual sandboxState so tools refuse if SRT is down.
+      }
+    }
+    if (
+      !session.isCurrentGeneration(activationGeneration) ||
+      session.getTurnPhase() !== "active" ||
+      !session.isCurrentTurn(startingTurnId)
+    ) {
+      return;
+    }
     const executionSnapshot = captureExecutionSnapshot(startingTurnId);
     if (executionSnapshot) beginPermissionTurn(ctx, executionSnapshot);
+  });
+
+  // Each LLM sampling is a step. A mid-agent cycle updates desired mode only;
+  // this is where the applied snapshot and SRT actually catch up (Codex-like).
+  pi.on("turn_start", async (_event, ctx) => {
+    session.markLifecycleEvent();
+    await applyPendingTurnModeRefresh(ctx);
   });
 
   pi.on("agent_end", () => {
@@ -2502,21 +2605,42 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {
     if (!ctx.isIdle()) ensureExecutionSnapshot(ctx);
     const beganDuringActiveTurn = session.getTurnPhase() === "active";
-    // Register the barrier synchronously with the shortcut invocation. A queued
-    // agent_start must observe it even if agent_end runs before this mutation's
-    // first asynchronous continuation.
-    const transitionBarrier = createModeTransitionBarrier();
-    const pendingBeforeTransition = session.getPendingTransition();
-    const modeBeforeCycle = modeRuntime ? modeRuntime.mode : "auto";
-    // The switch itself runs immediately. An active turn keeps its captured
-    // execution snapshot; a pending token prevents a downgrade's async
-    // activation from tearing that snapshot down mid-turn. The lifecycle
-    // boundary clears the token, and the next turn captures the new mode.
-    const isUpgrade = MODE_RANK[nextMode(modeBeforeCycle)] > MODE_RANK[modeBeforeCycle];
-    const transition = beganDuringActiveTurn && !isUpgrade ? scheduleModeTransition() : undefined;
-    const transitionOwnsPendingState =
-      transition !== undefined && transition !== pendingBeforeTransition;
 
+    if (beganDuringActiveTurn) {
+      // Desired-mode only. The applied snapshot and SRT stay put until the
+      // next turn_start (or preparePermissionExecution safety drain).
+      const generation = session.getGeneration();
+      try {
+        if ((await shiftTabAvailability(agentDir)) !== "available") {
+          ctx.ui.notify(renderPermissionNotice({ kind: "shortcut-conflict" }), "warning");
+          return;
+        }
+        let runtime = modeRuntime;
+        if (!runtime) {
+          const initial = await activateConfig(ctx, false, undefined, undefined, generation);
+          if (!session.isCurrentGeneration(generation)) return;
+          runtime = ensureModeRuntime(initial.config);
+        }
+        const targetMode = nextMode(runtime.mode);
+        runtime.activate(targetMode, { preserveAutoTransientState: true });
+        pendingModeRefresh = true;
+        deferGuardianInvalidationForModeChange(true);
+        setDefaultStatus(ctx);
+      } catch (error: unknown) {
+        if (!session.isCurrentGeneration(generation)) return;
+        const message = error instanceof Error ? error.message : String(error);
+        setDefaultStatus(ctx);
+        ctx.ui.notify(
+          renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
+          "error",
+        );
+      }
+      return;
+    }
+
+    // Between turns / idle: no snapshot to preserve; apply immediately so the
+    // next agent_start captures a consistent mode+SRT pair.
+    const transitionBarrier = createModeTransitionBarrier();
     try {
       await session.runModeMutation(async (generation) => {
         try {
@@ -2525,13 +2649,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             settleModeTransitionBarrier(transitionBarrier, true);
             return;
           }
-          if (!transition && !beganDuringActiveTurn) {
-            // Between turns and while idle there is no snapshot to preserve.
-            // Invalidate the current permission/reviewer context before activation;
-            // active-turn transitions leave the snapshot untouched.
-            permissions.invalidate(PERMISSION_MODE_CHANGED_REASON);
-            invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
-          }
+          permissions.invalidate(PERMISSION_MODE_CHANGED_REASON);
+          invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           let runtime = modeRuntime;
           if (!runtime) {
             const initial = await activateConfig(ctx, false, undefined, undefined, generation);
@@ -2541,46 +2660,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             }
             runtime = ensureModeRuntime(initial.config);
           }
-          // Recompute from the latest runtime state: runModeMutation serializes
-          // mutations, so a rapid double Shift+Tab lands on the correct final
-          // two-state mode (auto -> yolo -> auto) instead of both reading the
-          // same starting mode.
-          const previousMode = runtime.mode;
-          const targetMode = nextMode(previousMode);
-          const result = await activateConfig(
-            ctx,
-            !beganDuringActiveTurn,
-            targetMode,
-            undefined,
-            generation,
-          );
+          const targetMode = nextMode(runtime.mode);
+          const result = await activateConfig(ctx, true, targetMode, undefined, generation);
           if (!session.isCurrentGeneration(generation)) {
-            if (transition && transitionOwnsPendingState) {
-              clearPendingModeTransitionIfCurrent(transition);
-            }
             settleModeTransitionBarrier(transitionBarrier, false);
             return;
           }
           runtime = ensureModeRuntime(result.config);
-          runtime.activate(targetMode, {
-            preserveAutoTransientState: beganDuringActiveTurn,
-          });
-          deferGuardianInvalidationForModeChange(beganDuringActiveTurn);
-          if (
-            transition &&
-            transitionOwnsPendingState &&
-            !isPendingModeTransitionCurrent(transition)
-          ) {
-            // agent_end/agent_settled (or a superseding lifecycle reset) already cleaned
-            // the old turn. Do not restore its invalidation token or snapshot.
-            clearPendingModeTransitionIfCurrent(transition);
-          }
+          runtime.activate(targetMode);
           setDefaultStatus(ctx);
           settleModeTransitionBarrier(transitionBarrier, true);
         } catch (error: unknown) {
-          if (transition && transitionOwnsPendingState) {
-            clearPendingModeTransitionIfCurrent(transition);
-          }
           settleModeTransitionBarrier(transitionBarrier, false);
           if (!session.isCurrentGeneration(generation)) return;
           const message = error instanceof Error ? error.message : String(error);
@@ -2592,7 +2682,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         }
       });
     } finally {
-      // runModeMutation can discard a stale generation before invoking the operation.
       settleModeTransitionBarrier(transitionBarrier, false);
     }
   };

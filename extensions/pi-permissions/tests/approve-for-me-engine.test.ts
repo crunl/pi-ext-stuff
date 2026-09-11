@@ -2269,6 +2269,69 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
+  it("refreshTurnMode applies a step-boundary mode change without beginTurn", async () => {
+    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "unused" }));
+    const turn = engine.beginTurn(snapshot({ mode: "auto" }));
+    const sandboxExecutor = vi.fn(async (attempt) => {
+      expect(attempt.lease.mode).toBe("sandboxed");
+      return completed("sandboxed");
+    });
+    await expect(turn.execute(call(sandboxExecutor))).resolves.toMatchObject({
+      kind: "completed",
+      value: "sandboxed",
+    });
+
+    expect(
+      engine.refreshTurnMode({
+        mode: "yolo",
+        sandboxReady: false,
+        escalationEligibility: {
+          eligible: false,
+          reason: "Command escalation is unavailable outside auto mode",
+        },
+      }),
+    ).toBe(true);
+    const yoloExecutor = vi.fn(async (attempt) => {
+      expect(attempt.lease.mode).toBe("unrestricted");
+      return completed("yolo");
+    });
+    await expect(
+      turn.execute(call(yoloExecutor, { admission: reviewAdmission() })),
+    ).resolves.toEqual({
+      kind: "completed",
+      value: "yolo",
+    });
+    expect(review).not.toHaveBeenCalled();
+
+    expect(
+      engine.refreshTurnMode({
+        mode: "auto",
+        sandboxReady: true,
+        baseSandboxPolicy: basePolicy,
+        escalationEligibility: {
+          eligible: true,
+          reason: "Sandbox is healthy",
+        },
+      }),
+    ).toBe(true);
+    const autoAgain = vi.fn(async (attempt) => {
+      expect(attempt.lease.mode).toBe("sandboxed");
+      return completed("auto-again");
+    });
+    await expect(turn.execute(call(autoAgain))).resolves.toMatchObject({
+      kind: "completed",
+      value: "auto-again",
+    });
+  });
+
+  it("refreshTurnMode refuses when no turn is current", () => {
+    const { engine } = createEngine(async () => ({ kind: "deny", rationale: "unused" }));
+    expect(engine.refreshTurnMode({ mode: "yolo" })).toBe(false);
+    const turn = engine.beginTurn(snapshot());
+    turn.close();
+    expect(engine.refreshTurnMode({ mode: "yolo" })).toBe(false);
+  });
+
   it("executes in yolo mode despite a denying policy", async () => {
     const policy = vi.fn(async () => ({ kind: "deny" as const, reason: "blocked by policy" }));
     const { engine, review } = createEngine(

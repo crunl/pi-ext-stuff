@@ -213,6 +213,28 @@ export class PermissionSession {
     this.executionSnapshot = snapshot;
   }
 
+  /**
+   * Step-boundary mode apply: rewrite applied mode (and optional lifecycle
+   * facts) on the root snapshot and every nested child. Never allocates a
+   * turn or clears grants.
+   */
+  refreshExecutionSnapshotMode(
+    mode: PermissionMode,
+    facts?: { sandboxReady?: boolean; baseSandboxConfig?: SandboxPolicy },
+  ): void {
+    if (this.turnPhase !== "active") return;
+    const apply = (snapshot: PermissionExecutionSnapshot | undefined): void => {
+      if (!snapshot) return;
+      snapshot.mode = mode;
+      if (facts?.sandboxReady !== undefined) snapshot.sandboxReady = facts.sandboxReady;
+      if (facts?.baseSandboxConfig !== undefined) {
+        snapshot.baseSandboxConfig = facts.baseSandboxConfig;
+      }
+    };
+    apply(this.executionSnapshot);
+    for (const nested of this.nestedSnapshots) apply(nested);
+  }
+
   getExecutionSnapshot(): PermissionExecutionSnapshot | undefined {
     return this.executionSnapshot;
   }

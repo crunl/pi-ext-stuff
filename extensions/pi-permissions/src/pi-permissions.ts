@@ -227,6 +227,16 @@ export interface PiPermissions<ReviewContext = undefined> {
   /** True while at least one delegated child turn is open. */
   hasNestedTurn(): boolean;
   hasActiveTurn(): boolean;
+  /**
+   * Apply a host mode change to the live turn without beginTurn. Walks the
+   * nested stack so parked parents stay aligned with the child.
+   */
+  refreshTurnMode(patch: {
+    mode: "auto" | "yolo";
+    sandboxReady?: boolean;
+    baseSandboxPolicy?: SandboxPolicy;
+    escalationEligibility?: { eligible: boolean; reason: string };
+  }): boolean;
   inspect(): PermissionStateView | undefined;
   /**
    * Submit an opaque action capture produced at host ingress. The action's
@@ -356,6 +366,20 @@ export class PiPermissionsRuntime<ReviewContext = undefined>
 
   hasActiveTurn(): boolean {
     return this.activeTurn !== undefined;
+  }
+
+  refreshTurnMode(patch: {
+    mode: "auto" | "yolo";
+    sandboxReady?: boolean;
+    baseSandboxPolicy?: SandboxPolicy;
+    escalationEligibility?: { eligible: boolean; reason: string };
+  }): boolean {
+    let refreshed = false;
+    for (const level of this.nestedLevels) {
+      if (level.engine.refreshTurnMode(patch)) refreshed = true;
+    }
+    if (this.engine.refreshTurnMode(patch)) refreshed = true;
+    return refreshed;
   }
 
   captureAction<Input>(call: PiActionCall<Input>): PiCapturedAction<Input> {

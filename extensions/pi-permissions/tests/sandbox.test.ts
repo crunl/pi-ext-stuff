@@ -580,12 +580,13 @@ describe("sandbox integration", () => {
       { onData: (data) => output.push(data) },
     );
 
-    expect(manager.wrapWithSandbox).toHaveBeenCalledWith(
-      expect.stringContaining("printf unsandboxed"),
-      undefined,
-      runtime,
-      undefined,
-    );
+    const callArgs = manager.wrapWithSandbox.mock.calls[0];
+    expect(callArgs?.[0]).toContain("printf unsandboxed");
+    expect(callArgs?.[1]).toBeUndefined();
+    expect(callArgs?.[3]).toBeUndefined();
+    // Policy is rebuilt per execution (live Git metadata), so compare the
+    // stable workspace root rather than a deep cwd-discovered snapshot.
+    expect(callArgs?.[2]?.filesystem.allowWrite).toEqual(runtime.filesystem.allowWrite);
     expect(Buffer.concat(output).toString()).toBe("sandboxed");
     expect(result.exitCode).toBe(0);
   });

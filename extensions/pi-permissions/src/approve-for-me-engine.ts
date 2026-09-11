@@ -354,6 +354,17 @@ export interface PermissionStateView {
 
 export interface ApproveForMeEngine<ReviewContext = undefined> {
   beginTurn(snapshot: TurnSnapshot): TurnHandle<ReviewContext>;
+  /**
+   * Step-boundary mode apply (Codex-like). Patches only mode and related
+   * host-derived facts on the live turn. Never begins a turn, clears grants,
+   * opens the denial circuit, or freezes attempt windows.
+   */
+  refreshTurnMode(patch: {
+    mode: ApproveForMeMode;
+    sandboxReady?: boolean;
+    baseSandboxPolicy?: SandboxPolicy;
+    escalationEligibility?: { eligible: boolean; reason: string };
+  }): boolean;
   invalidate(reason: string): void;
   listDenials(): readonly DenialNotice[];
   inspect(): PermissionStateView | undefined;
@@ -2468,6 +2479,29 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     return handle;
   };
 
+  const refreshTurnMode = (patch: {
+    mode: ApproveForMeMode;
+    sandboxReady?: boolean;
+    baseSandboxPolicy?: SandboxPolicy;
+    escalationEligibility?: { eligible: boolean; reason: string };
+  }): boolean => {
+    if (!active || !isCurrent(active)) return false;
+    active.snapshot.mode = patch.mode;
+    if (patch.sandboxReady !== undefined) {
+      active.snapshot.sandboxReady = patch.sandboxReady;
+    }
+    if (patch.baseSandboxPolicy !== undefined) {
+      active.snapshot.baseSandboxPolicy = clonePolicy(patch.baseSandboxPolicy);
+    }
+    if (patch.escalationEligibility !== undefined) {
+      active.snapshot.escalationEligibility = {
+        eligible: patch.escalationEligibility.eligible,
+        reason: patch.escalationEligibility.reason,
+      };
+    }
+    return true;
+  };
+
   const invalidate = (reason: string): void => {
     generation += 1;
     if (active) closeState(active, reason);
@@ -2508,5 +2542,5 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       pendingConnections: inlineCapabilityReviews.size,
     });
   };
-  return { beginTurn, invalidate, listDenials, armRetry, inspect };
+  return { beginTurn, refreshTurnMode, invalidate, listDenials, armRetry, inspect };
 }

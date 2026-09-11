@@ -441,6 +441,10 @@ async function startAgent(app: Harness): Promise<void> {
   await invoke(app, "agent_start", { type: "agent_start" });
 }
 
+async function startTurn(app: Harness, turnIndex = 0): Promise<void> {
+  await invoke(app, "turn_start", { type: "turn_start", turnIndex, timestamp: Date.now() });
+}
+
 async function endAgent(app: Harness): Promise<void> {
   await invoke(app, "agent_end", { type: "agent_end" });
 }
@@ -1617,6 +1621,94 @@ describe("Permission mode registration", () => {
     await executeBash(app, "next-auto", "printf auto");
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
     expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("applies a mid-turn Auto→YOLO cycle at the next turn_start, not at the cycle instant", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await startAgent(app);
+
+    await executeBash(app, "before-cycle-auto", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+
+    const resetsBeforeCycle = app.sandboxManager.reset.mock.calls.length;
+    await shortcut.handler(app.context);
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(resetsBeforeCycle);
+
+    await executeBash(app, "same-step-still-auto", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledTimes(2);
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
+
+    await startTurn(app, 1);
+    await executeBash(app, "next-step-yolo", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.reset.mock.calls.length).toBeGreaterThan(resetsBeforeCycle);
+  });
+
+  it("applies a mid-turn YOLO→Auto cycle at turn_start and uses the sandbox again", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+    await startAgent(app);
+
+    await executeBash(app, "before-downshift", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+
+    await shortcut.handler(app.context);
+    await executeBash(app, "same-step-still-yolo", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledTimes(2);
+    expect(app.sandboxBashExecute).not.toHaveBeenCalled();
+
+    await startTurn(app, 1);
+    await executeBash(app, "next-step-auto", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the applied mode unchanged when the step-boundary auto activation fails", async () => {
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxResetErrorAfter: 3,
+    });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+    await startAgent(app);
+
+    await executeBash(app, "yolo-before-failed-downshift", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+
+    await shortcut.handler(app.context);
+    await startTurn(app, 1);
+    expect(app.notify).toHaveBeenCalledWith(expect.stringContaining("failed"), "error");
+    // Still yolo: a failed auto activation must not open unrestricted tools
+    // as auto, nor leave auto authorization without SRT.
+    await executeBash(app, "still-yolo-after-failed-activate", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledTimes(2);
+    expect(app.sandboxBashExecute).not.toHaveBeenCalled();
+  });
+
+  it("keeps nested child snapshots aligned when the step boundary applies a mode change", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await startAgent(app);
+    await executeBash(app, "outer-auto", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+
+    await startAgent(app); // nested child
+    await executeBash(app, "child-auto", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledTimes(2);
+
+    await shortcut.handler(app.context);
+    await startTurn(app, 1);
+    await executeBash(app, "child-yolo", "printf yolo");
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
   });
 
   it("lets the registration tool_call hook skip managed tools", async () => {

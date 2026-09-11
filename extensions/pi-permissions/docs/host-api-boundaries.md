@@ -81,7 +81,7 @@ contract to the model.
 | Sandbox adapter | Pinned SRT 0.0.74 + connect guard | Backend/platform capability gates remain |
 | `request_permissions` protocol | Extension-registered tool | Shape is Pi-specific |
 | Approval handoff-to-user event | `/approve` after denial only | Guardian does not AskUser |
-| Runtime reviewer switch | Mode cycle shortcut / commands | No mid-turn User ↔ AutoReview flip |
+| Runtime reviewer switch | Mode cycle shortcut / commands | No mid-turn User ↔ AutoReview flip; auto/yolo applies at the next `turn_start` step boundary |
 
 These are deliberate boundaries, not unfinished host features. Closing a gap
 requires either an extension-side product decision or a new host API; do not
@@ -97,6 +97,7 @@ paper over them in docs as if the host already offered them.
 | `ctx.ui.confirm/select/notify` | `/approve` and mode notices (not the default Auto path) |
 | `ctx.abort()` | Circuit-breaker turn interrupt |
 | session/agent lifecycle events | Turn snapshot, grant expiry, cleanup |
+| `pi.on("turn_start")` | Step-boundary apply of a mid-agent auto/yolo cycle (Codex-like); no sandbox profile hot-swap |
 | `pi.registerCommand` / `registerShortcut` | `/approve`, `/permissions`, mode cycle |
 | `pi.sendMessage` | Exact one-shot `/approve` retry instruction |
 
