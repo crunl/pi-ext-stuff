@@ -61,13 +61,21 @@ test("top border: untouched with no mode and no stats", () => {
 	);
 });
 
+test("top border: inset capWidth reserves no extra columns", () => {
+	const top = buildTopBorder(WIDTH, "Plan", undefined, 0)!;
+	assert.equal(top.pre, "──");
+	assert.equal(top.mode, "Plan");
+	assert.equal(top.pre.length + top.mode.length + top.post.length, WIDTH);
+});
+
 test("bottom border: model info without the mode", () => {
 	const bottom = buildBottomBorder(WIDTH, {
 		modelId: "gpt-5.6",
 		effort: "high",
 	});
 	assert.match(bottom!, /^── \u{F035B} gpt-5\.6 \u{F0875} high ─+$/u);
-	assert.equal(bottom!.length, WIDTH);
+	// Code-point width, not UTF-16 length — astral icons must not shrink the rule.
+	assert.equal([...bottom!].length, WIDTH);
 });
 
 test("bottom border: undefined when the label does not fit", () => {
@@ -76,4 +84,11 @@ test("bottom border: undefined when the label does not fit", () => {
 		effort: "xhigh",
 	});
 	assert.equal(bottom, undefined);
+});
+
+test("bottom border: astral icons still leave a full-width rule", () => {
+	// 2 icons × surrogate pair = UTF-16 length 4 but visible 2.
+	const bottom = buildBottomBorder(30, { modelId: "m", effort: "high" })!;
+	assert.equal([...bottom].length, 30);
+	assert.ok(bottom.endsWith("─"));
 });

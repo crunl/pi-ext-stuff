@@ -1,6 +1,6 @@
 # statusline
 
-pi 全局 TUI 状态行扩展：重排 footer，并将 token、模型和 effort 信息嵌入 editor 边框。
+pi 全局 TUI 状态行扩展：重排 footer，并将 token、模型和 effort 信息嵌入 boxed editor 边框。
 
 安装位置：
 
@@ -10,11 +10,13 @@ pi 全局 TUI 状态行扩展：重排 footer，并将 token、模型和 effort 
 
 ## 当前布局
 
+Editor 为圆角盒（宽 ≥24）；mode 为 powerline 半圆胶囊，嵌在顶栏圆角之后。窄宽度退回无盒上下边框。
+
 ```text
 [ 消息流 ... ]
-──────────────────────────────── ↑284k ↓37.3k ──
- > 输入内容…
-── Default•(provider) model•effort ─────────────
+╭──Auto─────────────────── ↑284k ↓37.3k ─╮
+│ 输入内容…                               │
+╰─ model•effort ──────────────────────────╯
 󰉋 ~/project 󰙁 main • session    CH66.4%   █████░░░░░ 80.6k/192k
 [其他扩展的 setStatus 状态（有则显示）]
 ```
@@ -23,7 +25,7 @@ pi 全局 TUI 状态行扩展：重排 footer，并将 token、模型和 effort 
 
 ### Editor 上边框
 
-右侧显示当前 session 的累计 token：
+左侧 mode 徽章（powerline 半圆胶囊）；右侧显示当前 session 的累计 token：
 
 ```text
 ↑input ↓output
@@ -115,7 +117,8 @@ statusline/
 ├── index.ts              # pi 自动发现入口，仅转发 src/index.ts
 ├── src/
 │   ├── index.ts          # 扩展实现入口、事件接线、安装/卸载
-│   ├── model-editor.ts   # CustomEditor：上下边框嵌入状态信息
+│   ├── model-editor.ts   # CustomEditor：boxed chrome + 状态嵌入
+│   ├── box-editor.ts     # 纯函数：圆角 + 竖轨包装
 │   ├── footer.ts         # 自定义 footer、Nerd Font、context meter
 │   ├── usage.ts          # 累加 session token/cache/cost usage
 │   └── format.ts         # token 格式、对齐、cwd、icons、meter 工具

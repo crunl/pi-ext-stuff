@@ -13,15 +13,24 @@ export interface TokenStats {
 }
 
 /**
+ * Visible column count for our label alphabet (ASCII, box-drawing, Nerd
+ * Font PUA). Counts Unicode code points, not UTF-16 units — astral-plane
+ * icons are surrogate pairs and `.length` would overcount by 1 each.
+ */
+function displayLength(s: string): number {
+	return [...s].length;
+}
+
+/**
  * Top border segments: mode on the left, token stats on the right.
  *
  *   ──Auto──────────────── ↑284k ↓37.3k ──
  *   ^^^    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
  *   pre    post              (mode = "Auto")
  *
- * `mode` is the plain label; the decorator adds two powerline
- * half-circle caps around it, so post is sized against
- * label.length + BADGE_CAP_WIDTH.
+ * `mode` is the plain label. `capWidth` is the visible width the badge
+ * decorator will add (2 for powerline pill caps, 0 for inset/boxed).
+ * post is sized against label.length + capWidth.
  *
  * Returned as segments so the caller can color the border runs and the
  * mode badge independently — a fg/bg reset inside a single colored line
@@ -33,7 +42,7 @@ export interface TokenStats {
 export interface TopBorderSegments {
 	/** Border run before the badge ("──"); empty when no mode. */
 	pre: string;
-	/** Badge text ("Auto"), plain — caller decorates with caps. Empty when no mode. */
+	/** Badge text ("Auto"), plain — caller decorates. Empty when no mode. */
 	mode: string;
 	/** Border run after the badge, including right-aligned stats. */
 	post: string;
@@ -43,11 +52,11 @@ export function buildTopBorder(
 	width: number,
 	mode: string | undefined,
 	stats: TokenStats | undefined,
+	capWidth: number = BADGE_CAP_WIDTH,
 ): TopBorderSegments | undefined {
 	const modeSegment = mode ? `${mode}` : "";
-	// Decorator adds half-circle caps on each side; reserve their columns.
 	const modeWidth =
-		modeSegment.length > 0 ? modeSegment.length + BADGE_CAP_WIDTH : 0;
+		modeSegment.length > 0 ? displayLength(modeSegment) + capWidth : 0;
 	const pre = modeWidth > 0 ? "──" : "";
 	const leftWidth = pre.length + modeWidth;
 	const right =
@@ -55,11 +64,11 @@ export function buildTopBorder(
 			? ` ↑${formatTokens(stats.input)} ↓${formatTokens(stats.output)} ──`
 			: "";
 	if (leftWidth === 0 && right.length === 0) return undefined;
-	if (leftWidth + right.length < width) {
+	if (leftWidth + displayLength(right) < width) {
 		return {
 			pre,
 			mode: modeSegment,
-			post: "─".repeat(width - leftWidth - right.length) + right,
+			post: "─".repeat(width - leftWidth - displayLength(right)) + right,
 		};
 	}
 	if (leftWidth > 0 && leftWidth <= width) {
@@ -82,6 +91,7 @@ export function buildBottomBorder(
 	info: ModelStatusInfo,
 ): string | undefined {
 	const decorated = `── ${formatModelStatus(info)} `;
-	if (decorated.length >= width) return undefined;
-	return decorated + "─".repeat(width - decorated.length);
+	const labelWidth = displayLength(decorated);
+	if (labelWidth >= width) return undefined;
+	return decorated + "─".repeat(width - labelWidth);
 }

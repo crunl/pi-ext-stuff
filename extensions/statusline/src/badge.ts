@@ -8,10 +8,12 @@
  * Falls back to inverse video when the theme is unavailable or not
  * truecolor.
  *
- * Shape is a powerline pill: half-circle caps painted in the badge
- * color as foreground, label body on the badge background.
- *
- *   ──Auto───────  (caps are U+E0B6 / U+E0B4)
+ * Two shapes:
+ * - "pill" (default): powerline half-circle caps + colored body
+ *     ──Auto───────  (caps U+E0B6 / U+E0B4)
+ * - "inset": colored body only, for boxed editors where the corner
+ *   already curves and a pill would stack a second arc
+ *     ╭─Auto───────╮
  *
  * This file must not import pi packages (tests run under bare node).
  */
@@ -20,8 +22,10 @@
 export const PL_LEFT = "\uE0B6";
 export const PL_RIGHT = "\uE0B4";
 
-/** Visible width the decorator adds around the label (two caps). */
+/** Visible width the decorator adds around the label (two caps in pill mode). */
 export const BADGE_CAP_WIDTH = 2;
+
+export type BadgeStyle = "pill" | "inset";
 
 /** Theme color backing the badge for a given severity ("none" never renders). */
 export function badgeColorFor(
@@ -53,14 +57,19 @@ export function contrastTextFor(rgb: [number, number, number]): string {
 
 /**
  * Build the badge decorator from the badge color's foreground ANSI.
- * Input is the plain label ("Auto"); output is the full
- * powerline pill (caps + body), layout-neutral (zero-width codes only
- * beyond the two cap glyphs).
+ * Input is the plain label ("Auto"); output is the decorated segment.
+ * Pill style adds two visible cap columns; inset style is width-neutral.
  */
 export function makeModeBadgeDecorator(
 	badgeFgAnsi: string | undefined,
+	style: BadgeStyle = "pill",
 ): (segment: string) => string {
 	const rgb = badgeFgAnsi ? parseTruecolor(badgeFgAnsi) : null;
+	if (style === "inset") {
+		if (!rgb) return INVERSE;
+		const open = `\x1b[48;2;${rgb[0]};${rgb[1]};${rgb[2]}m${contrastTextFor(rgb)}`;
+		return (segment) => `${open}${segment}\x1b[39m\x1b[49m`;
+	}
 	if (!rgb) return (segment) => INVERSE(`${PL_LEFT}${segment}${PL_RIGHT}`);
 	const [r, g, b] = rgb;
 	const capFg = `\x1b[38;2;${r};${g};${b}m`;

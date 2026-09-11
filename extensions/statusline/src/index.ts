@@ -1,13 +1,13 @@
 /**
- * statusline — custom footer + model info embedded in the editor's bottom border.
+ * statusline — custom footer + boxed editor chrome with embedded status.
  *
  * Layout:
  *   [ messages ... ]
- *   ─────────────────── ↑284k ↓37.3k ──       <- editor top border (right)
- *    > input…
- *   ── Default•model•effort ──                     <- editor bottom border (left)
- *   ~/path (branch) • name    ↑↓RW$ ctx%           <- footer.ts (setFooter, line 1)
- *   [other extensions' statuses]                   <- footer.ts (optional line 2)
+ *   ╭──Auto────────────── ↑284k ↓37.3k ─╮   <- editor top (pill + stats)
+ *   │ input…                              │
+ *   ╰─ model•effort ──────────────────────╯   <- editor bottom (model)
+ *   ~/path (branch) • name    ↑↓RW$ ctx%      <- footer.ts (setFooter, line 1)
+ *   [other extensions' statuses]              <- footer.ts (optional line 2)
  *
  * Commands:
  *   /statusline  — toggle between this statusline and the built-in layout
