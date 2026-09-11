@@ -583,6 +583,70 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
+  it("covers a public host from config-level whole-network without Guardian review", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: {
+            enabled: true,
+            allowedDomains: [],
+            deniedDomains: [],
+          },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await attempt.authorizeCapability({
+        capability: { kind: "network", host: "api.example.com", port: 443 },
+      });
+      return decision.kind === "allow"
+        ? completed("covered public host")
+        : failed(decision.error.reason);
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "covered public host",
+    });
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("still hard-blocks a private target when config-level whole-network is enabled", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: {
+            enabled: true,
+            allowedDomains: [],
+            deniedDomains: [],
+          },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await attempt.authorizeCapability({
+        capability: { kind: "network", host: "192.168.1.10", port: 443 },
+      });
+      return decision.kind === "deny" ? completed(decision.error.code) : failed("must deny");
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "policy-denied" },
+    });
+    expect(review).not.toHaveBeenCalled();
+  });
+
   it("rejects escalation when the exact Bash input is not present", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
