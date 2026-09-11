@@ -1,18 +1,12 @@
 // Concurrency control for generations, turn lifecycle, execution snapshots,
-// mode-transition barriers, and pending transitions. Pure state machine — no
-// I/O, no host knowledge; the host supplies snapshot contents and performs
-// side effects around these transitions.
+// and mode-transition barriers. Pure state machine — no I/O, no host
+// knowledge; the host supplies snapshot contents and performs side effects
+// around these transitions.
 
 import type { PermissionsConfig } from "./config.ts";
 import type { DelegationAuditLink, DelegationEnvelope } from "./delegation.ts";
 import type { SandboxPolicy } from "./sandbox.ts";
 import type { PermissionMode } from "./state.ts";
-
-export interface PendingModeTransition {
-  id: number;
-  turnId: number | undefined;
-  phase: "active";
-}
 
 export interface ModeTransitionBarrier {
   id: number;
@@ -31,9 +25,7 @@ export interface PermissionExecutionSnapshot {
 
 export class PermissionSession {
   private generationCounter = 0;
-  private nextTransitionId = 0;
   private nextBarrierId = 0;
-  private pendingTransition: PendingModeTransition | undefined;
   private inFlightBarrier: ModeTransitionBarrier | undefined;
 
   // --- turn lifecycle ----------------------------------------------------
@@ -265,49 +257,6 @@ export class PermissionSession {
 
   hasObservedLifecycle(): boolean {
     return this.lifecycleEventsObserved;
-  }
-
-  // --- pending mode transitions -------------------------------------------
-
-  /**
-   * Mint the turn-scoped token that keeps a mid-switch invalidate from tearing
-   * down the live snapshot. First caller owns it for the turn.
-   */
-  schedulePendingTransition(): PendingModeTransition | undefined {
-    if (this.turnPhase !== "active" || this.currentTurnId === undefined) return undefined;
-    if (this.pendingTransition) return this.pendingTransition;
-    this.pendingTransition = {
-      id: ++this.nextTransitionId,
-      turnId: this.currentTurnId,
-      phase: "active",
-    };
-    return this.pendingTransition;
-  }
-
-  /** Only the lifecycle boundary that owns the token may clear it by turn. */
-  clearPendingForTurn(turnId: number): void {
-    if (this.pendingTransition?.turnId === turnId) this.pendingTransition = undefined;
-  }
-
-  isPendingCurrent(transition: PendingModeTransition): boolean {
-    return (
-      this.pendingTransition?.id === transition.id &&
-      this.turnPhase === transition.phase &&
-      this.currentTurnId === transition.turnId
-    );
-  }
-
-  clearPendingIfCurrent(transition: PendingModeTransition): void {
-    if (this.pendingTransition?.id === transition.id) this.pendingTransition = undefined;
-  }
-
-  clearPending(): void {
-    this.pendingTransition = undefined;
-  }
-
-  /** Read-only view for diagnostics/snapshot capture. */
-  getPendingTransition(): PendingModeTransition | undefined {
-    return this.pendingTransition;
   }
 
   // --- mode transition barriers --------------------------------------------

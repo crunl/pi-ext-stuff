@@ -11,11 +11,21 @@ tool execution, and an external "guardian" reviewer. Loaded directly from
 ```bash
 npm run preflight:sibling # sibling pi-core present + clean (see Cross-extension dependency)
 npm run check     # tsc --noEmit (type check)
+npm run check:host-turn-boundary # offline real-host step-boundary check (see below)
 npm run lint      # biome check . (pinned @biomejs/biome)
 npm run diagnose:guardian # read-only real Guardian worker/SRT diagnostic (bounded JSONL)
 npm run test      # vitest --run (one-shot)
 npx vitest --run tests/<name>.test.ts   # single test file
 ```
+
+`check:host-turn-boundary` loads this extension through the pinned
+`@earendil-works/pi-coding-agent` `createAgentSession` + `bindExtensions`
+(print mode), then drives `agent_start` → Shift+Tab → `turn_start` via the
+session's `ExtensionRunner` with a live `ExtensionContext`. Stub SRT manager;
+no LLM, no network. Asserts: handler registered; session_start activates auto;
+mid-turn cycle does not touch SRT; next `turn_start` applies yolo via reset;
+the following boundary restores auto via activate. Run it when changing
+mid-turn mode apply or host lifecycle wiring.
 
 `diagnose:guardian` uses a deterministic local reviewer stub (no provider or
 network request), emits phase plus fixed call/review correlation metadata, and
@@ -196,13 +206,14 @@ tracked per-session. Reviewer provider/model live under `"reviewer"`.
   `.superpowers/` are session-local and are not product evidence.
 - Acceptance for a revision is: `npm run preflight:sibling` (sibling `pi-core`
   present and clean), then `npm run check`, `npm run lint`, and `npm test`
-  pass on that tree, plus any slice-specific checks named in the change. Record
+  pass on that tree. Changes to mid-turn mode apply or host lifecycle wiring
+  also run `npm run check:host-turn-boundary` (named slice check). Record
   the commit SHA **and** the sibling short SHA with the result when leaving
   evidence outside the commit body. A dirty-sibling run is provisional/blocked,
-  never acceptance — even if check/lint/test are green. Slice-specific checks
-  are named in the change; their result or omission is recorded in the commit
-  body or the dated research note for that slice. There is no CI; green checks
-  are voluntary until a remote gate exists.
+  never acceptance — even if check/lint/test are green. Other slice-specific
+  checks are named in the change; their result or omission is recorded in the
+  commit body or the dated research note for that slice. There is no CI; green
+  checks are voluntary until a remote gate exists.
 
 Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.85.1 —
 check its API surface before upgrading assumptions about extension hooks. Use pnpm

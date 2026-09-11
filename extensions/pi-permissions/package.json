@@ -13,6 +13,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "check:host-turn-boundary": "node scripts/host-turn-boundary.mjs",
     "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
     "lint": "biome check .",
     "preflight:sibling": "node scripts/preflight-sibling.mjs",

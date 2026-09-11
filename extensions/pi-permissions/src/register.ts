@@ -373,7 +373,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     inputFallbackTranscript = [];
     guardianInvalidationAfterModeChange = false;
     session.resetTurn();
-    session.clearPending();
     pendingModeRefresh = false;
     invalidatePermissionContext(reason);
   };
@@ -446,10 +445,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       baseSandboxConfig: snapshot.baseSandboxConfig,
       sandboxReady: snapshot.sandboxReady,
     };
-  };
-
-  const clearPendingModeTransition = (turnId: number): void => {
-    session.clearPendingForTurn(turnId);
   };
 
   const createModeTransitionBarrier = (): ModeTransitionBarrier => session.createBarrier();
@@ -751,7 +746,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const closingTurnId = session.finishNestedTurn();
     if (closingTurnId === undefined) return undefined;
     permissions.closeTurn(reason);
-    clearPendingModeTransition(closingTurnId);
     if (guardianInvalidationAfterModeChange) {
       guardianInvalidationAfterModeChange = false;
       invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
@@ -2442,7 +2436,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.bumpGeneration();
     cancelInFlightModeTransition();
     session.resetTurn();
-    session.clearPending();
     guardianInvalidationAfterModeChange = false;
     invalidatePermissionContext("session shutdown");
     await sandboxCoordinator.runExclusive(async () => {

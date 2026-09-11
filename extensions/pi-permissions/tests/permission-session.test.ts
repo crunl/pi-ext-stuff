@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PendingModeTransition } from "../src/permission-session.ts";
 import { PermissionSession } from "../src/permission-session.ts";
 
 describe("PermissionSession turn lifecycle", () => {
@@ -43,30 +42,6 @@ describe("PermissionSession turn lifecycle", () => {
     expect(session.hasObservedLifecycle()).toBe(true);
     session.clearLifecycleEvents();
     expect(session.hasObservedLifecycle()).toBe(false);
-  });
-});
-
-describe("PermissionSession pending transitions", () => {
-  it("keeps one active-turn token and clears only its owner", () => {
-    const session = new PermissionSession();
-    const turnId = session.allocateTurnId();
-    session.beginTurn(turnId);
-
-    const transition = session.schedulePendingTransition();
-    expect(transition).toBeDefined();
-    if (transition === undefined) {
-      throw new Error("expected a pending transition");
-    }
-    expect(session.schedulePendingTransition()).toBe(transition);
-    expect(session.isPendingCurrent(transition)).toBe(true);
-
-    const stale: PendingModeTransition = { ...transition, id: transition.id + 1 };
-    session.clearPendingIfCurrent(stale);
-    expect(session.getPendingTransition()).toBe(transition);
-    session.clearPendingForTurn(turnId + 1);
-    expect(session.getPendingTransition()).toBe(transition);
-    session.clearPendingForTurn(turnId);
-    expect(session.getPendingTransition()).toBeUndefined();
   });
 });
 

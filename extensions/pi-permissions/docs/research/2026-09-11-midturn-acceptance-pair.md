@@ -41,12 +41,17 @@
 - `npm run lint` → green
 - `npm test` → 1089 passed / 1 skipped
 
+同日补强：`npm run check:host-turn-boundary` 成为 mid-turn / host lifecycle
+切片的 named check（offline real-host：`createAgentSession` +
+`bindExtensions` + `ExtensionRunner` 驱动 `agent_start`/Shift+Tab/`turn_start`）。
+
 复现：checkout 上述两个 SHA，使 `extensions/pi-core` 与 `extensions/pi-permissions`
 （或等价相对布局）相邻，在 permissions 侧安装依赖后跑同一套命令。
 
 ## 本文不声称
 
 - 不声称 live `../pi-core` 工作树当前 clean（验收时其 TUI WIP 仍 dirty）。
-- 不声称真实 TUI Shift+Tab 人机路径已验证；step boundary 契约由隔离
-  host E2E（session 外 `work/e2e-midturn/`）与本 pair 的单测共同支撑。
+- 不声称真实 TUI Shift+Tab 人机路径已验证；step boundary 契约由
+  `check:host-turn-boundary`、单测，以及 session 外 live-LLM harness
+  （`work/e2e-midturn/`）共同支撑。
 - 不引入 sibling SHA pin；pair 只钉定本次验收对象。

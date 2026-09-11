@@ -581,12 +581,19 @@ describe("sandbox integration", () => {
     );
 
     const callArgs = manager.wrapWithSandbox.mock.calls[0];
+    const enforced = callArgs?.[2];
     expect(callArgs?.[0]).toContain("printf unsandboxed");
     expect(callArgs?.[1]).toBeUndefined();
     expect(callArgs?.[3]).toBeUndefined();
-    // Policy is rebuilt per execution (live Git metadata), so compare the
-    // stable workspace root rather than a deep cwd-discovered snapshot.
-    expect(callArgs?.[2]?.filesystem.allowWrite).toEqual(runtime.filesystem.allowWrite);
+    // Policy is rebuilt per execution (live Git metadata). Assert the full
+    // enforced shape of that rebuild: stable roots match the runtime config,
+    // denyWrite is a superset of it, and network is unchanged.
+    expect(enforced?.filesystem.allowWrite).toEqual(runtime.filesystem.allowWrite);
+    expect(enforced?.filesystem.denyRead).toEqual(runtime.filesystem.denyRead);
+    expect(enforced?.filesystem.denyWrite).toEqual(
+      expect.arrayContaining(runtime.filesystem.denyWrite),
+    );
+    expect(enforced?.network).toEqual(runtime.network);
     expect(Buffer.concat(output).toString()).toBe("sandboxed");
     expect(result.exitCode).toBe(0);
   });
