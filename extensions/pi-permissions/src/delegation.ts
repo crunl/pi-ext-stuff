@@ -5,7 +5,7 @@ import {
   matchesNetworkDomainPattern,
   normalizeNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
-import type { SandboxPolicy } from "./sandbox.ts";
+import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 /**
  * Least-privilege envelope for a delegated subagent turn.

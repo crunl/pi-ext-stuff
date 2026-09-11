@@ -11,7 +11,7 @@ import {
 } from "./guardian-policy.ts";
 import { boundGuardianTranscript, type GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { RiskDecision } from "./risk-policy.ts";
-import type { NetworkPolicyView } from "./sandbox.ts";
+import type { NetworkPolicyView } from "./sandbox-policy.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export type AutoReviewRisk = GuardianRiskLevel;

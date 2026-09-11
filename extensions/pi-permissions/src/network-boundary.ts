@@ -8,7 +8,7 @@ import {
   isValidNetworkPort,
   normalizeNetworkHost,
 } from "./network-host.ts";
-import type { SandboxNetworkEndpoint } from "./sandbox.ts";
+import type { SandboxNetworkEndpoint } from "./sandbox-policy.ts";
 
 /** Codex's network runtime gives DNS resolution a two-second budget. */
 export const DEFAULT_NETWORK_RESOLUTION_TIMEOUT_MS = 2_000;

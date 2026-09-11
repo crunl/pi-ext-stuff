@@ -30,15 +30,17 @@ import {
   GuardianWorkerInfrastructureError,
 } from "./guardian-worker-client.ts";
 import {
-  copyGuardianEvidenceScope,
-  createGuardianReadOnlySandboxConfig,
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
+  type SandboxedCommandResult,
+} from "./sandbox.ts";
+import {
+  copyGuardianEvidenceScope,
+  createGuardianReadOnlySandboxConfig,
   type GuardianEvidenceScope,
   type SandboxExecutionRequest,
-  type SandboxedCommandResult,
   type SandboxManagerLike,
-} from "./sandbox.ts";
+} from "./sandbox-policy.ts";
 
 const GUARDIAN_TOOL_NAMES = new Set(["read", "grep", "find", "ls", "inspect"]);
 const SENSITIVE_ERROR_PATTERNS: Array<[RegExp, string]> = [

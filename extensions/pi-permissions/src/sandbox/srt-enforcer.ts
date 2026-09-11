@@ -14,7 +14,7 @@ import {
   type SandboxExecutionResult,
   type SandboxManagerLike,
   type SandboxPolicy,
-} from "../sandbox.ts";
+} from "../sandbox-policy.ts";
 import { errorMessage } from "../unknown-value.ts";
 import { SandboxConnectGuard, shouldBypassParentProxy } from "./connect-guard.ts";
 import { srtProcessCoordinator } from "./srt-coordinator.ts";

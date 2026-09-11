@@ -32,7 +32,7 @@ import {
 } from "./guardian-policy.ts";
 import { GuardianReviewSessionManager } from "./guardian-session.ts";
 import { createIsolatedGuardianToolRuntime, type GuardianToolRuntime } from "./guardian-tools.ts";
-import type { GuardianEvidenceScope } from "./sandbox.ts";
+import type { GuardianEvidenceScope } from "./sandbox-policy.ts";
 import { errorMessage } from "./unknown-value.ts";
 
 export type { AutoReviewerContext } from "./auto-review-request.ts";

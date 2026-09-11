@@ -29,7 +29,7 @@ import {
   describeExecutionNetwork,
   type GuardianEvidenceScope,
   type SandboxPolicy,
-} from "./sandbox.ts";
+} from "./sandbox-policy.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 /**

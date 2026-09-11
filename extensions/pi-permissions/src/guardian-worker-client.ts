@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_STDERR_BYTES } from "./guardian-worker-limits.mjs";
-import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox.ts";
+import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox-policy.ts";
 
 /**
  * The Guardian worker is deliberately a process boundary.  In particular,

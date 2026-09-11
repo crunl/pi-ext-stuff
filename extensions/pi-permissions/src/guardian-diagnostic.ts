@@ -15,7 +15,7 @@ import {
   GuardianWorkerInfrastructureError,
   GuardianWorkerProtocolError,
 } from "./guardian-worker-client.ts";
-import { createGuardianEvidenceScope, type SandboxPolicy } from "./sandbox.ts";
+import { createGuardianEvidenceScope, type SandboxPolicy } from "./sandbox-policy.ts";
 
 const DIAGNOSTIC_CALL_ID = "guardian-diagnostic-call-1";
 const DIAGNOSTIC_REVIEW_ID = "guardian-diagnostic-review-1";

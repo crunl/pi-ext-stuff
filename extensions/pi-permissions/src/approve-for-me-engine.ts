@@ -12,7 +12,7 @@ import {
   type NativeFileOperationFailure,
   projectExecutionNetwork,
   type SandboxPolicy,
-} from "./sandbox.ts";
+} from "./sandbox-policy.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.

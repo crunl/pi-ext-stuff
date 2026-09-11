@@ -96,16 +96,18 @@ import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 import {
   createSandboxedBashOperations,
   createSandboxedFileOperations,
+  type SandboxedFileOperationOptions,
+} from "./sandbox.ts";
+import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
+import {
   createSandboxRuntimeConfig,
   describeExecutionNetwork,
   looksLikeSandboxDenial,
   type NativeFileOperationFailure,
-  type SandboxedFileOperationOptions,
   type SandboxManagerLike,
   type SandboxNetworkAuthorize,
   type SandboxPolicy,
-} from "./sandbox.ts";
-import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
+} from "./sandbox-policy.ts";
 import { permissionedBashParameters } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";

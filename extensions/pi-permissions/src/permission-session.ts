@@ -5,7 +5,7 @@
 
 import type { PermissionsConfig } from "./config.ts";
 import type { DelegationAuditLink, DelegationEnvelope } from "./delegation.ts";
-import type { SandboxPolicy } from "./sandbox.ts";
+import type { SandboxPolicy } from "./sandbox-policy.ts";
 import type { PermissionMode } from "./state.ts";
 
 export interface ModeTransitionBarrier {

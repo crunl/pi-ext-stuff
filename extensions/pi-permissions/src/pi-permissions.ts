@@ -30,7 +30,7 @@ import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
 import type { ReviewUi } from "./review-presenter.ts";
 import { ReviewPresenter, type ReviewStatusBinding } from "./review-presenter.ts";
 import type { RiskDecision } from "./risk-policy.ts";
-import type { SandboxPolicy } from "./sandbox.ts";
+import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 /**
  * Pi's ingress vocabulary. The Engine remains an implementation detail of

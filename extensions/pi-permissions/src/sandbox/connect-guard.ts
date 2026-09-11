@@ -13,7 +13,7 @@ import { connect as tlsConnect } from "node:tls";
 import { URL } from "node:url";
 
 import { isLoopbackAddress, isValidNetworkPort, normalizeNetworkHost } from "../network-host.ts";
-import type { SandboxNetworkEndpoint } from "../sandbox.ts";
+import type { SandboxNetworkEndpoint } from "../sandbox-policy.ts";
 
 const MAX_TICKETS = 256;
 const TICKET_TTL_MS = 30_000;
