@@ -101,6 +101,14 @@ subagent network. Yolo remains the only unrestricted path.
 - `src/register.ts` is the Pi host adapter: it loads config, captures turn
   snapshots, maps host tool events to Engine invocations, and owns the concrete
   bash/write/edit/request-permissions adapters.
+- `src/register-support.ts` holds pure transcript/mode/timeout helpers extracted
+  from the host adapter.
+- `src/sandbox-policy.ts` is the pure policy/projection layer (no fs/git I/O);
+  `src/sandbox.ts` keeps process factories and re-exports the historical seam.
+  Engine imports the pure layer only.
+- Production Guardian worker is `src/guardian-worker.mjs` plus the sibling
+  `src/guardian-worker-limits.mjs` (shared protocol constants). Any packaging
+  or install whitelist must ship both files; a lone worker copy fails bootstrap.
 - `src/approve-for-me-engine.ts` is the deep, I/O-free decision module. It owns
   admission-plan validation, hard policy checks, Guardian review routing,
   exact one-shot grants, exact command-escalation leases, denial circuit

@@ -67,7 +67,8 @@ export function nextMode(mode: PermissionMode): PermissionMode {
   return mode === "auto" ? "yolo" : "auto";
 }
 
-/** Pi 0.85.1 createBashTool leaves timeout unset; escalated path normalizes at ingress. */
+/** Pi 0.85.1 createBashTool leaves timeout unset; escalated path normalizes at ingress.
+ * Keep in lockstep with sandbox.ts DEFAULT_BASH_TIMEOUT_MS (SRT bash path). */
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
 export const MAX_BASH_TIMEOUT_SECONDS = 2_147_483.647;
 
