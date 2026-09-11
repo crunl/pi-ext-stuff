@@ -22,7 +22,8 @@ pi loads extensions directly, so there is **no build step**.
 - **Edit diff summary** — colorized `+/-` summaries for `edit` tool results.
 - **Output padding sync** — keeps the tool-output viewport aligned with the
   editor layout.
-- **Markdown code frame** — consistent code-block framing in chat output.
+- **Markdown code blocks** — short `╭─ lang` label plus indent-only content, so
+  line copies never pick up frame characters.
 
 ## Requirements
 

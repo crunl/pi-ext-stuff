@@ -9,21 +9,20 @@
  *
  * There is no official hook to change this (codeBlockBorder only colors the
  * text), so we patch Markdown.prototype.renderToken and take over the
- * "code" token branch, delegating every other token to the original:
+ * "code" token branch, delegating every other token to the original.
  *
- *   ╭─ ts ─────────╮
- *   │ code...        │
- *   ╰────────────────╯
+ * Shape (copy-friendly): a short top label, then indent-only content.
+ * Content rows carry no rails or trailing pad, so line-selection copies
+ * just the code (plus a two-space indent).
  *
- * Code is pre-wrapped to the frame's inner width and each row is padded
- * back out, so every emitted row is exactly `width` columns and survives
- * the outer Markdown.render() wrap pass (at contentWidth) untouched.
+ *   ╭─ ts
+ *     const x = 1;
+ *     console.log(x);
  *
  * Syntax highlighting is untouched: theme.highlightCode (when present)
- * still colors the code, we only replace the fence dressing.
+ * still colors the code; the label uses theme.codeBlockBorder.
  */
-import { Markdown, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { FRAME_OVERHEAD, padLineToWidth } from "./frame.ts";
+import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 interface CodeToken {
   type: string;
@@ -54,8 +53,11 @@ interface PatchCarrier extends MarkdownInternals {
   __codeFrameOriginal?: RenderToken;
 }
 
+/** Leading spaces on every content row. Spaces only — safe to copy. */
+const CONTENT_INDENT = "  ";
+
 /**
- * Patch Markdown.prototype.renderToken to frame code blocks. Re-entrant:
+ * Patch Markdown.prototype.renderToken to restyle code blocks. Re-entrant:
  * the pristine original is stashed on the prototype itself, so calling
  * again (e.g. after /reload re-evaluates this module while the host keeps
  * the same Markdown class) replaces the wrapper with the current version
@@ -102,32 +104,25 @@ function renderCodeFrame(
   width: number,
   nextTokenType?: string,
 ): string[] {
-  const innerWidth = Math.max(1, width - FRAME_OVERHEAD);
-  const border = (text: string) => theme.codeBlockBorder(text);
-
-  // Language label: first word only ("ts title=x" -> "ts").
+  // First fence word only ("ts title=x" -> "ts"). Truncate the label so a
+  // long lang can never wrap the top rule under Markdown's outer pass.
   const lang = token.lang?.trim().split(/\s+/)[0] ?? "";
-  const label = lang.length > 0 ? `─ ${lang} ` : "";
+  const label = lang.length > 0 ? `─ ${lang}` : "─";
   const lines: string[] = [
-    border(`╭${label}${"─".repeat(Math.max(0, innerWidth + 2 - label.length))}╮`),
+    theme.codeBlockBorder(truncateToWidth(`╭${label}`, Math.max(1, width), "…")),
   ];
 
-  // Highlight first, then wrap each resulting line to the inner width and
-  // pad it back out, so every row is exactly `width` columns and survives
-  // the outer Markdown.render() wrap pass untouched.
   const contentLines = theme.highlightCode
     ? theme.highlightCode(token.text, token.lang)
     : token.text.split("\n").map((line) => theme.codeBlock(line));
-  const left = border("│ ");
-  const right = border(" │");
+  const innerWidth = Math.max(1, width - CONTENT_INDENT.length);
   for (const contentLine of contentLines) {
     const wrapped = wrapTextWithAnsi(contentLine, innerWidth);
     for (const row of wrapped.length > 0 ? wrapped : [""]) {
-      lines.push(`${left}${padLineToWidth(row, innerWidth)}${right}`);
+      lines.push(`${CONTENT_INDENT}${row}`);
     }
   }
 
-  lines.push(border(`╰${"─".repeat(Math.max(0, innerWidth + 2))}╯`));
   if (nextTokenType && nextTokenType !== "space") {
     lines.push(""); // spacing after the block, mirroring the original
   }
