@@ -6,7 +6,7 @@
  * into its own jiti instance:
  *   - pi-permissions → withCodexToolPresentation / createCodexToolRendering / …
  *   - permission UIs → markToolCall
- *   - statusline     → applyAutocompleteAbove
+ *   - statusline     → applyAutocompleteAbove / outputPaddingController
  *
  * Contract: importing this module (and anything it re-exports) runs no
  * side effects. Host patching only happens when a register/apply/install
@@ -30,5 +30,7 @@ export {
   summarizeEditDiff,
 } from "./src/tui/codex-tool-specs.ts";
 export { createEditDiffBox } from "./src/tui/edit-diff.ts";
+/** Shared live `outputPad` (0|1); started by pi-core's register graph. */
+export { outputPaddingController } from "./src/tui/output-padding.ts";
 export { markToolCall, type ToolCallMark } from "./src/tui/tool-call-mark.ts";
 export { createCodexToolRendering } from "./src/tui/tool-renderer.ts";
