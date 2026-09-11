@@ -44,28 +44,24 @@ describe("applyMarkdownCodeFrame", () => {
     resetMarkdownCodeFrame();
   });
 
-  it("replaces raw fences with a closed rounded frame and language label", () => {
+  it("replaces raw fences with a short language label and indent-only content", () => {
     applyMarkdownCodeFrame();
     const lines = renderMarkdown(FENCED);
 
     expect(lines.join("\n")).not.toContain("```");
-    expect(lines[0]).toContain("╭─ ts ");
-    expect(lines[0]).toContain("╮");
-    expect(lines[1]).toContain("│ ");
-    expect(lines[1]).toContain("const x = 1;");
-    expect(plain(lines[1]).trimEnd().endsWith("│")).toBe(true); // right border closed
-    expect(lines[2]).toContain("╰");
-    expect(lines[2]).toContain("╯");
+    expect(plain(lines[0])).toBe("╭─ ts");
+    expect(plain(lines[1])).toBe("  const x = 1;");
+    expect(lines[1]).not.toContain("│");
   });
 
-  it("renders a plain top border when no language is given", () => {
+  it("renders a bare top tick when no language is given", () => {
     applyMarkdownCodeFrame();
     const lines = renderMarkdown("```\ncode\n```");
-    expect(lines[0]).toContain("╭");
-    expect(lines[0]).not.toContain("╭─ ");
+    expect(plain(lines[0])).toBe("╭─");
+    expect(plain(lines[1])).toBe("  code");
   });
 
-  it("styles borders via codeBlockBorder and code via codeBlock", () => {
+  it("styles the label via codeBlockBorder and code via codeBlock", () => {
     applyMarkdownCodeFrame();
     const lines = renderMarkdown(FENCED);
     expect(lines[0]).toContain(B_ON);
@@ -82,14 +78,34 @@ describe("applyMarkdownCodeFrame", () => {
     expect(lines[1]).toContain("\x1b[35mconst x = 1;\x1b[39m");
   });
 
-  it("wraps long code lines inside the closed frame", () => {
+  it("keeps content rows copy-safe: indent spaces only, no rails or trailing pad", () => {
+    applyMarkdownCodeFrame();
+    const lines = renderMarkdown("```ts\nconst x = 1;\nconst y = 2;\n```");
+    for (const line of lines.slice(1)) {
+      const text = plain(line);
+      expect(text.startsWith("  ")).toBe(true);
+      expect(text).not.toContain("│");
+      expect(text.trimEnd()).toBe(text);
+    }
+  });
+
+  it("truncates a long language label instead of wrapping the top tick", () => {
+    applyMarkdownCodeFrame();
+    const lines = renderMarkdown("```abcdefghijklmnopqrstuvwxyz\nx\n```", plainTheme, 20);
+    expect(plain(lines[0]).length).toBeLessThanOrEqual(20);
+    expect(plain(lines[0]).startsWith("╭─ ")).toBe(true);
+    expect(plain(lines[1])).toBe("  x");
+  });
+
+  it("wraps long code lines under the same indent", () => {
     applyMarkdownCodeFrame();
     const longLine = "x".repeat(60);
     const lines = renderMarkdown(`\`\`\`\n${longLine}\n\`\`\``, plainTheme, 40);
-    const railRows = lines.filter((l) => l.includes("│ "));
-    expect(railRows.length).toBeGreaterThan(1); // wrapped continuation keeps rail
-    for (const row of railRows) {
-      expect(plain(row).trimEnd().endsWith("│")).toBe(true); // every row closes right
+    const body = lines.slice(1).map(plain);
+    expect(body.length).toBeGreaterThan(1);
+    for (const row of body) {
+      expect(row.startsWith("  ")).toBe(true);
+      expect(row).not.toContain("│");
     }
   });
 
