@@ -1,9 +1,16 @@
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OutputPad } from "./output-padding.ts";
 
 const FIRST_PREFIX = "  └ ";
 const NEXT_PREFIX = "    ";
+
+interface OutputLayout {
+  width: number;
+  contentWidth: number;
+  firstPrefix: string;
+  nextPrefix: string;
+}
 
 /** Concatenate the text parts of a tool result (empty parts dropped). */
 export function toolResultText(result: AgentToolResult<unknown>): string {
@@ -17,8 +24,22 @@ export function countNonEmptyLines(text: string): number {
   return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
 }
 
-function wrappedRows(text: string, width: number, outputPad: OutputPad): string[] {
-  const contentWidth = Math.max(1, width - outputPad - NEXT_PREFIX.length);
+function createOutputLayout(width: number, outputPad: OutputPad): OutputLayout {
+  const padding = " ".repeat(outputPad);
+  const firstPrefix = `${padding}${FIRST_PREFIX}`;
+  const nextPrefix = `${padding}${NEXT_PREFIX}`;
+  const prefixWidth = Math.max(visibleWidth(firstPrefix), visibleWidth(nextPrefix));
+  // Decoration must leave room for content; otherwise give content the full width.
+  const showPrefixes = width > prefixWidth;
+  return {
+    width,
+    contentWidth: showPrefixes ? width - prefixWidth : width,
+    firstPrefix: showPrefixes ? firstPrefix : "",
+    nextPrefix: showPrefixes ? nextPrefix : "",
+  };
+}
+
+function wrappedRows(text: string, contentWidth: number): string[] {
   const rows: string[] = [];
   for (const logicalLine of text.replace(/\r\n?/g, "\n").split("\n")) {
     const wrapped = wrapTextWithAnsi(logicalLine, contentWidth);
@@ -27,9 +48,15 @@ function wrappedRows(text: string, width: number, outputPad: OutputPad): string[
   return rows;
 }
 
-function withPrefixes(rows: readonly string[], outputPad: OutputPad): string[] {
-  const padding = " ".repeat(outputPad);
-  return rows.map((row, index) => `${padding}${index === 0 ? FIRST_PREFIX : NEXT_PREFIX}${row}`);
+function withPrefixes(rows: readonly string[], layout: OutputLayout): string[] {
+  // Enforce the total column budget after decoration, including inserted omission hints.
+  return rows.map((row, index) =>
+    truncateToWidth(
+      `${index === 0 ? layout.firstPrefix : layout.nextPrefix}${row}`,
+      layout.width,
+      "…",
+    ),
+  );
 }
 
 export function buildOutputPreview(
@@ -38,11 +65,12 @@ export function buildOutputPreview(
   maxRows = 5,
   outputPad: OutputPad = 0,
 ): string[] {
-  if (text.length === 0 || maxRows <= 0) return [];
-  const rows = wrappedRows(text, width, outputPad);
-  if (rows.length <= maxRows) return withPrefixes(rows, outputPad);
+  if (text.length === 0 || width <= 0 || maxRows <= 0) return [];
+  const layout = createOutputLayout(width, outputPad);
+  const rows = wrappedRows(text, layout.contentWidth);
+  if (rows.length <= maxRows) return withPrefixes(rows, layout);
   if (maxRows === 1) {
-    return withPrefixes([`… +${rows.length} lines`], outputPad);
+    return withPrefixes([`… +${rows.length} lines`], layout);
   }
 
   const contentRows = maxRows - 1;
@@ -54,7 +82,7 @@ export function buildOutputPreview(
     `… +${omitted} lines`,
     ...(tailCount > 0 ? rows.slice(-tailCount) : []),
   ];
-  return withPrefixes(visible, outputPad);
+  return withPrefixes(visible, layout);
 }
 
 export function buildExpandedOutput(
@@ -62,6 +90,7 @@ export function buildExpandedOutput(
   width: number,
   outputPad: OutputPad = 0,
 ): string[] {
-  if (text.length === 0) return [];
-  return withPrefixes(wrappedRows(text, width, outputPad), outputPad);
+  if (text.length === 0 || width <= 0) return [];
+  const layout = createOutputLayout(width, outputPad);
+  return withPrefixes(wrappedRows(text, layout.contentWidth), layout);
 }
