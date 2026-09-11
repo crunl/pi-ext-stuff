@@ -6,11 +6,17 @@
  * Line 2 (optional): extension statuses from other extensions' setStatus()
  * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
+ * Gutters follow settings.outputPad via pi-core's shared
+ * outputPaddingController, so footer lines up with chat messages.
+ *
  * Model info intentionally omitted — it lives in the editor's bottom border.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+// standalone.ts is pi-core's side-effect-free surface: no register graph
+// gets pulled into this jiti instance.
+import { outputPaddingController } from "../../pi-core/standalone.ts";
 import {
 	alignLine,
 	formatCwd,
@@ -137,17 +143,26 @@ export function installFooter(
 				const statsPlain = rightPlainParts.join("  ");
 				const statsColored = rightColoredParts.join("  ");
 
+				// Match chat-message gutters (settings.outputPad). The shared
+				// controller is started by pi-core; this import is the same
+				// cross-jiti singleton.
+				const pad = outputPaddingController.getOutputPad();
+				const gutter = " ".repeat(pad);
+				const innerWidth = Math.max(0, width - pad * 2);
+
 				const { line, rightFits } = alignLine(
 					leftColored,
 					visibleWidth(leftPlain),
 					statsColored,
 					visibleWidth(statsPlain),
-					width,
+					innerWidth,
 				);
 
-				const firstLine = rightFits
-					? line
-					: truncateToWidth(leftColored, width, theme.fg("dim", "..."));
+				const firstLine =
+					gutter +
+					(rightFits
+						? line
+						: truncateToWidth(leftColored, innerWidth, theme.fg("dim", "...")));
 
 				const lines = [firstLine];
 
@@ -156,7 +171,9 @@ export function installFooter(
 						.sort(([a], [b]) => a.localeCompare(b))
 						.map(([, text]) => text.replace(/[\r\n]+/g, " "))
 						.join(" ");
-					lines.push(truncateToWidth(merged, width, theme.fg("dim", "...")));
+					lines.push(
+						gutter + truncateToWidth(merged, innerWidth, theme.fg("dim", "...")),
+					);
 				}
 
 				return lines;
