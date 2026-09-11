@@ -80,6 +80,12 @@ import {
   type PiTurnSnapshot,
 } from "./pi-permissions.ts";
 import {
+  guardianTranscriptEntryFromMessage,
+  nextMode,
+  normalizeEscalatedBashTimeout,
+  requiresSandbox,
+} from "./register-support.ts";
+import {
   createReviewResultRenderer,
   createReviewStatusBridge,
   plainReviewResultRenderer,
@@ -155,68 +161,6 @@ const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
 const ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE =
   "The active permission context is unavailable. Retry in the current task.";
 const guardianFallbackNoticeKeys = new Set<string>();
-
-function textContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!isRecord(part) || typeof part.type !== "string") return "";
-      if (part.type === "text" && typeof part.text === "string") return part.text;
-      if (part.type === "image") return "[image]";
-      return "";
-    })
-    .filter((part) => part.length > 0)
-    .join("\n");
-}
-
-function assistantContent(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (!isRecord(part) || typeof part.type !== "string") return "";
-      if (part.type === "text" && typeof part.text === "string") return part.text;
-      if (part.type === "toolCall") {
-        return JSON.stringify({
-          toolCall: typeof part.name === "string" ? part.name : "",
-          arguments: isRecord(part.arguments) ? part.arguments : {},
-        });
-      }
-      return "";
-    })
-    .filter((part) => part.length > 0)
-    .join("\n");
-}
-
-function guardianTranscriptEntryFromMessage(message: unknown): GuardianTranscriptEntry | undefined {
-  if (!isRecord(message)) return undefined;
-  if (message.role === "user") {
-    const content = textContent(message.content);
-    return content.length > 0 ? { role: "user", content } : undefined;
-  }
-  if (message.role === "assistant") {
-    const content = assistantContent(message.content);
-    return content.length > 0 ? { role: "assistant", content } : undefined;
-  }
-  if (message.role === "toolResult") {
-    const content = textContent(message.content);
-    return {
-      role: "tool",
-      toolName: typeof message.toolName === "string" ? message.toolName : "",
-      content,
-      isError: message.isError === true,
-    };
-  }
-  return undefined;
-}
-
-function requiresSandbox(mode: PermissionMode, config: PermissionsConfig): boolean {
-  return mode !== "yolo" && config.sandbox.enabled;
-}
-
-function nextMode(mode: PermissionMode): PermissionMode {
-  return mode === "auto" ? "yolo" : "auto";
-}
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
@@ -1134,28 +1078,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // escalated path is deliberately still Pi's executor, so normalize only
   // that path at ingress; ordinary sandbox/yolo calls retain their Pi/SRT
   // timeout semantics.
-  const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
-  const MAX_BASH_TIMEOUT_SECONDS = 2_147_483.647;
   const normalizeBashParams = (params: BashParams): BashParams => {
     if (!isRecord(params)) throw new Error("Bash parameters must be an object");
     // SAFETY: isRecord above establishes string-keyed input; the host Bash type omits extension fields.
     const rawParams = params as unknown as Record<string, unknown>;
     if (rawParams.sandbox_permissions !== "require_escalated") return params;
-    const timeout = params.timeout;
-    if (timeout === undefined) {
-      return { ...params, timeout: DEFAULT_BASH_TIMEOUT_SECONDS } as BashParams;
-    }
-    if (
-      typeof timeout !== "number" ||
-      !Number.isFinite(timeout) ||
-      timeout <= 0 ||
-      timeout > MAX_BASH_TIMEOUT_SECONDS
-    ) {
-      throw new Error(
-        `Invalid timeout: must be a finite number greater than 0 and at most ${MAX_BASH_TIMEOUT_SECONDS} seconds`,
-      );
-    }
-    return params;
+    const timeout = normalizeEscalatedBashTimeout(params.timeout);
+    return timeout === params.timeout ? params : ({ ...params, timeout } as BashParams);
   };
 
   interface PreparedPermissionExecution {
