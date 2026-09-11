@@ -1172,6 +1172,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * applied mode is the live execution snapshot. Divergence is resolved only
    * here (turn_start) or at the preparePermissionExecution safety drain —
    * never by hot-swapping the sandbox profile mid-attempt.
+   *
+   * Must call activateConfig with force=false: force=true goes through
+   * commitActivation's permissions.invalidate and would wipe grants, nested
+   * turns, and the Auto denial circuit at the step boundary.
    */
   const applyPendingTurnModeRefresh = async (ctx: ExtensionContext): Promise<void> => {
     if (!modeRuntime || !loaded) return;
@@ -1179,7 +1183,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const snapshot = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
     if (!snapshot) return;
     const targetMode = modeRuntime.mode;
-    if (snapshot.mode === targetMode) return;
+    if (snapshot.mode === targetMode) {
+      pendingModeRefresh = false;
+      return;
+    }
 
     const generation = session.getGeneration();
     if (!session.isCurrentGeneration(generation)) return;
@@ -1188,10 +1195,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     try {
       if (requiresSandbox(targetMode, config)) {
         // Activate SRT first; fail closed before switching authorization.
-        await activateConfig(ctx, true, targetMode, undefined, generation);
+        // force=false keeps the live Engine turn (grants/circuit/nested) intact.
+        await activateConfig(ctx, false, targetMode, undefined, generation);
         if (!session.isCurrentGeneration(generation) || session.getTurnPhase() !== "active") {
           return;
         }
+        // A second cycle may have flipped desired mode during the await.
+        if (modeRuntime.mode !== targetMode) return;
         if (sandboxState.kind !== "ready") {
           throw Object.assign(new Error("Sandbox executor is unavailable or poisoned"), {
             code: "enforcement-unavailable",
@@ -1223,6 +1233,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           });
         }
         await activateConfig(ctx, false, targetMode, undefined, generation);
+        if (!session.isCurrentGeneration(generation) || session.getTurnPhase() !== "active") {
+          return;
+        }
+        if (modeRuntime.mode !== targetMode) return;
       }
       // Mode actually applied at this step boundary: retire deferred Guardian trunk.
       pendingModeRefresh = false;
@@ -1232,7 +1246,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     } catch (error: unknown) {
       if (!session.isCurrentGeneration(generation)) return;
-      // Leave the prior applied mode; the next prepare/turn_start will retry.
+      // Auto path never switched authorization on failure. Yolo already
+      // applied unrestricted authorization; keep pending so a later step
+      // can still catch up if desired mode changed again.
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(
         renderPermissionNotice({ kind: "mode-change-failed", reason: message }),

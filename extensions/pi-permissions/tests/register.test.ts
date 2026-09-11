@@ -1650,6 +1650,7 @@ describe("Permission mode registration", () => {
   it("applies a mid-turn YOLO→Auto cycle at turn_start and uses the sandbox again", async () => {
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
+    const invalidateSession = app.autoReviewer.invalidateSession as ReturnType<typeof vi.fn>;
     const shortcut = app.shortcuts.get("shift+tab");
     if (!shortcut) throw new Error("missing shift+tab shortcut");
     await shortcut.handler(app.context);
@@ -1663,9 +1664,30 @@ describe("Permission mode registration", () => {
     expect(app.bareBashExecute).toHaveBeenCalledTimes(2);
     expect(app.sandboxBashExecute).not.toHaveBeenCalled();
 
+    const invalidationsBeforeApply = invalidateSession.mock.calls.length;
     await startTurn(app, 1);
     await executeBash(app, "next-step-auto", "printf auto");
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+    // Step-boundary apply must not force-invalidate the live Engine turn
+    // (commitActivation force=true would wipe grants/circuit). Only the
+    // deferred Guardian trunk retirement is expected.
+    expect(invalidateSession.mock.calls.length).toBe(invalidationsBeforeApply + 1);
+  });
+
+  it("keeps the latest desired mode when Shift+Tab is pressed twice before turn_start", async () => {
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await startAgent(app);
+    await executeBash(app, "start-auto", "printf auto");
+
+    await shortcut.handler(app.context); // auto -> yolo
+    await shortcut.handler(app.context); // yolo -> auto
+    await startTurn(app, 1);
+    await executeBash(app, "still-auto-after-double-cycle", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledTimes(2);
+    expect(app.bareBashExecute).not.toHaveBeenCalled();
   });
 
   it("leaves the applied mode unchanged when the step-boundary auto activation fails", async () => {
