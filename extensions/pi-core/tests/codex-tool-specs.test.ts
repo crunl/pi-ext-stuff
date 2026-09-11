@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
+  codexFindToolSpec,
+  codexGrepToolSpec,
+  codexLsToolSpec,
+  codexReadToolSpec,
   codexWriteToolSpec,
   summarizeEditDiff,
 } from "../src/tui/codex-tool-specs.ts";
@@ -47,11 +51,24 @@ function renderHeader<TPreviewState = unknown>(
 }
 
 describe("codex tool specs", () => {
+  it.each([
+    ["read", codexReadToolSpec, "\uF15C"],
+    ["grep", codexGrepToolSpec, "\uF0B0"],
+    ["find", codexFindToolSpec, "\uF002"],
+    ["ls", codexLsToolSpec, "\uF07B"],
+    ["bash", codexBashToolSpec, "\uF120"],
+    ["write", codexWriteToolSpec, "\uEE38"],
+    ["edit", codexEditToolSpec, "\uEE3C"],
+  ] as const)("%s uses the selected single-column Font Awesome icon", (_name, spec, icon) => {
+    expect(spec.icon).toBe(icon);
+    expect(visibleWidth(icon)).toBe(1);
+  });
+
   it("edit spec renders Editing header with a +N -M summary", () => {
     const rendering = createCodexToolRendering(codexEditToolSpec);
     const ctx = context({ args: { path: "src/a.ts" } });
     const running = rendering.renderCall({ path: "src/a.ts" }, theme as never, ctx as never);
-    expect(running.render(100).join("\n")).toContain("Editing src/a.ts");
+    expect(running.render(100).join("\n")).toContain("\uEE3C Editing src/a.ts");
 
     const result = rendering.renderResult(
       {
@@ -64,13 +81,13 @@ describe("codex tool specs", () => {
     );
     const completed = rendering.renderCall({ path: "src/a.ts" }, theme as never, ctx as never);
     const text = `${completed.render(100).join("\n")}\n${result.render(100).join("\n")}`;
-    expect(text).toContain("Edited src/a.ts");
+    expect(text).toContain("\uEE3C Edited src/a.ts");
     expect(text).toContain("+2 -1");
   });
 
   it("write spec collapses to the header with a green +N line summary", () => {
     const text = renderHeader(codexWriteToolSpec, { path: "note.txt", content: "a\nb\n" });
-    expect(text).toContain("Wrote note.txt");
+    expect(text).toContain("\uEE38 Wrote note.txt");
     expect(text).toContain("+2");
   });
 
@@ -83,7 +100,7 @@ describe("codex tool specs", () => {
       ctx as never,
     );
     const text = call.render(100).join("\n");
-    expect(text).toContain("Writing src/a.ts");
+    expect(text).toContain("\uEE38 Writing src/a.ts");
     expect(text).toContain("1 │");
     expect(text).toContain("2 │");
     expect(text).toContain("b");
@@ -105,7 +122,7 @@ describe("codex tool specs", () => {
 
   it("bash spec renders Ran header with the command", () => {
     const text = renderHeader(codexBashToolSpec, { command: "npm test" });
-    expect(text).toContain("Ran npm test");
+    expect(text).toContain("\uF120 Ran npm test");
   });
 
   it("keeps a long multiline bash header on one visual row", () => {
@@ -130,7 +147,7 @@ describe("codex tool specs", () => {
     expect(lines).toHaveLength(1);
     expect(visibleWidth(lines[0])).toBe(120);
     expect(stripTerminalSequences(lines[0]).trimEnd()).toBe(
-      " Ran git status --short && git add README.md ↵ src/tui/tool-renderer.ts && git commit -m test",
+      "\uF120 Ran git status --short && git add README.md ↵ src/tui/tool-renderer.ts && git commit -m test",
     );
   });
 

@@ -70,7 +70,7 @@ function readArgument(args: Record<string, unknown>): string {
 }
 
 export const codexReadToolSpec: CodexToolRendererSpec = {
-  icon: "󰈙",
+  icon: "\uF15C", // nf-fa-file_lines
   runningVerb: "Reading",
   completedVerb: "Read",
   argument: readArgument,
@@ -78,7 +78,7 @@ export const codexReadToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexGrepToolSpec: CodexToolRendererSpec = {
-  icon: "󰱽",
+  icon: "\uF0B0", // nf-fa-filter
   runningVerb: "Searching",
   completedVerb: "Searched",
   argument: (args) => {
@@ -90,7 +90,7 @@ export const codexGrepToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexFindToolSpec: CodexToolRendererSpec = {
-  icon: "󰈞",
+  icon: "\uF002", // nf-fa-search
   runningVerb: "Finding",
   completedVerb: "Found",
   argument: (args) => {
@@ -102,7 +102,7 @@ export const codexFindToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexLsToolSpec: CodexToolRendererSpec = {
-  icon: "󰉋",
+  icon: "\uF07B", // nf-fa-folder
   runningVerb: "Listing",
   completedVerb: "Listed",
   argument: (args) => (typeof args.path === "string" ? args.path : "."),
@@ -110,7 +110,7 @@ export const codexLsToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexBashToolSpec: CodexToolRendererSpec = {
-  icon: "",
+  icon: "\uF120", // nf-fa-terminal
   runningVerb: "Running",
   completedVerb: "Ran",
   argument: (args) => (typeof args.command === "string" ? args.command : ""),
@@ -121,7 +121,7 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = {
-  icon: "󰝒",
+  icon: "\uEE38", // nf-fa-file_import
   runningVerb: "Writing",
   completedVerb: "Wrote",
   argument: (args) => (typeof args.path === "string" ? args.path : ""),
@@ -142,7 +142,7 @@ export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = 
 };
 
 export const codexEditToolSpec: CodexToolRendererSpec = {
-  icon: "󰏫",
+  icon: "\uEE3C", // nf-fa-file_signature
   runningVerb: "Editing",
   completedVerb: "Edited",
   argument: (args) => (typeof args.path === "string" ? args.path : ""),
