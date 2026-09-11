@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -212,6 +212,10 @@ async function sourceWorkerWithFakeSandbox(
   const configMarker = join(directory, "sandbox-config.json");
   const resetMarker = join(directory, "sandbox-reset");
   const source = await readFile(new URL("../src/guardian-worker.mjs", import.meta.url), "utf8");
+  await copyFile(
+    new URL("../src/guardian-worker-limits.mjs", import.meta.url),
+    join(directory, "guardian-worker-limits.mjs"),
+  );
   const sandboxImport = 'import { SandboxManager } from "@anthropic-ai/sandbox-runtime";';
   const fsImport =
     'import { constants, fstatSync, lstatSync, realpathSync, statSync } from "node:fs";';

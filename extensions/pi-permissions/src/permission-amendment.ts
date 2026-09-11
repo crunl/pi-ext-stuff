@@ -1,7 +1,8 @@
-import { expandSymlinkAliases, resolvePolicyPath } from "./filesystem-policy.ts";
+import { expandSymlinkAliases, hasGlobSyntax, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { MAX_PATH_LENGTH } from "./request-limits.ts";
 
 export interface PermissionAmendment {
   networkHosts: string[];
@@ -39,10 +40,10 @@ export async function normalizePermissionAmendment(
 
   const writeRoots: string[] = [];
   for (const raw of input.writeRoots ?? []) {
-    if (typeof raw !== "string" || raw.trim().length === 0 || raw.length > 4096) {
+    if (typeof raw !== "string" || raw.trim().length === 0 || raw.length > MAX_PATH_LENGTH) {
       return { ok: false, reason: "request_permissions write root is invalid" };
     }
-    if (/[*?[\]]/.test(raw)) {
+    if (hasGlobSyntax(raw)) {
       return { ok: false, reason: "request_permissions write roots cannot contain globs" };
     }
     const resolved = resolvePolicyPath(raw.trim(), cwd);

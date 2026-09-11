@@ -1,8 +1,9 @@
 import { parse } from "node:path";
 import { Type } from "typebox";
 import type { PermissionsConfig } from "./config.ts";
-import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
+import { createFilesystemPolicy, hasGlobSyntax, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import { isRecord } from "./unknown-value.ts";
 
 const additionalFileSystemPermissions = Type.Object(
@@ -60,7 +61,7 @@ export const permissionedBashParameters = Type.Object(
     justification: Type.Optional(
       Type.String({
         minLength: 1,
-        maxLength: 1000,
+        maxLength: MAX_JUSTIFICATION_LENGTH,
         description: "Why the additional filesystem access or command escalation is required",
       }),
     ),
@@ -96,7 +97,7 @@ export function requestedEscalation(
   if (
     typeof input.justification !== "string" ||
     input.justification.trim().length === 0 ||
-    input.justification.length > 1000
+    input.justification.length > MAX_JUSTIFICATION_LENGTH
   ) {
     return { error: "command escalation requires a justification" };
   }
@@ -142,8 +143,8 @@ function requestedWriteRoots(
       (path) =>
         typeof path === "string" &&
         path.trim().length > 0 &&
-        path.length <= 4096 &&
-        !/[*?[\]]/.test(path),
+        path.length <= MAX_PATH_LENGTH &&
+        !hasGlobSyntax(path),
     )
   ) {
     return { error: "additional_permissions.file_system.write contains invalid paths" };
@@ -151,7 +152,7 @@ function requestedWriteRoots(
   if (
     typeof input.justification !== "string" ||
     input.justification.trim().length === 0 ||
-    input.justification.length > 1000
+    input.justification.length > MAX_JUSTIFICATION_LENGTH
   ) {
     return { error: "additional filesystem permissions require a justification" };
   }

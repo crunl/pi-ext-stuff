@@ -5,18 +5,16 @@ import { access, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, normalize, parse } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_STDERR_BYTES } from "./guardian-worker-limits.mjs";
 
-// This file is intentionally self-contained. Pi loads the extension through
-// jiti, so a worker that imports the extension's TypeScript would not be a
-// reliable process entry point for an installed package.
+// This file is intentionally self-contained aside from guardian-worker-limits.mjs.
+// Pi loads the extension through jiti, so a worker that imports the extension's
+// TypeScript would not be a reliable process entry point for an installed package.
 
-const MAX_FRAME_BYTES = 8 * 1024 * 1024;
-const MAX_REQUEST_BYTES = 256 * 1024;
 const MAX_ARGUMENTS = 64;
 const MAX_ARGUMENT_BYTES = 128 * 1024;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_STDOUT_BYTES = 5 * 1024 * 1024;
-const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_PENDING_REQUESTS = 16;

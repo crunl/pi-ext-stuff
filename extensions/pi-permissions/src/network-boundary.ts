@@ -2,17 +2,16 @@ import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 import { fingerprintValue } from "./config.ts";
-import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
+import {
+  isLoopbackAddress,
+  isPublicNetworkHost,
+  isValidNetworkPort,
+  normalizeNetworkHost,
+} from "./network-host.ts";
 import type { SandboxNetworkEndpoint } from "./sandbox.ts";
 
 /** Codex's network runtime gives DNS resolution a two-second budget. */
 export const DEFAULT_NETWORK_RESOLUTION_TIMEOUT_MS = 2_000;
-
-const LOOPBACK_V4 = new BlockList();
-LOOPBACK_V4.addSubnet("127.0.0.0", 8, "ipv4");
-const LOOPBACK_V6 = new BlockList();
-LOOPBACK_V6.addAddress("::1", "ipv6");
-LOOPBACK_V6.addSubnet("::ffff:7f00:0", 104, "ipv6");
 
 export type NetworkEndpointDecision =
   | { readonly kind: "allow"; readonly endpoint: SandboxNetworkEndpoint }
@@ -34,10 +33,6 @@ export interface NetworkEndpointResolutionOptions {
 
 function endpointKey(host: string, port: number): string {
   return `${host}:${port}`;
-}
-
-function validPort(port: number): boolean {
-  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 function parseTrustedRanges(ranges: readonly string[]): BlockList {
@@ -69,13 +64,6 @@ export function isTrustedFakeIp(address: string, ranges: readonly string[]): boo
 function normalizeAddress(address: string): string | undefined {
   const normalized = normalizeNetworkHost(address);
   return normalized && isIP(normalized) !== 0 ? normalized : undefined;
-}
-
-function isLoopbackAddress(address: string): boolean {
-  const family = isIP(address);
-  return family === 4
-    ? LOOPBACK_V4.check(address, "ipv4")
-    : family === 6 && LOOPBACK_V6.check(address, "ipv6");
 }
 
 function endpoint(
@@ -167,7 +155,7 @@ export class NetworkBoundary {
     options: NetworkEndpointResolutionOptions = {},
   ): Promise<NetworkEndpointDecision> {
     const host = normalizeNetworkHost(hostInput);
-    if (!host || !validPort(port)) {
+    if (!host || !isValidNetworkPort(port)) {
       return Promise.resolve({ kind: "deny", reason: "Malformed network endpoint" });
     }
 

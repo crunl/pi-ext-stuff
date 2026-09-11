@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_STDERR_BYTES } from "./guardian-worker-limits.mjs";
 import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox.ts";
 
 /**
@@ -13,9 +14,9 @@ import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox
  */
 
 export const DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS = 30_000;
-export const GUARDIAN_WORKER_MAX_FRAME_BYTES = 8 * 1024 * 1024;
-export const GUARDIAN_WORKER_MAX_REQUEST_BYTES = 256 * 1024;
-export const GUARDIAN_WORKER_MAX_STDERR_BYTES = 64 * 1024;
+export const GUARDIAN_WORKER_MAX_FRAME_BYTES = MAX_FRAME_BYTES;
+export const GUARDIAN_WORKER_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
+export const GUARDIAN_WORKER_MAX_STDERR_BYTES = MAX_STDERR_BYTES;
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL("./guardian-worker.mjs", import.meta.url));
 const WORKER_TERMINATE_WAIT_MS = 1_000;
@@ -284,7 +285,7 @@ function boundedTimeout(value: number | undefined, fallback: number): number {
 
 function boundedOutput(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.min(8 * 1024 * 1024, Math.floor(value));
+  return Math.min(MAX_FRAME_BYTES, Math.floor(value));
 }
 
 function canonicalAbsolute(value: string, label: string): string {
@@ -737,7 +738,7 @@ export class GuardianWorkerClient {
       if (stderr.byteLength > pending.maxStderrBytes) {
         throw new GuardianWorkerProtocolError("worker stderr exceeds the requested bound");
       }
-      if (stdout.byteLength + stderr.byteLength > 8 * 1024 * 1024) {
+      if (stdout.byteLength + stderr.byteLength > MAX_FRAME_BYTES) {
         throw new GuardianWorkerProtocolError("worker result exceeds the output bound");
       }
       if (response.exitCode !== null && typeof response.exitCode !== "number") {

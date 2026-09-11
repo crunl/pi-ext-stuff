@@ -6,7 +6,8 @@ import {
   isExactLocalNetworkAllowed,
   matchesNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
-import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
+import { isPublicNetworkHost, isValidNetworkPort, normalizeNetworkHost } from "./network-host.ts";
+import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import {
   type NativeFileOperationFailure,
   projectExecutionNetwork,
@@ -585,6 +586,18 @@ function localNetworkAllowed(
   );
 }
 
+/** Shared private/special-use gate for every Engine network request path. */
+function privateNetworkBlocked(
+  policy: SandboxPolicy | undefined,
+  request: CapabilityRequest,
+): boolean {
+  return (
+    request.kind === "network" &&
+    !isPublicNetworkHost(request.host) &&
+    !localNetworkAllowed(policy, request.host, request.port)
+  );
+}
+
 function normalizeCapabilityRequest(
   raw: unknown,
   cwd: string,
@@ -595,7 +608,7 @@ function normalizeCapabilityRequest(
     if (raw.operation !== "read" && raw.operation !== "write") return undefined;
     if (typeof raw.path !== "string" || raw.path.length === 0 || raw.path.includes("\0"))
       return undefined;
-    if (hasGlobSyntax(raw.path) || raw.path.length > 4096) return undefined;
+    if (hasGlobSyntax(raw.path) || raw.path.length > MAX_PATH_LENGTH) return undefined;
     return { kind: "filesystem", operation: raw.operation, path: resolve(cwd, raw.path) };
   }
   if (raw.kind === "network-all")
@@ -605,10 +618,7 @@ function normalizeCapabilityRequest(
     const host = normalizeNetworkHost(raw.host);
     if (!host || (!options.allowPrivateNetwork && !isPublicNetworkHost(host))) return undefined;
     const port = raw.port;
-    if (
-      port !== undefined &&
-      (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)
-    ) {
+    if (port !== undefined && (typeof port !== "number" || !isValidNetworkPort(port))) {
       return undefined;
     }
     const protocol = raw.protocol;
@@ -712,7 +722,7 @@ function normalizeAdmission(
     raw.justification !== undefined &&
     (typeof raw.justification !== "string" ||
       raw.justification.trim().length === 0 ||
-      raw.justification.length > 1000)
+      raw.justification.length > MAX_JUSTIFICATION_LENGTH)
   ) {
     return { ok: false };
   }
@@ -1799,11 +1809,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
     if (
-      admission.requested.some(
-        (item) =>
-          item.kind === "network" &&
-          !isPublicNetworkHost(item.host) &&
-          !localNetworkAllowed(state.snapshot.baseSandboxPolicy, item.host, item.port),
+      admission.requested.some((item) =>
+        privateNetworkBlocked(state.snapshot.baseSandboxPolicy, item),
       )
     ) {
       return blocked({
@@ -1900,11 +1907,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         });
       }
       if (
-        amendment.requests.some(
-          (item) =>
-            item.kind === "network" &&
-            !isPublicNetworkHost(item.host) &&
-            !localNetworkAllowed(state.snapshot.baseSandboxPolicy, item.host, item.port),
+        amendment.requests.some((item) =>
+          privateNetworkBlocked(state.snapshot.baseSandboxPolicy, item),
         )
       ) {
         return blocked({
@@ -2281,11 +2285,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         request: normalized,
       });
     }
-    if (
-      normalized.kind === "network" &&
-      !isPublicNetworkHost(normalized.host) &&
-      !localNetworkAllowed(attempt.baseline.policy, normalized.host, normalized.port)
-    ) {
+    if (privateNetworkBlocked(attempt.baseline.policy, normalized)) {
       return denyAttemptForAttempt({
         code: "policy-denied",
         reason: "Private or special-use network target is blocked",

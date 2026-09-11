@@ -12,23 +12,16 @@ import type { Duplex } from "node:stream";
 import { connect as tlsConnect } from "node:tls";
 import { URL } from "node:url";
 
-import { normalizeNetworkHost } from "../network-host.ts";
+import { isLoopbackAddress, isValidNetworkPort, normalizeNetworkHost } from "../network-host.ts";
 import type { SandboxNetworkEndpoint } from "../sandbox.ts";
 
 const MAX_TICKETS = 256;
 const TICKET_TTL_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 10_000;
 
-const LOOPBACK_V4 = new BlockList();
-LOOPBACK_V4.addSubnet("127.0.0.0", 8, "ipv4");
-const LOOPBACK_V6 = new BlockList();
-LOOPBACK_V6.addAddress("::1", "ipv6");
-// IPv4-mapped 127/8 addresses are represented in IPv6 as ::ffff:7f00:0/104.
-LOOPBACK_V6.addSubnet("::ffff:7f00:0", 104, "ipv6");
-
 function ticketKey(hostInput: string, port: number): string | undefined {
   const host = normalizeNetworkHost(hostInput);
-  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  if (!host || !isValidNetworkPort(port)) return undefined;
   return `${host}:${port}`;
 }
 
@@ -37,7 +30,7 @@ function parseAuthority(authority: string | undefined): { host: string; port: nu
   const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(authority.trim());
   const host = match?.[1] ?? match?.[2];
   const port = Number(match?.[3]);
-  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  if (!host || !isValidNetworkPort(port)) return undefined;
   const normalized = normalizeNetworkHost(host);
   return normalized ? { host: normalized, port } : undefined;
 }
@@ -175,10 +168,7 @@ function isLoopbackHost(host: string): boolean {
   const normalized = normalizeNetworkHost(host);
   if (!normalized) return false;
   if (normalized === "localhost") return true;
-  const family = isIP(normalized);
-  return family === 4
-    ? LOOPBACK_V4.check(normalized, "ipv4")
-    : family === 6 && LOOPBACK_V6.check(normalized, "ipv6");
+  return isLoopbackAddress(normalized);
 }
 
 /** Apply SRT's unconditional loopback bypass before conventional NO_PROXY rules. */
@@ -234,7 +224,7 @@ function normalizeEndpoint(endpoint: SandboxNetworkEndpoint): SandboxNetworkEndp
     return undefined;
   }
   const host = normalizeNetworkHost(endpoint.host);
-  if (!host || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) {
+  if (!host || !isValidNetworkPort(endpoint.port)) {
     return undefined;
   }
   if (!Array.isArray(endpoint.addresses) || endpoint.addresses.length === 0) return undefined;

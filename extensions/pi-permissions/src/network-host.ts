@@ -1,4 +1,22 @@
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
+
+const LOOPBACK_V4 = new BlockList();
+LOOPBACK_V4.addSubnet("127.0.0.0", 8, "ipv4");
+const LOOPBACK_V6 = new BlockList();
+LOOPBACK_V6.addAddress("::1", "ipv6");
+// IPv4-mapped 127/8 addresses are represented in IPv6 as ::ffff:7f00:0/104.
+LOOPBACK_V6.addSubnet("::ffff:7f00:0", 104, "ipv6");
+
+export function isValidNetworkPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+export function isLoopbackAddress(address: string): boolean {
+  const family = isIP(address);
+  return family === 4
+    ? LOOPBACK_V4.check(address, "ipv4")
+    : family === 6 && LOOPBACK_V6.check(address, "ipv6");
+}
 
 export function isValidNetworkCidr(value: string): boolean {
   if (value.trim() !== value || /\s/.test(value)) return false;
