@@ -45,13 +45,17 @@
 切片的 named check（offline real-host：`createAgentSession` +
 `bindExtensions` + `ExtensionRunner` 驱动 `agent_start`/Shift+Tab/`turn_start`）。
 
+后续（同日）：pi-core TUI WIP 落盘后 sibling clean @ `e389537`；在
+`pi-permissions@bcce72c` + `pi-core@e389537` 上复跑 preflight/check/lint/
+host-turn-boundary/test 全绿（1088 passed / 1 skipped）。真实 TUI Shift+Tab
+由用户手动验证通过。
+
 复现：checkout 上述两个 SHA，使 `extensions/pi-core` 与 `extensions/pi-permissions`
 （或等价相对布局）相邻，在 permissions 侧安装依赖后跑同一套命令。
 
 ## 本文不声称
 
-- 不声称 live `../pi-core` 工作树当前 clean（验收时其 TUI WIP 仍 dirty）。
-- 不声称真实 TUI Shift+Tab 人机路径已验证；step boundary 契约由
-  `check:host-turn-boundary`、单测，以及 session 外 live-LLM harness
-  （`work/e2e-midturn/`）共同支撑。
+- 不声称 live `../pi-core` 的 ahead-of-origin 状态已 push；本地 clean 即可验收。
+- 不声称 session 外 live-LLM harness（`work/e2e-midturn/`）是产品验收路径；
+  它留在 agent work 区，不进本仓 `npm test`。
 - 不引入 sibling SHA pin；pair 只钉定本次验收对象。
