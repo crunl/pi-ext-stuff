@@ -1,13 +1,14 @@
 /**
  * Model-line editor — a CustomEditor whose borders embed status info:
  *
- *   ──▐Auto▌───────────── ↑284k ↓37.3k ──  <- top: mode badge left, stats right
+ *   ── Auto ────────────── ↑284k ↓37.3k ──  <- top: powerline mode pill left, stats right
  *    > user input here…
  *   ── model•effort ───────────────────────────  <- bottom border, left side
  *
- * The mode badge uses a mode-dependent theme color as background: warning
- * (yellow — "attention, not alarm") for Auto, error (red — alarm) for YOLO.
- * Falls back to inverse video without truecolor theme data.
+ * The mode badge is a powerline pill (half-circle caps + colored body).
+ * Mode color: warning (yellow — "attention, not alarm") for Auto, error
+ * (red — alarm) for YOLO. Falls back to inverse video without truecolor
+ * theme data.
  *
  * Pattern follows examples/extensions/modal-editor.ts: subclass CustomEditor,
  * post-process super.render() output, splice labels into the border lines.
@@ -57,17 +58,18 @@ export class ModelLineEditor extends CustomEditor {
 			}
 		}
 
-		// Top border: mode badge on the left, token stats on the right
-		//   ──▐Auto▌────────── ↑284k ↓37.3k ──
+		// Top border: powerline mode pill on the left, token stats on the right
+		//   ── Auto ─────────── ↑284k ↓37.3k ──
 		// Mode is omitted for Default (only non-default modes are called out).
 		// Border runs and the badge are colored separately: the badge's own
-		// fg/bg codes must not leak into (or cut) the border color.
+		// fg/bg codes must not leak into (or cut) the border color. Decorate
+		// adds two visible cap columns; post is already sized for them.
 		if (topIdx !== -1) {
 			const mode = this.getPermissionsMode();
 			const top = buildTopBorder(width, mode?.label, this.getStats());
 			if (top !== undefined) {
-				// Builders guarantee pre+mode+post is exactly `width` (tested),
-				// so no re-truncation is needed here.
+				// Builders guarantee pre+mode+post+caps is exactly `width`
+				// (tested), so no re-truncation is needed here.
 				const decorate = makeModeBadgeDecorator(
 					mode ? this.getBadgeFgAnsi(badgeColorFor(mode.severity)) : undefined,
 				);

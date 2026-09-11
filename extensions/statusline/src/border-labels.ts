@@ -3,6 +3,7 @@
  * ModelLineEditor so they can be unit-tested without pi's runtime module
  * resolution (this file must not import pi packages).
  */
+import { BADGE_CAP_WIDTH } from "./badge.ts";
 import { formatTokens } from "./format.ts";
 import { formatModelStatus, type ModelStatusInfo } from "./status-mode.ts";
 
@@ -14,9 +15,13 @@ export interface TokenStats {
 /**
  * Top border segments: mode on the left, token stats on the right.
  *
- *   ── Auto ──────────────── ↑284k ↓37.3k ──
- *   ^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
- *   pre     post              (mode = " Auto ")
+ *   ──Auto──────────────── ↑284k ↓37.3k ──
+ *   ^^^    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ *   pre    post              (mode = "Auto")
+ *
+ * `mode` is the plain label; the decorator adds two powerline
+ * half-circle caps around it, so post is sized against
+ * label.length + BADGE_CAP_WIDTH.
  *
  * Returned as segments so the caller can color the border runs and the
  * mode badge independently — a fg/bg reset inside a single colored line
@@ -28,7 +33,7 @@ export interface TokenStats {
 export interface TopBorderSegments {
 	/** Border run before the badge ("──"); empty when no mode. */
 	pre: string;
-	/** Badge text (" Auto "), plain — caller decorates. Empty when no mode. */
+	/** Badge text ("Auto"), plain — caller decorates with caps. Empty when no mode. */
 	mode: string;
 	/** Border run after the badge, including right-aligned stats. */
 	post: string;
@@ -39,9 +44,12 @@ export function buildTopBorder(
 	mode: string | undefined,
 	stats: TokenStats | undefined,
 ): TopBorderSegments | undefined {
-	const modeSegment = mode ? ` ${mode} ` : "";
-	const pre = modeSegment.length > 0 ? "──" : "";
-	const leftWidth = pre.length + modeSegment.length;
+	const modeSegment = mode ? `${mode}` : "";
+	// Decorator adds half-circle caps on each side; reserve their columns.
+	const modeWidth =
+		modeSegment.length > 0 ? modeSegment.length + BADGE_CAP_WIDTH : 0;
+	const pre = modeWidth > 0 ? "──" : "";
+	const leftWidth = pre.length + modeWidth;
 	const right =
 		stats && (stats.input > 0 || stats.output > 0)
 			? ` ↑${formatTokens(stats.input)} ↓${formatTokens(stats.output)} ──`
