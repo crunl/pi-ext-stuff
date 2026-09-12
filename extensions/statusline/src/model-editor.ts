@@ -4,7 +4,7 @@
  *
  *   ╭──Auto─────────────── ↑284k ↓37.3k ─╮
  *   │ user input here…                   │
- *   ╰─ model•effort ─────────────────────╯
+ *   ╰──modeleffort ──────────╯
  *
  * Mode badge keeps the powerline half-circle pill, sitting in the top
  * border after the box corner. Mode color: warning (yellow — "attention,
@@ -37,6 +37,9 @@ export interface PermissionsModeProvider {
 	(): { label: string; severity: "warning" | "error" } | undefined;
 }
 
+/** Theme color key used for the model/effort powerline segments. */
+export type ModelPillColor = "mdLink" | "accent";
+
 export class ModelLineEditor extends CustomEditor {
 	/** Injected callback returning current model info (reads live ctx). */
 	getModelInfo: ModelInfoProvider = () => undefined;
@@ -46,6 +49,8 @@ export class ModelLineEditor extends CustomEditor {
 	getPermissionsMode: PermissionsModeProvider = () => undefined;
 	/** Badge-color ANSI provider (captured lazily from the footer theme). */
 	getBadgeFgAnsi: (color: "warning" | "error") => string | undefined = () => undefined;
+	/** Model/effort pill color provider (truecolor fg used as segment bg). */
+	getPillFgAnsi: (color: ModelPillColor) => string | undefined = () => undefined;
 
 	render(width: number): string[] {
 		const boxed = width >= BOX_MIN_WIDTH;
@@ -79,12 +84,19 @@ export class ModelLineEditor extends CustomEditor {
 			}
 		}
 
-		// Bottom border: model info  ── model•effort ──
+		// Bottom border: model/effort powerline pill. Color border runs
+		// separately — the pill's resets would cut the border color.
 		const info = this.getModelInfo();
 		if (info && bottomIdx !== -1 && bottomIdx !== topIdx) {
-			const bottom = buildBottomBorder(innerWidth, info);
+			const bottom = buildBottomBorder(
+				innerWidth,
+				info,
+				this.getPillFgAnsi("mdLink"),
+				this.getPillFgAnsi("accent"),
+			);
 			if (bottom !== undefined) {
-				lines[bottomIdx] = this.borderColor(bottom);
+				lines[bottomIdx] =
+					this.borderColor(bottom.pre) + bottom.pill + this.borderColor(bottom.post);
 			}
 		}
 

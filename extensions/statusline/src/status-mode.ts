@@ -1,13 +1,66 @@
+import { contrastTextFor, parseTruecolor, PL_LEFT, PL_RIGHT } from "./badge.ts";
 import { ICONS } from "./format.ts";
+
+/** Powerline right solid arrowhead — segment divider inside the pill. */
+const PL_SEP = "";
 
 export interface ModelStatusInfo {
 	modelId: string;
 	effort: string | undefined;
 }
 
-/** Bottom-border label: model identity only (mode lives in the top border). */
-export function formatModelStatus(info: ModelStatusInfo): string {
-	return `${ICONS.model} ${info.modelId}${info.effort ? ` ${ICONS.effort} ${info.effort}` : ""}`;
+/**
+ * Bottom-border label: powerline pill with model, optional effort segment
+ * split by a half-triangle. Mode lives in the top border.
+ *
+ *   model
+ *   modeleffort
+ *
+ * `modelAnsi` / `effortAnsi` are truecolor foregrounds used as segment
+ * backgrounds (same convention as the mode badge). Falls back to inverse
+ * video when a color is missing or not truecolor.
+ */
+export function formatModelStatus(
+	info: ModelStatusInfo,
+	modelAnsi?: string,
+	effortAnsi?: string,
+): string {
+	const model = `${ICONS.model} ${info.modelId}`;
+	if (!info.effort) {
+		return cap(PL_LEFT, modelAnsi) + body(model, modelAnsi) + cap(PL_RIGHT, modelAnsi);
+	}
+	const effort = `${ICONS.effort} ${info.effort}`;
+	return (
+		cap(PL_LEFT, modelAnsi) +
+		body(model, modelAnsi) +
+		sep(modelAnsi, effortAnsi) +
+		body(effort, effortAnsi) +
+		cap(PL_RIGHT, effortAnsi)
+	);
+}
+
+function cap(glyph: string, ansi: string | undefined): string {
+	const rgb = ansi ? parseTruecolor(ansi) : null;
+	if (!rgb) return glyph;
+	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${glyph}\x1b[39m`;
+}
+
+function body(text: string, ansi: string | undefined): string {
+	const rgb = ansi ? parseTruecolor(ansi) : null;
+	if (!rgb) return `\x1b[7m${text}\x1b[27m`;
+	return `\x1b[48;2;${rgb[0]};${rgb[1]};${rgb[2]}m${contrastTextFor(rgb)}${text}\x1b[39m\x1b[49m`;
+}
+
+/** Arrowhead drawn in the left segment's color over the right segment's bg. */
+function sep(leftAnsi: string | undefined, rightAnsi: string | undefined): string {
+	const left = leftAnsi ? parseTruecolor(leftAnsi) : null;
+	if (!left) return PL_SEP;
+	const fg = `\x1b[38;2;${left[0]};${left[1]};${left[2]}m`;
+	const right = rightAnsi ? parseTruecolor(rightAnsi) : null;
+	const bg = right
+		? `\x1b[48;2;${right[0]};${right[1]};${right[2]}m`
+		: "\x1b[49m";
+	return `${fg}${bg}${PL_SEP}\x1b[39m\x1b[49m`;
 }
 
 /** Badge severity published by pi-permissions ("none" hides the badge). */

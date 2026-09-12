@@ -13,18 +13,28 @@ const info = {
 	effort: "xhigh",
 };
 
-test("formats model and effort for the bottom border", () => {
+test("formats model and effort as a powerline pill (inverse fallback)", () => {
 	assert.equal(
 		formatModelStatus(info),
-		"\u{F035B} gpt-5.6-sol-fast \u{F0875} xhigh",
+		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast\x1b[27m\uE0B0\x1b[7m\u{F0875} xhigh\x1b[27m\uE0B4",
 	);
 });
 
-test("omits the effort segment when effort is absent", () => {
-	assert.equal(
-		formatModelStatus({ ...info, effort: undefined }),
-		"\u{F035B} gpt-5.6-sol-fast",
+test("paints pill segments with the provided truecolor foregrounds", () => {
+	const out = formatModelStatus(
+		info,
+		"\x1b[38;2;100;100;100m",
+		"\x1b[38;2;200;50;50m",
 	);
+	assert.ok(out.includes("\x1b[48;2;100;100;100m"));
+	assert.ok(out.includes("\x1b[48;2;200;50;50m"));
+	assert.ok(out.includes("\x1b[38;2;100;100;100m\x1b[48;2;200;50;50m"));
+});
+
+test("omits the effort segment when effort is absent", () => {
+	const out = formatModelStatus({ ...info, effort: undefined });
+	assert.ok(out.includes("\u{F035B} gpt-5.6-sol-fast"));
+	assert.ok(!out.includes("\u{F0875}"));
 });
 
 test("partition splits pi-permissions from unrelated statuses", () => {

@@ -72,10 +72,16 @@ test("bottom border: model info without the mode", () => {
 	const bottom = buildBottomBorder(WIDTH, {
 		modelId: "gpt-5.6",
 		effort: "high",
-	});
-	assert.match(bottom!, /^── \u{F035B} gpt-5\.6 \u{F0875} high ─+$/u);
-	// Code-point width, not UTF-16 length — astral icons must not shrink the rule.
-	assert.equal([...bottom!].length, WIDTH);
+	})!;
+	assert.equal(bottom.pre, "──");
+	// Uncolored pill: inverse bodies, plain caps/sep; flush against ──
+	assert.match(
+		bottom.pill,
+		/^\uE0B6\x1b\[7m\u{F035B} gpt-5\.6\x1b\[27m\uE0B0\x1b\[7m\u{F0875} high\x1b\[27m\uE0B4$/u,
+	);
+	assert.match(bottom.post, /^─+$/);
+	const plain = (bottom.pre + bottom.pill + bottom.post).replace(/\x1b\[[0-9;]*m/g, "");
+	assert.equal([...plain].length, WIDTH);
 });
 
 test("bottom border: undefined when the label does not fit", () => {
@@ -89,6 +95,7 @@ test("bottom border: undefined when the label does not fit", () => {
 test("bottom border: astral icons still leave a full-width rule", () => {
 	// 2 icons × surrogate pair = UTF-16 length 4 but visible 2.
 	const bottom = buildBottomBorder(30, { modelId: "m", effort: "high" })!;
-	assert.equal([...bottom].length, 30);
-	assert.ok(bottom.endsWith("─"));
+	const plain = (bottom.pre + bottom.pill + bottom.post).replace(/\x1b\[[0-9;]*m/g, "");
+	assert.equal([...plain].length, 30);
+	assert.ok(plain.endsWith("─"));
 });

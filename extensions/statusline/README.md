@@ -16,7 +16,7 @@ Editor 为圆角盒（宽 ≥24）；mode 为 powerline 半圆胶囊，嵌在顶
 [ 消息流 ... ]
 ╭──Auto─────────────────── ↑284k ↓37.3k ─╮
 │ 输入内容…                               │
-╰─ model•effort ──────────────────────────╯
+╰──modeleffort ──────────────╯
 󰉋 ~/project 󰙁 main • session    CH66.4%   █████░░░░░ 80.6k/192k
 [其他扩展的 setStatus 状态（有则显示）]
 ```
@@ -35,19 +35,16 @@ Editor 为圆角盒（宽 ≥24）；mode 为 powerline 半圆胶囊，嵌在顶
 
 ### Editor 下边框
 
-左侧显示当前模型：
+左侧 model/effort 为 powerline 胶囊，两段用半三角分隔：
 
 ```text
-Default•(provider) model•effort
+modeleffort
 ```
 
-- `Default`：`pi-permissions` 通过 `setStatus` 发布的当前 mode
-- `provider`：当前 provider ID
-- `model`：当前 model ID
-- `effort`：当前 thinking level
-- 非 reasoning 模型不显示 effort
+- `model`：优先 `model.name`，空则回落 `model.id`
+- `effort`：当前 thinking level；非 reasoning 模型不显示
+- 外层半圆 U+E0B6 / U+E0B4，分隔 U+E0B0
 - 边框继续使用 pi 原生的 thinking/bash mode 动态颜色
-- 未加载 `pi-permissions` 时，降级为原来的 `(provider) model • effort`
 
 ### Footer 左侧
 

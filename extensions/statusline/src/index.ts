@@ -60,12 +60,15 @@ export default function statusline(pi: ExtensionAPI) {
 		currentCtx = ctx;
 		// Captured from the footer factory's theme (full Theme, not EditorTheme).
 		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
+		const pillFgAnsi: Partial<Record<"mdLink" | "accent", string>> = {};
 		installFooter(
 			ctx,
 			permissionsMode,
 			(theme) => {
 				badgeFgAnsi.warning = theme.getFgAnsi("warning");
 				badgeFgAnsi.error = theme.getFgAnsi("error");
+				pillFgAnsi.mdLink = theme.getFgAnsi("mdLink");
+				pillFgAnsi.accent = theme.getFgAnsi("accent");
 			},
 			(fn) => {
 				requestRender = fn;
@@ -82,6 +85,7 @@ export default function statusline(pi: ExtensionAPI) {
 				return { label, severity };
 			};
 			editor.getBadgeFgAnsi = (color) => badgeFgAnsi[color];
+			editor.getPillFgAnsi = (color) => pillFgAnsi[color];
 			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
 		});
 	};

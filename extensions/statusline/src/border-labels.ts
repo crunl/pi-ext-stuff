@@ -14,11 +14,11 @@ export interface TokenStats {
 
 /**
  * Visible column count for our label alphabet (ASCII, box-drawing, Nerd
- * Font PUA). Counts Unicode code points, not UTF-16 units — astral-plane
- * icons are surrogate pairs and `.length` would overcount by 1 each.
+ * Font PUA). Strips ANSI first, then counts Unicode code points — not
+ * UTF-16 units, so astral-plane icons (surrogate pairs) are not overcounted.
  */
 function displayLength(s: string): number {
-	return [...s].length;
+	return [...s.replace(/\x1b\[[0-9;]*m/g, "")].length;
 }
 
 /**
@@ -79,19 +79,34 @@ export function buildTopBorder(
 	return undefined;
 }
 
+export interface BottomBorderSegments {
+	/** Border run before the pill ("──"). */
+	pre: string;
+	/** Powerline pill (may carry ANSI); caller must not wrap in borderColor. */
+	pill: string;
+	/** Border run after the pill, already filled to width. */
+	post: string;
+}
+
 /**
  * Bottom border: model identity on the left.
  *
- *   ── model • effort ─────────────────────
+ *   ──modeleffort─────────────
  *
+ * Pill sits flush against the left rule, matching the top-border mode badge.
+ * Returned as segments so the caller can color the border runs independently —
+ * the pill's own fg/bg resets would otherwise cut the border color.
  * Returns undefined when the label does not fit.
  */
 export function buildBottomBorder(
 	width: number,
 	info: ModelStatusInfo,
-): string | undefined {
-	const decorated = `── ${formatModelStatus(info)} `;
-	const labelWidth = displayLength(decorated);
-	if (labelWidth >= width) return undefined;
-	return decorated + "─".repeat(width - labelWidth);
+	modelAnsi?: string,
+	effortAnsi?: string,
+): BottomBorderSegments | undefined {
+	const pre = "──";
+	const pill = formatModelStatus(info, modelAnsi, effortAnsi);
+	const leftWidth = displayLength(pre) + displayLength(pill);
+	if (leftWidth >= width) return undefined;
+	return { pre, pill, post: "─".repeat(width - leftWidth) };
 }
