@@ -4,7 +4,7 @@
  *
  *   ╭──Auto─────────────── ↑284k ↓37.3k ─╮
  *   │ user input here…                   │
- *   ╰──modeleffort ──────────╯
+ *   ╰──modeleffort──────────╯
  *
  * Mode badge keeps the powerline half-circle pill, sitting in the top
  * border after the box corner. Mode color: warning (yellow — "attention,
@@ -21,9 +21,10 @@
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { badgeColorFor, makeModeBadgeDecorator } from "./badge.ts";
+import { makeModeBadgeDecorator } from "./badge.ts";
 import { BOX_MIN_WIDTH, boxEditorLines } from "./box-editor.ts";
 import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
+import { stripAnsi } from "./format.ts";
 
 export interface ModelInfoProvider {
 	(): { modelId: string; effort: string | undefined } | undefined;
@@ -76,7 +77,7 @@ export class ModelLineEditor extends CustomEditor {
 			const top = buildTopBorder(innerWidth, mode?.label, this.getStats());
 			if (top !== undefined) {
 				const decorate = makeModeBadgeDecorator(
-					mode ? this.getBadgeFgAnsi(badgeColorFor(mode.severity)) : undefined,
+					mode ? this.getBadgeFgAnsi(mode.severity) : undefined,
 				);
 				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
 				lines[topIdx] =
@@ -109,9 +110,4 @@ export class ModelLineEditor extends CustomEditor {
 			bottomIdx,
 		});
 	}
-}
-
-const ANSI_RE = new RegExp(String.raw`\x1b\[[0-9;]*m`, "g");
-function stripAnsi(s: string): string {
-	return s.replace(ANSI_RE, "");
 }

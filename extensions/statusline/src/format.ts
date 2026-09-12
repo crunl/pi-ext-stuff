@@ -3,6 +3,13 @@
  * No ctx / tui dependencies — easy to test and reason about.
  */
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/** Strip SGR sequences. Used before code-point width measurement. */
+export function stripAnsi(s: string): string {
+	return s.replace(ANSI_RE, "");
+}
+
 /** Compact token count: 999 -> "999", 12300 -> "12.3k", 1500000 -> "1.5M" */
 export function formatTokens(count: number): string {
 	if (count < 1000) return `${count}`;

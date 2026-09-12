@@ -11,7 +11,6 @@ export interface UsageTotals {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
-	cost: number;
 	/** Cache hit rate (%) of the latest assistant message, if computable. */
 	latestCacheHitRate: number | undefined;
 }
@@ -22,7 +21,6 @@ export function computeUsageTotals(ctx: ExtensionContext): UsageTotals {
 		output: 0,
 		cacheRead: 0,
 		cacheWrite: 0,
-		cost: 0,
 		latestCacheHitRate: undefined,
 	};
 
@@ -31,13 +29,11 @@ export function computeUsageTotals(ctx: ExtensionContext): UsageTotals {
 		output?: number;
 		cacheRead?: number;
 		cacheWrite?: number;
-		cost?: { total?: number };
 	}) => {
 		totals.input += usage.input ?? 0;
 		totals.output += usage.output ?? 0;
 		totals.cacheRead += usage.cacheRead ?? 0;
 		totals.cacheWrite += usage.cacheWrite ?? 0;
-		totals.cost += usage.cost?.total ?? 0;
 	};
 
 	for (const entry of ctx.sessionManager.getEntries()) {
@@ -72,5 +68,4 @@ interface UsageLike {
 	output?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
-	cost?: { total?: number };
 }

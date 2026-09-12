@@ -61,13 +61,6 @@ test("top border: untouched with no mode and no stats", () => {
 	);
 });
 
-test("top border: inset capWidth reserves no extra columns", () => {
-	const top = buildTopBorder(WIDTH, "Plan", undefined, 0)!;
-	assert.equal(top.pre, "──");
-	assert.equal(top.mode, "Plan");
-	assert.equal(top.pre.length + top.mode.length + top.post.length, WIDTH);
-});
-
 test("bottom border: model info without the mode", () => {
 	const bottom = buildBottomBorder(WIDTH, {
 		modelId: "gpt-5.6",

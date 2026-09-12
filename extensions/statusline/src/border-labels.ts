@@ -4,7 +4,7 @@
  * resolution (this file must not import pi packages).
  */
 import { BADGE_CAP_WIDTH } from "./badge.ts";
-import { formatTokens } from "./format.ts";
+import { formatTokens, stripAnsi } from "./format.ts";
 import { formatModelStatus, type ModelStatusInfo } from "./status-mode.ts";
 
 export interface TokenStats {
@@ -14,11 +14,11 @@ export interface TokenStats {
 
 /**
  * Visible column count for our label alphabet (ASCII, box-drawing, Nerd
- * Font PUA). Strips ANSI first, then counts Unicode code points — not
- * UTF-16 units, so astral-plane icons (surrogate pairs) are not overcounted.
+ * Font PUA). Counts Unicode code points — not UTF-16 units, so astral-plane
+ * icons (surrogate pairs) are not overcounted.
  */
 function displayLength(s: string): number {
-	return [...s.replace(/\x1b\[[0-9;]*m/g, "")].length;
+	return [...stripAnsi(s)].length;
 }
 
 /**
@@ -28,9 +28,8 @@ function displayLength(s: string): number {
  *   ^^^    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
  *   pre    post              (mode = "Auto")
  *
- * `mode` is the plain label. `capWidth` is the visible width the badge
- * decorator will add (2 for powerline pill caps, 0 for inset/boxed).
- * post is sized against label.length + capWidth.
+ * `mode` is the plain label; the decorator adds two powerline caps, so
+ * post is sized against label width + BADGE_CAP_WIDTH.
  *
  * Returned as segments so the caller can color the border runs and the
  * mode badge independently — a fg/bg reset inside a single colored line
@@ -52,11 +51,10 @@ export function buildTopBorder(
 	width: number,
 	mode: string | undefined,
 	stats: TokenStats | undefined,
-	capWidth: number = BADGE_CAP_WIDTH,
 ): TopBorderSegments | undefined {
 	const modeSegment = mode ? `${mode}` : "";
 	const modeWidth =
-		modeSegment.length > 0 ? displayLength(modeSegment) + capWidth : 0;
+		modeSegment.length > 0 ? displayLength(modeSegment) + BADGE_CAP_WIDTH : 0;
 	const pre = modeWidth > 0 ? "──" : "";
 	const leftWidth = pre.length + modeWidth;
 	const right =

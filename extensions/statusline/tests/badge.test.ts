@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	BADGE_CAP_WIDTH,
-	badgeColorFor,
 	contrastTextFor,
 	makeModeBadgeDecorator,
 	parseTruecolor,
@@ -60,23 +59,8 @@ test("falls back to inverse video without truecolor data", () => {
 	}
 });
 
-test("badge color passes the published severity through", () => {
-	assert.equal(badgeColorFor("error"), "error");
-	assert.equal(badgeColorFor("warning"), "warning");
-});
-
 test("caps add two visible columns around the label", () => {
 	assert.equal(BADGE_CAP_WIDTH, 2);
 	assert.equal(PL_LEFT.length, 1);
 	assert.equal(PL_RIGHT.length, 1);
-});
-
-test("inset style is width-neutral (no caps)", () => {
-	const decorate = makeModeBadgeDecorator("\x1b[38;2;229;200;144m", "inset");
-	assert.equal(decorate("Auto"), "\x1b[48;2;229;200;144m\x1b[30mAuto\x1b[39m\x1b[49m");
-});
-
-test("inset falls back to inverse without truecolor", () => {
-	const decorate = makeModeBadgeDecorator(undefined, "inset");
-	assert.equal(decorate("Auto"), "\x1b[7mAuto\x1b[27m");
 });

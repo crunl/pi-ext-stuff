@@ -14,14 +14,9 @@
  *
  * Must not import pi packages (tests run under bare node).
  */
+import { stripAnsi } from "./format.ts";
 
 export const BOX_MIN_WIDTH = 24;
-
-const ANSI_RE = new RegExp(String.raw`\x1b\[[0-9;]*m`, "g");
-
-function stripAnsi(s: string): string {
-	return s.replace(ANSI_RE, "");
-}
 
 /**
  * True for editor chrome lines: pure `─` runs, or scroll borders like
