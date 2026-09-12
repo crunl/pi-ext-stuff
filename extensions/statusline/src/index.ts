@@ -43,10 +43,12 @@ export default function statusline(pi: ExtensionAPI) {
 		const ctx = currentCtx;
 		const model = ctx?.model;
 		if (!model) return undefined;
+		const level = ctx?.thinkingLevel ?? "off";
 		return {
 			// Prefer the display name; fall back to the raw id when absent.
 			modelId: model.name?.trim() || model.id,
-			effort: model.reasoning ? (ctx?.thinkingLevel ?? "off") : undefined,
+			// "off" is the default — hide the segment rather than label it.
+			effort: model.reasoning && level !== "off" ? level : undefined,
 		};
 	};
 

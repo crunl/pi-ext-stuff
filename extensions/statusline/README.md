@@ -43,7 +43,7 @@ modeleffortfolderbranch   CH66.4%  █████░░░░░ 80.6k/192k
 modeleffortfolderbranchname
 ```
 
-- 段色：model=`mdLink`，effort=`accent`，folder=`borderAccent`，branch=`success`，session=`muted`
+- 段色：model=`mdLink`，effort=跟随 thinking level（`thinkingOff`…`thinkingMax`，与 editor 边框同色），folder=`borderAccent`，branch=`success`，session=`muted`
 - `SHOW_MODEL_ON_BORDER`（`model-editor.ts`）为 false 时 editor 下栏是纯横线，model/effort 只在 footer
 
 ### Footer 右侧

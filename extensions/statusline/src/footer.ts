@@ -37,6 +37,26 @@ import { computeUsageTotals } from "./usage.ts";
 
 const METER_CELLS = 10;
 
+/** Map thinking level to the theme color Pi uses for the editor border. */
+function thinkingColorKey(level: string): string {
+	switch (level) {
+		case "minimal":
+			return "thinkingMinimal";
+		case "low":
+			return "thinkingLow";
+		case "medium":
+			return "thinkingMedium";
+		case "high":
+			return "thinkingHigh";
+		case "xhigh":
+			return "thinkingXhigh";
+		case "max":
+			return "thinkingMax";
+		default:
+			return "thinkingOff";
+	}
+}
+
 interface FooterTheme {
 	getFgAnsi(color: string): string;
 }
@@ -104,7 +124,8 @@ export function installFooter(
 					if (model.effort) {
 						segments.push({
 							text: `${ICONS.effort} ${model.effort}`,
-							ansi: fg("accent"),
+							// Same color as the editor border for this thinking level.
+							ansi: fg(thinkingColorKey(model.effort)),
 						});
 					}
 				}
