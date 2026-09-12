@@ -43,7 +43,8 @@ export default function statusline(pi: ExtensionAPI) {
 		const model = ctx?.model;
 		if (!model) return undefined;
 		return {
-			modelId: model.id,
+			// Prefer the display name; fall back to the raw id when absent.
+			modelId: model.name?.trim() || model.id,
 			effort: model.reasoning ? (ctx?.thinkingLevel ?? "off") : undefined,
 		};
 	};
