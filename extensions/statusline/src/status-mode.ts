@@ -9,34 +9,51 @@ export interface ModelStatusInfo {
 	effort: string | undefined;
 }
 
+export interface PowerlineSegment {
+	text: string;
+	/** Truecolor foreground used as the segment background. */
+	ansi?: string;
+}
+
+/**
+ * Chain segments into a powerline pill:
+ *
+ *   model effort folder …
+ *
+ * Caps use the adjacent segment color as fg; bodies use it as bg.
+ * Falls back to inverse video per segment when a color is missing.
+ */
+export function powerlineChain(segments: readonly PowerlineSegment[]): string {
+	if (segments.length === 0) return "";
+	const first = segments[0]!;
+	let out = cap(PL_LEFT, first.ansi) + body(first.text, first.ansi);
+	for (let i = 1; i < segments.length; i++) {
+		const prev = segments[i - 1]!;
+		const cur = segments[i]!;
+		out += sep(prev.ansi, cur.ansi) + body(cur.text, cur.ansi);
+	}
+	return out + cap(PL_RIGHT, segments[segments.length - 1]!.ansi);
+}
+
 /**
  * Bottom-border label: powerline pill with model, optional effort segment
  * split by a half-triangle. Mode lives in the top border.
  *
  *   model
  *   modeleffort
- *
- * `modelAnsi` / `effortAnsi` are truecolor foregrounds used as segment
- * backgrounds (same convention as the mode badge). Falls back to inverse
- * video when a color is missing or not truecolor.
  */
 export function formatModelStatus(
 	info: ModelStatusInfo,
 	modelAnsi?: string,
 	effortAnsi?: string,
 ): string {
-	const model = `${ICONS.model} ${info.modelId}`;
-	if (!info.effort) {
-		return cap(PL_LEFT, modelAnsi) + body(model, modelAnsi) + cap(PL_RIGHT, modelAnsi);
+	const segments: PowerlineSegment[] = [
+		{ text: `${ICONS.model} ${info.modelId}`, ansi: modelAnsi },
+	];
+	if (info.effort) {
+		segments.push({ text: `${ICONS.effort} ${info.effort}`, ansi: effortAnsi });
 	}
-	const effort = `${ICONS.effort} ${info.effort}`;
-	return (
-		cap(PL_LEFT, modelAnsi) +
-		body(model, modelAnsi) +
-		sep(modelAnsi, effortAnsi) +
-		body(effort, effortAnsi) +
-		cap(PL_RIGHT, effortAnsi)
-	);
+	return powerlineChain(segments);
 }
 
 function cap(glyph: string, ansi: string | undefined): string {

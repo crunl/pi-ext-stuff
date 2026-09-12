@@ -5,6 +5,7 @@ import {
 	isPermissionsModeEvent,
 	PermissionsModeState,
 	partitionExtensionStatuses,
+	powerlineChain,
 	syncPermissionsMode,
 } from "../src/status-mode.ts";
 
@@ -35,6 +36,24 @@ test("omits the effort segment when effort is absent", () => {
 	const out = formatModelStatus({ ...info, effort: undefined });
 	assert.ok(out.includes("\u{F035B} gpt-5.6-sol-fast"));
 	assert.ok(!out.includes("\u{F0875}"));
+});
+
+test("powerlineChain joins N segments with caps and seps", () => {
+	const out = powerlineChain([
+		{ text: "A", ansi: "\x1b[38;2;10;10;10m" },
+		{ text: "B", ansi: "\x1b[38;2;20;20;20m" },
+		{ text: "C" },
+	]);
+	assert.ok(out.startsWith("\x1b[38;2;10;10;10m"));
+	assert.ok(out.includes("A"));
+	assert.ok(out.includes("B"));
+	assert.ok(out.includes("C"));
+	// two separators between three segments
+	assert.equal(out.split("").length, 3);
+});
+
+test("powerlineChain returns empty for no segments", () => {
+	assert.equal(powerlineChain([]), "");
 });
 
 test("partition splits pi-permissions from unrelated statuses", () => {

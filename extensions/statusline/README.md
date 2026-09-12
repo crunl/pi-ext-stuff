@@ -16,8 +16,8 @@ Editor 为圆角盒（宽 ≥24）；mode 为 powerline 半圆胶囊，嵌在顶
 [ 消息流 ... ]
 ╭──Auto─────────────────── ↑284k ↓37.3k ─╮
 │ 输入内容…                               │
-╰──modeleffort ──────────────╯
-󰉋 ~/project 󰙁 main • session    CH66.4%   █████░░░░░ 80.6k/192k
+╰─────────────────────────────────────────╯
+modeleffortfolderbranch   CH66.4%  █████░░░░░ 80.6k/192k
 [其他扩展的 setStatus 状态（有则显示）]
 ```
 
@@ -35,27 +35,16 @@ Editor 为圆角盒（宽 ≥24）；mode 为 powerline 半圆胶囊，嵌在顶
 
 ### Editor 下边框
 
-左侧 model/effort 为 powerline 胶囊，两段用半三角分隔：
+`SHOW_MODEL_ON_BORDER`（`model-editor.ts`）为 **false**（默认）时是纯横线，model/effort 只在 footer。设为 true 可把 powerline 胶囊放回下栏。
+
+### Footer 左侧（powerline 链）
 
 ```text
-modeleffort
+modeleffortfolderbranchname
 ```
 
-- `model`：优先 `model.name`，空则回落 `model.id`
-- `effort`：当前 thinking level；非 reasoning 模型不显示
-- 外层半圆 U+E0B6 / U+E0B4，分隔 U+E0B0
-- 边框继续使用 pi 原生的 thinking/bash mode 动态颜色
-
-### Footer 左侧
-
-```text
-󰉋 cwd 󰙁 branch • session-name
-```
-
-- `󰉋`：当前工作目录
-- home 目录缩写为 `~`
-- `󰙁`：当前 Git branch（存在时显示）
-- session name 存在时追加显示
+- 段色：model=`mdLink`，effort=`accent`，folder=`borderAccent`，branch=`success`，session=`muted`
+- `SHOW_MODEL_ON_BORDER`（`model-editor.ts`）为 false 时 editor 下栏是纯横线，model/effort 只在 footer
 
 ### Footer 右侧
 

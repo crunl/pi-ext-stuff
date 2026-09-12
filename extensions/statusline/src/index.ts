@@ -5,8 +5,9 @@
  *   [ messages ... ]
  *   ╭──Auto────────────── ↑284k ↓37.3k ─╮   <- editor top (pill + stats)
  *   │ input…                              │
- *   ╰─ model•effort ──────────────────────╯   <- editor bottom (model)
- *   ~/path (branch) • name    ↑↓RW$ ctx%      <- footer.ts (setFooter, line 1)
+ *   ╰─────────────────────────────────────╯   <- editor bottom (plain when
+ *                                                SHOW_MODEL_ON_BORDER=false)
+ *   modeleffortfolderbranch   CH% █░ tok  <- footer powerline + stats
  *   [other extensions' statuses]              <- footer.ts (optional line 2)
  *
  * Commands:
@@ -61,19 +62,18 @@ export default function statusline(pi: ExtensionAPI) {
 		// Captured from the footer factory's theme (full Theme, not EditorTheme).
 		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
 		const pillFgAnsi: Partial<Record<"mdLink" | "accent", string>> = {};
-		installFooter(
-			ctx,
-			permissionsMode,
-			(theme) => {
+		installFooter(ctx, permissionsMode, {
+			getModelInfo: modelInfo,
+			onTheme: (theme) => {
 				badgeFgAnsi.warning = theme.getFgAnsi("warning");
 				badgeFgAnsi.error = theme.getFgAnsi("error");
 				pillFgAnsi.mdLink = theme.getFgAnsi("mdLink");
 				pillFgAnsi.accent = theme.getFgAnsi("accent");
 			},
-			(fn) => {
+			onRequestRender: (fn) => {
 				requestRender = fn;
 			},
-		);
+		});
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			const editor = new ModelLineEditor(tui, theme, keybindings);
 			editor.getModelInfo = modelInfo;

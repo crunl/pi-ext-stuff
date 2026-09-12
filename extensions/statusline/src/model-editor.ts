@@ -4,7 +4,10 @@
  *
  *   ╭──Auto─────────────── ↑284k ↓37.3k ─╮
  *   │ user input here…                   │
- *   ╰──modeleffort──────────╯
+ *   ╰────────────────────────────────────╯
+ *
+ * Bottom border is a plain rule when SHOW_MODEL_ON_BORDER is false —
+ * the footer owns model/effort display as powerline segments.
  *
  * Mode badge keeps the powerline half-circle pill, sitting in the top
  * border after the box corner. Mode color: warning (yellow — "attention,
@@ -40,6 +43,13 @@ export interface PermissionsModeProvider {
 
 /** Theme color key used for the model/effort powerline segments. */
 export type ModelPillColor = "mdLink" | "accent";
+
+/**
+ * When false, the bottom border stays a plain rule and the footer owns
+ * model/effort display (powerline segments). Flip to true to put the
+ * pill back on the editor bottom border.
+ */
+export const SHOW_MODEL_ON_BORDER = false;
 
 export class ModelLineEditor extends CustomEditor {
 	/** Injected callback returning current model info (reads live ctx). */
@@ -85,10 +95,14 @@ export class ModelLineEditor extends CustomEditor {
 			}
 		}
 
-		// Bottom border: model/effort powerline pill. Color border runs
-		// separately — the pill's resets would cut the border color.
+		// Bottom border: model/effort powerline pill (optional — footer may own it).
 		const info = this.getModelInfo();
-		if (info && bottomIdx !== -1 && bottomIdx !== topIdx) {
+		if (
+			SHOW_MODEL_ON_BORDER &&
+			info &&
+			bottomIdx !== -1 &&
+			bottomIdx !== topIdx
+		) {
 			const bottom = buildBottomBorder(
 				innerWidth,
 				info,

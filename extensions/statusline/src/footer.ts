@@ -1,15 +1,15 @@
 /**
  * Custom footer — replaces the built-in FooterComponent.
  *
- * Line 1:  📁 ~/path  branch • name           CH66%  ██░░░░░░░░ 1.0k/192k
- *          └─ dim, icons accent ─┘          └─ meter threshold-colored ─┘
+ * Line 1 (powerline chain on the left, stats on the right):
+ *   modeleffortfolderbranch     CH66%  ██░░░░░░░░ 1.0k/192k
  * Line 2 (optional): extension statuses from other extensions' setStatus()
  * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
  * Gutters follow settings.outputPad via pi-core's shared
  * outputPaddingController, so footer lines up with chat messages.
  *
- * Model info intentionally omitted — it lives in the editor's bottom border.
+ * Model/effort live here when SHOW_MODEL_ON_BORDER is false.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -24,26 +24,42 @@ import {
 	ICONS,
 	isHiddenExtensionStatus,
 	meterCells,
+	stripAnsi,
 } from "./format.ts";
-import { PermissionsModeState, syncPermissionsMode } from "./status-mode.ts";
+import {
+	type ModelStatusInfo,
+	PermissionsModeState,
+	type PowerlineSegment,
+	powerlineChain,
+	syncPermissionsMode,
+} from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
 
 const METER_CELLS = 10;
 
+interface FooterTheme {
+	getFgAnsi(color: string): string;
+}
+
+export interface FooterOptions {
+	getModelInfo?: () => ModelStatusInfo | undefined;
+	onTheme?: (theme: FooterTheme) => void;
+	onRequestRender?: (requestRender: () => void) => void;
+}
+
 export function installFooter(
 	ctx: ExtensionContext,
 	permissionsMode: PermissionsModeState,
-	onTheme?: (theme: { getFgAnsi(color: string): string }) => void,
-	onRequestRender?: (requestRender: () => void) => void,
+	options: FooterOptions = {},
 ): void {
+	const { getModelInfo, onTheme, onRequestRender } = options;
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		try {
 			// SAFETY: theme is the live TUI theme object, which exposes getFgAnsi
 			// at runtime; the static EditorTheme type just doesn't declare it.
-			// Failure falls through to the inverse-video badge fallback below.
-			onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
+			onTheme?.(theme as unknown as FooterTheme);
 		} catch {
 			// theme without getFgAnsi: badge falls back to inverse video
 		}
@@ -54,38 +70,56 @@ export function installFooter(
 			dispose: unsubBranch,
 			invalidate() {},
 			render(width: number): string[] {
-				// Live-read the theme on every render: the theme object is a live
-				// proxy, so hot theme switches (file watch or /theme) refresh the
-				// badge colors without a reinstall.
 				try {
 					// SAFETY: same live-theme invariant as above; re-read every render
 					// so hot theme switches refresh badge colors without reinstall.
-					onTheme?.(theme as unknown as { getFgAnsi(color: string): string });
+					onTheme?.(theme as unknown as FooterTheme);
 				} catch {
 					// theme without getFgAnsi: badge falls back to inverse video
 				}
-				// ---- left: 📁 pwd  branch • session-name ----
+				const t = theme as unknown as FooterTheme;
+				const fg = (color: string) => {
+					try {
+						return t.getFgAnsi(color);
+					} catch {
+						return undefined;
+					}
+				};
+
+				// ---- left: powerline model | effort | folder | branch | session ----
 				const pwd = formatCwd(
 					ctx.sessionManager.getCwd(),
 					process.env.HOME || process.env.USERPROFILE,
 				);
 				const branch = footerData.getGitBranch();
 				const sessionName = ctx.sessionManager.getSessionName();
+				const model = getModelInfo?.();
 
-				let leftPlain = `${ICONS.folder} ${pwd}`;
-				let leftColored =
-					theme.fg("accent", ICONS.folder) + theme.fg("dim", ` ${pwd}`);
+				const segments: PowerlineSegment[] = [];
+				if (model) {
+					segments.push({
+						text: `${ICONS.model} ${model.modelId}`,
+						ansi: fg("mdLink"),
+					});
+					if (model.effort) {
+						segments.push({
+							text: `${ICONS.effort} ${model.effort}`,
+							ansi: fg("accent"),
+						});
+					}
+				}
+				segments.push({ text: `${ICONS.folder} ${pwd}`, ansi: fg("borderAccent") });
 				if (branch) {
-					leftPlain += ` ${ICONS.branch} ${branch}`;
-					leftColored +=
-						" " + theme.fg("accent", ICONS.branch) + theme.fg("dim", ` ${branch}`);
+					segments.push({ text: `${ICONS.branch} ${branch}`, ansi: fg("success") });
 				}
 				if (sessionName) {
-					leftPlain += ` • ${sessionName}`;
-					leftColored += theme.fg("dim", ` • ${sessionName}`);
+					segments.push({ text: sessionName, ansi: fg("muted") });
 				}
 
-				// ---- right:  cache hit + █░ usage meter + tokens/window ----
+				const leftColored = powerlineChain(segments);
+				const leftPlain = stripAnsi(leftColored);
+
+				// ---- right:  cache hit + █░ usage meter + tokens/window ----
 				const totals = computeUsageTotals(ctx);
 				const rightPlainParts: string[] = [];
 				const rightColoredParts: string[] = [];
