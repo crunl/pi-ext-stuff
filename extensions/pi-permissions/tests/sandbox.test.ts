@@ -545,13 +545,10 @@ describe("sandbox integration", () => {
     expect(denyRuntime.filesystem.denyWrite).toContain("/private/var/spool/x");
   });
 
-  it("protects the plugin-local global configuration path", () => {
-    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).toContain(
-      "/workspace/agent/extensions/pi-permissions/config.json",
-    );
-    expect(defaultProtectedWritePaths("/workspace/project", "/workspace/agent")).not.toContain(
-      "/workspace/agent/permissions.json",
-    );
+  it("protects both the canonical and legacy global configuration paths", () => {
+    const paths = defaultProtectedWritePaths("/workspace/project", "/workspace/agent");
+    expect(paths).toContain("/workspace/agent/permissions.json");
+    expect(paths).toContain("/workspace/agent/extensions/pi-permissions/config.json");
   });
 
   it("does not protect the extension package root by default", () => {

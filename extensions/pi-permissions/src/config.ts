@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { join } from "node:path";
+import { defaultPermissionsConfigPath, legacyPermissionsConfigPath } from "./filesystem-policy.ts";
 import { networkPatternHasLocalException } from "./network-domain-pattern.ts";
 import { isValidNetworkCidr } from "./network-host.ts";
 import { isRecord } from "./unknown-value.ts";
@@ -144,8 +144,14 @@ export interface PermissionsConfig {
   };
 }
 
+export type PermissionsConfigSource = "new" | "legacy" | "default";
+
 export interface LoadedPermissionsConfig {
   config: PermissionsConfig;
+  /** Which config file was loaded; paths are not part of the fingerprint. */
+  source: PermissionsConfigSource;
+  /** Absolute path of the loaded file, or undefined when using DEFAULT_CONFIG. */
+  sourcePath?: string;
 }
 
 export type PermissionsConfigOverlay = {
@@ -621,13 +627,25 @@ async function readConfigFile(path: string): Promise<PermissionsConfigOverlay | 
 }
 
 export async function loadPermissionsConfig(agentDir: string): Promise<LoadedPermissionsConfig> {
-  const globalPath = join(agentDir, "extensions", "pi-permissions", "config.json");
-  const overlay = await readConfigFile(globalPath);
-  return {
-    config: overlay
-      ? mergeGlobalPermissionsConfig(DEFAULT_CONFIG, overlay)
-      : cloneConfig(DEFAULT_CONFIG),
-  };
+  const newPath = defaultPermissionsConfigPath(agentDir);
+  const legacyPath = legacyPermissionsConfigPath(agentDir);
+  const newOverlay = await readConfigFile(newPath);
+  if (newOverlay) {
+    return {
+      config: mergeGlobalPermissionsConfig(DEFAULT_CONFIG, newOverlay),
+      source: "new",
+      sourcePath: newPath,
+    };
+  }
+  const legacyOverlay = await readConfigFile(legacyPath);
+  if (legacyOverlay) {
+    return {
+      config: mergeGlobalPermissionsConfig(DEFAULT_CONFIG, legacyOverlay),
+      source: "legacy",
+      sourcePath: legacyPath,
+    };
+  }
+  return { config: cloneConfig(DEFAULT_CONFIG), source: "default" };
 }
 
 /** JSON-compatible value: the domain stableValue normalizes into for hashing. */

@@ -76,10 +76,16 @@ Upstream tracking of the underlying agent-loop race lives in earendil-works/pi.
 
 ## Config
 
-Runtime config is read from `<agentDir>/extensions/pi-permissions/config.json`
-(this file when deployed at its install path); `config.example.json` shows the
-full schema. Config content is fingerprinted into session state, so changes are
-tracked per-session. Reviewer provider/model live under `"reviewer"`.
+Runtime config is resolved from `agentDir` (official `getAgentDir()`:
+`PI_CODING_AGENT_DIR` or `~/.pi/agent`), decoupled from install layout so
+`pi install npm:...` works:
+
+1. `{agentDir}/permissions.json` — canonical source
+2. `{agentDir}/extensions/pi-permissions/config.json` — legacy fallback (read-only, deprecation notify)
+3. `DEFAULT_CONFIG` — when neither exists
+
+Both paths are protected write targets. Fingerprint binds content only, not
+path. `config.example.json` in the package root is the schema example.
 
 `sandbox.network.network_access` is the Codex `sandbox_workspace_write.network_access`
 analogue: when `true`, the whole TCP network is open (public + private outbound +

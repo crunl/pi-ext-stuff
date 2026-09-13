@@ -51,10 +51,18 @@ export function hasGlobSyntax(value: string): boolean {
 }
 
 function defaultAgentDir(): string {
+  const fromEnv = process.env.PI_CODING_AGENT_DIR;
+  if (fromEnv && fromEnv.length > 0) return resolve(fromEnv);
   return resolve(homedir(), ".pi", "agent");
 }
 
+/** Canonical user-config path: agentDir root, decoupled from install layout. */
 export function defaultPermissionsConfigPath(agentDir = defaultAgentDir()): string {
+  return resolve(agentDir, "permissions.json");
+}
+
+/** Pre-npm-install path; read-only fallback during the deprecation window. */
+export function legacyPermissionsConfigPath(agentDir = defaultAgentDir()): string {
   return resolve(agentDir, "extensions", "pi-permissions", "config.json");
 }
 
@@ -64,6 +72,9 @@ export function defaultProtectedWritePaths(cwd: string, agentDir = defaultAgentD
     resolve(cwd, ".agents"),
     resolve(cwd, ".codex"),
     defaultPermissionsConfigPath(agentDir),
+    // Keep protecting the legacy path so a delete-new-fallback-to-legacy
+    // scenario cannot become an agent self-privilege bypass.
+    legacyPermissionsConfigPath(agentDir),
   ];
 }
 

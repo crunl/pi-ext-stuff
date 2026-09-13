@@ -31,7 +31,7 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 function globalConfigPath(agentDir: string): string {
-  return join(agentDir, "extensions", "pi-permissions", "config.json");
+  return join(agentDir, "permissions.json");
 }
 
 // Host-policy fixture only: fake SRT advertises macOS, never kernel support.
@@ -428,13 +428,14 @@ describe("permissions config", () => {
     });
   });
 
-  it("ignores the legacy agent-level permissions file", async () => {
+  it("loads the agent-level permissions.json as the canonical source", async () => {
     await withConfigRoots(async ({ agentDir }) => {
       await writeJson(join(agentDir, "permissions.json"), {
         sandbox: { profile: "read-only" },
       });
       const loaded = await loadPermissionsConfig(agentDir);
-      expect(loaded.config.sandbox.profile).toBe("workspace-write");
+      expect(loaded.source).toBe("new");
+      expect(loaded.config.sandbox.profile).toBe("read-only");
     });
   });
 

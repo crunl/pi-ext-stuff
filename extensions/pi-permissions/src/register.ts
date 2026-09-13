@@ -182,6 +182,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
+  let legacyConfigWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   let guardianInvalidationAfterModeChange = false;
@@ -2307,6 +2308,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("session_start", async (_event, ctx) => {
     shortcutWarningShown = false;
+    legacyConfigWarningShown = false;
     resetBranchPermissionContext("session changed");
     session.clearLifecycleEvents();
     const generation = session.getGeneration();
@@ -2318,6 +2320,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       configFailure = error instanceof Error ? error : new Error(String(error));
       reportPermissionSetupError(ctx, error);
       return;
+    }
+    if (candidate.source === "legacy" && !legacyConfigWarningShown) {
+      legacyConfigWarningShown = true;
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `pi-permissions config loaded from the legacy path (${candidate.sourcePath}). ` +
+            `Migrate to ~/.pi/agent/permissions.json: ` +
+            `cp "${candidate.sourcePath}" ~/.pi/agent/permissions.json`,
+          "warning",
+        );
+      }
     }
     try {
       const restoredRuntime = new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi));
@@ -2644,13 +2657,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     handler: async (args, ctx) => {
       if (args.trim() === "status") {
         let configured:
-          | { fingerprint: string; network: PermissionsConfig["sandbox"]["network"] }
+          | {
+              fingerprint: string;
+              network: PermissionsConfig["sandbox"]["network"];
+              source: string;
+              path?: string;
+            }
           | { error: string };
         try {
           const candidate = await loadPermissionsConfig(agentDir);
           configured = {
             fingerprint: fingerprintConfig(candidate.config),
             network: structuredClone(candidate.config.sandbox.network),
+            source: candidate.source,
+            ...(candidate.sourcePath === undefined ? {} : { path: candidate.sourcePath }),
           };
         } catch (error) {
           configured = { error: error instanceof Error ? error.message : String(error) };
