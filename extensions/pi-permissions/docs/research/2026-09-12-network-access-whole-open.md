@@ -35,11 +35,13 @@ migration ConfigError. `request_permissions` tool shape uses the same
 
 ## Intentional divergences from Codex
 
-1. **Loopback/bind coupling.** Codex keeps `network_access` (outbound) and
-   `allow_local_binding` as independent axes. We expand bind/inbound from
-   `network_access:true` unless the fine axis explicitly tightens it. This is
-   deliberately wider than Codex Enabled-direct for the user's local-dev
-   workflow; SSRF/inbound surface grows accordingly.
+1. **Fine-axis tightening.** Codex `network_access:true` (no managed proxy)
+   already opens bind/inbound at the seatbelt layer; `allow_local_binding` is
+   only a `NetworkProxyConfig` axis, not a workspace-write axis. Our
+   `network_access:true` therefore **aligns** with Codex Enabled-direct. The
+   product extension is that `allowPrivateTargets` / `allowLocalBinding` may
+   explicitly tighten that expanded authority (Codex has no workspace-write
+   equivalent).
 2. **Tool vocabulary.** Codex `RequestPermissionsArgs.permissions.network` is
    `NetworkPermissions { enabled?: boolean }`. Our tool and config share one
    word: `network_access`. Schema and runtime must stay identical.
