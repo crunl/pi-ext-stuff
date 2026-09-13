@@ -2105,7 +2105,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         network: Type.Optional(
           Type.Union([
             Type.Object({ hosts: Type.Array(Type.String()) }),
-            Type.Object({ enabled: Type.Literal(true) }),
+            Type.Object({ network_access: Type.Literal(true) }),
           ]),
         ),
       }),

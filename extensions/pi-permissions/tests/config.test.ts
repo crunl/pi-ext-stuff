@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { ConfigError } from "../src/config.ts";
 import {
   DEFAULT_CONFIG,
+  effectiveNetworkAuthority,
   fingerprintConfig,
   loadPermissionsConfig,
   validatePermissionsConfig,
@@ -213,6 +214,59 @@ describe("permissions config", () => {
       ).toThrow(/System TLS/);
     }),
   );
+
+  it("rejects the removed sandbox.network.enabled field with a migration error", () => {
+    expect(() => validatePermissionsConfig({ sandbox: { network: { enabled: true } } })).toThrow(
+      /network_access/,
+    );
+    expect(() => validatePermissionsConfig({ sandbox: { network: { enabled: false } } })).toThrow(
+      /was removed/,
+    );
+  });
+
+  it("rejects network_access:true with system TLS unless local binding is tightened", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: { network: { network_access: true, macosTls: "system" } },
+      }),
+    ).toThrow(/System TLS/);
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: {
+          network: { network_access: true, macosTls: "system", allowLocalBinding: false },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  describe("effectiveNetworkAuthority", () => {
+    it.each([
+      [{}, { wholeNetwork: false, privateTargets: false, localBinding: false }],
+      [
+        { network_access: false },
+        { wholeNetwork: false, privateTargets: false, localBinding: false },
+      ],
+      [{ network_access: true }, { wholeNetwork: true, privateTargets: true, localBinding: true }],
+      [
+        { network_access: true, allowPrivateTargets: false },
+        { wholeNetwork: true, privateTargets: false, localBinding: true },
+      ],
+      [
+        { network_access: true, allowLocalBinding: false },
+        { wholeNetwork: true, privateTargets: true, localBinding: false },
+      ],
+      [
+        { network_access: true, allowPrivateTargets: false, allowLocalBinding: false },
+        { wholeNetwork: true, privateTargets: false, localBinding: false },
+      ],
+      [
+        { allowPrivateTargets: true },
+        { wholeNetwork: false, privateTargets: true, localBinding: false },
+      ],
+    ])("derives %j → %j", (input, expected) => {
+      expect(effectiveNetworkAuthority(input)).toEqual(expected);
+    });
+  });
 
   it.each([
     { enabled: "true" },

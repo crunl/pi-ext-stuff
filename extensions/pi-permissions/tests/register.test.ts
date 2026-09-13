@@ -86,6 +86,7 @@ interface Harness {
     {
       label?: string;
       description?: string;
+      parameters?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >;
@@ -201,6 +202,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     {
       label?: string;
       description?: string;
+      parameters?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >();
@@ -352,6 +354,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       name: string;
       label?: string;
       description?: string;
+      parameters?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }) => tools.set(tool.name, tool),
     appendEntry,
@@ -3382,6 +3385,35 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute.mock.calls[2]?.[0].policy.network.allowedDomains).toEqual([
       "api.example.com",
     ]);
+  });
+
+  it("registers request_permissions with a network_access schema that matches runtime", async () => {
+    const app = await makeHarness({ useRealPermissionRuntime: true });
+    await startSession(app);
+    await startAgent(app);
+    const tool = app.tools.get("request_permissions");
+    expect(tool).toBeDefined();
+    const serialized = JSON.stringify(tool?.parameters);
+    expect(serialized).toContain("network_access");
+    expect(serialized).not.toContain('"enabled"');
+    await expect(
+      tool?.execute(
+        "schema-shaped",
+        { permissions: { network: { network_access: true } } },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      tool?.execute(
+        "schema-legacy",
+        { permissions: { network: { enabled: true } } },
+        undefined,
+        undefined,
+        app.context,
+      ),
+    ).rejects.toMatchObject({ code: "policy-denied" });
   });
 
   it.each([
