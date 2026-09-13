@@ -2012,9 +2012,9 @@ describe("Permission mode registration", () => {
             filesystem: { allowWrite: ["."] },
             network: {
               access: { kind: "explicit", transport: surface !== "system" ? "direct" : "proxy" },
-              enabled: true,
+              network_access: true,
               ...(surface === "system"
-                ? { macosTls: "system" }
+                ? { macosTls: "system", allowLocalBinding: false }
                 : { allowPrivateTargets: true, allowLocalBinding: surface === "binding" }),
             },
           },
@@ -2074,7 +2074,7 @@ describe("Permission mode registration", () => {
       expect(app.sandboxManager.execute).not.toHaveBeenCalled();
       await executeBash(app, "child-after-late-review", "printf child");
       expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
-        enabled: false,
+        network_access: false,
         macosTls: "strict",
         execution: { kind: "proxy", inlineReview: false },
       });
@@ -2129,7 +2129,7 @@ describe("Permission mode registration", () => {
           sandbox: {
             network: {
               access: { kind: "explicit", transport: "direct" },
-              enabled: true,
+              network_access: true,
               allowPrivateTargets: true,
             },
           },
@@ -2270,7 +2270,7 @@ describe("Permission mode registration", () => {
       .get("request_permissions")!
       .execute(
         "later-broad",
-        { permissions: { network: { enabled: true } } },
+        { permissions: { network: { network_access: true } } },
         undefined,
         undefined,
         app.context,
@@ -2300,14 +2300,16 @@ describe("Permission mode registration", () => {
         phase: "planned-or-executing",
         lease: { policy: { network: { allowedDomains: ["api.example.com"] } } },
       });
-      expect(queued.lease.policy.network.enabled).not.toBe(true);
+      expect(queued.lease.policy.network.network_access).not.toBe(true);
       releaseBroad();
       await broad;
       const observed = await status();
       expect(observed.authority.turn.networkAll).toBe(true);
-      expect(observed.authority.attempts[0].lease.policy.network.enabled).not.toBe(true);
-      observed.authority.attempts[0].lease.policy.network.enabled = true;
-      expect((await status()).authority.attempts[0].lease.policy.network.enabled).not.toBe(true);
+      expect(observed.authority.attempts[0].lease.policy.network.network_access).not.toBe(true);
+      observed.authority.attempts[0].lease.policy.network.network_access = true;
+      expect((await status()).authority.attempts[0].lease.policy.network.network_access).not.toBe(
+        true,
+      );
       expect(app.sandboxManager.execute).not.toHaveBeenCalled();
     } finally {
       releaseAction();
@@ -2318,9 +2320,9 @@ describe("Permission mode registration", () => {
     const request = app.sandboxManager.execute.mock.calls[0]?.[0];
     expect(request.program.args).toContain("rm -rf /tmp/risk-only-fixture");
     expect(request.policy.network.allowedDomains).toEqual(["api.example.com"]);
-    expect(request.policy.network.enabled).not.toBe(true);
+    expect(request.policy.network.network_access).not.toBe(true);
     await executeBash(app, "after-queued-grant", "printf B");
-    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.enabled).toBe(true);
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.network_access).toBe(true);
     expect(app.reviewInputs).toHaveLength(3);
   });
 
@@ -2393,7 +2395,7 @@ describe("Permission mode registration", () => {
       .get("request_permissions")!
       .execute(
         "reload-grant",
-        { permissions: { network: { enabled: true } } },
+        { permissions: { network: { network_access: true } } },
         undefined,
         undefined,
         app.context,
@@ -2415,7 +2417,9 @@ describe("Permission mode registration", () => {
       useRealBashTool: true,
       useRealPermissionRuntime: true,
       config: {
-        sandbox: { network: { access: { kind: "explicit", transport: "proxy" }, enabled: true } },
+        sandbox: {
+          network: { access: { kind: "explicit", transport: "proxy" }, network_access: true },
+        },
       },
     });
     await startSession(app);
@@ -2463,7 +2467,7 @@ describe("Permission mode registration", () => {
         .get("request_permissions")!
         .execute(
           "status-broad",
-          { permissions: { network: { enabled: true } } },
+          { permissions: { network: { network_access: true } } },
           undefined,
           undefined,
           app.context,
@@ -2495,7 +2499,7 @@ describe("Permission mode registration", () => {
       expect(observed.backend.nativeEnforcement).toBe("unknown");
       expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(initialized);
       expect(app.appendEntry).toHaveBeenCalledTimes(persisted);
-      observed.authority.effective.network.enabled = false;
+      observed.authority.effective.network.network_access = false;
       await app.commands.get("permissions")!.handler("status", app.context);
       expect(status().authority.turn.networkAll).toBe(true);
       await writeFile(
@@ -2546,7 +2550,7 @@ describe("Permission mode registration", () => {
         .get("request_permissions")!
         .execute(
           "public-broad",
-          { permissions: { network: { enabled: true } } },
+          { permissions: { network: { network_access: true } } },
           undefined,
           undefined,
           app.context,
@@ -2554,9 +2558,9 @@ describe("Permission mode registration", () => {
       const execution = executeBash(app, "private-broad", "printf B");
       if (allowPrivateTargets) await expect(execution).resolves.toBeDefined();
       else await expect(execution).rejects.toMatchObject({ code: "policy-denied" });
-      expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.allowLocalBinding).toBe(
-        false,
-      );
+      expect(
+        app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.allowLocalBinding,
+      ).toBeUndefined();
       expect(app.reviewInputs).toHaveLength(1);
     },
   );
@@ -2584,7 +2588,9 @@ describe("Permission mode registration", () => {
       if (baseline === "localhost") await expect(amendment).resolves.toBeDefined();
       else await expect(amendment).rejects.toMatchObject({ code: "policy-denied" });
       await executeBash(app, "exact-local-covered", "printf A");
-      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.network_access).not.toBe(
+        true,
+      );
       expect(app.reviewInputs).toHaveLength(baseline === "localhost" ? 1 : 0);
     },
   );
@@ -2610,15 +2616,17 @@ describe("Permission mode registration", () => {
         await startSession(app);
         await startAgent(app);
         await expect(
-          app.tools
-            .get("request_permissions")!
-            .execute(
-              "hard-network-conflict",
-              { permissions: { network: system ? { hosts: ["127.0.0.1"] } : { enabled: true } } },
-              undefined,
-              undefined,
-              app.context,
-            ),
+          app.tools.get("request_permissions")!.execute(
+            "hard-network-conflict",
+            {
+              permissions: {
+                network: system ? { hosts: ["127.0.0.1"] } : { network_access: true },
+              },
+            },
+            undefined,
+            undefined,
+            app.context,
+          ),
         ).rejects.toMatchObject({ code: "policy-denied" });
         expect(app.reviewInputs).toHaveLength(0);
         expect(app.sandboxManager.execute).not.toHaveBeenCalled();
@@ -2648,9 +2656,13 @@ describe("Permission mode registration", () => {
     });
     expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
       allowedDomains: ["10.1.2.3"],
-      allowLocalBinding: false,
     });
-    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+    expect(
+      app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.allowLocalBinding,
+    ).toBeUndefined();
+    expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.network_access).not.toBe(
+      true,
+    );
     expect(app.reviewInputs).toHaveLength(1);
   });
 
@@ -2663,7 +2675,7 @@ describe("Permission mode registration", () => {
         config: {
           sandbox: {
             network: {
-              enabled: true,
+              network_access: true,
               allowedDomains: ["api.example.com"],
               access: { kind: "explicit", transport: "proxy" },
             },
@@ -2679,7 +2691,7 @@ describe("Permission mode registration", () => {
           .get("request_permissions")!
           .execute(
             "child-broad",
-            { permissions: { network: { enabled: true } } },
+            { permissions: { network: { network_access: true } } },
             undefined,
             undefined,
             app.context,
@@ -2687,7 +2699,7 @@ describe("Permission mode registration", () => {
       ).rejects.toMatchObject({ code: "policy-denied" });
       await executeBash(app, "child-host-only", "printf child");
       expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
-        enabled: false,
+        network_access: false,
         delegated: true,
         allowedDomains: ["api.example.com"],
         execution: { kind: "proxy", inlineReview: false },
@@ -2711,7 +2723,7 @@ describe("Permission mode registration", () => {
       .get("request_permissions")!
       .execute(
         "parent-broad",
-        { permissions: { network: { enabled: true } } },
+        { permissions: { network: { network_access: true } } },
         undefined,
         undefined,
         app.context,
@@ -2719,12 +2731,12 @@ describe("Permission mode registration", () => {
     await startAgent(app);
     await executeBash(app, "child-finite", "printf child");
     expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
-      enabled: false,
+      network_access: false,
       allowedDomains: ["api.example.com"],
     });
     await endAgent(app);
     await executeBash(app, "parent-resumed", "printf parent");
-    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.enabled).toBe(true);
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.network_access).toBe(true);
   });
 
   it.each(["direct", "system"] as const)(
@@ -2745,8 +2757,10 @@ describe("Permission mode registration", () => {
           sandbox: {
             network: {
               access: { kind: "explicit", transport: surface === "direct" ? "direct" : "proxy" },
-              enabled: true,
-              ...(surface === "direct" ? { allowPrivateTargets: true } : { macosTls: "system" }),
+              network_access: true,
+              ...(surface === "direct"
+                ? { allowPrivateTargets: true }
+                : { macosTls: "system", allowLocalBinding: false }),
             },
           },
           delegation: { enabled: true, networkHosts: ["api.example.com"] },
@@ -2778,7 +2792,7 @@ describe("Permission mode registration", () => {
       expect(app.sandboxManager.waitForIdle).toHaveBeenCalledTimes(1);
       await executeBash(app, "tight-child", "printf child");
       expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
-        enabled: false,
+        network_access: false,
         macosTls: "strict",
         delegated: true,
         allowedDomains: ["api.example.com"],
@@ -2798,7 +2812,7 @@ describe("Permission mode registration", () => {
           sandbox: {
             network: {
               access: { kind: "explicit", transport: "direct" },
-              enabled: true,
+              network_access: true,
               allowPrivateTargets: true,
             },
           },
@@ -2873,17 +2887,19 @@ describe("Permission mode registration", () => {
       .get("request_permissions")!
       .execute(
         "direct-grant",
-        { permissions: { network: { enabled: true } } },
+        { permissions: { network: { network_access: true } } },
         undefined,
         undefined,
         app.context,
       );
     await executeBash(app, "direct-B", "printf B");
     expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
-      enabled: true,
+      network_access: true,
       execution: { kind: "direct" },
-      allowLocalBinding: false,
     });
+    expect(
+      app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.allowLocalBinding,
+    ).toBeUndefined();
     expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.filesystem.denyWrite).toContain(
       join(app.cwd, ".git"),
     );
@@ -2913,7 +2929,7 @@ describe("Permission mode registration", () => {
       .get("request_permissions")!
       .execute(
         "broad",
-        { permissions: { network: { enabled: true } } },
+        { permissions: { network: { network_access: true } } },
         undefined,
         undefined,
         app.context,
@@ -2921,7 +2937,7 @@ describe("Permission mode registration", () => {
     await executeBash(app, "broad-B", "printf B");
     expect(app.reviewInputs).toHaveLength(1);
     expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.network).toMatchObject({
-      enabled: true,
+      network_access: true,
       allowedDomains: [],
       deniedDomains: ["blocked.example.com"],
     });
@@ -2992,7 +3008,7 @@ describe("Permission mode registration", () => {
             .get("request_permissions")!
             .execute(
               "explicit-grant",
-              { permissions: { network: { enabled: true } } },
+              { permissions: { network: { network_access: true } } },
               undefined,
               undefined,
               app.context,
@@ -3000,7 +3016,7 @@ describe("Permission mode registration", () => {
         expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(activations);
         expect(app.sandboxManager.execute).toHaveBeenCalledTimes(1);
         expect(running.policy.network.allowedDomains).toEqual([]);
-        expect(running.policy.network.enabled).not.toBe(true);
+        expect(running.policy.network.network_access).not.toBe(true);
         expect(running.policy.network.execution).toEqual({ kind: "restricted" });
         await app.commands.get("permissions")!.handler("status", app.context);
         const view = JSON.parse(
@@ -3159,7 +3175,7 @@ describe("Permission mode registration", () => {
         "not-granted",
         {
           permissions: {
-            network: scope === "host" ? { hosts: ["api.example.com"] } : { enabled: true },
+            network: scope === "host" ? { hosts: ["api.example.com"] } : { network_access: true },
           },
         },
         controller.signal,
@@ -3370,14 +3386,16 @@ describe("Permission mode registration", () => {
 
   it.each([
     { scope: "session", permissions: { network: { hosts: ["api.example.com"] } } },
-    { permissions: { network: { hosts: ["api.example.com"], enabled: true } } },
-    { permissions: { network: { enabled: false } } },
-    { permissions: { network: { enabled: "true" } } },
-    { permissions: { network: { enabled: true, port: 443 } } },
+    { permissions: { network: { hosts: ["api.example.com"], network_access: true } } },
+    { permissions: { network: { network_access: false } } },
+    { permissions: { network: { network_access: "true" } } },
+    { permissions: { network: { network_access: true, port: 443 } } },
     { permissions: { network: { hosts: ["*"] } } },
     {
       permissions: {
-        network: Object.assign(Object.create({ hosts: ["api.example.com"] }), { enabled: true }),
+        network: Object.assign(Object.create({ hosts: ["api.example.com"] }), {
+          network_access: true,
+        }),
       },
     },
     { permissions: { network: { hosts: ["api.example.com"], protocol: "udp" } } },
@@ -3408,7 +3426,8 @@ describe("Permission mode registration", () => {
   it.each(["hidden-hosts", "hidden-port"] as const)(
     "rejects clone-erased network scope before review and grants: %s",
     async (shape) => {
-      const network = shape === "hidden-hosts" ? { enabled: true } : { hosts: ["narrow.example"] };
+      const network =
+        shape === "hidden-hosts" ? { network_access: true } : { hosts: ["narrow.example"] };
       Object.defineProperty(network, shape === "hidden-hosts" ? "hosts" : "port", {
         value: shape === "hidden-hosts" ? ["narrow.example"] : 443,
         enumerable: false,
@@ -3447,7 +3466,9 @@ describe("Permission mode registration", () => {
         execution: { kind: "restricted" },
         allowedDomains: [],
       });
-      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.enabled).not.toBe(true);
+      expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network.network_access).not.toBe(
+        true,
+      );
       await expectNoGrants();
     },
   );

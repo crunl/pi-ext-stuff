@@ -15,7 +15,7 @@
     },
     "network": {
       "access": { "kind": "inline-proxy" },
-      "enabled": false,
+      "network_access": false,
       "allowPrivateTargets": false,
       "macosTls": "strict",
       "allowedDomains": [],

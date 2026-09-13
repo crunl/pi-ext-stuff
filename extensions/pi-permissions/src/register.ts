@@ -25,6 +25,7 @@ import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   ConfigError,
+  effectiveNetworkAuthority,
   fingerprintConfig,
   fingerprintValue,
   type LoadedPermissionsConfig,
@@ -360,10 +361,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
     session.currentExecutionSnapshot() === snapshot;
 
-  const requiresNetworkQuiescence = (network: SandboxPolicy["network"] | undefined): boolean =>
-    (network?.access?.kind === "explicit" && network.access.transport === "direct") ||
-    network?.macosTls === "system" ||
-    network?.allowLocalBinding === true;
+  const requiresNetworkQuiescence = (network: SandboxPolicy["network"] | undefined): boolean => {
+    if (!network) return false;
+    const authority = effectiveNetworkAuthority(network);
+    return (
+      (network.access?.kind === "explicit" && network.access.transport === "direct") ||
+      network.macosTls === "system" ||
+      authority.localBinding
+    );
+  };
 
   const assertUnmediatedExecutionCurrent = (
     policy: SandboxPolicy,
@@ -525,7 +531,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // non-inheriting; a broad parent may be intersected into an explicit finite envelope.
     if (childBase && permissions.inspect()?.turn.networkAll) {
       childBase = structuredClone(childBase);
-      childBase.network.enabled = true;
+      childBase.network.network_access = true;
     }
     let envelope: DelegationEnvelope = {
       writeRoots: [...(childBase?.filesystem.allowWrite ?? [])],
@@ -1366,14 +1372,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         };
       }
       const exactLocalAllow = isExactLocalNetworkAllowed(policy.network.allowedDomains, host, port);
+      const authority = effectiveNetworkAuthority(policy.network);
       const endpoint = await networkBoundary.resolveEndpoint(
         host,
         port,
         policy.network.trustedFakeIpRanges ?? [],
         activeSignal,
         {
-          allowLocalBinding: policy.network.allowLocalBinding === true,
-          allowPrivateTargets: policy.network.allowPrivateTargets === true,
+          allowLocalBinding: authority.localBinding,
+          allowPrivateTargets: authority.privateTargets,
           allowExactLocalAllow: exactLocalAllow,
         },
       );
@@ -2111,7 +2118,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (!isSupportedPermissionRequestShape(params)) {
         const reason =
-          "request_permissions requires an unambiguous turn-scoped network.hosts OR network.enabled:true request, and/or filesystem.write";
+          "request_permissions requires an unambiguous turn-scoped network.hosts OR network_access:true request, and/or filesystem.write";
         throw Object.assign(
           new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
           { code: "policy-denied", reason },

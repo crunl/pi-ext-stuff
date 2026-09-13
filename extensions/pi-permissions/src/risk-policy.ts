@@ -1,4 +1,4 @@
-import type { PermissionsConfig } from "./config.ts";
+import { effectiveNetworkAuthority, type PermissionsConfig } from "./config.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";
@@ -89,9 +89,9 @@ export function isSupportedPermissionRequestShape(
     (Object.hasOwn(input.permissions, "network") &&
       !validScope(input.permissions.network, "hosts") &&
       !(
-        dataRecord(input.permissions.network, ["enabled"]) &&
-        Object.hasOwn(input.permissions.network, "enabled") &&
-        input.permissions.network.enabled === true
+        dataRecord(input.permissions.network, ["network_access"]) &&
+        Object.hasOwn(input.permissions.network, "network_access") &&
+        input.permissions.network.network_access === true
       )) ||
     (Object.hasOwn(input.permissions, "filesystem") &&
       !validScope(input.permissions.filesystem, "write"))
@@ -111,18 +111,18 @@ async function evaluateRequestPermissions(
       action: "block",
       risk: "HARD",
       reason:
-        "request_permissions supports turn-scoped network.hosts OR network.enabled:true, and filesystem.write lists",
+        "request_permissions supports turn-scoped network.hosts OR network_access:true, and filesystem.write lists",
     };
   }
   const permissions = input.permissions;
   const network = isRecord(permissions.network) ? permissions.network : {};
   const filesystem = isRecord(permissions.filesystem) ? permissions.filesystem : {};
+  const authority = effectiveNetworkAuthority(networkPolicy);
   const normalized = await normalizePermissionAmendment(
     {
       hosts: stringList(network.hosts),
       writeRoots: stringList(filesystem.write),
-      allowPrivateTargets:
-        networkPolicy.allowPrivateTargets === true || networkPolicy.allowLocalBinding,
+      allowPrivateTargets: authority.privateTargets,
       allowedDomains: networkPolicy.allowedDomains,
     },
     cwd,
@@ -132,7 +132,7 @@ async function evaluateRequestPermissions(
     return { action: "block", risk: "HARD", reason: normalized.reason };
   }
   if (
-    network.enabled !== true &&
+    network.network_access !== true &&
     normalized.amendment.networkHosts.length === 0 &&
     normalized.amendment.writeRoots.length === 0
   ) {
@@ -147,10 +147,10 @@ async function evaluateRequestPermissions(
     risk: "REVIEW",
     reason: "REVIEW operation",
     summary:
-      network.enabled === true
+      network.network_access === true
         ? "Whole-network outbound authority (subject to hard destination and private-target policy), current turn only"
         : summarize("request_permissions", input),
-    ...(network.enabled === true ? { networkAll: true as const } : {}),
+    ...(network.network_access === true ? { networkAll: true as const } : {}),
     ...(normalized.amendment.networkHosts.length > 0
       ? { networkHosts: normalized.amendment.networkHosts }
       : {}),

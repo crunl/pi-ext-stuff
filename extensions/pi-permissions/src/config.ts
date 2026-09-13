@@ -32,10 +32,35 @@ export function validateNetworkAccess(input: unknown): NetworkAccess {
   );
 }
 
+/** Codex `network_access` analogue: whole TCP network including private/loopback/bind. */
+export type EffectiveNetworkAuthority = {
+  wholeNetwork: boolean;
+  privateTargets: boolean;
+  localBinding: boolean;
+};
+
+/**
+ * Derive effective network authority. Explicit false on a fine axis wins over
+ * `network_access`; undefined falls back to `network_access`. Never materialize
+ * back into the policy fields (fingerprint, delegation, status views).
+ */
+export function effectiveNetworkAuthority(network: {
+  network_access?: boolean;
+  allowPrivateTargets?: boolean;
+  allowLocalBinding?: boolean;
+}): EffectiveNetworkAuthority {
+  const wholeNetwork = network.network_access === true;
+  return {
+    wholeNetwork,
+    privateTargets: network.allowPrivateTargets ?? wholeNetwork,
+    localBinding: network.allowLocalBinding ?? wholeNetwork,
+  };
+}
+
 /** Shared structural eligibility for configuration, Engine plans and backend mapping. */
 export function validateNetworkPolicy(network: {
   access?: NetworkAccess;
-  enabled?: boolean;
+  network_access?: boolean;
   allowPrivateTargets?: boolean;
   macosTls?: "strict" | "system";
   allowLocalBinding?: boolean;
@@ -43,21 +68,18 @@ export function validateNetworkPolicy(network: {
   deniedDomains: readonly string[];
   delegated?: true;
 }): void {
+  const authority = effectiveNetworkAuthority(network);
   const direct = network.access?.kind === "explicit" && network.access.transport === "direct";
   if (direct) {
-    if (!network.allowPrivateTargets && !network.allowLocalBinding)
+    if (!authority.privateTargets && !authority.localBinding)
       throw new ConfigError(
-        "Direct requires unrestricted private/special outbound eligibility (allowPrivateTargets)",
+        "Direct requires unrestricted private/special outbound eligibility (network_access or allowPrivateTargets)",
       );
     if (network.allowedDomains.length || network.deniedDomains.length || network.delegated)
       throw new ConfigError("Direct cannot enforce domain constraints or delegation");
     if (network.macosTls === "system") throw new ConfigError("Direct/system TLS is unsupported");
   }
-  if (
-    network.access?.kind === "explicit" &&
-    network.allowLocalBinding &&
-    !(direct && network.enabled === true)
-  ) {
+  if (network.access?.kind === "explicit" && authority.localBinding && !authority.wholeNetwork) {
     throw new ConfigError(
       "sandbox.network.allowLocalBinding is incompatible with grant-dependent explicit access",
     );
@@ -68,7 +90,7 @@ export function validateNetworkPolicy(network: {
     if (
       network.deniedDomains.length ||
       network.delegated ||
-      network.allowLocalBinding ||
+      authority.localBinding ||
       localException
     ) {
       throw new ConfigError(
@@ -95,7 +117,8 @@ export interface PermissionsConfig {
     };
     network: {
       access?: NetworkAccess;
-      enabled?: boolean;
+      /** Codex `network_access`: whole TCP network including private/loopback/bind when true. */
+      network_access?: boolean;
       allowPrivateTargets?: boolean;
       macosTls?: "strict" | "system";
       allowedDomains: string[];
@@ -103,7 +126,7 @@ export interface PermissionsConfig {
       /** CIDRs reserved for a user-managed TUN/fake-IP resolver. */
       trustedFakeIpRanges: string[];
       /** High privilege: SRT may allow local bind/inbound and loopback outbound. */
-      allowLocalBinding: boolean;
+      allowLocalBinding?: boolean;
     };
   };
   rules: Array<{ action: "allow" | "ask" | "deny"; tool: string; pattern?: string }>;
@@ -138,7 +161,7 @@ export type PermissionsConfigOverlay = {
     };
     network?: {
       access?: NetworkAccess;
-      enabled?: boolean;
+      network_access?: boolean;
       allowPrivateTargets?: boolean;
       macosTls?: "strict" | "system";
       allowedDomains?: string[];
@@ -182,7 +205,7 @@ export const DEFAULT_CONFIG: PermissionsConfig = {
       // narrow exception without being shadowed by a built-in deny rule.
       deniedDomains: [],
       trustedFakeIpRanges: [],
-      allowLocalBinding: false,
+      // allowLocalBinding stays absent so network_access can expand bind/inbound.
     },
   },
   rules: [],
@@ -386,11 +409,17 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
     if ("network" in input.sandbox && input.sandbox.network !== undefined) {
       if (!isRecord(input.sandbox.network))
         throw new ConfigError("sandbox.network must be an object");
+      if ("enabled" in input.sandbox.network) {
+        throw new ConfigError(
+          "sandbox.network.enabled was removed; use sandbox.network.network_access. " +
+            "network_access:true now also opens private/loopback/bind (Codex Enabled), not public-only.",
+        );
+      }
       rejectUnknownKeys(
         input.sandbox.network,
         [
           "access",
-          "enabled",
+          "network_access",
           "allowPrivateTargets",
           "macosTls",
           "allowedDomains",
@@ -401,7 +430,7 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         "sandbox.network",
       );
       const network: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["network"]> = {};
-      for (const key of ["enabled", "allowPrivateTargets"] as const) {
+      for (const key of ["network_access", "allowPrivateTargets"] as const) {
         if (key in input.sandbox.network)
           network[key] = expectBoolean(input.sandbox.network[key], `sandbox.network.${key}`);
       }
@@ -526,7 +555,7 @@ function applyOverlay(
       config.sandbox.filesystem.denyRead = [...overlay.sandbox.filesystem.denyRead];
     if (overlay.sandbox.filesystem?.denyWrite !== undefined)
       config.sandbox.filesystem.denyWrite = [...overlay.sandbox.filesystem.denyWrite];
-    for (const key of ["enabled", "allowPrivateTargets", "macosTls"] as const) {
+    for (const key of ["network_access", "allowPrivateTargets", "macosTls"] as const) {
       const value = overlay.sandbox.network?.[key];
       if (value !== undefined) Object.assign(config.sandbox.network, { [key]: value });
     }

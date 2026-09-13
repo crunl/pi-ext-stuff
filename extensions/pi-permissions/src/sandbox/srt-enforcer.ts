@@ -4,6 +4,7 @@ import {
   type SandboxRuntimeConfig,
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
+import { effectiveNetworkAuthority } from "../config.ts";
 import { hasGlobSyntax } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
 import {
@@ -103,6 +104,7 @@ function toSrtConfig(
   connectGuard?: SandboxConnectGuard,
 ): SandboxRuntimeConfig {
   assertSrtPolicySupported(policy);
+  const authority = effectiveNetworkAuthority(policy.network);
   return {
     filesystem: {
       denyRead: [...policy.filesystem.denyRead],
@@ -115,9 +117,7 @@ function toSrtConfig(
       // same Engine decision and lets the parent guard bind a DNS answer.
       allowedDomains: connectGuard ? [] : [...policy.network.allowedDomains],
       deniedDomains: [...policy.network.deniedDomains],
-      ...(policy.network.allowLocalBinding === undefined
-        ? {}
-        : { allowLocalBinding: policy.network.allowLocalBinding }),
+      ...(authority.localBinding ? { allowLocalBinding: true } : {}),
       ...(connectGuard?.parentProxyUrl
         ? {
             parentProxy: {

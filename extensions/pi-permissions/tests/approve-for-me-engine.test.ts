@@ -147,7 +147,7 @@ describe("ApproveForMeEngine public seam", () => {
             call: {
               id: "all-amendment",
               tool: "request_permissions",
-              input: { permissions: { network: { enabled: true } } },
+              input: { permissions: { network: { network_access: true } } },
               cwd: "/workspace",
             },
             admission: reviewAdmission(requested),
@@ -158,7 +158,7 @@ describe("ApproveForMeEngine public seam", () => {
       );
       await entry;
       expect(engine.inspect()?.turn.networkAll).toBe(false);
-      expect(engine.inspect()?.attempts[0].lease.policy?.network.enabled).toBe(true);
+      expect(engine.inspect()?.attempts[0].lease.policy?.network.network_access).toBe(true);
       const inspection = engine.inspect()!;
       inspection.turn.networkAll = true;
       inspection.baseline!.network.allowedDomains.push("forged.example");
@@ -593,7 +593,7 @@ describe("ApproveForMeEngine public seam", () => {
         baseSandboxPolicy: {
           ...basePolicy,
           network: {
-            enabled: true,
+            network_access: true,
             allowedDomains: [],
             deniedDomains: [],
           },
@@ -616,7 +616,7 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("still hard-blocks a private target when config-level whole-network is enabled", async () => {
+  it("allows a private target under config-level network_access without Guardian review", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
@@ -626,9 +626,42 @@ describe("ApproveForMeEngine public seam", () => {
         baseSandboxPolicy: {
           ...basePolicy,
           network: {
-            enabled: true,
+            network_access: true,
             allowedDomains: [],
             deniedDomains: [],
+          },
+        },
+      }),
+    );
+    const executor = vi.fn(async (attempt) => {
+      const decision = await attempt.authorizeCapability({
+        capability: { kind: "network", host: "192.168.1.10", port: 443 },
+      });
+      return decision.kind === "allow"
+        ? completed("covered private host")
+        : failed(decision.error.reason);
+    });
+
+    await expect(turn.execute(call(executor))).resolves.toEqual({
+      kind: "completed",
+      value: "covered private host",
+    });
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("still hard-blocks a denied domain when network_access is enabled", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(
+      snapshot({
+        baseSandboxPolicy: {
+          ...basePolicy,
+          network: {
+            network_access: true,
+            allowedDomains: [],
+            deniedDomains: ["192.168.1.10"],
           },
         },
       }),

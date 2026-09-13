@@ -101,40 +101,53 @@ describe("permissions config", () => {
     expect(() => validatePermissionsConfig({ sandbox: { network: { access } } })).toThrow(/access/);
   });
 
-  it("requires independent private eligibility for direct, even with broad baseline authority", () => {
-    for (const enabled of [false, true]) {
-      expect(() =>
-        validatePermissionsConfig({
-          sandbox: { network: { enabled, access: { kind: "explicit", transport: "direct" } } },
-        }),
-      ).toThrow(/private\/special/);
-    }
+  it("requires private eligibility for direct unless network_access provides it", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: {
+          network: { network_access: false, access: { kind: "explicit", transport: "direct" } },
+        },
+      }),
+    ).toThrow(/private\/special/);
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: { network: { access: { kind: "explicit", transport: "direct" } } },
+      }),
+    ).toThrow(/private\/special/);
     const input = {
       sandbox: {
         network: {
           access: { kind: "explicit", transport: "direct" },
-          enabled: true,
-          allowPrivateTargets: true,
+          network_access: true,
           macosTls: "strict",
         },
       },
     };
     const config = validatePermissionsConfig(input);
     expect(config.sandbox.network).toMatchObject({
-      enabled: true,
-      allowPrivateTargets: true,
-      allowLocalBinding: false,
+      network_access: true,
     });
-    input.sandbox.network.enabled = false;
-    expect(config.sandbox.network.enabled).toBe(true);
-    expect(fingerprintConfig(config)).not.toBe(fingerprintConfig(validatePermissionsConfig(input)));
+    const tighter = {
+      sandbox: {
+        network: {
+          access: { kind: "explicit", transport: "direct" } as const,
+          network_access: false,
+          allowPrivateTargets: true,
+          macosTls: "strict" as const,
+        },
+      },
+    };
+    expect(config.sandbox.network.network_access).toBe(true);
+    expect(fingerprintConfig(config)).not.toBe(
+      fingerprintConfig(validatePermissionsConfig(tighter)),
+    );
   });
 
   it.each([
     { allowedDomains: ["api.example.com"] },
     { deniedDomains: ["blocked.example.com"] },
     { macosTls: "system" },
-    { allowLocalBinding: true, enabled: false },
+    { allowLocalBinding: true, network_access: false },
   ])(
     "rejects direct policy conflicts before activation: %j",
     withDarwin(async (conflict) => {
@@ -152,7 +165,7 @@ describe("permissions config", () => {
     }),
   );
 
-  it.each([{ enabled: true }, { allowPrivateTargets: true }, { macosTls: "system" }])(
+  it.each([{ network_access: true }, { allowPrivateTargets: true }, { macosTls: "system" }])(
     "fingerprints and clones each independent network authority/profile dimension: %j",
     withDarwin(async (network) => {
       const input = { sandbox: { network } };
@@ -160,7 +173,7 @@ describe("permissions config", () => {
       expect(fingerprintConfig(config)).not.toBe(fingerprintConfig(DEFAULT_CONFIG));
       expect(fingerprintConfig(config)).toBe(fingerprintConfig(structuredClone(config)));
       Object.assign(input.sandbox.network, {
-        enabled: false,
+        network_access: false,
         allowPrivateTargets: false,
         macosTls: "strict",
       });
@@ -175,7 +188,7 @@ describe("permissions config", () => {
       sandbox: {
         network: {
           access: { kind: "explicit", transport: "direct" },
-          enabled: true,
+          network_access: true,
           allowLocalBinding: true,
         },
       },

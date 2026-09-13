@@ -175,7 +175,7 @@ export function intersectSandboxPolicy(
     normalizeRoots(envelope.writeRoots ?? []),
   );
   const allowedDomains =
-    base.network.enabled === true
+    base.network.network_access === true
       ? normalizeHosts(envelope.networkHosts ?? [])
       : [
           ...intersectNetworkPatterns(
@@ -198,7 +198,7 @@ export function intersectSandboxPolicy(
                 : structuredClone(base.network.access),
           }
         : {}),
-      enabled: false,
+      network_access: false,
       delegated: true,
       macosTls: "strict",
       ...(base.network.allowPrivateTargets === undefined
@@ -273,7 +273,7 @@ export function resolveChildEnvelope(input: {
   const effectiveRequestHosts =
     input.configuredNetworkHosts.length === 0 ? parentHosts : configuredHosts;
   const droppedNetworkHosts =
-    input.configuredNetworkHosts.length === 0 || input.parentBase.network.enabled === true
+    input.configuredNetworkHosts.length === 0 || input.parentBase.network.network_access === true
       ? []
       : configuredHosts.filter(
           (configuredHost) => intersectNetworkPatterns(parentHosts, [configuredHost]).length === 0,

@@ -40,7 +40,8 @@ describe("Permission request own-property shape", () => {
   it.each(["hidden-hosts", "hidden-port"] as const)(
     "rejects clone-erased network constraints: %s",
     (shape) => {
-      const network = shape === "hidden-hosts" ? { enabled: true } : { hosts: ["narrow.example"] };
+      const network =
+        shape === "hidden-hosts" ? { network_access: true } : { hosts: ["narrow.example"] };
       Object.defineProperty(network, shape === "hidden-hosts" ? "hosts" : "port", {
         value: shape === "hidden-hosts" ? ["narrow.example"] : 443,
         enumerable: false,
@@ -131,7 +132,7 @@ describe("Permission request own-property shape", () => {
       }
       expect(isSupportedPermissionRequestShape(input)).toBe(true);
       expect(isSupportedPermissionRequestShape(structuredClone(input))).toBe(true);
-      const broad = { permissions: { network: { enabled: true } } };
+      const broad = { permissions: { network: { network_access: true } } };
       for (const value of [broad, broad.permissions, broad.permissions.network]) {
         if (form === "frozen") Object.freeze(value);
         if (form === "null-prototype") Object.setPrototypeOf(value, null);

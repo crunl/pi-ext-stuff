@@ -278,12 +278,13 @@ describe("SRT executor contract", () => {
       await manager.activate(configuredSystem);
       await execute(manager, configuredSystem);
       const authorized = structuredClone(configuredSystem);
-      authorized.network.enabled = true;
+      authorized.network.network_access = true;
+      authorized.network.allowLocalBinding = false;
       await execute(manager, authorized);
       const direct = basePolicy();
       Object.assign(direct.network, {
         access: { kind: "explicit", transport: "direct" },
-        enabled: true,
+        network_access: true,
         allowPrivateTargets: true,
       });
       await execute(manager, direct, { networkAuthorize: async () => ({ allowed: false }) });
@@ -313,7 +314,7 @@ describe("SRT executor contract", () => {
       if (surface === "direct-missing")
         Object.assign(policy.network, {
           access: { kind: "explicit", transport: "direct" },
-          enabled: true,
+          network_access: true,
           allowPrivateTargets: true,
         });
       else {
@@ -589,9 +590,11 @@ describe("SRT executor contract", () => {
       const manager = new SrtSandboxManager(runtime);
       const policy = basePolicy();
       Object.assign(policy.network, {
-        enabled: true,
+        network_access: true,
         access: { kind: "explicit", transport: surface === "direct" ? "direct" : "proxy" },
-        ...(surface === "direct" ? { allowPrivateTargets: true } : { macosTls: "system" }),
+        ...(surface === "direct"
+          ? { allowPrivateTargets: true }
+          : { macosTls: "system", allowLocalBinding: false }),
       });
       await manager.activate(policy);
       const gate = deferred();

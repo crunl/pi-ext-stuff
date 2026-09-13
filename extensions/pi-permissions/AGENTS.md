@@ -81,20 +81,21 @@ Runtime config is read from `<agentDir>/extensions/pi-permissions/config.json`
 full schema. Config content is fingerprinted into session state, so changes are
 tracked per-session. Reviewer provider/model live under `"reviewer"`.
 
-`sandbox.network.enabled` is the standing whole-network switch (Codex
-`sandbox_workspace_write.network_access` analogue on the **capability** axis
-only). When `true`, Engine treats public outbound hosts as covered by the base
-lease and does **not** send them to Guardian; when unset/false, public hosts
-are reviewed per connection. This axis is orthogonal to auto/yolo: auto still
-only means Guardian reviews on the user's behalf. Do not describe the result as
-"Codex Enabled+proxy": Codex's Enabled+proxy still reviews allowlist misses,
-while we skip that review. We are a deliberate stricter hybrid — production
-always keeps the connect-guard (SRT allowlist forced empty) and private/special
-targets stay hard-blocked unless an exact local allow, `allowLocalBinding`, or
-`allowPrivateTargets` is configured. Whole-network authority is **not**
-inherited by delegated child turns (`delegation.ts` pins child
-`enabled: false` + `delegated: true`); a parent config grant does not open
-subagent network. Yolo remains the only unrestricted path.
+`sandbox.network.network_access` is the Codex `sandbox_workspace_write.network_access`
+analogue: when `true`, the whole TCP network is open (public + private outbound +
+loopback + bind/inbound), aligned with Codex Enabled without proxy. Fine axes
+(`allowPrivateTargets` / `allowLocalBinding`) may tighten it: explicit `false`
+wins over `network_access`; `undefined` inherits. `deniedDomains` always
+vetoes. The old `sandbox.network.enabled` field was removed; loading it throws
+a migration error.
+
+This axis is orthogonal to auto/yolo: auto still only means Guardian reviews on
+the user's behalf. Production still keeps the connect-guard (SRT allowlist
+forced empty) and `deniedDomains` still apply, so we remain stricter than
+Codex Enabled-direct. Whole-network authority is **not** inherited by delegated
+child turns (`delegation.ts` pins child `network_access: false` +
+`delegated: true`); a parent config grant does not open subagent network. Yolo
+remains the only unrestricted path.
 
 ## Layout notes
 

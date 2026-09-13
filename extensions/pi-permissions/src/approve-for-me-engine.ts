@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { basename, dirname, relative, resolve } from "node:path";
-import { fingerprintValue } from "./config.ts";
+import { effectiveNetworkAuthority, fingerprintValue } from "./config.ts";
 import { hasGlobSyntax } from "./filesystem-policy.ts";
 import {
   isExactLocalNetworkAllowed,
@@ -579,11 +579,9 @@ function localNetworkAllowed(
   host: string,
   port: number | undefined,
 ): boolean {
-  return (
-    policy?.network.allowPrivateTargets === true ||
-    policy?.network.allowLocalBinding === true ||
-    exactLocalNetworkAllow(policy, host, port)
-  );
+  if (!policy) return false;
+  const authority = effectiveNetworkAuthority(policy.network);
+  return authority.privateTargets || exactLocalNetworkAllow(policy, host, port);
 }
 
 /** Shared private/special-use gate for every Engine network request path. */
@@ -756,11 +754,14 @@ function requestCovered(lease: CapabilityLease, request: CapabilityRequest): boo
     return policy.filesystem.allowWrite.some((root) => isPathWithin(root, request.path));
   }
   if (request.kind === "network-all")
-    return policy.network.enabled === true && !networkPolicyDenies(policy, request);
+    return (
+      effectiveNetworkAuthority(policy.network).wholeNetwork &&
+      !networkPolicyDenies(policy, request)
+    );
   if (request.kind === "network") {
     if (networkPolicyDenies(policy, request)) return false;
     return (
-      policy.network.enabled === true ||
+      effectiveNetworkAuthority(policy.network).wholeNetwork ||
       policy.network.allowedDomains.some((pattern) =>
         matchesNetworkDomainPattern(pattern, request.host, request.port),
       )
@@ -835,8 +836,12 @@ function leaseWithRequests(
   if (ownership === "host-admission") return { mode: "host-admitted" };
   const policy = clonePolicy(state.snapshot.baseSandboxPolicy);
   if (!policy) return { mode: "sandboxed" };
-  if (state.turnNetworkAll || requested.some((item) => item.kind === "network-all"))
-    policy.network.enabled = true;
+  if (state.turnNetworkAll || requested.some((item) => item.kind === "network-all")) {
+    policy.network.network_access = true;
+    // System TLS cannot host local binding; keep the lease valid under the
+    // expanded authority by pinning bind closed for this attempt.
+    if (policy.network.macosTls === "system") policy.network.allowLocalBinding = false;
+  }
   const turnHosts = [...state.turnNetworkHosts];
   const turnRoots = [...state.turnWriteRoots];
   const extraHosts = [...turnHosts];
@@ -860,7 +865,10 @@ function leaseWithAdditionalRequests(
 ): CapabilityLease {
   const next = cloneLease(lease);
   if (next.mode !== "sandboxed" || next.policy === undefined) return next;
-  if (requested.some((item) => item.kind === "network-all")) next.policy.network.enabled = true;
+  if (requested.some((item) => item.kind === "network-all")) {
+    next.policy.network.network_access = true;
+    if (next.policy.network.macosTls === "system") next.policy.network.allowLocalBinding = false;
+  }
   const extraHosts: string[] = [];
   const extraRoots: string[] = [];
   for (const request of requested) {

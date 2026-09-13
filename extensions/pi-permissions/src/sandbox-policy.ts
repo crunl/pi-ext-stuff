@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from "node:path";
 import type { PermissionsConfig } from "./config.ts";
 import {
+  effectiveNetworkAuthority,
   fingerprintValue,
   type NetworkAccess,
   validateNetworkAccess,
@@ -33,7 +34,8 @@ export interface SandboxPolicy {
   };
   network: {
     access?: NetworkAccess;
-    enabled?: boolean;
+    /** Codex `network_access`: whole TCP network including private/loopback/bind when true. */
+    network_access?: boolean;
     allowPrivateTargets?: boolean;
     macosTls?: "strict" | "system";
     /** Resolved finite child ceiling; never broad delegation consent. */
@@ -52,18 +54,19 @@ export function projectExecutionNetwork(policy: SandboxPolicy): ExecutionNetwork
   const network = policy.network;
   const access = "access" in network ? validateNetworkAccess(network.access) : undefined;
   validateNetworkPolicy(network);
+  const authority = effectiveNetworkAuthority(network);
   const tls = network.macosTls === "system" ? { tls: "system" as const } : {};
   if (access?.kind !== "explicit")
     return Object.freeze({ kind: "proxy", inlineReview: true, ...tls });
   const hasAuthority =
-    (network.enabled === true && !network.deniedDomains.includes("*")) ||
+    (authority.wholeNetwork && !network.deniedDomains.includes("*")) ||
     network.allowedDomains.some(
       (allowed) =>
         !network.deniedDomains.some((denied) => isNetworkPatternCoveredBy(denied, allowed)),
     );
   if (!hasAuthority) return Object.freeze({ kind: "restricted" });
   if (access.transport === "direct") {
-    if (network.enabled !== true)
+    if (!authority.wholeNetwork)
       throw new Error("Direct requires whole-network authority, not a host grant");
     return Object.freeze({ kind: "direct" });
   }
@@ -73,17 +76,17 @@ export function projectExecutionNetwork(policy: SandboxPolicy): ExecutionNetwork
 /** Defensive derived evidence, shared by review and read-only status. Absent TLS means strict. */
 export function describeExecutionNetwork(policy: SandboxPolicy) {
   const required = projectExecutionNetwork(policy);
+  const authority = effectiveNetworkAuthority(policy.network);
   return {
     requestPath: policy.network.access?.kind ?? "inline-proxy",
-    wholeNetwork: policy.network.enabled === true,
+    wholeNetwork: authority.wholeNetwork,
     hosts: [...policy.network.allowedDomains],
     denies: [...policy.network.deniedDomains],
     required,
     configuredTls: policy.network.macosTls ?? "strict",
     effectiveTls: required.kind === "proxy" && required.tls === "system" ? "system" : "strict",
-    privateTargets:
-      policy.network.allowPrivateTargets === true || policy.network.allowLocalBinding === true,
-    localBindingAndInbound: policy.network.allowLocalBinding === true,
+    privateTargets: authority.privateTargets,
+    localBindingAndInbound: authority.localBinding,
     helperEgressRisk: required.kind === "proxy" && required.tls === "system",
     delegated: policy.network.delegated === true,
     policyFingerprint: fingerprintValue(policy),
@@ -369,7 +372,9 @@ export function createSandboxRuntimeConfig(
       ...("access" in config.network
         ? { access: validateNetworkAccess(config.network.access) }
         : {}),
-      ...(config.network.enabled === undefined ? {} : { enabled: config.network.enabled }),
+      ...(config.network.network_access === undefined
+        ? {}
+        : { network_access: config.network.network_access }),
       ...(config.network.allowPrivateTargets === undefined
         ? {}
         : { allowPrivateTargets: config.network.allowPrivateTargets }),
@@ -377,7 +382,9 @@ export function createSandboxRuntimeConfig(
       allowedDomains: [...config.network.allowedDomains],
       deniedDomains: [...config.network.deniedDomains],
       trustedFakeIpRanges: [...config.network.trustedFakeIpRanges],
-      allowLocalBinding: config.network.allowLocalBinding,
+      ...(config.network.allowLocalBinding === undefined
+        ? {}
+        : { allowLocalBinding: config.network.allowLocalBinding }),
     },
   };
 }
