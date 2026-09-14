@@ -24,6 +24,9 @@ pi loads extensions directly, so there is **no build step**.
   editor layout.
 - **Markdown code blocks** — pure syntax-highlighted content (Codex-aligned:
   no fence, language label, or indent), so selection copies just the code.
+- **User message bar** — Crush-style left rail (`▌`) plus a content
+  background band (`userMessageBg`); one blank banded row above and below
+  keeps a 3-row minimum for single-line turns.
 
 ## Requirements
 

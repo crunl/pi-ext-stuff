@@ -85,12 +85,18 @@ Adding an export here is the only supported way to widen the contract.
   cleared, never populated.
 - `ui-guard.ts` — shared `isInteractiveTui()` guard for terminal-only hooks;
   `hasUI` alone is insufficient because it is also true in RPC mode.
-- `effort-command.ts`, `exit-command.ts`, `output-padding.ts`, `markdown-code-frame.ts` — smaller,
+- `effort-command.ts`, `exit-command.ts`, `output-padding.ts`, `markdown-code-frame.ts`, `user-message-bar.ts` — smaller,
   single-purpose patches (effort/exit register slash commands `/effort` and `/exit` (alias for `/quit`);
   `/effort` hosts pi's own `ThinkingSelectorComponent` with pi-ai level filtering, so no local copy can drift). (`startup-header.ts` was removed — it rendered a
   logo via the external `chafa` binary.) Pi 0.85's
   `registerMarkdownTransformer()` can rewrite source text but cannot replace a
   themed token renderer, so framed code blocks remain a guarded prototype seam.
+  `user-message-bar.ts` likewise patches `UserMessageComponent.prototype.render`:
+  it unwraps the Box, prefixes a 1-column `borderAccent` bar, re-applies
+  `userMessageBg` to the content columns, and restores one blank banded row
+  above and below (min 3 rows for a 1-line message). Content starts at column
+  1, which matches assistant text at the default `outputPad=1`; `outputPad=0`
+  shifts user content one column right.
 
 ## Testing
 

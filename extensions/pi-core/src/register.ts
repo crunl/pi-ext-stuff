@@ -7,6 +7,7 @@ import { registerExitCommand } from "./tui/exit-command.ts";
 import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
+import { registerUserMessageBar } from "./tui/user-message-bar.ts";
 import { registerWorkingTokenRate } from "./tui/working-token-rate.ts";
 
 export function registerExtension(pi: ExtensionAPI): void {
@@ -19,4 +20,5 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerExitCommand(pi);
   registerWorkingTokenRate(pi);
   applyMarkdownCodeFrame();
+  registerUserMessageBar(pi);
 }
