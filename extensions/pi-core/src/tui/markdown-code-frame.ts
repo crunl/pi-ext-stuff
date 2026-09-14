@@ -11,18 +11,16 @@
  * text), so we patch Markdown.prototype.renderToken and take over the
  * "code" token branch, delegating every other token to the original.
  *
- * Shape (copy-friendly): a short top label, then indent-only content.
- * Content rows carry no rails or trailing pad, so line-selection copies
- * just the code (plus a two-space indent).
+ * Shape (aligned with Codex CLI): pure syntax-highlighted content. No
+ * language label, no indent, no rails — selection copies just the code.
  *
- *   ╭─ ts
- *     const x = 1;
- *     console.log(x);
+ *   const x = 1;
+ *   console.log(x);
  *
  * Syntax highlighting is untouched: theme.highlightCode (when present)
- * still colors the code; the label uses theme.codeBlockBorder.
+ * still colors the code; fallback is theme.codeBlock per line.
  */
-import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Markdown, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 interface CodeToken {
   type: string;
@@ -52,9 +50,6 @@ interface PatchCarrier extends MarkdownInternals {
   /** Pristine renderToken, stashed on the prototype so hot reloads can find it. */
   __codeFrameOriginal?: RenderToken;
 }
-
-/** Leading spaces on every content row. Spaces only — safe to copy. */
-const CONTENT_INDENT = "  ";
 
 /**
  * Patch Markdown.prototype.renderToken to restyle code blocks. Re-entrant:
@@ -104,22 +99,16 @@ function renderCodeFrame(
   width: number,
   nextTokenType?: string,
 ): string[] {
-  // First fence word only ("ts title=x" -> "ts"). Truncate the label so a
-  // long lang can never wrap the top rule under Markdown's outer pass.
-  const lang = token.lang?.trim().split(/\s+/)[0] ?? "";
-  const label = lang.length > 0 ? `─ ${lang}` : "─";
-  const lines: string[] = [
-    theme.codeBlockBorder(truncateToWidth(`╭${label}`, Math.max(1, width), "…")),
-  ];
-
   const contentLines = theme.highlightCode
     ? theme.highlightCode(token.text, token.lang)
     : token.text.split("\n").map((line) => theme.codeBlock(line));
-  const innerWidth = Math.max(1, width - CONTENT_INDENT.length);
+
+  const lines: string[] = [];
+  const innerWidth = Math.max(1, width);
   for (const contentLine of contentLines) {
     const wrapped = wrapTextWithAnsi(contentLine, innerWidth);
     for (const row of wrapped.length > 0 ? wrapped : [""]) {
-      lines.push(`${CONTENT_INDENT}${row}`);
+      lines.push(row);
     }
   }
 
