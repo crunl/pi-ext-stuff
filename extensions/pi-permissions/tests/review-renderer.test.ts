@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { REVIEW_STATUS_ICON } from "../src/review-presenter.ts";
 import {
   createReviewResultRenderer,
   createReviewStatusBridge,
@@ -44,12 +45,12 @@ describe("review row renderer", () => {
     expect(reviewStatusFromDetails(cleared.details)).toBeUndefined();
   });
 
-  it("bounds the warning row to the requested width", () => {
+  it("bounds the overlay warning row to the requested width", () => {
     const base = vi.fn(() => ({
       render: () => ["base"],
       invalidate: vi.fn(),
     }));
-    const renderer = createReviewResultRenderer(base);
+    const renderer = createReviewResultRenderer(base, "overlay");
     const theme = { fg: vi.fn((_color: string, text: string) => `<warning>${text}</warning>`) };
     const result = renderer(
       partial(
@@ -65,6 +66,63 @@ describe("review row renderer", () => {
     const visible = theme.fg.mock.lastCall?.[1] ?? "";
     expect([...visible].length).toBeLessThanOrEqual(12);
     expect(lines[1]).toBe(`<warning>${visible}</warning>`);
+  });
+
+  it("stamps a permanent leadingIconOverride without overlaying a status row", () => {
+    const base = vi.fn(() => ({
+      render: () => ["base"],
+      invalidate: vi.fn(),
+    }));
+    const renderer = createReviewResultRenderer(base, "header-icon");
+    const state: { leadingIconOverride?: string } = {};
+    const result = renderer(
+      partial(decorateReviewDetails(undefined, "Reviewing approval request · bash")),
+      undefined,
+      {},
+      { state },
+    ) as { render(width: number): string[] };
+
+    expect(state.leadingIconOverride).toBe(REVIEW_STATUS_ICON);
+    expect(base).toHaveBeenCalledOnce();
+    expect(result.render(80)).toEqual(["base"]);
+  });
+
+  it("does not clear leadingIconOverride when status disappears", () => {
+    const base = vi.fn(() => ({
+      render: () => ["base"],
+      invalidate: vi.fn(),
+    }));
+    const renderer = createReviewResultRenderer(base, "header-icon");
+    const state: { leadingIconOverride?: string } = {};
+
+    renderer(partial(decorateReviewDetails(undefined, "Reviewing")), undefined, {}, { state });
+    expect(state.leadingIconOverride).toBe(REVIEW_STATUS_ICON);
+
+    renderer(partial(), undefined, {}, { state });
+    expect(state.leadingIconOverride).toBe(REVIEW_STATUS_ICON);
+  });
+
+  it("skips stamping when context.state is missing", () => {
+    const base = vi.fn(() => ({
+      render: () => ["base"],
+      invalidate: vi.fn(),
+    }));
+    const renderer = createReviewResultRenderer(base, "header-icon");
+    expect(() =>
+      renderer(partial(decorateReviewDetails(undefined, "Reviewing")), undefined, {}, {}),
+    ).not.toThrow();
+    expect(base).toHaveBeenCalledOnce();
+  });
+
+  it("never stamps when review status was never present", () => {
+    const base = vi.fn(() => ({
+      render: () => ["base"],
+      invalidate: vi.fn(),
+    }));
+    const renderer = createReviewResultRenderer(base, "header-icon");
+    const state: { leadingIconOverride?: string } = {};
+    renderer(partial(), undefined, {}, { state });
+    expect(state.leadingIconOverride).toBeUndefined();
   });
 
   it("keeps fallback permission results within a narrow viewport", () => {

@@ -1059,6 +1059,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // ToolDefinition across SDK versions.
     const wrapped = createReviewResultRenderer(
       rendering.renderResult as unknown as ReviewRenderResult,
+      "header-icon",
     );
     // SAFETY: wrapped keeps identical input/output behavior; this only satisfies
     // the host's NonNullable render type.
@@ -2113,9 +2114,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }),
     // SAFETY: same renderer-wrapper contract as addReviewResultRenderer —
     // identical input/output behavior, assertion only bridges host generics.
-    renderResult: createReviewResultRenderer(plainReviewResultRenderer) as unknown as NonNullable<
-      ToolDefinition<TSchema>["renderResult"]
-    >,
+    renderResult: createReviewResultRenderer(
+      plainReviewResultRenderer,
+      "overlay",
+    ) as unknown as NonNullable<ToolDefinition<TSchema>["renderResult"]>,
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (!isSupportedPermissionRequestShape(params)) {
         const reason =

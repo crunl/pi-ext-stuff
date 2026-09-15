@@ -3,6 +3,7 @@
  * directly from TypeScript, so this module uses the Component protocol rather
  * than importing a second copy of pi-tui.
  */
+import { REVIEW_STATUS_ICON } from "./review-presenter.ts";
 
 export interface ReviewComponent {
   render(width: number): string[];
@@ -192,9 +193,18 @@ export const plainReviewResultRenderer: ReviewRenderResult = (result) => ({
   invalidate() {},
 });
 
-/** Wrap one existing Pi renderResult without changing its base rendering. */
+export type ReviewRendererMode = "header-icon" | "overlay";
+
+/**
+ * Wrap one existing Pi renderResult without changing its base rendering.
+ *
+ * `"header-icon"`: stamp a permanent leading glyph badge on `context.state`
+ * (consumed by pi-core `leadingParts`); never overlays a status row.
+ * `"overlay"`: append a transient status row (tools without a Codex header).
+ */
 export function createReviewResultRenderer(
   baseRenderResult: ReviewRenderResult | undefined,
+  mode: ReviewRendererMode,
 ): ReviewRenderResult {
   return (result, options, theme, context) => {
     const status = reviewStatusFromDetails(result.details);
@@ -203,8 +213,12 @@ export function createReviewResultRenderer(
       ...context,
       lastComponent: unwrapReviewComponent(context.lastComponent),
     };
+    if (mode === "header-icon" && status !== undefined) {
+      const state = context.state as { leadingIconOverride?: string } | undefined;
+      if (state) state.leadingIconOverride = REVIEW_STATUS_ICON;
+    }
     const base = baseRenderResult?.(baseResult, options, theme, baseContext);
-    if (status === undefined) return base;
+    if (mode === "header-icon" || status === undefined) return base;
     return overlayComponent(base, status, theme);
   };
 }
