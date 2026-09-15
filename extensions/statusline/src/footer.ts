@@ -6,17 +6,14 @@
  * Line 2 (optional): extension statuses from other extensions' setStatus()
  * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
- * Gutters follow settings.outputPad via pi-core's shared
- * outputPaddingController, so footer lines up with chat messages.
+ * Gutters follow settings.outputPad (read live from settings.json), so
+ * footer lines up with chat messages without a sibling pi-core dependency.
  *
  * Model/effort live here when SHOW_MODEL_ON_BORDER is false.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-// standalone.ts is pi-core's side-effect-free surface: no register graph
-// gets pulled into this jiti instance.
-import { outputPaddingController } from "../../pi-core/standalone.ts";
 import {
 	alignLine,
 	formatCwd,
@@ -26,6 +23,7 @@ import {
 	meterCells,
 	stripAnsi,
 } from "./format.ts";
+import { getOutputPad } from "./output-pad.ts";
 import {
 	type ModelStatusInfo,
 	PermissionsModeState,
@@ -198,10 +196,11 @@ export function installFooter(
 				const statsPlain = rightPlainParts.join("  ");
 				const statsColored = rightColoredParts.join("  ");
 
-				// Match chat-message gutters (settings.outputPad). The shared
-				// controller is started by pi-core; this import is the same
-				// cross-jiti singleton.
-				const pad = outputPaddingController.getOutputPad();
+				// Match chat-message gutters (settings.outputPad). Read live
+				// with an mtime cache so `/settings` changes apply on the next
+				// footer frame without a sibling dependency. Trust/cwd are
+				// read per frame so a mid-session /trust is not sticky-stale.
+				const pad = getOutputPad(ctx.cwd, ctx.isProjectTrusted());
 				const gutter = " ".repeat(pad);
 				const innerWidth = Math.max(0, width - pad * 2);
 
