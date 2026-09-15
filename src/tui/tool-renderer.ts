@@ -67,6 +67,13 @@ interface CodexToolRenderState<TPreviewState = unknown> {
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
+  /**
+   * Permanent leading glyph badge (e.g. review provenance). When set, the
+   * icon color is pinned to warning; verb still follows status. Written by
+   * peer extensions via context.state; never cleared by the production
+   * review path.
+   */
+  leadingIconOverride?: string;
   /** Renderer-specific state for previews (typed via CodexToolRendererSpec). */
   rendererState?: TPreviewState;
 }
@@ -173,7 +180,14 @@ function leadingParts<TPreviewState = unknown>(
   theme: Theme,
 ): { icon: string; verb: string; summary: string } {
   const status = state.status ?? "running";
-  const bulletColor = status === "failed" ? "error" : status === "completed" ? "success" : "dim";
+  // Reviewed calls keep a permanent warning badge; ordinary calls color by status.
+  const bulletColor = state.leadingIconOverride
+    ? "warning"
+    : status === "failed"
+      ? "error"
+      : status === "completed"
+        ? "success"
+        : "dim";
   const verb =
     status === "failed" ? "Failed" : status === "completed" ? spec.completedVerb : spec.runningVerb;
   const summary = state.summary
@@ -183,7 +197,7 @@ function leadingParts<TPreviewState = unknown>(
     : "";
   const icon = context.toolCallMark
     ? ""
-    : `${theme.fg(bulletColor, theme.bold(spec.icon ?? "•"))} `;
+    : `${theme.fg(bulletColor, theme.bold(state.leadingIconOverride ?? spec.icon ?? "•"))} `;
   return { icon, verb: theme.bold(verb), summary };
 }
 
