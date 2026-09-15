@@ -4,6 +4,7 @@ import type {
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text, TruncatedText } from "@earendil-works/pi-tui";
+import { WrappedCommandHeader } from "./bash-command-header.ts";
 import {
   type OutputPad,
   type OutputPaddingSource,
@@ -30,6 +31,13 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   argument: (args: Record<string, unknown>, cwd: string) => string;
   /** Truncate the header to one row and expose embedded line breaks as `↵`. */
   singleLineHeader?: boolean;
+  /**
+   * "single" (default): existing header path; singleLineHeader collapses to one row.
+   * "wrap-command": Codex ExecCell — verb on the first row with the start of the
+   * command, continuation rows under a `  │ ` rail (bash syntax highlight).
+   * Takes precedence over singleLineHeader.
+   */
+  headerLayout?: "single" | "wrap-command";
   collapsed?: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
   /**
@@ -55,7 +63,7 @@ interface MutableToolHeader extends Component {
 }
 
 interface CodexToolRenderState<TPreviewState = unknown> {
-  header?: MutableToolHeader;
+  header?: Component & { setText?(text: string): void };
   outputPad?: OutputPad;
   status?: "running" | "completed" | "failed";
   summary?: string;
@@ -158,19 +166,16 @@ interface CodexToolRendering<TPreviewState = unknown> {
   ) => Component;
 }
 
-function headerText<TPreviewState = unknown>(
+function leadingParts<TPreviewState = unknown>(
   spec: CodexToolRendererSpec<TPreviewState>,
   state: CodexToolRenderState,
-  args: Record<string, unknown>,
   context: RenderContext,
   theme: Theme,
-): string {
+): { icon: string; verb: string; summary: string } {
   const status = state.status ?? "running";
   const bulletColor = status === "failed" ? "error" : status === "completed" ? "success" : "dim";
   const verb =
     status === "failed" ? "Failed" : status === "completed" ? spec.completedVerb : spec.runningVerb;
-  const argument = spec.argument(args, context.cwd);
-  const suffix = argument.length > 0 ? ` ${theme.fg("muted", argument)}` : "";
   const summary = state.summary
     ? spec.formatSummary
       ? `${theme.fg("dim", " · ")}${spec.formatSummary(state.summary, theme)}`
@@ -179,7 +184,20 @@ function headerText<TPreviewState = unknown>(
   const icon = context.toolCallMark
     ? ""
     : `${theme.fg(bulletColor, theme.bold(spec.icon ?? "•"))} `;
-  return `${icon}${theme.bold(verb)}${suffix}${summary}`;
+  return { icon, verb: theme.bold(verb), summary };
+}
+
+function headerText<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
+  state: CodexToolRenderState,
+  args: Record<string, unknown>,
+  context: RenderContext,
+  theme: Theme,
+): string {
+  const { icon, verb, summary } = leadingParts(spec, state, context, theme);
+  const argument = spec.argument(args, context.cwd);
+  const suffix = argument.length > 0 ? ` ${theme.fg("muted", argument)}` : "";
+  return `${icon}${verb}${suffix}${summary}`;
 }
 
 class ToolOutputComponent implements Component {
@@ -217,14 +235,25 @@ function updateHeader<TPreviewState = unknown>(
   context: RenderContext<TPreviewState>,
   theme: Theme,
   outputPad: OutputPad,
-): MutableToolHeader {
+): Component {
+  if (spec.headerLayout === "wrap-command") {
+    let wrapped = state.header instanceof WrappedCommandHeader ? state.header : undefined;
+    if (!wrapped || state.outputPad !== outputPad) {
+      wrapped = new WrappedCommandHeader(outputPad);
+      state.header = wrapped;
+      state.outputPad = outputPad;
+    }
+    wrapped.setHeader(leadingParts(spec, state, context, theme), spec.argument(args, context.cwd));
+    return wrapped;
+  }
+
   if (!state.header || state.outputPad !== outputPad) {
     state.header = spec.singleLineHeader
       ? new SingleLineToolHeader(outputPad)
       : new Text("", outputPad, 0);
     state.outputPad = outputPad;
   }
-  state.header.setText(headerText(spec, state, args, context, theme));
+  state.header.setText?.(headerText(spec, state, args, context, theme));
   return state.header;
 }
 

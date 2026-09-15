@@ -58,10 +58,16 @@ Adding an export here is the only supported way to widen the contract.
   compatibility Seam for permission-owned definitions.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary)
   plus the per-tool summary helpers (bash status spacing compaction, edit-diff
-  count/colorize, write line-count colorize).
+  count/colorize, write line-count colorize). Bash uses
+  `headerLayout: "wrap-command"`.
+- `bash-command-header.ts` — Codex ExecCell-style command header: verb on the
+  first row with the start of the command, `  │ ` continuation rail (max 2
+  rows), bash syntax highlighting via Pi's public `highlightCode`. Display-only.
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)` with lifecycle
-  colors and renderer-owned shared state. Approval presentation remains outside
-  tool rows so completed calls retain their ordinary success/error semantics.
+  colors and renderer-owned shared state. `headerLayout: "wrap-command"` routes
+  bash through `WrappedCommandHeader`; the default `single` path is unchanged.
+  Approval presentation remains outside tool rows so completed calls retain
+  their ordinary success/error semantics.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its
   controller is shared through `globalThis`/`Symbol.for` so renderers imported
   by pi-permissions through a separate jiti instance see the same value.

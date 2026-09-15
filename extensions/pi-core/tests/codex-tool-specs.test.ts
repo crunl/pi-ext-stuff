@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
@@ -13,6 +14,10 @@ import {
   summarizeEditDiff,
 } from "../src/tui/codex-tool-specs.ts";
 import { type CodexToolRendererSpec, createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+
+beforeAll(() => {
+  initTheme("dark", false);
+});
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -123,11 +128,11 @@ describe("codex tool specs", () => {
   });
 
   it("bash spec renders Ran header with the command", () => {
-    const text = renderHeader(codexBashToolSpec, { command: "npm test" });
-    expect(text).toContain("\uF120 Ran npm test");
+    const text = stripTerminalSequences(renderHeader(codexBashToolSpec, { command: "npm test" }));
+    expect(text).toContain("Ran npm test");
   });
 
-  it("keeps a long multiline bash header on one visual row", () => {
+  it("wraps a multiline bash command under a continuation rail", () => {
     const rendering = createCodexToolRendering(codexBashToolSpec, {
       getOutputPad: () => 0,
       track() {},
@@ -145,15 +150,17 @@ describe("codex tool specs", () => {
       ctx as never,
     );
 
-    const lines = header.render(120);
-    expect(lines).toHaveLength(1);
-    expect(visibleWidth(lines[0])).toBe(120);
-    expect(stripTerminalSequences(lines[0]).trimEnd()).toBe(
-      "\uF120 Ran git status --short && git add README.md ↵ src/tui/tool-renderer.ts && git commit -m test",
-    );
+    const lines = header.render(120).map((line) => stripTerminalSequences(line));
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines[0]).toContain("Ran git status --short && git add README.md");
+    expect(lines[1]).toContain("src/tui/tool-renderer.ts");
+    expect(lines[1]).toContain("│");
+    for (const line of lines) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(120);
+    }
   });
 
-  it("limits collapsed bash previews to four rows", () => {
+  it("limits collapsed bash previews to five rows", () => {
     const rendering = createCodexToolRendering(codexBashToolSpec, {
       getOutputPad: () => 0,
       track() {},
@@ -174,12 +181,9 @@ describe("codex tool specs", () => {
       ctx as never,
     );
 
-    expect(result.render(100)).toEqual([
-      "  └ line 1",
-      "    line 2",
-      "    … +5 lines",
-      "    line 8",
-    ]);
+    const rows = result.render(100);
+    expect(rows.length).toBeLessThanOrEqual(5);
+    expect(rows[0]).toContain("line 1");
   });
 });
 

@@ -135,9 +135,9 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   runningVerb: "Running",
   completedVerb: "Ran",
   argument: (args) => (typeof args.command === "string" ? args.command : ""),
-  singleLineHeader: true,
+  headerLayout: "wrap-command",
   collapsed: "preview",
-  maxOutputRows: 4,
+  maxOutputRows: 5,
   transformOutput: compactBashStatusSpacing,
 };
 
