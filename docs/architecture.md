@@ -71,9 +71,10 @@ Adding an export here is the only supported way to widen the contract.
   color is pinned to warning; verb still follows status. Codex-header tools
   (bash/write/edit) use this slot; tools without a Codex header (e.g.
   request_permissions) keep the overlay status row.
-- `output-padding.ts` — watches effective settings only in TUI mode. Its
-  controller is shared through `globalThis`/`Symbol.for` so renderers imported
-  by pi-permissions through a separate jiti instance see the same value.
+- `output-padding.ts` — watches effective settings only in TUI mode. Shared
+  through `globalThis`/`Symbol.for` so renderers imported by pi-permissions
+  through a separate jiti instance see the same value. **Internal only** (not
+  exported from `standalone.ts`); statusline reads `settings.outputPad` itself.
 - `write-preview.ts` — streaming write preview; `edit-diff.ts` — diff box.
 - Floating overlay chain (call order): `autocomplete-above.ts` installs the
   autocomplete provider and the editor float panel
