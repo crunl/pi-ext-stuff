@@ -25,20 +25,21 @@ test("truecolorFg emits SGR parseable by badge.parseTruecolor", () => {
 });
 
 test("dark palette uses Catppuccin Frappé accents", () => {
-	assert.equal(PALETTE_DARK.fixed.model, "#e78284");
-	assert.equal(PALETTE_DARK.fixed.folder, "#ef9f76");
+	assert.equal(PALETTE_DARK.fixed.model, "#ca9ee6");
+	assert.equal(PALETTE_DARK.fixed.folder, "#99d1db");
 	assert.equal(PALETTE_DARK.fixed.git, "#e5c890");
-	assert.equal(PALETTE_DARK.fixed.session, "#ca9ee6");
 	assert.equal(PALETTE_DARK.effort.minimal, "#a6d189");
-	assert.equal(PALETTE_DARK.effort.medium, "#8caaee");
+	assert.equal(PALETTE_DARK.effort.low, "#8caaee");
+	assert.equal(PALETTE_DARK.effort.medium, "#f2d5cf");
+	assert.equal(PALETTE_DARK.effort.high, "#eebebe");
+	assert.equal(PALETTE_DARK.effort.xhigh, "#ef9f76");
 	assert.equal(PALETTE_DARK.effort.max, "#f4b8e4");
 });
 
 test("light palette uses Catppuccin Latte accents", () => {
 	assert.equal(PALETTE_LIGHT.fixed.model, "#d20f39");
-	assert.equal(PALETTE_LIGHT.fixed.folder, "#fe640b");
+	assert.equal(PALETTE_LIGHT.fixed.folder, "#04a5e5");
 	assert.equal(PALETTE_LIGHT.fixed.git, "#df8e1d");
-	assert.equal(PALETTE_LIGHT.fixed.session, "#8839ef");
 });
 
 test("effort hues never collide with fixed slots in either palette", () => {

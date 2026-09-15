@@ -1,10 +1,13 @@
 /**
  * Catppuccin powerline palettes for the statusline left chain.
  *
- * Dark = Frappe accents; Light = Latte accents (cap contrast on pale
- * backgrounds). Segments: model=red, folder=peach, git=yellow,
- * session=mauve. Effort owns green→teal→blue→sky→lavender→pink so it
- * never collides with the fixed slots.
+ * Dark = Frappé accents; Light = Latte accents (cap contrast on pale
+ * backgrounds). Segments: model=mauve (identity, not error-red),
+ * folder=sky, git=yellow.
+ *
+ * Dark effort band (research: docs/dark-palette-effort-research.md,
+ * model later moved red→mauve): green → blue → rosewater → flamingo →
+ * peach → pink. Cross-cluster from fixed mauve/sky/yellow.
  *
  * Light/dark is detected from the live theme's userMessageBg luminance
  * (no Pi isLight API for custom themes).
@@ -12,7 +15,7 @@
 
 import { parseTruecolor } from "./badge.ts";
 
-export type PaletteKey = "model" | "folder" | "git" | "session";
+export type PaletteKey = "model" | "folder" | "git";
 export type EffortLevel =
 	| "minimal"
 	| "low"
@@ -29,17 +32,16 @@ export interface PowerlinePalette {
 /** Catppuccin Frappé — matches live theme `catppuccin-frappe`. */
 export const PALETTE_DARK: PowerlinePalette = {
 	fixed: {
-		model: "#e78284",
-		folder: "#ef9f76",
+		model: "#ca9ee6",
+		folder: "#99d1db",
 		git: "#e5c890",
-		session: "#ca9ee6",
 	},
 	effort: {
 		minimal: "#a6d189",
-		low: "#81c8be",
-		medium: "#8caaee",
-		high: "#99d1db",
-		xhigh: "#babbf1",
+		low: "#8caaee",
+		medium: "#f2d5cf",
+		high: "#eebebe",
+		xhigh: "#ef9f76",
 		max: "#f4b8e4",
 	},
 };
@@ -48,16 +50,15 @@ export const PALETTE_DARK: PowerlinePalette = {
 export const PALETTE_LIGHT: PowerlinePalette = {
 	fixed: {
 		model: "#d20f39",
-		folder: "#fe640b",
+		folder: "#04a5e5",
 		git: "#df8e1d",
-		session: "#8839ef",
 	},
 	effort: {
 		minimal: "#40a02b",
 		low: "#179299",
 		medium: "#1e66f5",
-		high: "#04a5e5",
-		xhigh: "#7287fd",
+		high: "#7287fd",
+		xhigh: "#dd7878",
 		max: "#ea76cb",
 	},
 };

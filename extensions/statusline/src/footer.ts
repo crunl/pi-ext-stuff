@@ -78,13 +78,12 @@ export function installFooter(
 					// theme without getFgAnsi: badge falls back to inverse video
 				}
 
-				// ---- left: powerline model | effort | folder | branch | session ----
+				// ---- left: powerline model | effort | folder | branch ----
 				const pwd = formatCwd(
 					ctx.sessionManager.getCwd(),
 					process.env.HOME || process.env.USERPROFILE,
 				);
 				const branch = footerData.getGitBranch();
-				const sessionName = ctx.sessionManager.getSessionName();
 				const model = getModelInfo?.();
 
 				// Catppuccin latte/frappe accents; light/dark from live bg.
@@ -112,12 +111,6 @@ export function installFooter(
 					segments.push({
 						text: `${ICONS.branch} ${branch}`,
 						ansi: truecolorFg(pal.fixed.git),
-					});
-				}
-				if (sessionName) {
-					segments.push({
-						text: sessionName,
-						ansi: truecolorFg(pal.fixed.session),
 					});
 				}
 

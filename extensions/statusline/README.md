@@ -40,10 +40,10 @@ modeleffortfolderbranch   CH66.4%  █████░░░░░ 80.6k/192k
 ### Footer 左侧（powerline 链）
 
 ```text
-modeleffortfolderbranchname
+modeleffortfolderbranch
 ```
 
-- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。model=red，folder=peach，git=yellow，session=mauve；effort 按 thinking level 在 green→teal→blue→sky→lavender→pink 上变色。effort=off 时不显示。
+- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。dark：model=mauve，folder=sky，git=yellow；effort 色带 green→blue→rosewater→flamingo→peach→pink。effort=off 时不显示。
 - `SHOW_MODEL_ON_BORDER`（`model-editor.ts`）为 false 时 editor 下栏是纯横线，model/effort 只在 footer
 
 ### Footer 右侧
