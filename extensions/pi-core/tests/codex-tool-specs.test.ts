@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
   codexLsToolSpec,
   codexReadToolSpec,
   codexWriteToolSpec,
+  displayPath,
   summarizeEditDiff,
 } from "../src/tui/codex-tool-specs.ts";
 import { type CodexToolRendererSpec, createCodexToolRendering } from "../src/tui/tool-renderer.ts";
@@ -178,6 +180,34 @@ describe("codex tool specs", () => {
       "    … +5 lines",
       "    line 8",
     ]);
+  });
+});
+
+describe("displayPath", () => {
+  it("rewrites the home prefix to ~ and leaves other paths alone", () => {
+    expect(displayPath("/Users/alice/.pi/x.md", "/Users/alice")).toBe("~/.pi/x.md");
+    expect(displayPath("/Users/alice", "/Users/alice")).toBe("~");
+    expect(displayPath("/Users/alice2/x.md", "/Users/alice")).toBe("/Users/alice2/x.md");
+    expect(displayPath("/tmp/x.md", "/Users/alice")).toBe("/tmp/x.md");
+    expect(displayPath("", "/Users/alice")).toBe("");
+  });
+
+  it("uses the live homedir for tool headers", () => {
+    const home = homedir();
+    const path = `${home}/.pi/agent/skills/code-review/SKILL.md`;
+    const text = renderHeader(codexReadToolSpec, { path });
+    expect(text).toContain(`Read ~/.pi/agent/skills/code-review/SKILL.md`);
+    expect(text).not.toContain(home);
+  });
+
+  it("keeps the home prefix when offset/limit append a range", () => {
+    const home = homedir();
+    const text = renderHeader(codexReadToolSpec, {
+      path: `${home}/src/a.ts`,
+      offset: 10,
+      limit: 5,
+    });
+    expect(text).toContain("Read ~/src/a.ts:10-14");
   });
 });
 

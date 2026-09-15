@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { sep } from "node:path";
 import {
   type AgentToolResult,
   getLanguageFromPath,
@@ -59,8 +61,27 @@ function countSummary(noun: string, plural = `${noun}s`) {
   };
 }
 
+/**
+ * Display-only path shortening for tool headers. Replaces the home directory
+ * prefix with `~` so long absolute paths stay readable; never mutates args.
+ */
+export function displayPath(path: string, home: string = homedir()): string {
+  if (!path) return path;
+  const normalizedHome = home.replace(/[/\\]+$/u, "");
+  if (!normalizedHome || normalizedHome === "/") return path;
+  if (path === normalizedHome) return "~";
+  if (path.startsWith(`${normalizedHome}/`) || path.startsWith(`${normalizedHome}${sep}`)) {
+    return `~${path.slice(normalizedHome.length)}`;
+  }
+  return path;
+}
+
+function toolPath(args: Record<string, unknown>): string {
+  return typeof args.path === "string" ? displayPath(args.path) : "";
+}
+
 function readArgument(args: Record<string, unknown>): string {
-  const path = typeof args.path === "string" ? args.path : "";
+  const path = toolPath(args);
   const offset = typeof args.offset === "number" ? args.offset : undefined;
   const limit = typeof args.limit === "number" ? args.limit : undefined;
   if (offset === undefined && limit === undefined) return path;
@@ -83,7 +104,7 @@ export const codexGrepToolSpec: CodexToolRendererSpec = {
   completedVerb: "Searched",
   argument: (args) => {
     const pattern = typeof args.pattern === "string" ? `"${args.pattern}"` : "";
-    const path = typeof args.path === "string" ? ` in ${args.path}` : "";
+    const path = typeof args.path === "string" ? ` in ${displayPath(args.path)}` : "";
     return `${pattern}${path}`;
   },
   collapsed: countSummary("match", "matches"),
@@ -95,7 +116,7 @@ export const codexFindToolSpec: CodexToolRendererSpec = {
   completedVerb: "Found",
   argument: (args) => {
     const pattern = typeof args.pattern === "string" ? args.pattern : "";
-    const path = typeof args.path === "string" ? ` in ${args.path}` : "";
+    const path = typeof args.path === "string" ? ` in ${displayPath(args.path)}` : "";
     return `${pattern}${path}`;
   },
   collapsed: countSummary("file"),
@@ -105,7 +126,7 @@ export const codexLsToolSpec: CodexToolRendererSpec = {
   icon: "\uF07B", // nf-fa-folder
   runningVerb: "Listing",
   completedVerb: "Listed",
-  argument: (args) => (typeof args.path === "string" ? args.path : "."),
+  argument: (args) => (typeof args.path === "string" ? displayPath(args.path) : "."),
   collapsed: countSummary("entry", "entries"),
 };
 
@@ -124,7 +145,7 @@ export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = 
   icon: "\uEE38", // nf-fa-file_import
   runningVerb: "Writing",
   completedVerb: "Wrote",
-  argument: (args) => (typeof args.path === "string" ? args.path : ""),
+  argument: toolPath,
   collapsed: (_result, args) => {
     const content = typeof args.content === "string" ? args.content : "";
     const lineCount = countWrittenLines(content);
@@ -145,7 +166,7 @@ export const codexEditToolSpec: CodexToolRendererSpec = {
   icon: "\uEE3C", // nf-fa-file_signature
   runningVerb: "Editing",
   completedVerb: "Edited",
-  argument: (args) => (typeof args.path === "string" ? args.path : ""),
+  argument: toolPath,
   collapsed: summarizeEditDiff,
   formatSummary: colorizeEditDiffSummary,
   renderExpandedResult: (result, args, theme, outputPad) => {
