@@ -66,8 +66,11 @@ Adding an export here is the only supported way to widen the contract.
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)` with lifecycle
   colors and renderer-owned shared state. `headerLayout: "wrap-command"` routes
   bash through `WrappedCommandHeader`; the default `single` path is unchanged.
-  Approval presentation remains outside tool rows so completed calls retain
-  their ordinary success/error semantics.
+  Peer extensions may stamp a permanent leading glyph badge via
+  `context.state.leadingIconOverride` (plain string). When set, the icon
+  color is pinned to warning; verb still follows status. Codex-header tools
+  (bash/write/edit) use this slot; tools without a Codex header (e.g.
+  request_permissions) keep the overlay status row.
 - `output-padding.ts` — watches effective settings only in TUI mode. Its
   controller is shared through `globalThis`/`Symbol.for` so renderers imported
   by pi-permissions through a separate jiti instance see the same value.

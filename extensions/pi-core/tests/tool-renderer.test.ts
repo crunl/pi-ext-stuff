@@ -45,6 +45,147 @@ describe("createCodexToolRendering", () => {
     expect(header.render(80).join("\n").trim()).toBe("Running npm test");
   });
 
+  it("replaces the leading glyph from leadingIconOverride and pins warning color", () => {
+    const colors: string[] = [];
+    const spyTheme = {
+      fg: (color: string, text: string) => {
+        colors.push(color);
+        return text;
+      },
+      bold: (text: string) => text,
+    } as any;
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = { leadingIconOverride: "review" };
+
+    const running = rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(stripTerminalSequences(running.render(80).join("\n")).trim()).toBe(
+      "review Running npm test",
+    );
+    expect(colors).toContain("warning");
+    expect(colors).not.toContain("dim");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "ok" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state),
+    );
+    const completed = rendering.renderCall!(
+      { command: "npm test" } as any,
+      spyTheme,
+      context(state),
+    );
+    expect(stripTerminalSequences(completed.render(80).join("\n")).trim()).toBe(
+      "review Ran npm test",
+    );
+    expect(colors).toContain("warning");
+    expect(colors).not.toContain("success");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state, { isError: true }),
+    );
+    const failed = rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(stripTerminalSequences(failed.render(80).join("\n")).trim()).toBe(
+      "review Failed npm test",
+    );
+    expect(colors).toContain("warning");
+    expect(colors).not.toContain("error");
+  });
+
+  it("keeps status colors for calls without leadingIconOverride", () => {
+    const colors: string[] = [];
+    const spyTheme = {
+      fg: (color: string, text: string) => {
+        colors.push(color);
+        return text;
+      },
+      bold: (text: string) => text,
+    } as any;
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = {};
+
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("dim");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "ok" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state),
+    );
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("success");
+    expect(colors).not.toContain("warning");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state, { isError: true }),
+    );
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("error");
+    expect(colors).not.toContain("warning");
+  });
+
+  it("prefers toolCallMark over leadingIconOverride", () => {
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const header = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context({ leadingIconOverride: "review" }, { toolCallMark: { icon: "m", color: "warning" } }),
+    );
+    expect(header.render(80).join("\n").trim()).toBe("Running npm test");
+  });
+
+  it("applies leadingIconOverride on the wrap-command layout", () => {
+    const rendering = createCodexToolRendering(
+      {
+        icon: "original",
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        headerLayout: "wrap-command",
+        collapsed: "hidden",
+      },
+      { getOutputPad: () => 0, track() {} },
+    );
+    const header = rendering.renderCall!(
+      { command: "echo a\necho b" } as any,
+      theme,
+      context({ leadingIconOverride: "review" }),
+    );
+    const lines = header.render(80).map((line) => stripTerminalSequences(line));
+    expect(lines[0]).toContain("review Running echo a");
+    expect(lines[1]).toContain("echo b");
+    expect(visibleWidth(lines[0])).toBeLessThanOrEqual(80);
+  });
+
   it("keeps whitespace-heavy headers within an interactive rendering budget", () => {
     const rendering = createCodexToolRendering(
       {
