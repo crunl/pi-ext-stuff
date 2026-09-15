@@ -131,7 +131,7 @@ export const codexLsToolSpec: CodexToolRendererSpec = {
 };
 
 export const codexBashToolSpec: CodexToolRendererSpec = {
-  icon: "\uF120", // nf-fa-terminal
+  icon: "\uF155", // fa-upload / bash
   runningVerb: "Running",
   completedVerb: "Ran",
   argument: (args) => (typeof args.command === "string" ? args.command : ""),

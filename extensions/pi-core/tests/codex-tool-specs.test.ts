@@ -63,7 +63,7 @@ describe("codex tool specs", () => {
     ["grep", codexGrepToolSpec, "\uF0B0"],
     ["find", codexFindToolSpec, "\uF002"],
     ["ls", codexLsToolSpec, "\uF07B"],
-    ["bash", codexBashToolSpec, "\uF120"],
+    ["bash", codexBashToolSpec, "\uF155"],
     ["write", codexWriteToolSpec, "\uEE38"],
     ["edit", codexEditToolSpec, "\uEE3C"],
   ] as const)("%s uses the selected single-column Font Awesome icon", (_name, spec, icon) => {
