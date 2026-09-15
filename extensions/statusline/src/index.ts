@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 // gets pulled into this jiti instance.
 import { applyAutocompleteAbove } from "../../pi-core/standalone.ts";
 import { installFooter } from "./footer.ts";
+import { resolveModelInfo } from "./model-info.ts";
 import { ModelLineEditor } from "./model-editor.ts";
 import { isPermissionsModeEvent, PermissionsModeState } from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
@@ -43,13 +44,11 @@ export default function statusline(pi: ExtensionAPI) {
 		const ctx = currentCtx;
 		const model = ctx?.model;
 		if (!model) return undefined;
-		const level = ctx?.thinkingLevel ?? "off";
-		return {
-			// Prefer the display name; fall back to the raw id when absent.
+		return resolveModelInfo({
 			modelId: model.name?.trim() || model.id,
-			// "off" is the default — hide the segment rather than label it.
-			effort: model.reasoning && level !== "off" ? level : undefined,
-		};
+			reasoning: Boolean(model.reasoning),
+			thinkingLevel: ctx?.thinkingLevel,
+		});
 	};
 
 	const stats = () => {

@@ -24,6 +24,7 @@ import {
 	stripAnsi,
 } from "./format.ts";
 import { getOutputPad } from "./output-pad.ts";
+import { effortColor, isLightThemeFrom, paletteForLight, truecolorFg } from "./palette.ts";
 import {
 	type ModelStatusInfo,
 	PermissionsModeState,
@@ -35,28 +36,9 @@ import { computeUsageTotals } from "./usage.ts";
 
 const METER_CELLS = 10;
 
-/** Map thinking level to the theme color Pi uses for the editor border. */
-function thinkingColorKey(level: string): string {
-	switch (level) {
-		case "minimal":
-			return "thinkingMinimal";
-		case "low":
-			return "thinkingLow";
-		case "medium":
-			return "thinkingMedium";
-		case "high":
-			return "thinkingHigh";
-		case "xhigh":
-			return "thinkingXhigh";
-		case "max":
-			return "thinkingMax";
-		default:
-			return "thinkingOff";
-	}
-}
-
 interface FooterTheme {
 	getFgAnsi(color: string): string;
+	getBgAnsi?(color: string): string;
 }
 
 export interface FooterOptions {
@@ -95,14 +77,6 @@ export function installFooter(
 				} catch {
 					// theme without getFgAnsi: badge falls back to inverse video
 				}
-				const t = theme as unknown as FooterTheme;
-				const fg = (color: string) => {
-					try {
-						return t.getFgAnsi(color);
-					} catch {
-						return undefined;
-					}
-				};
 
 				// ---- left: powerline model | effort | folder | branch | session ----
 				const pwd = formatCwd(
@@ -113,26 +87,38 @@ export function installFooter(
 				const sessionName = ctx.sessionManager.getSessionName();
 				const model = getModelInfo?.();
 
+				// Catppuccin latte/frappe accents; light/dark from live bg.
+				const pal = paletteForLight(
+					isLightThemeFrom(theme as unknown as FooterTheme),
+				);
 				const segments: PowerlineSegment[] = [];
 				if (model) {
 					segments.push({
 						text: `${ICONS.model} ${model.modelId}`,
-						ansi: fg("mdLink"),
+						ansi: truecolorFg(pal.fixed.model),
 					});
 					if (model.effort) {
 						segments.push({
 							text: `${ICONS.effort} ${model.effort}`,
-							// Same color as the editor border for this thinking level.
-							ansi: fg(thinkingColorKey(model.effort)),
+							ansi: truecolorFg(effortColor(model.effort, pal)),
 						});
 					}
 				}
-				segments.push({ text: `${ICONS.folder} ${pwd}`, ansi: fg("borderAccent") });
+				segments.push({
+					text: `${ICONS.folder} ${pwd}`,
+					ansi: truecolorFg(pal.fixed.folder),
+				});
 				if (branch) {
-					segments.push({ text: `${ICONS.branch} ${branch}`, ansi: fg("success") });
+					segments.push({
+						text: `${ICONS.branch} ${branch}`,
+						ansi: truecolorFg(pal.fixed.git),
+					});
 				}
 				if (sessionName) {
-					segments.push({ text: sessionName, ansi: fg("muted") });
+					segments.push({
+						text: sessionName,
+						ansi: truecolorFg(pal.fixed.session),
+					});
 				}
 
 				const leftColored = powerlineChain(segments);

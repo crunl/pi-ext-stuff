@@ -18,19 +18,22 @@ export interface PowerlineSegment {
 /**
  * Chain segments into a powerline pill:
  *
- *   model effort folder …
+ *   model  effort  folder …
  *
  * Caps use the adjacent segment color as fg; bodies use it as bg.
- * Falls back to inverse video per segment when a color is missing.
+ * Every segment body is padded with a trailing space (so text does not
+ * sit flush against the next sep or the right cap). Segments after the
+ * first also get a leading space after the arrowhead. Model (first) stays
+ * tight on the left. Falls back to inverse video when a color is missing.
  */
 export function powerlineChain(segments: readonly PowerlineSegment[]): string {
 	if (segments.length === 0) return "";
 	const first = segments[0]!;
-	let out = cap(PL_LEFT, first.ansi) + body(first.text, first.ansi);
+	let out = cap(PL_LEFT, first.ansi) + body(`${first.text} `, first.ansi);
 	for (let i = 1; i < segments.length; i++) {
 		const prev = segments[i - 1]!;
 		const cur = segments[i]!;
-		out += sep(prev.ansi, cur.ansi) + body(cur.text, cur.ansi);
+		out += sep(prev.ansi, cur.ansi) + body(` ${cur.text} `, cur.ansi);
 	}
 	return out + cap(PL_RIGHT, segments[segments.length - 1]!.ansi);
 }

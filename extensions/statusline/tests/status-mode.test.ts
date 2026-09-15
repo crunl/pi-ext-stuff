@@ -15,9 +15,10 @@ const info = {
 };
 
 test("formats model and effort as a powerline pill (inverse fallback)", () => {
+	// First segment: trailing pad only. Later segments: lead + trail.
 	assert.equal(
 		formatModelStatus(info),
-		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast\x1b[27m\uE0B0\x1b[7m\u{F0875} xhigh\x1b[27m\uE0B4",
+		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast \x1b[27m\uE0B0\x1b[7m \u{F0875} xhigh \x1b[27m\uE0B4",
 	);
 });
 
