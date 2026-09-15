@@ -57,7 +57,7 @@ export const ICONS = {
 	gauge: "\uF49B", // gauge icon used before the usage meter
 	cache: "\uF1C0", // nf-fa-database (cache blocks)
 	model: "\u{F035B}", // nf-md-memory — editor bottom border model
-	effort: "\u{F0875}", // nf-md-gauge_low — editor bottom border effort
+	effort: "\u{F09D1}", //  — thinking / effort segment
 } as const;
 
 /**

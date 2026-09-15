@@ -18,7 +18,7 @@ test("formats model and effort as a powerline pill (inverse fallback)", () => {
 	// First segment: trailing pad only. Later segments: lead + trail.
 	assert.equal(
 		formatModelStatus(info),
-		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast \x1b[27m\uE0B0\x1b[7m \u{F0875} xhigh \x1b[27m\uE0B4",
+		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast \x1b[27m\uE0B0\x1b[7m \u{F09D1} xhigh \x1b[27m\uE0B4",
 	);
 });
 
@@ -36,7 +36,7 @@ test("paints pill segments with the provided truecolor foregrounds", () => {
 test("omits the effort segment when effort is absent", () => {
 	const out = formatModelStatus({ ...info, effort: undefined });
 	assert.ok(out.includes("\u{F035B} gpt-5.6-sol-fast"));
-	assert.ok(!out.includes("\u{F0875}"));
+	assert.ok(!out.includes("\u{F09D1}"));
 });
 
 test("powerlineChain joins N segments with caps and seps", () => {

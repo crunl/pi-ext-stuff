@@ -70,7 +70,7 @@ test("bottom border: model info without the mode", () => {
 	// Uncolored pill: inverse bodies, plain caps/sep; flush against ──
 	assert.match(
 		bottom.pill,
-		/^\uE0B6\x1b\[7m\u{F035B} gpt-5\.6 \x1b\[27m\uE0B0\x1b\[7m \u{F0875} high \x1b\[27m\uE0B4$/u,
+		/^\uE0B6\x1b\[7m\u{F035B} gpt-5\.6 \x1b\[27m\uE0B0\x1b\[7m \u{F09D1} high \x1b\[27m\uE0B4$/u,
 	);
 	assert.match(bottom.post, /^─+$/);
 	const plain = (bottom.pre + bottom.pill + bottom.post).replace(/\x1b\[[0-9;]*m/g, "");
