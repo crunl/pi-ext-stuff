@@ -2,12 +2,17 @@
  * Catppuccin powerline palettes for the statusline left chain.
  *
  * Dark = Frappé accents; Light = Latte accents (cap contrast on pale
- * backgrounds). Segments: model=mauve (identity, not error-red),
- * folder=sky, git=yellow.
+ * backgrounds). Layout: model | effort | folder | git.
  *
- * Dark effort band (research: docs/dark-palette-effort-research.md,
- * model later moved red→mauve): green → blue → rosewater → flamingo →
- * peach → pink. Cross-cluster from fixed mauve/sky/yellow.
+ * Dark fixed: model=mauve, folder=sky, git=yellow.
+ * Dark effort (docs/dark-palette-effort-research.md):
+ *   green → blue → rosewater → flamingo → peach → pink.
+ *
+ * Light fixed: model=mauve (not error-red), folder=teal, git=yellow.
+ * Light effort (docs/light-palette-effort-research.md):
+ *   green → blue → lavender → flamingo → peach → pink.
+ *   medium uses lavender, not rosewater — Latte rosewater→flamingo
+ *   adjacent ΔE is only 4.3 and would blur level changes.
  *
  * Light/dark is detected from the live theme's userMessageBg luminance
  * (no Pi isLight API for custom themes).
@@ -49,16 +54,16 @@ export const PALETTE_DARK: PowerlinePalette = {
 /** Catppuccin Latte — light terminal. */
 export const PALETTE_LIGHT: PowerlinePalette = {
 	fixed: {
-		model: "#d20f39",
-		folder: "#04a5e5",
+		model: "#8839ef",
+		folder: "#179299",
 		git: "#df8e1d",
 	},
 	effort: {
 		minimal: "#40a02b",
-		low: "#179299",
-		medium: "#1e66f5",
-		high: "#7287fd",
-		xhigh: "#dd7878",
+		low: "#1e66f5",
+		medium: "#7287fd",
+		high: "#dd7878",
+		xhigh: "#fe640b",
 		max: "#ea76cb",
 	},
 };

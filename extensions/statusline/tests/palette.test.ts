@@ -37,9 +37,15 @@ test("dark palette uses Catppuccin Frappé accents", () => {
 });
 
 test("light palette uses Catppuccin Latte accents", () => {
-	assert.equal(PALETTE_LIGHT.fixed.model, "#d20f39");
-	assert.equal(PALETTE_LIGHT.fixed.folder, "#04a5e5");
+	assert.equal(PALETTE_LIGHT.fixed.model, "#8839ef");
+	assert.equal(PALETTE_LIGHT.fixed.folder, "#179299");
 	assert.equal(PALETTE_LIGHT.fixed.git, "#df8e1d");
+	assert.equal(PALETTE_LIGHT.effort.minimal, "#40a02b");
+	assert.equal(PALETTE_LIGHT.effort.low, "#1e66f5");
+	assert.equal(PALETTE_LIGHT.effort.medium, "#7287fd");
+	assert.equal(PALETTE_LIGHT.effort.high, "#dd7878");
+	assert.equal(PALETTE_LIGHT.effort.xhigh, "#fe640b");
+	assert.equal(PALETTE_LIGHT.effort.max, "#ea76cb");
 });
 
 test("effort hues never collide with fixed slots in either palette", () => {

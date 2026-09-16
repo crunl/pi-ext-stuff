@@ -43,7 +43,7 @@ modeleffortfolderbranch   CH66.4%  █████░░░░░ 80.6k/192k
 modeleffortfolderbranch
 ```
 
-- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。dark：model=mauve，folder=sky，git=yellow；effort 色带 green→blue→rosewater→flamingo→peach→pink。effort=off 时不显示。
+- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。dark：model=mauve，folder=sky，git=yellow；effort green→blue→rosewater→flamingo→peach→pink。light：model=mauve，folder=teal，git=yellow；effort green→blue→lavender→flamingo→peach→pink。effort=off 时不显示。见 `docs/dark-palette-effort-research.md` / `docs/light-palette-effort-research.md`。
 - `SHOW_MODEL_ON_BORDER`（`model-editor.ts`）为 false 时 editor 下栏是纯横线，model/effort 只在 footer
 
 ### Footer 右侧
