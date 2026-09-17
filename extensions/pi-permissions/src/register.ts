@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import type {
   ExtensionAPI,
@@ -48,6 +48,12 @@ import {
   resolvePolicyPath,
 } from "./filesystem-policy.ts";
 import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
+import {
+  buildGuardianMetricsRecord,
+  mapActionTag,
+  mapFailureReason,
+  mapTerminalStatus,
+} from "./guardian/metrics.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
@@ -210,6 +216,46 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     },
     reviewEventSink: (event) => {
       pi.events.emit("pi-permissions:review", event);
+      // Best-effort local metrics sink. Never throws into the authorization path.
+      if (event.status !== "reviewing" && event.metrics) {
+        const record = buildGuardianMetricsRecord({
+          reviewId: event.reviewId,
+          terminalStatus: mapTerminalStatus(event.status),
+          failureReason: mapFailureReason(
+            event.metrics.failureKind as Parameters<typeof mapFailureReason>[0],
+          ),
+          action: mapActionTag(event.call.tool),
+          ownership: event.ownership,
+          sessionKind: event.metrics.sessionKind ?? "trunk_new",
+          hadPriorReviewContext: event.metrics.hadPriorReviewContext ?? false,
+          ...(event.metrics.riskLevel === undefined ? {} : { riskLevel: event.metrics.riskLevel }),
+          ...(event.metrics.userAuthorization === undefined
+            ? {}
+            : { userAuthorization: event.metrics.userAuthorization }),
+          ...(event.metrics.outcome === undefined ? {} : { outcome: event.metrics.outcome }),
+          ...(event.metrics.guardianModel === undefined
+            ? {}
+            : { guardianModel: event.metrics.guardianModel }),
+          ...(event.metrics.guardianReasoningEffort === undefined
+            ? {}
+            : { guardianReasoningEffort: event.metrics.guardianReasoningEffort }),
+          durationMs: event.metrics.durationMs,
+          ...(event.metrics.tokenUsage === undefined
+            ? {}
+            : { tokenUsage: event.metrics.tokenUsage }),
+        });
+        void (async () => {
+          try {
+            const { appendFile } = await import("node:fs/promises");
+            await appendFile(
+              join(agentDir, "guardian-metrics.jsonl"),
+              `${JSON.stringify(record)}\n`,
+            );
+          } catch {
+            // Metrics are observational; never surface sink failures.
+          }
+        })();
+      }
     },
     onAutoStateChange: (state, ctx, newlyPaused) => {
       modeRuntime?.applyAutoState(state);

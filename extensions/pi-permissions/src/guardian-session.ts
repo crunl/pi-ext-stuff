@@ -34,6 +34,8 @@ export interface GuardianReviewLease {
   readonly sessionId: string;
   readonly cursorUsed: GuardianTranscriptCursor | undefined;
   readonly newCursor: GuardianTranscriptCursor;
+  readonly sessionKind: "trunk_new" | "trunk_reused" | "ephemeral_forked";
+  readonly hadPriorReviewContext: boolean;
   extend(messages: Message[]): Context;
   commit(messages: Message[]): void;
   release(): void;
@@ -238,6 +240,13 @@ export class GuardianReviewSessionManager {
     const snapshot = trimTurns(trunk.turns).flat();
     const context = createLeaseContext(snapshot, request, tools, trunk.systemPrompt);
     const sessionId = isFork ? `${trunk.sessionId}-fork-${randomUUID()}` : trunk.sessionId;
+    const sessionKind: GuardianReviewLease["sessionKind"] = isFork
+      ? "ephemeral_forked"
+      : trunk.priorReviewCount > 0 || trunk.turns.length > 0
+        ? "trunk_reused"
+        : "trunk_new";
+    const hadPriorReviewContext =
+      trunk.priorReviewCount > 0 || cursorUsed !== undefined || trunk.turns.length > 0;
     let committed = false;
     let released = false;
 
@@ -246,6 +255,8 @@ export class GuardianReviewSessionManager {
       sessionId,
       cursorUsed,
       newCursor: newCursor ?? { epoch: 0, seenCount: 0 },
+      sessionKind,
+      hadPriorReviewContext,
       extend: (messages) => {
         return createContext([...context.messages, ...messages], tools, trunk.systemPrompt);
       },

@@ -260,6 +260,34 @@ describe("GuardianReviewSessionManager", () => {
     });
   });
 
+  describe("sessionKind and hadPriorReviewContext", () => {
+    it("reports trunk_new on first open and trunk_reused after commit", () => {
+      const manager = new GuardianReviewSessionManager();
+      const first = manager.open(key, "first");
+      expect(first.sessionKind).toBe("trunk_new");
+      expect(first.hadPriorReviewContext).toBe(false);
+      first.commit([assistant('{"outcome":"allow"}')]);
+      first.release();
+
+      const second = manager.open(key, "second");
+      expect(second.sessionKind).toBe("trunk_reused");
+      expect(second.hadPriorReviewContext).toBe(true);
+      second.release();
+    });
+
+    it("reports ephemeral_forked when trunk is busy", () => {
+      const manager = new GuardianReviewSessionManager();
+      const trunk = manager.open(key, "trunk");
+      expect(trunk.sessionKind).toBe("trunk_new");
+
+      const fork = manager.open(key, "fork");
+      expect(fork.sessionKind).toBe("ephemeral_forked");
+      expect(fork.hadPriorReviewContext).toBe(false);
+      fork.release();
+      trunk.release();
+    });
+  });
+
   it("keeps an invalidated active lease from mutating or releasing its replacement", () => {
     const manager = new GuardianReviewSessionManager();
     const stale = manager.open(key, "stale approval");

@@ -28,6 +28,8 @@ export interface AutoReviewResult {
     source: "configured" | "active" | "active-fallback";
     fallbackNotice?: "configured-reviewer-unavailable";
   };
+  sessionKind?: "trunk_new" | "trunk_reused" | "ephemeral_forked";
+  hadPriorReviewContext?: boolean;
 }
 
 /** Host-provided inputs a guardian review run needs. Owned here so that

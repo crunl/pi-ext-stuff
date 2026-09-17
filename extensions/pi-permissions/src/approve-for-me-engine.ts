@@ -187,12 +187,31 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   approvalOverride?: ApprovalOverride;
 }
 
+export interface GuardianDecisionMetrics {
+  readonly riskLevel?: string;
+  readonly userAuthorization?: string;
+  readonly outcome?: string;
+  readonly guardianModel?: string;
+  readonly guardianReasoningEffort?: string;
+  readonly failureKind?: string;
+  readonly sessionKind?: "trunk_new" | "trunk_reused" | "ephemeral_forked";
+  readonly hadPriorReviewContext?: boolean;
+  readonly tokenUsage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    reasoning?: number;
+    total?: number;
+  };
+}
+
 export type GuardianDecision =
-  | { kind: "approve"; rationale: string }
-  | { kind: "deny"; rationale: string }
-  | { kind: "timed-out" }
-  | { kind: "cancelled" }
-  | { kind: "failed"; reason: string };
+  | { kind: "approve"; rationale: string; metrics?: GuardianDecisionMetrics }
+  | { kind: "deny"; rationale: string; metrics?: GuardianDecisionMetrics }
+  | { kind: "timed-out"; metrics?: GuardianDecisionMetrics }
+  | { kind: "cancelled"; metrics?: GuardianDecisionMetrics }
+  | { kind: "failed"; reason: string; metrics?: GuardianDecisionMetrics };
 
 /** True external decision Adapter. It cannot mint or shape capabilities. */
 export interface GuardianAdapter<ReviewContext = undefined> {
@@ -239,27 +258,34 @@ export type ReviewEvent =
       readonly status: "reviewing";
       readonly reviewId: string;
       readonly call: InvocationCall;
+      readonly ownership: InvocationOwnership;
       readonly displaySummary?: string;
     }
   | {
       readonly status: "approved" | "denied";
       readonly reviewId: string;
       readonly call: InvocationCall;
+      readonly ownership: InvocationOwnership;
       readonly rationale: string;
       readonly displaySummary?: string;
+      readonly metrics?: GuardianDecisionMetrics & { durationMs: number };
     }
   | {
       readonly status: "aborted" | "timed-out";
       readonly reviewId: string;
       readonly call: InvocationCall;
+      readonly ownership: InvocationOwnership;
       readonly displaySummary?: string;
+      readonly metrics?: GuardianDecisionMetrics & { durationMs: number };
     }
   | {
       readonly status: "failed";
       readonly reviewId: string;
       readonly call: InvocationCall;
+      readonly ownership: InvocationOwnership;
       readonly reason: string;
       readonly displaySummary?: string;
+      readonly metrics?: GuardianDecisionMetrics & { durationMs: number };
     };
 
 export type PermissionErrorCode =
@@ -1151,10 +1177,13 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
     const reviewId = `review-${++reviewSequence}`;
     const displaySummary = review.summary?.trim() || undefined;
+    const reviewStartTs = Date.now();
+    const ownership = request.ownership;
     emitReviewEvent(() => ({
       status: "reviewing",
       reviewId,
       call: cloneInvocationCall(request.call),
+      ownership,
       ...(displaySummary === undefined ? {} : { displaySummary }),
     }));
     const guardian = options.guardian;
@@ -1164,7 +1193,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         status: "failed",
         reviewId,
         call: cloneInvocationCall(request.call),
+        ownership,
         reason,
+        metrics: { durationMs: Date.now() - reviewStartTs },
         ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return { code: "review-unavailable", reason };
@@ -1180,6 +1211,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
@@ -1224,6 +1257,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
@@ -1233,6 +1268,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
@@ -1242,6 +1279,11 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: {
+            durationMs: Date.now() - reviewStartTs,
+            ...(decision.metrics ?? {}),
+          },
         }));
         return { code: "aborted", reason: "Operation aborted" };
       }
@@ -1251,6 +1293,11 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "timed-out",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: {
+            durationMs: Date.now() - reviewStartTs,
+            ...(decision.metrics ?? {}),
+          },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-timeout", reason: "Automatic approval review timed out" };
@@ -1261,7 +1308,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "failed",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
           reason: decision.reason,
+          metrics: {
+            durationMs: Date.now() - reviewStartTs,
+            ...(decision.metrics ?? {}),
+          },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-unavailable", reason: decision.reason };
@@ -1273,7 +1325,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "failed",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
           reason,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "review-unavailable", reason };
@@ -1283,7 +1337,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         status: decision.kind === "approve" ? "approved" : "denied",
         reviewId,
         call: cloneInvocationCall(request.call),
+        ownership,
         rationale: decision.rationale,
+        metrics: {
+          durationMs: Date.now() - reviewStartTs,
+          ...(decision.metrics ?? {}),
+        },
         ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return decision;
@@ -1293,6 +1352,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
@@ -1302,6 +1363,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "aborted", reason: "Operation aborted" };
@@ -1311,6 +1374,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           status: "aborted",
           reviewId,
           call: cloneInvocationCall(request.call),
+          ownership,
+          metrics: { durationMs: Date.now() - reviewStartTs },
           ...(displaySummary === undefined ? {} : { displaySummary }),
         }));
         return { code: "stale-invocation", reason: "Permission context changed" };
@@ -1321,7 +1386,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         status: "failed",
         reviewId,
         call: cloneInvocationCall(request.call),
+        ownership,
         reason,
+        metrics: { durationMs: Date.now() - reviewStartTs },
         ...(displaySummary === undefined ? {} : { displaySummary }),
       }));
       return {

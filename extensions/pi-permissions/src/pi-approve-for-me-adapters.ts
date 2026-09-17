@@ -291,8 +291,10 @@ export function createPiGuardianAdapter(
         result = await autoReviewer.review(request, reviewerContext, signal);
       } catch (error) {
         if (error instanceof AutoReviewerFailure) {
-          if (error.kind === "timeout") return { kind: "timed-out" };
-          if (error.kind === "cancelled") return { kind: "cancelled" };
+          const failureKind = error.kind;
+          if (error.kind === "timeout") return { kind: "timed-out", metrics: { failureKind } };
+          if (error.kind === "cancelled") return { kind: "cancelled", metrics: { failureKind } };
+          return { kind: "failed", reason: errorMessage(error), metrics: { failureKind } };
         }
         return { kind: "failed", reason: errorMessage(error) };
       }
@@ -302,9 +304,19 @@ export function createPiGuardianAdapter(
         // Reviewer identity/status reporting is observational. A UI or event
         // consumer must never turn an approval into an authorization failure.
       }
+      const metrics = {
+        riskLevel: result.risk,
+        userAuthorization: result.userAuthorization,
+        outcome: result.decision,
+        ...(result.guardian?.model === undefined ? {} : { guardianModel: result.guardian.model }),
+        ...(result.sessionKind === undefined ? {} : { sessionKind: result.sessionKind }),
+        ...(result.hadPriorReviewContext === undefined
+          ? {}
+          : { hadPriorReviewContext: result.hadPriorReviewContext }),
+      };
       return result.decision === "approve"
-        ? { kind: "approve", rationale: result.rationale }
-        : { kind: "deny", rationale: result.rationale };
+        ? { kind: "approve", rationale: result.rationale, metrics }
+        : { kind: "deny", rationale: result.rationale, metrics };
     },
   };
 }

@@ -464,6 +464,11 @@ describe("createPiGuardianAdapter", () => {
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: expected,
       rationale: result.rationale,
+      metrics: expect.objectContaining({
+        riskLevel: result.risk,
+        userAuthorization: result.userAuthorization,
+        outcome: result.decision,
+      }),
     });
   });
 
@@ -493,7 +498,11 @@ describe("createPiGuardianAdapter", () => {
           }),
         }),
       ),
-    ).resolves.toEqual({ kind: "approve", rationale: result.rationale });
+    ).resolves.toEqual({
+      kind: "approve",
+      rationale: result.rationale,
+      metrics: expect.objectContaining({ outcome: "approve" }),
+    });
   });
 
   it("maps reviewer failures into typed Guardian terminal outcomes", async () => {
@@ -511,9 +520,15 @@ describe("createPiGuardianAdapter", () => {
     });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("timeout", "review timed out"));
-    await expect(adapter.review(reviewInput())).resolves.toEqual({ kind: "timed-out" });
+    await expect(adapter.review(reviewInput())).resolves.toEqual({
+      kind: "timed-out",
+      metrics: { failureKind: "timeout" },
+    });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("cancelled", "review cancelled"));
-    await expect(adapter.review(reviewInput())).resolves.toEqual({ kind: "cancelled" });
+    await expect(adapter.review(reviewInput())).resolves.toEqual({
+      kind: "cancelled",
+      metrics: { failureKind: "cancelled" },
+    });
   });
 });

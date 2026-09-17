@@ -490,6 +490,8 @@ export class PiAutoReviewer implements AutoReviewer {
             return {
               ...result,
               guardian: guardianIdentity,
+              sessionKind: lease.sessionKind,
+              hadPriorReviewContext: lease.hadPriorReviewContext,
             };
           } catch (error) {
             const failure = new AutoReviewerFailure(
