@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn as spawnProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import type {
   SandboxAskCallback,
@@ -8,6 +9,7 @@ import type {
   SandboxWrapConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import { describe, expect, it, vi } from "vitest";
+import { expandSymlinkAliases } from "../src/filesystem-policy.ts";
 
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
@@ -801,6 +803,38 @@ describe("SRT executor contract", () => {
     await manager.reset();
   });
 
+  it("injects platform tmpdir() into SRT allowWrite but not into user policy", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const policy: SandboxPolicy = {
+      ...basePolicy(),
+      filesystem: { allowWrite: ["/workspace"], denyRead: [], denyWrite: [] },
+    };
+    await execute(manager, policy);
+
+    const updated = runtime.updated[0] ?? runtime.initialized[0];
+    // SRT seam always includes tmpdir() aliases when user roots are non-empty.
+    for (const alias of expandSymlinkAliases(tmpdir())) {
+      expect(updated?.filesystem.allowWrite).toContain(alias);
+    }
+    expect(updated?.filesystem.allowWrite).toContain("/workspace");
+    // User policy object is not mutated.
+    expect(policy.filesystem.allowWrite).toEqual(["/workspace"]);
+    await manager.reset();
+  });
+
+  it("does not inject tmpdir() when user write roots are empty (read-only / empty intersection)", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    // basePolicy() already has allowWrite: [] — matches read-only and
+    // resolved-empty delegation intersections.
+    await execute(manager, basePolicy());
+
+    const updated = runtime.updated[0] ?? runtime.initialized[0];
+    expect(updated?.filesystem.allowWrite).toEqual([]);
+    await manager.reset();
+  });
+
   it("keeps deny rules independent from writable roots", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime);
@@ -816,15 +850,18 @@ describe("SRT executor contract", () => {
     };
     await execute(manager, policy);
 
-    expect(runtime.updated[0]).toEqual({
-      filesystem: {
-        allowWrite: ["/workspace"],
-        denyRead: ["/workspace/.env"],
-        denyWrite: ["/workspace/.git"],
-      },
-      network: { allowedDomains: ["registry.npmjs.org"], deniedDomains: ["bad.example"] },
+    const updated = runtime.updated[0];
+    expect(updated?.filesystem.allowWrite).toContain("/workspace");
+    for (const alias of expandSymlinkAliases(tmpdir())) {
+      expect(updated?.filesystem.allowWrite).toContain(alias);
+    }
+    expect(updated?.filesystem.denyRead).toEqual(["/workspace/.env"]);
+    expect(updated?.filesystem.denyWrite).toEqual(["/workspace/.git"]);
+    expect(updated?.network).toEqual({
+      allowedDomains: ["registry.npmjs.org"],
+      deniedDomains: ["bad.example"],
     });
-    expect(runtime.updated[0]?.filesystem).not.toHaveProperty("allowRead");
+    expect(updated?.filesystem).not.toHaveProperty("allowRead");
     await manager.reset();
   });
 
@@ -839,12 +876,13 @@ describe("SRT executor contract", () => {
       execute(first, basePolicy()),
       execute(second, {
         ...basePolicy(),
-        filesystem: { allowWrite: ["/workspace"], denyRead: [], denyWrite: [] },
+        filesystem: { allowWrite: [], denyRead: [], denyWrite: [] },
       }),
     ]);
 
     expect(runtime.maxActiveWraps).toBe(1);
-    expect(runtime.updated.at(-1)?.filesystem.allowWrite).toEqual([]);
+    // Empty user write roots stay empty — no tmpdir injection.
+    expect(runtime.initialized.at(-1)?.filesystem.allowWrite).toEqual([]);
     await first.reset();
   });
 

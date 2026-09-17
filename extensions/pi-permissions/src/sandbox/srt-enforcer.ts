@@ -1,11 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import {
   type SandboxRuntimeConfig,
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
 import { effectiveNetworkAuthority } from "../config.ts";
-import { hasGlobSyntax } from "../filesystem-policy.ts";
+import { expandSymlinkAliases, hasGlobSyntax } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
 import {
   type ExecutionNetwork,
@@ -105,10 +106,20 @@ function toSrtConfig(
 ): SandboxRuntimeConfig {
   assertSrtPolicySupported(policy);
   const authority = effectiveNetworkAuthority(policy.network);
+  // Codex workspace-write treats $TMPDIR as a platform default write root
+  // (FileSystemSpecialPath::Tmpdir), not a user writable_roots entry. Inject
+  // it only at the SRT enforcement seam so Engine path checks and delegation
+  // intersections keep seeing the user's own allowWrite list. Gated on a
+  // non-empty user write set so read-only profiles and resolved-empty
+  // delegation intersections stay zero-write.
+  const allowWrite =
+    policy.filesystem.allowWrite.length === 0
+      ? [...policy.filesystem.allowWrite]
+      : [...new Set([...policy.filesystem.allowWrite, ...expandSymlinkAliases(tmpdir())])];
   return {
     filesystem: {
       denyRead: [...policy.filesystem.denyRead],
-      allowWrite: [...policy.filesystem.allowWrite],
+      allowWrite,
       denyWrite: [...policy.filesystem.denyWrite],
     },
     network: {
