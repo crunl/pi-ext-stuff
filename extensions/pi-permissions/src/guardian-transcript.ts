@@ -19,6 +19,11 @@ const MAX_TOOL_CHARACTERS = 10_000;
 const MAX_RECENT_ENTRIES = 40;
 const TRUNCATION_MARKER = "[...]";
 
+// Raw-log hard cap. When exceeded the head is dropped and the caller must
+// bump its epoch so the next review falls back to Full.
+export const MAX_RAW_TRANSCRIPT_ENTRIES = 500;
+export const MAX_RAW_TRANSCRIPT_CHARACTERS = 200_000;
+
 function truncateContent(content: string, limit: number): string {
   if (limit <= 0) return "";
   if (content.length <= limit) return content;
@@ -81,9 +86,46 @@ export function boundGuardianTranscript(
 export function appendGuardianTranscript(
   entries: readonly GuardianTranscriptEntry[],
   entry: GuardianTranscriptEntry,
+): { entries: GuardianTranscriptEntry[]; truncated: boolean } {
+  // Append-only raw log. Windowed bounding happens only when building a
+  // Full-mode prompt so the cursor stays meaningful for Delta reviews.
+  const next = [...entries, copyEntry(entry)];
+  if (next.length <= MAX_RAW_TRANSCRIPT_ENTRIES) {
+    let characters = 0;
+    for (const existing of next) characters += existing.content.length;
+    if (characters <= MAX_RAW_TRANSCRIPT_CHARACTERS) return { entries: next, truncated: false };
+  }
+  // Over hard cap: drop from the head until under both limits. Callers that
+  // track a cursor must treat this as epoch-invalidating.
+  let start = 0;
+  let characters = 0;
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    const entryCharacters = next[index]?.content.length ?? 0;
+    if (
+      next.length - index > MAX_RAW_TRANSCRIPT_ENTRIES ||
+      characters + entryCharacters > MAX_RAW_TRANSCRIPT_CHARACTERS
+    ) {
+      break;
+    }
+    characters += entryCharacters;
+    start = index;
+  }
+  return { entries: next.slice(start), truncated: true };
+}
+
+/** Entries not yet sent to the reviewer, for Delta-mode prompts. */
+export function sliceGuardianTranscriptFrom(
+  entries: readonly GuardianTranscriptEntry[],
+  seenCount: number,
 ): GuardianTranscriptEntry[] {
-  return boundGuardianTranscript([
-    ...entries.map((existing) => copyEntry(existing)),
-    copyEntry(entry),
-  ]);
+  if (seenCount <= 0) return entries.map((entry) => copyEntry(entry));
+  if (seenCount >= entries.length) return [];
+  return entries.slice(seenCount).map((entry) => copyEntry(entry));
+}
+
+/** Bound a Delta slice so a large increment cannot blow the prompt budget. */
+export function boundGuardianTranscriptDelta(
+  entries: readonly GuardianTranscriptEntry[],
+): GuardianTranscriptEntry[] {
+  return boundGuardianTranscript(entries);
 }

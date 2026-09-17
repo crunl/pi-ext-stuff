@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { appendGuardianTranscript, boundGuardianTranscript } from "../src/guardian-transcript.ts";
+import {
+  appendGuardianTranscript,
+  boundGuardianTranscript,
+  type GuardianTranscriptEntry,
+  MAX_RAW_TRANSCRIPT_ENTRIES,
+  sliceGuardianTranscriptFrom,
+} from "../src/guardian-transcript.ts";
 
 describe("guardian transcript", () => {
   it("preserves the first user entry and newest role-tagged entries", () => {
@@ -139,9 +145,57 @@ describe("guardian transcript", () => {
     });
 
     expect(original).toEqual([{ role: "user", content: "start" }]);
-    expect(next).toEqual([
+    expect(next.entries).toEqual([
       { role: "user", content: "start" },
       { role: "assistant", content: "continuation" },
     ]);
+    expect(next.truncated).toBe(false);
+  });
+
+  it("keeps appendGuardianTranscript append-only (no windowed bound)", () => {
+    let entries: GuardianTranscriptEntry[] = [];
+    for (let index = 0; index < MAX_RAW_TRANSCRIPT_ENTRIES + 10; index += 1) {
+      const result = appendGuardianTranscript(entries, {
+        role: "assistant",
+        content: `msg-${index}`,
+      });
+      entries = result.entries;
+      if (index === MAX_RAW_TRANSCRIPT_ENTRIES + 9) {
+        expect(result.truncated).toBe(true);
+      }
+    }
+    // Raw log is capped at MAX_RAW_TRANSCRIPT_ENTRIES by head-drop, not by
+    // the 40-entry windowed bound.
+    expect(entries.length).toBe(MAX_RAW_TRANSCRIPT_ENTRIES);
+    expect(entries[0]?.content).toBe("msg-10");
+    expect(entries.at(-1)?.content).toBe(`msg-${MAX_RAW_TRANSCRIPT_ENTRIES + 9}`);
+  });
+
+  describe("sliceGuardianTranscriptFrom", () => {
+    const entries = [
+      { role: "user" as const, content: "a" },
+      { role: "assistant" as const, content: "b" },
+      { role: "user" as const, content: "c" },
+    ];
+
+    it("returns all entries when seenCount is 0", () => {
+      expect(sliceGuardianTranscriptFrom(entries, 0)).toEqual(entries);
+    });
+
+    it("returns only unseen entries", () => {
+      expect(sliceGuardianTranscriptFrom(entries, 2)).toEqual([{ role: "user", content: "c" }]);
+    });
+
+    it("returns empty when seenCount reaches the end", () => {
+      expect(sliceGuardianTranscriptFrom(entries, 3)).toEqual([]);
+    });
+
+    it("returns empty when seenCount exceeds the end", () => {
+      expect(sliceGuardianTranscriptFrom(entries, 99)).toEqual([]);
+    });
+
+    it("returns empty for an empty log", () => {
+      expect(sliceGuardianTranscriptFrom([], 0)).toEqual([]);
+    });
   });
 });

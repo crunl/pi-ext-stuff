@@ -86,6 +86,11 @@ export interface AutoReviewRequest {
   untrustedAction: GuardianAction;
   permissionContext: GuardianPermissionContext;
   approvalOverride?: AutoReviewApprovalOverride;
+  /** Raw append-only log + epoch for Delta-mode prompts. */
+  transcriptMeta?: {
+    epoch: number;
+    rawEntries: readonly GuardianTranscriptEntry[];
+  };
 }
 
 type PromptDecision = Extract<RiskDecision, { action: "prompt" }>;
@@ -119,6 +124,8 @@ export function buildAutoReviewRequest(
   permissionContext: GuardianPermissionContext,
   transcript: readonly GuardianTranscriptEntry[],
   approvalOverride?: AutoReviewApprovalOverride,
+  transcriptEpoch?: number,
+  rawTranscript?: readonly GuardianTranscriptEntry[],
 ): AutoReviewRequest {
   const untrustedAction = guardianActionFromToolCall(event, cwd);
   const enrichedPermissionContext: GuardianPermissionContext = {
@@ -139,12 +146,16 @@ export function buildAutoReviewRequest(
     untrustedAction,
     permissionContext: enrichedPermissionContext,
   });
+  const rawEntries = rawTranscript ?? transcript;
   return {
     toolCallId: event.toolCallId,
-    untrustedTranscript: boundGuardianTranscript(transcript),
+    untrustedTranscript: boundGuardianTranscript(rawEntries),
     untrustedAction,
     permissionContext: enrichedPermissionContext,
     ...(approvalOverride === undefined ? {} : { approvalOverride }),
+    ...(transcriptEpoch === undefined
+      ? {}
+      : { transcriptMeta: { epoch: transcriptEpoch, rawEntries } }),
   };
 }
 
@@ -153,6 +164,28 @@ export function renderAutoReviewPrompt(request: AutoReviewRequest): string {
     untrustedTranscript: boundGuardianTranscript(request.untrustedTranscript),
     untrustedAction: request.untrustedAction,
     permissionContext: request.permissionContext,
+    outputSchema: {
+      risk_level: ["low", "medium", "high", "critical"],
+      user_authorization: ["unknown", "low", "medium", "high"],
+      outcome: ["allow", "deny"],
+      rationale: "string",
+    },
+  });
+}
+
+/**
+ * Delta-mode prompt: prior transcript lives in the reviewer session history;
+ * this user message carries only the entries not yet sent.
+ */
+export function renderDeltaReviewPrompt(
+  transcriptDelta: readonly GuardianTranscriptEntry[],
+  untrustedAction: unknown,
+  permissionContext: unknown,
+): string {
+  return JSON.stringify({
+    untrustedTranscriptDelta: transcriptDelta,
+    untrustedAction,
+    permissionContext,
     outputSchema: {
       risk_level: ["low", "medium", "high", "critical"],
       user_authorization: ["unknown", "low", "medium", "high"],

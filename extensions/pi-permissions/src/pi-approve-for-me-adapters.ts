@@ -40,6 +40,9 @@ import { errorMessage, isRecord } from "./unknown-value.ts";
 export interface PiGuardianReviewContext {
   event: ToolCallEvent;
   transcript: readonly GuardianTranscriptEntry[];
+  /** Append-only raw log for Delta-mode cursor tracking. */
+  rawTranscript?: readonly GuardianTranscriptEntry[];
+  transcriptEpoch?: number;
   autoReviewerContext: AutoReviewerContext;
   sandboxProfile: "workspace-write" | "read-only";
   sandboxEnabled: boolean;
@@ -276,6 +279,8 @@ export function createPiGuardianAdapter(
         permissionContext,
         transcriptFromEngine(input),
         approvalOverrideFromEngine(input),
+        input.context.transcriptEpoch,
+        input.context.rawTranscript,
       );
       let result: AutoReviewResult;
       try {

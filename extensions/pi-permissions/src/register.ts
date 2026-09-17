@@ -184,6 +184,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let shortcutWarningShown = false;
   let legacyConfigWarningShown = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
+  let guardianTranscriptEpoch = 0;
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   let guardianInvalidationAfterModeChange = false;
   /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
@@ -318,6 +319,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.bumpGeneration();
     cancelInFlightModeTransition();
     guardianTranscript = [];
+    guardianTranscriptEpoch += 1;
     inputFallbackTranscript = [];
     guardianInvalidationAfterModeChange = false;
     session.resetTurn();
@@ -724,10 +726,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
   };
 
+  const currentRawGuardianTranscript = (): GuardianTranscriptEntry[] => {
+    // Switching between fallback and the real log invalidates the Delta cursor.
+    if (guardianTranscript.length > 0 && inputFallbackTranscript.length > 0) {
+      guardianTranscriptEpoch += 1;
+      inputFallbackTranscript = [];
+    }
+    return guardianTranscript.length > 0 ? guardianTranscript : inputFallbackTranscript;
+  };
+
   const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
-    boundGuardianTranscript(
-      guardianTranscript.length > 0 ? guardianTranscript : inputFallbackTranscript,
-    );
+    boundGuardianTranscript(currentRawGuardianTranscript());
 
   const stableSessionId = (
     ctx: Pick<ExtensionContext, "sessionManager">,
@@ -1251,6 +1260,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return {
       event,
       transcript,
+      rawTranscript: currentRawGuardianTranscript(),
+      transcriptEpoch: guardianTranscriptEpoch,
       autoReviewerContext: {
         modelRegistry: ctx.modelRegistry,
         activeModel: ctx.model,
@@ -2399,17 +2410,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("input", (event) => {
     if ((event.source === "interactive" || event.source === "rpc") && event.text.length > 0) {
-      inputFallbackTranscript = appendGuardianTranscript(inputFallbackTranscript, {
+      const appended = appendGuardianTranscript(inputFallbackTranscript, {
         role: "user",
         content: event.text,
       });
+      inputFallbackTranscript = appended.entries;
+      if (appended.truncated) guardianTranscriptEpoch += 1;
     }
   });
 
   pi.on("message_end", (event) => {
     const entry = guardianTranscriptEntryFromMessage(event.message);
     if (entry) {
-      guardianTranscript = appendGuardianTranscript(guardianTranscript, entry);
+      const appended = appendGuardianTranscript(guardianTranscript, entry);
+      guardianTranscript = appended.entries;
+      if (appended.truncated) guardianTranscriptEpoch += 1;
     }
   });
 

@@ -223,7 +223,7 @@ describe("PiAutoReviewer", () => {
       expect.objectContaining({
         reasoningEffort: "medium",
         maxRetries: 0,
-        cacheRetention: "none",
+        cacheRetention: "short",
         signal: expect.any(AbortSignal),
         sessionId: expect.any(String),
       }),

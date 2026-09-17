@@ -228,6 +228,41 @@ describe("auto review request", () => {
     ).toBeLessThanOrEqual(12000);
   });
 
+  it("passes raw transcript to transcriptMeta and bounds untrustedTranscript", () => {
+    const raw = Array.from({ length: 50 }, (_, index) => ({
+      role: "assistant" as const,
+      content: `msg-${index}`,
+    }));
+    const request = buildAutoReviewRequest(
+      {
+        toolName: "bash",
+        toolCallId: "glue-call",
+        input: { command: "ls" },
+      } as any,
+      { action: "prompt", risk: "LOW", reason: "read", summary: "ls" },
+      "/workspace",
+      {
+        sandboxProfile: "workspace-write",
+        sandboxEnforcesAction: true,
+        filesystemWriteRoots: ["/workspace"],
+        filesystemDenyRead: [],
+        filesystemDenyWrite: [],
+        requestedNetworkTargets: [],
+        allowedNetworkHosts: [],
+        deniedNetworkHosts: [],
+      },
+      raw,
+      undefined,
+      3,
+      raw,
+    );
+    // rawEntries tracks the append-only log, not the windowed bound.
+    expect(request.transcriptMeta?.epoch).toBe(3);
+    expect(request.transcriptMeta?.rawEntries.length).toBe(50);
+    // untrustedTranscript is the windowed view used for Full prompts.
+    expect(request.untrustedTranscript.length).toBeLessThanOrEqual(41);
+  });
+
   it("frames an exact /approve retry as trusted developer context", () => {
     const request = buildAutoReviewRequest(
       {

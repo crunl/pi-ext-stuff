@@ -139,7 +139,13 @@ describe("GuardianReviewSessionManager", () => {
 
       const changed = manager.open({ ...key, [field]: value }, "changed approval");
 
-      expect(changed.sessionId).not.toBe(first.sessionId);
+      // sessionId is the stable provider cache key: it changes only when the
+      // parent session id itself changes.
+      if (field === "sessionId") {
+        expect(changed.sessionId).not.toBe(first.sessionId);
+      } else {
+        expect(changed.sessionId).toBe(first.sessionId);
+      }
       expect(changed.context.messages.map(messageText)).toEqual(["changed approval"]);
     },
   );
@@ -153,8 +159,105 @@ describe("GuardianReviewSessionManager", () => {
     manager.invalidate();
     const next = manager.open(key, "new approval");
 
-    expect(next.sessionId).not.toBe(first.sessionId);
+    // Same parent session → same stable cache key; history is fresh.
+    expect(next.sessionId).toBe(first.sessionId);
     expect(next.context.messages.map(messageText)).toEqual(["new approval"]);
+  });
+
+  describe("Delta transcript", () => {
+    const entries = [
+      { role: "user" as const, content: "user-1" },
+      { role: "assistant" as const, content: "assistant-1" },
+      { role: "user" as const, content: "user-2" },
+    ];
+    const meta = (epoch: number, raw = entries) => ({
+      epoch,
+      rawEntries: raw,
+      action: { tool: "bash", command: "ls" },
+      permissionContext: { risk: "REVIEW" },
+    });
+
+    it("falls back to Full on first open and commits cursor", () => {
+      const manager = new GuardianReviewSessionManager();
+      const first = manager.open(key, "ignored", undefined, undefined, meta(1));
+      expect(first.cursorUsed).toBeUndefined();
+      expect(first.newCursor).toEqual({ epoch: 1, seenCount: 3 });
+      const firstPrompt = messageText(first.context.messages.at(-1)!);
+      expect(firstPrompt).toContain("untrustedTranscript");
+      first.commit([assistant('{"outcome":"allow"}')]);
+      first.release();
+
+      const second = manager.open(key, "ignored", undefined, undefined, meta(1));
+      expect(second.cursorUsed).toEqual({ epoch: 1, seenCount: 3 });
+      const secondPrompt = messageText(second.context.messages.at(-1)!);
+      expect(secondPrompt).toContain("untrustedTranscriptDelta");
+      expect(secondPrompt).not.toContain("user-1");
+      second.release();
+    });
+
+    it("falls back to Full when epoch changes", () => {
+      const manager = new GuardianReviewSessionManager();
+      const first = manager.open(key, "ignored", undefined, undefined, meta(1));
+      first.commit([assistant('{"outcome":"allow"}')]);
+      first.release();
+
+      const second = manager.open(key, "ignored", undefined, undefined, meta(2));
+      expect(second.cursorUsed).toBeUndefined();
+      const prompt = messageText(second.context.messages.at(-1)!);
+      expect(prompt).toContain("untrustedTranscript");
+      expect(prompt).not.toContain("untrustedTranscriptDelta");
+      second.release();
+    });
+
+    it("falls back to Full when seenCount exceeds raw length", () => {
+      const manager = new GuardianReviewSessionManager();
+      const first = manager.open(key, "ignored", undefined, undefined, meta(1));
+      first.commit([assistant('{"outcome":"allow"}')]);
+      first.release();
+
+      const second = manager.open(
+        key,
+        "ignored",
+        undefined,
+        undefined,
+        meta(1, entries.slice(0, 1)),
+      );
+      expect(second.cursorUsed).toBeUndefined();
+      second.release();
+    });
+
+    it("does not advance cursor on release without commit", () => {
+      const manager = new GuardianReviewSessionManager();
+      const first = manager.open(key, "ignored", undefined, undefined, meta(1));
+      first.release();
+
+      const second = manager.open(key, "ignored", undefined, undefined, meta(1));
+      expect(second.cursorUsed).toBeUndefined();
+      second.release();
+    });
+
+    it("carries new entries in Delta even after the windowed bound saturates", () => {
+      const manager = new GuardianReviewSessionManager();
+      // Build a raw log larger than the windowed bound (40 recent entries).
+      const many: { role: "user" | "assistant"; content: string }[] = [];
+      for (let index = 0; index < 50; index += 1) {
+        many.push({ role: "assistant", content: `msg-${index}` });
+      }
+      const first = manager.open(key, "ignored", undefined, undefined, meta(1, many));
+      expect(first.cursorUsed).toBeUndefined();
+      first.commit([assistant('{"outcome":"allow"}')]);
+      first.release();
+
+      // Raw grows by one; windowed bound would still be ~41, but Delta must
+      // see the new entry because cursor tracks raw length.
+      const grown = [...many, { role: "user" as const, content: "new-entry" }];
+      const second = manager.open(key, "ignored", undefined, undefined, meta(1, grown));
+      expect(second.cursorUsed).toEqual({ epoch: 1, seenCount: 50 });
+      const prompt = messageText(second.context.messages.at(-1)!);
+      expect(prompt).toContain("untrustedTranscriptDelta");
+      expect(prompt).toContain("new-entry");
+      second.release();
+    });
   });
 
   it("keeps an invalidated active lease from mutating or releasing its replacement", () => {

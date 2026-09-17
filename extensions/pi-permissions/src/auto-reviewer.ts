@@ -356,6 +356,14 @@ export class PiAutoReviewer implements AutoReviewer {
         renderAutoReviewPrompt(request),
         toolRuntime.tools,
         systemPrompt,
+        request.transcriptMeta
+          ? {
+              epoch: request.transcriptMeta.epoch,
+              rawEntries: request.transcriptMeta.rawEntries,
+              action: request.untrustedAction,
+              permissionContext: request.permissionContext,
+            }
+          : undefined,
       );
     } catch (error) {
       await closeToolRuntime();
@@ -388,7 +396,7 @@ export class PiAutoReviewer implements AutoReviewer {
                 reasoningEffort,
                 timeoutMs: remainingMs,
                 maxRetries: 0,
-                cacheRetention: "none",
+                cacheRetention: "short",
                 signal,
                 sessionId: lease.sessionId,
               }),
