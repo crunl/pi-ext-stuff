@@ -27,6 +27,8 @@ export interface AutoReviewResult {
     model: string;
     source: "configured" | "active" | "active-fallback";
     fallbackNotice?: "configured-reviewer-unavailable";
+    /** Effort actually used for this review (config or code default). */
+    reasoningEffort?: string;
   };
   sessionKind?: "trunk_new" | "trunk_reused" | "ephemeral_forked";
   hadPriorReviewContext?: boolean;

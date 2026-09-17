@@ -3,7 +3,7 @@
   "reviewer": {
     "provider": "openai-codex",
     "model": "gpt-5.6",
-    "reasoningEffort": "high"
+    "reasoningEffort": "low"
   },
   "sandbox": {
     "enabled": true,

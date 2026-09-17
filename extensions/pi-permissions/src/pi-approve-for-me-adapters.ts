@@ -290,13 +290,31 @@ export function createPiGuardianAdapter(
         };
         result = await autoReviewer.review(request, reviewerContext, signal);
       } catch (error) {
+        const configuredEffort = input.context.autoReviewerContext?.reviewer?.reasoningEffort;
+        const failureEffort =
+          configuredEffort ??
+          (error instanceof AutoReviewerFailure ? error.guardian?.reasoningEffort : undefined);
+        const effortMetrics =
+          failureEffort === undefined ? {} : { guardianReasoningEffort: failureEffort };
         if (error instanceof AutoReviewerFailure) {
           const failureKind = error.kind;
-          if (error.kind === "timeout") return { kind: "timed-out", metrics: { failureKind } };
-          if (error.kind === "cancelled") return { kind: "cancelled", metrics: { failureKind } };
-          return { kind: "failed", reason: errorMessage(error), metrics: { failureKind } };
+          if (error.kind === "timeout") {
+            return { kind: "timed-out", metrics: { failureKind, ...effortMetrics } };
+          }
+          if (error.kind === "cancelled") {
+            return { kind: "cancelled", metrics: { failureKind, ...effortMetrics } };
+          }
+          return {
+            kind: "failed",
+            reason: errorMessage(error),
+            metrics: { failureKind, ...effortMetrics },
+          };
         }
-        return { kind: "failed", reason: errorMessage(error) };
+        return {
+          kind: "failed",
+          reason: errorMessage(error),
+          metrics: Object.keys(effortMetrics).length > 0 ? effortMetrics : undefined,
+        };
       }
       try {
         input.context.onResult?.(result);
@@ -309,6 +327,9 @@ export function createPiGuardianAdapter(
         userAuthorization: result.userAuthorization,
         outcome: result.decision,
         ...(result.guardian?.model === undefined ? {} : { guardianModel: result.guardian.model }),
+        ...(result.guardian?.reasoningEffort === undefined
+          ? {}
+          : { guardianReasoningEffort: result.guardian.reasoningEffort }),
         ...(result.sessionKind === undefined ? {} : { sessionKind: result.sessionKind }),
         ...(result.hadPriorReviewContext === undefined
           ? {}

@@ -65,7 +65,8 @@ type Complete = (
 type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 type GuardianToolRuntimeFactory = (scope: GuardianEvidenceScope) => GuardianToolRuntime;
 
-const DEFAULT_REVIEW_REASONING = "medium";
+/** Codex sync reviewer prefers Low; keep high only via explicit config. */
+const DEFAULT_REVIEW_REASONING = "low";
 const RETRYABLE_PROVIDER_STATUSES = new Set([500, 502, 503, 504]);
 const RETRYABLE_PROVIDER_CODES = new Set([
   "ECONNREFUSED",
@@ -288,10 +289,12 @@ export class PiAutoReviewer implements AutoReviewer {
       throw cancelledFailure();
     }
     const model = guardian.model;
+    const reasoningEffort = context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING;
     const guardianIdentity: GuardianReviewIdentity = {
       provider: model.provider,
       model: model.id,
       source: guardian.source,
+      reasoningEffort,
       ...(guardian.fallbackNotice === undefined ? {} : { fallbackNotice: guardian.fallbackNotice }),
     };
 
@@ -327,7 +330,6 @@ export class PiAutoReviewer implements AutoReviewer {
       );
     }
     const toolRuntime = this.createTools(context.guardianEvidenceScope);
-    const reasoningEffort = context.reviewer?.reasoningEffort ?? DEFAULT_REVIEW_REASONING;
     const toolFingerprint = fingerprintValue({
       authorityFingerprint: context.guardianEvidenceScope.authorityFingerprint,
       tools: toolRuntime.tools.map((tool) => ({

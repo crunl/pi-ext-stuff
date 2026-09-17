@@ -103,7 +103,7 @@ function guardianSessionKey(tools: Tool[]): GuardianSessionKey {
     ...guardianSession,
     provider: context.activeModel.provider,
     model: context.activeModel.id,
-    reasoningEffort: "medium",
+    reasoningEffort: "low",
     toolFingerprint: fingerprintValue({
       authorityFingerprint: guardianEvidenceScope.authorityFingerprint,
       tools: tools.map((tool) => ({
@@ -116,6 +116,19 @@ function guardianSessionKey(tools: Tool[]): GuardianSessionKey {
 }
 
 describe("PiAutoReviewer", () => {
+  it("defaults reviewer reasoning effort to low when config omits it", async () => {
+    const complete = vi.fn(async () => response);
+    const reviewer = new PiAutoReviewer(complete as never);
+    await expect(reviewer.review(request, context)).resolves.toMatchObject({
+      guardian: expect.objectContaining({ reasoningEffort: "low" }),
+    });
+    expect(complete).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ reasoningEffort: "low" }),
+    );
+  });
+
   it("exposes only sandboxed read-only Guardian tools by default", async () => {
     const complete = vi.fn(
       async (_model: unknown, reviewContext: { tools?: Array<{ name: string }> }) => {

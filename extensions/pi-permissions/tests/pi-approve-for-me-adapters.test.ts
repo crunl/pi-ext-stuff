@@ -40,6 +40,11 @@ const autoReviewerContext = {
     find: vi.fn(),
     getApiKeyAndHeaders: vi.fn(),
   },
+  reviewer: {
+    provider: "volcengine",
+    model: "doubao-seed-2-1-turbo-260628",
+    reasoningEffort: "low",
+  },
   guardianSession: {
     cwd: "/workspace",
     configFingerprint: "config-1",
@@ -52,6 +57,14 @@ function reviewResult(decision: AutoReviewResult["decision"] = "approve"): AutoR
     risk: decision === "approve" ? "low" : "high",
     userAuthorization: decision === "approve" ? "high" : "low",
     rationale: decision === "approve" ? "The action is authorized." : "The action is unsafe.",
+    guardian: {
+      provider: "volcengine",
+      model: "doubao-seed-2-1-turbo-260628",
+      source: "configured",
+      reasoningEffort: "low",
+    },
+    sessionKind: "trunk_reused",
+    hadPriorReviewContext: true,
   };
 }
 
@@ -468,6 +481,10 @@ describe("createPiGuardianAdapter", () => {
         riskLevel: result.risk,
         userAuthorization: result.userAuthorization,
         outcome: result.decision,
+        guardianModel: "doubao-seed-2-1-turbo-260628",
+        guardianReasoningEffort: "low",
+        sessionKind: "trunk_reused",
+        hadPriorReviewContext: true,
       }),
     });
   });
@@ -517,18 +534,19 @@ describe("createPiGuardianAdapter", () => {
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "failed",
       reason: "review provider unavailable",
+      metrics: { guardianReasoningEffort: "low" },
     });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("timeout", "review timed out"));
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "timed-out",
-      metrics: { failureKind: "timeout" },
+      metrics: { failureKind: "timeout", guardianReasoningEffort: "low" },
     });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("cancelled", "review cancelled"));
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "cancelled",
-      metrics: { failureKind: "cancelled" },
+      metrics: { failureKind: "cancelled", guardianReasoningEffort: "low" },
     });
   });
 });
