@@ -10,24 +10,38 @@ import {
   type OutputPaddingSource,
   outputPaddingController,
 } from "./output-padding.ts";
-import { buildExpandedOutput, buildOutputPreview, toolResultText } from "./tool-output.ts";
+import {
+  buildExpandedOutput,
+  buildOutputPreview,
+  hasMeaningfulToolOutput,
+  toolResultText,
+} from "./tool-output.ts";
+
+type CollapsedMeta = { isError: boolean };
 
 type CollapsedResult =
   | "hidden"
   | "preview"
-  | ((result: AgentToolResult<unknown>, args: Record<string, unknown>) => string | undefined);
+  | ((
+      result: AgentToolResult<unknown>,
+      args: Record<string, unknown>,
+      meta: CollapsedMeta,
+    ) => string | undefined);
 
 type ExpandedResultRenderer = (
   result: AgentToolResult<unknown>,
   args: Record<string, unknown>,
   theme: Theme,
   outputPad: OutputPad,
+  meta: CollapsedMeta,
 ) => Component;
 
 export interface CodexToolRendererSpec<TPreviewState = unknown> {
   icon?: string;
   runningVerb: string;
   completedVerb: string;
+  /** Failed verb; defaults to `Failed`. Bash uses `Command failed`. */
+  failedVerb?: string;
   argument: (args: Record<string, unknown>, cwd: string) => string;
   /** Truncate the header to one row and expose embedded line breaks as `↵`. */
   singleLineHeader?: boolean;
@@ -35,11 +49,23 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
    * "single" (default): existing header path; singleLineHeader collapses to one row.
    * "wrap-command": Codex ExecCell — verb on the first row with the start of the
    * command, continuation rows under a `  │ ` rail (bash syntax highlight).
-   * Takes precedence over singleLineHeader.
+   * Takes precedence over singleLineHeader. Bash collapsed headers use glance
+   * ("single"); wrap remains available for command evidence layouts.
    */
   headerLayout?: "single" | "wrap-command";
   collapsed?: CollapsedResult;
   formatSummary?: (summary: string, theme: Theme) => string;
+  /**
+   * Header summary when `collapsed` is a body mode ("preview"/"hidden").
+   * Runs on settled results (including failed); skipped while partial.
+   */
+  summarizeResult?: (
+    result: AgentToolResult<unknown>,
+    args: Record<string, unknown>,
+    meta: CollapsedMeta,
+  ) => string | undefined;
+  /** Preview row budget when the call failed (falls back to maxOutputRows). */
+  failedOutputRows?: number;
   /**
    * Optional component rendered below the header while the call is being
    * streamed (partial args) and the result view is expanded. Lets a tool
@@ -54,8 +80,21 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
     context: RenderContext<TPreviewState>,
   ) => Component | undefined;
   renderExpandedResult?: ExpandedResultRenderer;
+  /** Allow renderExpandedResult on failed settled calls (bash evidence). */
+  expandedResultOnFailed?: boolean;
+  /**
+   * Dim `▶`/`▼` at the end of the header row (bash glance). Driven by host
+   * expand state (`context.expanded` / `options.expanded`); pi-core does not
+   * own the toggle.
+   */
+  showExpandIndicator?: boolean;
   maxOutputRows?: number;
   transformOutput?: (text: string) => string;
+  /**
+   * Paint the header argument (bash glance command). When set, the argument is
+   * not wrapped in muted — used for shell command-position accent highlight.
+   */
+  highlightArgument?: (argument: string) => string;
 }
 
 interface MutableToolHeader extends Component {
@@ -189,7 +228,11 @@ function leadingParts<TPreviewState = unknown>(
         ? "success"
         : "dim";
   const verb =
-    status === "failed" ? "Failed" : status === "completed" ? spec.completedVerb : spec.runningVerb;
+    status === "failed"
+      ? (spec.failedVerb ?? "Failed")
+      : status === "completed"
+        ? spec.completedVerb
+        : spec.runningVerb;
   const summary = state.summary
     ? spec.formatSummary
       ? `${theme.fg("dim", " · ")}${spec.formatSummary(state.summary, theme)}`
@@ -203,6 +246,15 @@ function leadingParts<TPreviewState = unknown>(
   return { icon, verb: styledVerb, summary };
 }
 
+function expandIndicator<TPreviewState = unknown>(
+  spec: CodexToolRendererSpec<TPreviewState>,
+  context: RenderContext,
+  theme: Theme,
+): string {
+  if (!spec.showExpandIndicator) return "";
+  return theme.fg("dim", context.expanded ? " ▼" : " ▶");
+}
+
 function headerText<TPreviewState = unknown>(
   spec: CodexToolRendererSpec<TPreviewState>,
   state: CodexToolRenderState,
@@ -212,8 +264,11 @@ function headerText<TPreviewState = unknown>(
 ): string {
   const { icon, verb, summary } = leadingParts(spec, state, context, theme);
   const argument = spec.argument(args, context.cwd);
-  const suffix = argument.length > 0 ? ` ${theme.fg("muted", argument)}` : "";
-  return `${icon}${verb}${suffix}${summary}`;
+  const suffix =
+    argument.length > 0
+      ? ` ${spec.highlightArgument ? spec.highlightArgument(argument) : theme.fg("muted", argument)}`
+      : "";
+  return `${icon}${verb}${suffix}${summary}${expandIndicator(spec, context, theme)}`;
 }
 
 class ToolOutputComponent implements Component {
@@ -226,13 +281,14 @@ class ToolOutputComponent implements Component {
     private readonly maxRows: number,
     private readonly style: (text: string) => string,
     private readonly outputPad: OutputPad,
+    private readonly edge: "head-tail" | "tail" = "head-tail",
   ) {}
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const lines = this.expanded
       ? buildExpandedOutput(this.text, width, this.outputPad)
-      : buildOutputPreview(this.text, width, this.maxRows, this.outputPad);
+      : buildOutputPreview(this.text, width, this.maxRows, this.outputPad, this.edge);
     this.cachedWidth = width;
     this.cachedLines = lines.map(this.style);
     return this.cachedLines;
@@ -259,7 +315,11 @@ function updateHeader<TPreviewState = unknown>(
       state.header = wrapped;
       state.outputPad = outputPad;
     }
-    wrapped.setHeader(leadingParts(spec, state, context, theme), spec.argument(args, context.cwd));
+    const parts = leadingParts(spec, state, context, theme);
+    wrapped.setHeader(
+      { ...parts, summary: `${parts.summary}${expandIndicator(spec, context, theme)}` },
+      spec.argument(args, context.cwd),
+    );
     return wrapped;
   }
 
@@ -300,19 +360,34 @@ export function createCodexToolRendering<TPreviewState = unknown>(
       paddingSource.track(context.toolCallId, context.invalidate);
       const outputPad = paddingSource.getOutputPad();
       state.status = options.isPartial ? "running" : context.isError ? "failed" : "completed";
-      state.summary =
-        typeof spec.collapsed === "function" && !options.isPartial && !context.isError
-          ? spec.collapsed(result, context.args)
-          : undefined;
+      state.summary = undefined;
+      if (!options.isPartial) {
+        const meta = { isError: context.isError };
+        if (typeof spec.collapsed === "function") {
+          state.summary = spec.collapsed(result, context.args, meta);
+        }
+        if (state.summary === undefined && typeof spec.summarizeResult === "function") {
+          state.summary = spec.summarizeResult(result, context.args, meta);
+        }
+      }
       updateHeader(spec, state, context.args, context, theme, outputPad);
 
-      if (options.expanded && !options.isPartial && !context.isError && spec.renderExpandedResult) {
-        return spec.renderExpandedResult(result, context.args, theme, outputPad);
+      if (
+        options.expanded &&
+        !options.isPartial &&
+        spec.renderExpandedResult &&
+        (!context.isError || spec.expandedResultOnFailed === true)
+      ) {
+        return spec.renderExpandedResult(result, context.args, theme, outputPad, {
+          isError: context.isError,
+        });
       }
 
       const rawText = toolResultText(result);
       const text = spec.transformOutput ? spec.transformOutput(rawText) : rawText;
-      const maxRows = spec.maxOutputRows ?? DEFAULT_MAX_OUTPUT_ROWS;
+      const maxRows = context.isError
+        ? (spec.failedOutputRows ?? spec.maxOutputRows ?? DEFAULT_MAX_OUTPUT_ROWS)
+        : (spec.maxOutputRows ?? DEFAULT_MAX_OUTPUT_ROWS);
       if (options.expanded && text.length > 0) {
         return new ToolOutputComponent(
           text,
@@ -322,24 +397,18 @@ export function createCodexToolRendering<TPreviewState = unknown>(
           outputPad,
         );
       }
-      if (context.isError && text.length > 0) {
+      if (context.isError && text.length > 0 && hasMeaningfulToolOutput(text)) {
         return new ToolOutputComponent(
           text,
           false,
           maxRows,
           (line) => theme.fg("error", line),
           outputPad,
+          "tail",
         );
       }
-      if (spec.collapsed === "preview" && text.length > 0) {
-        return new ToolOutputComponent(
-          text,
-          false,
-          maxRows,
-          (line) => theme.fg("dim", line),
-          outputPad,
-        );
-      }
+      // MiniMax-aligned: settled success stays header-only when collapsed.
+      // Evidence preview remains for failed (above) and for expand (above).
       return new Container();
     },
   };

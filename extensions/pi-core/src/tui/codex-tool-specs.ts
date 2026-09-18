@@ -5,8 +5,10 @@ import {
   getLanguageFromPath,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { commandGlance, createBashExpandedEvidence } from "./bash-evidence.ts";
 import { createEditDiffBox } from "./edit-diff.ts";
-import { countNonEmptyLines, toolResultText } from "./tool-output.ts";
+import { highlightShellCommandLines } from "./shell-command-highlight.ts";
+import { countMeaningfulBashLines, countNonEmptyLines, toolResultText } from "./tool-output.ts";
 import type { CodexToolRendererSpec } from "./tool-renderer.ts";
 import { createWritePreviewFromArgs, type WritePreviewComponent } from "./write-preview.ts";
 
@@ -17,7 +19,7 @@ import { createWritePreviewFromArgs, type WritePreviewComponent } from "./write-
  */
 export function countWrittenLines(content: string): number {
   if (content.length === 0) return 0;
-  const normalized = content.replace(/\r\n?/g, "\n");
+  const normalized = content.replace(/\r?\n/gu, "\n");
   const lines = normalized.split("\n").length;
   return normalized.endsWith("\n") ? lines - 1 : lines;
 }
@@ -130,15 +132,54 @@ export const codexLsToolSpec: CodexToolRendererSpec = {
   collapsed: countSummary("entry", "entries"),
 };
 
+/**
+ * MiniMax-style bash header summary: `13 output lines` / `1 output line` /
+ * `no output`. Line counting lives in `countMeaningfulBashLines`; this helper
+ * only formats the summary copy. Failed calls report the count when present,
+ * but omit `no output`.
+ */
+export function summarizeBashOutput(
+  result: AgentToolResult<unknown>,
+  _args: Record<string, unknown>,
+  options: { isError: boolean },
+): string | undefined {
+  const count = countMeaningfulBashLines(compactBashStatusSpacing(toolResultText(result)));
+  if (count > 0) return `${count} output ${count === 1 ? "line" : "lines"}`;
+  return options.isError ? undefined : "no output";
+}
+
+export { BASH_GLANCE_BUDGET, commandGlance } from "./bash-evidence.ts";
+
+/**
+ * Bash glance header (design B): fixed-budget command + dim
+ * `· N output lines` + host-driven `▶`/`▼`. Full command evidence lives in
+ * the expanded body (ctrl+o / click).
+ */
 export const codexBashToolSpec: CodexToolRendererSpec = {
   icon: "\uF155", // fa-upload / bash
   runningVerb: "Running",
   completedVerb: "Ran",
-  argument: (args) => (typeof args.command === "string" ? args.command : ""),
-  headerLayout: "wrap-command",
+  failedVerb: "Command failed",
+  argument: (args) => commandGlance(typeof args.command === "string" ? args.command : ""),
+  highlightArgument: (argument) =>
+    argument.length > 0 ? highlightShellCommandLines(argument).join("\n") : argument,
+  singleLineHeader: true,
+  showExpandIndicator: true,
   collapsed: "preview",
-  maxOutputRows: 5,
+  summarizeResult: summarizeBashOutput,
+  // failedOutputRows exceeds renderer DEFAULT_MAX_OUTPUT_ROWS (5) on purpose.
+  failedOutputRows: 8,
   transformOutput: compactBashStatusSpacing,
+  expandedResultOnFailed: true,
+  renderExpandedResult(result, args, theme, outputPad, meta) {
+    return createBashExpandedEvidence({
+      command: typeof args.command === "string" ? args.command : "",
+      outputText: compactBashStatusSpacing(toolResultText(result)),
+      theme,
+      outputPad,
+      isError: meta.isError,
+    });
+  },
 };
 
 export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = {
@@ -157,7 +198,7 @@ export const codexWriteToolSpec: CodexToolRendererSpec<WritePreviewComponent> = 
     context.state.rendererState = preview;
     return preview;
   },
-  renderExpandedResult(_result, args, theme) {
+  renderExpandedResult(_result, args, theme, _outputPad, _meta) {
     return createWritePreviewFromArgs(args, undefined, theme);
   },
 };
@@ -169,7 +210,7 @@ export const codexEditToolSpec: CodexToolRendererSpec = {
   argument: toolPath,
   collapsed: summarizeEditDiff,
   formatSummary: colorizeEditDiffSummary,
-  renderExpandedResult: (result, args, theme, outputPad) => {
+  renderExpandedResult: (result, args, theme, outputPad, _meta) => {
     const details = result.details as { diff?: unknown } | undefined;
     return createEditDiffBox(typeof details?.diff === "string" ? details.diff : "", theme, {
       outputPad,

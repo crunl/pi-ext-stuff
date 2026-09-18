@@ -12,6 +12,7 @@ import {
   buildExpandedOutput,
   buildOutputPreview,
   countNonEmptyLines,
+  hasMeaningfulToolOutput,
 } from "../src/tui/tool-output.ts";
 
 describe("buildOutputPreview", () => {
@@ -164,5 +165,14 @@ describe("host differential rendering", () => {
 describe("countNonEmptyLines", () => {
   it("counts result entries without counting blank trailing lines", () => {
     expect(countNonEmptyLines("one\n\n two \n")).toBe(2);
+  });
+});
+
+describe("hasMeaningfulToolOutput", () => {
+  it("treats Pi's (no output) placeholder as empty", () => {
+    expect(hasMeaningfulToolOutput("(no output)")).toBe(false);
+    expect(hasMeaningfulToolOutput("")).toBe(false);
+    expect(hasMeaningfulToolOutput("ok")).toBe(true);
+    expect(hasMeaningfulToolOutput("err\nCommand exited with code 1")).toBe(true);
   });
 });

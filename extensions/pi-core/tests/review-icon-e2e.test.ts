@@ -154,7 +154,7 @@ describe("review icon header e2e (host updateDisplay order)", () => {
       { isPartial: false, isError: true },
     );
     expect(failedPass.call.join("\n")).toContain(REVIEW_ICON);
-    expect(failedPass.call.join("\n")).toContain("Failed");
+    expect(failedPass.call.join("\n")).toContain("Command failed");
   });
 
   it("never stamps a call that never entered review", () => {

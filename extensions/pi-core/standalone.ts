@@ -18,8 +18,9 @@ export { withCodexToolPresentation } from "./src/tui/codex-tool-presentation.ts"
 /**
  * @deprecated Migration-compatibility surface: these piecewise spec/helper
  * exports predate `withCodexToolPresentation`, which decorates a complete
- * tool definition in one step. Retained for existing consumers; prefer the
- * decorator for new code.
+ * tool definition in one step. Prefer the decorator for new code.
+ * **Consumers (pi-permissions) should migrate**; piecewise exports remain
+ * only until that cutover and may be narrowed later without a long dual-run.
  */
 export {
   codexBashToolSpec,
