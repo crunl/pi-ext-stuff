@@ -59,8 +59,15 @@ function parseTruecolor(ansi: string): [number, number, number] | null {
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
-/** Fraction of the diff color mixed into the base background. */
-const DIFF_TINT = 0.3;
+/**
+ * MiniMax `packages/tui` dedicated diff row backgrounds
+ * (`theme/palettes.ts` `diffAddedBg` / `diffRemovedBg`) — GitHub-like
+ * muted green/red, not a 30% fg tint on the tool surface.
+ */
+const MINIMAX_DIFF_ADDED_BG_DARK: [number, number, number] = [0x21, 0x3a, 0x2b];
+const MINIMAX_DIFF_REMOVED_BG_DARK: [number, number, number] = [0x4a, 0x22, 0x1d];
+const MINIMAX_DIFF_ADDED_BG_LIGHT: [number, number, number] = [0xda, 0xfb, 0xe1];
+const MINIMAX_DIFF_REMOVED_BG_LIGHT: [number, number, number] = [0xff, 0xeb, 0xe9];
 
 type RowBg = (text: string) => string;
 
@@ -70,30 +77,34 @@ interface RowBackgrounds {
   removed: RowBg;
 }
 
+function truecolorBackground(rgb: [number, number, number]): RowBg {
+  const open = `\x1b[48;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+  return (text) => `${open}${text}\x1b[49m`;
+}
+
 /**
- * Build per-row background painters. pi themes have no diff backgrounds
- * (toolSuccessBg and toolErrorBg are both neutral surface colors in e.g.
- * catppuccin), so added/removed tint the box background with the theme's
- * own diff foreground colors (toolDiffAdded/toolDiffRemoved). Falls back
- * to a uniform box background when the theme is not truecolor.
+ * Row backgrounds aligned with MiniMax: solid `diffAddedBg`/`diffRemovedBg`
+ * hex values (dark vs light picked from the host theme surface). Context
+ * keeps the neutral tool surface — MiniMax does not tint unchanged lines.
  */
 function buildRowBackgrounds(theme: Theme): RowBackgrounds {
   const boxBg: RowBg = (text) => theme.bg("toolSuccessBg", text);
+  let isLightSurface = false;
   try {
     const base = parseTruecolor(theme.getBgAnsi("toolSuccessBg"));
-    const added = parseTruecolor(theme.getFgAnsi("toolDiffAdded"));
-    const removed = parseTruecolor(theme.getFgAnsi("toolDiffRemoved"));
-    if (!base || !added || !removed) return { context: boxBg, added: boxBg, removed: boxBg };
-
-    const tinted = (tint: [number, number, number]): RowBg => {
-      const channel = (i: number) => Math.round(base[i] * (1 - DIFF_TINT) + tint[i] * DIFF_TINT);
-      const open = `\x1b[48;2;${channel(0)};${channel(1)};${channel(2)}m`;
-      return (text) => `${open}${text}\x1b[49m`;
-    };
-    return { context: boxBg, added: tinted(added), removed: tinted(removed) };
+    if (base) isLightSurface = (base[0] + base[1] + base[2]) / 3 > 140;
   } catch {
-    return { context: boxBg, added: boxBg, removed: boxBg };
+    // Fall through to dark palette (MiniMax default in the dark.json set).
   }
+  return {
+    context: boxBg,
+    added: truecolorBackground(
+      isLightSurface ? MINIMAX_DIFF_ADDED_BG_LIGHT : MINIMAX_DIFF_ADDED_BG_DARK,
+    ),
+    removed: truecolorBackground(
+      isLightSurface ? MINIMAX_DIFF_REMOVED_BG_LIGHT : MINIMAX_DIFF_REMOVED_BG_DARK,
+    ),
+  };
 }
 
 class EditDiffRows implements Component {
@@ -148,15 +159,13 @@ class EditDiffRows implements Component {
 
       logicalRows.forEach((content, index) => {
         const gutter = index === 0 ? `${marker} ${number} │ ` : `${" ".repeat(numberWidth + 2)} │ `;
-        // Highlighted content carries its own ANSI colors (with resets that
-        // would truncate an outer wrap), so only the gutter gets the diff
-        // color. Plain content keeps the original whole-line diff color.
+        // Highlighted content carries its own ANSI colors; only the gutter gets
+        // the diff color. Plain content keeps the whole-line diff color.
         const body = highlighted
           ? `${this.theme.fg(color, gutter)}${content}`
           : this.theme.fg(color, `${gutter}${content}`);
-        // The whole box keeps its neutral background; added/removed rows
-        // are tinted toward the theme's diff colors. Pad first so the
-        // background spans the full row width.
+        // Long lines wrap so the full change stays visible; continuation rows
+        // share the line-number gutter column.
         const padded = `${body}${" ".repeat(Math.max(0, width - visibleWidth(body)))}`;
         output.push(this.rowBg[row.kind](padded));
       });

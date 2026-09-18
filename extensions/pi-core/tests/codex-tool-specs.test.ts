@@ -98,6 +98,7 @@ describe("codex tool specs", () => {
     const running = rendering.renderCall(args, theme as never, ctx as never);
     const runningText = stripTerminalSequences(running.render(100).join("\n"));
     expect(runningText).toContain("Editing src/a.ts");
+    expect(runningText).toContain("▶");
 
     rendering.renderResult(
       {
@@ -112,6 +113,34 @@ describe("codex tool specs", () => {
     const text = stripTerminalSequences(completed.render(100).join("\n"));
     expect(text).toContain("Edited src/a.ts");
     expect(text).toContain("+2 -1");
+    expect(text).toContain("▶");
+  });
+
+  it("edit expanded header switches chevron to ▼", () => {
+    const rendering = createCodexToolRendering(codexEditToolSpec, padSource);
+    const args = { path: "src/a.ts" };
+    const ctx = context({ args, expanded: true });
+    rendering.renderCall(args, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      {
+        content: [{ type: "text", text: "ok" }],
+        details: { diff: "  1 context\n-2 old\n+2 new" },
+      } as never,
+      { expanded: true, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+    const header = stripTerminalSequences(
+      rendering
+        .renderCall(args, theme as never, ctx as never)
+        .render(100)
+        .join("\n"),
+    );
+    expect(header).toContain("Edited src/a.ts");
+    expect(header).toContain("▼");
+    expect(header).not.toContain("▶");
+    const body = result.render(100).map((row) => stripTerminalSequences(row));
+    expect(body.length).toBeGreaterThan(0);
   });
 
   it("write spec collapses to the header with a green +N line summary", () => {
@@ -457,5 +486,13 @@ describe("CodexToolRendererSpec type surface", () => {
     expect(typeof spec.summarizeResult).toBe("function");
     expect(typeof spec.renderExpandedResult).toBe("function");
     expect(spec.expandedResultOnFailed).toBeFalsy();
+  });
+
+  it("edit spec exposes expand chevron with diff summary", () => {
+    const spec: CodexToolRendererSpec = codexEditToolSpec;
+    expect(spec.singleLineHeader).toBe(true);
+    expect(spec.showExpandIndicator).toBe(true);
+    expect(typeof spec.collapsed).toBe("function");
+    expect(typeof spec.renderExpandedResult).toBe("function");
   });
 });
