@@ -198,7 +198,9 @@ function leadingParts<TPreviewState = unknown>(
   const icon = context.toolCallMark
     ? ""
     : `${theme.fg(bulletColor, theme.bold(state.leadingIconOverride ?? spec.icon ?? "•"))} `;
-  return { icon, verb: theme.bold(verb), summary };
+  // Failed verb carries error-red regardless of icon provenance (icon = source, verb = result).
+  const styledVerb = status === "failed" ? theme.fg("error", theme.bold(verb)) : theme.bold(verb);
+  return { icon, verb: styledVerb, summary };
 }
 
 function headerText<TPreviewState = unknown>(

@@ -99,8 +99,9 @@ describe("createCodexToolRendering", () => {
     expect(stripTerminalSequences(failed.render(80).join("\n")).trim()).toBe(
       "review Failed npm test",
     );
+    // warning = reviewed icon pin; error = Failed verb (result), not the icon.
     expect(colors).toContain("warning");
-    expect(colors).not.toContain("error");
+    expect(colors).toContain("error");
   });
 
   it("keeps status colors for calls without leadingIconOverride", () => {
