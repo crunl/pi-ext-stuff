@@ -130,6 +130,81 @@ describe("codex tool specs", () => {
     expect(text).toContain("+2");
   });
 
+  it("read settled header is path · N lines + chevron with empty body", () => {
+    const rendering = createCodexToolRendering(codexReadToolSpec, padSource);
+    const args = { path: "/repo/src/a.ts" };
+    const ctx = context({ args });
+    const header = rendering.renderCall(args, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      { content: [{ type: "text", text: "a\nb\nc" }] } as never,
+      { expanded: false, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+    const line = stripTerminalSequences(header.render(100).join("\n"));
+    expect(line).toContain("Read /repo/src/a.ts");
+    expect(line).toContain("· 3 lines");
+    expect(line).toContain("▶");
+    expect(result.render(100)).toEqual([]);
+  });
+
+  it("read expanded body uses line-number gutter, not the bash \u2514 rail", () => {
+    const rendering = createCodexToolRendering(codexReadToolSpec, padSource);
+    const args = { path: "/repo/src/a.ts", offset: 10, limit: 3 };
+    const ctx = context({ args, expanded: true, isError: false });
+    const header = rendering.renderCall(args, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      { content: [{ type: "text", text: "line ten\nline eleven\nline twelve\n" }] } as never,
+      { expanded: true, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+    expect(stripTerminalSequences(header.render(100).join("\n"))).toContain("▼");
+    const body = result.render(100).map((row) => stripTerminalSequences(row));
+    const joined = body.join("\n");
+    expect(joined).toContain("10 │");
+    expect(joined).toContain("11 │");
+    expect(joined).not.toContain("└");
+  });
+
+  it("read failed expanded stays on the error rail without file gutter", () => {
+    const rendering = createCodexToolRendering(codexReadToolSpec, padSource);
+    const args = { path: "/repo/missing.md" };
+    const ctx = context({ args, isError: true, expanded: true });
+    const header = rendering.renderCall(args, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      { content: [{ type: "text", text: "ENOENT: no such file" }] } as never,
+      { expanded: true, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+    expect(stripTerminalSequences(header.render(100).join("\n"))).toContain("▼");
+    const joined = result
+      .render(100)
+      .map((row) => stripTerminalSequences(row))
+      .join("\n");
+    expect(joined).toContain("ENOENT");
+    expect(joined).not.toMatch(/\d+\s+│/u);
+  });
+
+  it("read failed keeps error rail without line summary", () => {
+    const rendering = createCodexToolRendering(codexReadToolSpec, padSource);
+    const args = { path: "/repo/missing.md" };
+    const ctx = context({ args, isError: true });
+    const header = rendering.renderCall(args, theme as never, ctx as never);
+    const result = rendering.renderResult(
+      { content: [{ type: "text", text: "ENOENT: no such file" }] } as never,
+      { expanded: false, isPartial: false },
+      theme as never,
+      ctx as never,
+    );
+    const line = stripTerminalSequences(header.render(100).join("\n"));
+    expect(line).toContain("Failed");
+    expect(line).not.toMatch(/·\s+\d+\s+lines?/u);
+    const body = result.render(100).map((row) => stripTerminalSequences(row));
+    expect(body.join("\n")).toContain("ENOENT");
+  });
+
   it("bash glance header is one row with verb, command start, and output summary", () => {
     const { headerLines, rawHeader } = renderBashLifecycle({
       args: { command: "npm test" },
@@ -373,5 +448,14 @@ describe("CodexToolRendererSpec type surface", () => {
     expect(spec.failedOutputRows).toBe(8);
     expect(spec.expandedResultOnFailed).toBe(true);
     expect(spec.showExpandIndicator).toBe(true);
+  });
+
+  it("read spec exposes file-evidence contract fields", () => {
+    const spec: CodexToolRendererSpec = codexReadToolSpec;
+    expect(spec.singleLineHeader).toBe(true);
+    expect(spec.showExpandIndicator).toBe(true);
+    expect(typeof spec.summarizeResult).toBe("function");
+    expect(typeof spec.renderExpandedResult).toBe("function");
+    expect(spec.expandedResultOnFailed).toBeFalsy();
   });
 });

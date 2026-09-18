@@ -65,7 +65,7 @@ describe("pi-core registration", () => {
         name: "read",
         args: { path: "src/index.ts" },
         output: "file contents",
-        expected: "\uF15C Read src/index.ts",
+        expected: "\uF15C Read src/index.ts · 1 line",
       },
       {
         name: "grep",

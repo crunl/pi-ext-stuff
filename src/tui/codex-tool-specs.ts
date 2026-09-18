@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { commandGlance, createBashExpandedEvidence } from "./bash-evidence.ts";
 import { createEditDiffBox } from "./edit-diff.ts";
+import { createReadEvidence, summarizeReadLines } from "./read-evidence.ts";
 import { highlightShellCommandLines } from "./shell-command-highlight.ts";
 import { countMeaningfulBashLines, countNonEmptyLines, toolResultText } from "./tool-output.ts";
 import type { CodexToolRendererSpec } from "./tool-renderer.ts";
@@ -92,12 +93,29 @@ function readArgument(args: Record<string, unknown>): string {
   return `${path}:${start}${end}`;
 }
 
+/**
+ * Read: file identity in the header (`path[:offset-limit] · N lines`) and
+ * file evidence in expand only (`NN │ code` + language highlight). Never
+ * reuses bash stdout's `└` rail.
+ */
 export const codexReadToolSpec: CodexToolRendererSpec = {
   icon: "\uF15C", // nf-fa-file_lines
   runningVerb: "Reading",
   completedVerb: "Read",
   argument: readArgument,
   collapsed: "hidden",
+  singleLineHeader: true,
+  showExpandIndicator: true,
+  summarizeResult: summarizeReadLines,
+  renderExpandedResult(result, args, theme, outputPad, _meta) {
+    return createReadEvidence({
+      path: typeof args.path === "string" ? args.path : "",
+      text: toolResultText(result),
+      theme,
+      outputPad,
+      startLine: typeof args.offset === "number" ? args.offset : 1,
+    });
+  },
 };
 
 export const codexGrepToolSpec: CodexToolRendererSpec = {
