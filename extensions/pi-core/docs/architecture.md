@@ -63,9 +63,14 @@ Adding an export here is the only supported way to widen the contract.
   dim `· N output lines` / `· no output` on the same row, host-driven
   `▶`/`▼` expand chevron (`showExpandIndicator`), `failedVerb: "Command failed"`.
   Settled success + collapsed = header-only body; failed keeps error preview.
+  **Read**: header `path[:range] · N lines` + chevron; expand only shows
+  file evidence via `read-evidence.ts` (never bash `└` stdout rail).
 - `bash-evidence.ts` — `commandGlance` + expanded bash evidence
   (`$ ` full command under `  │ `, then full output). Imports command caps from
   `shell-command-highlight.ts`, not from reserved wrap header.
+- `read-evidence.ts` — expanded file evidence: absolute line numbers + dim
+  `│` gutter + `getLanguageFromPath`/`highlightCode`; caps
+  `READ_EVIDENCE_MAX_LINES`/`CHARS`; no wrap (1 line number ↔ 1 logical line).
 - `shell-command-highlight.ts` — command-position shell highlight +
   `MAX_COMMAND_CHARS`.
 - `bash-command-header.ts` — **reserved** Codex ExecCell wrap layout
