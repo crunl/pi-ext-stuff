@@ -447,16 +447,17 @@ describe("createCodexToolRendering", () => {
       theme,
       renderContext,
     );
-    const result = rendering.renderResult!(
-      { content: [{ type: "text", text: "ok" }] } as any,
-      { expanded: false, isPartial: true },
-      theme,
-      renderContext,
-    );
-
     expect(paddedHeader).not.toBe(unpaddedHeader);
     expect(paddedHeader.render(80)[0]).toMatch(/^ • Running/);
-    expect(result.render(80)[0]).toMatch(/^ {3}└ ok/);
+
+    // Settled success collapsed is header-only; failed still paints the preview rail.
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state, { isError: true }),
+    );
+    expect(result.render(80)[0]).toMatch(/^ {3}└ boom/);
     expect(paddingSource.track).toHaveBeenCalledWith("call-1", renderContext.invalidate);
   });
 
@@ -575,7 +576,7 @@ describe("createCodexToolRendering", () => {
       { content: [{ type: "text", text: body }] } as any,
       { expanded: false, isPartial: false },
       theme,
-      context({}),
+      context({}, { isError: true }),
     );
 
     const first = result.render(80);

@@ -58,19 +58,29 @@ Adding an export here is the only supported way to widen the contract.
   compatibility Seam for permission-owned definitions.
 - `codex-tool-specs.ts` — 7 tool render specs (icon, verbs, collapsed summary)
   plus the per-tool summary helpers (bash status spacing compaction, edit-diff
-  count/colorize, write line-count colorize). Bash uses
-  `headerLayout: "wrap-command"`.
-- `bash-command-header.ts` — Codex ExecCell-style command header: verb on the
-  first row with the start of the command, `  │ ` continuation rail (max 2
-  rows), bash syntax highlighting via Pi's public `highlightCode`. Display-only.
+  count/colorize, write line-count colorize). **Bash glance header (design B)**:
+  `singleLineHeader`, command first line capped at `BASH_GLANCE_BUDGET` + `…`,
+  dim `· N output lines` / `· no output` on the same row, host-driven
+  `▶`/`▼` expand chevron (`showExpandIndicator`), `failedVerb: "Command failed"`.
+  Settled success + collapsed = header-only body; failed keeps error preview.
+- `bash-evidence.ts` — `commandGlance` + expanded bash evidence
+  (`$ ` full command under `  │ `, then full output). Imports command caps from
+  `shell-command-highlight.ts`, not from reserved wrap header.
+- `shell-command-highlight.ts` — command-position shell highlight +
+  `MAX_COMMAND_CHARS`.
+- `bash-command-header.ts` — **reserved** Codex ExecCell wrap layout
+  (`headerLayout: "wrap-command"`). No production spec uses it; renderer still
+  routes the layout for tests/opt-in.
+- `tool-output.ts` — collapsed preview builders, `countMeaningfulBashLines` /
+  `isNoOutputPlaceholder` (Pi `(no output)` single source).
 - `tool-renderer.ts` — generic `createCodexToolRendering(spec)` with lifecycle
-  colors and renderer-owned shared state. `headerLayout: "wrap-command"` routes
-  bash through `WrappedCommandHeader`; the default `single` path is unchanged.
-  Peer extensions may stamp a permanent leading glyph badge via
-  `context.state.leadingIconOverride` (plain string). When set, the icon
-  color is pinned to warning; verb still follows status. Codex-header tools
-  (bash/write/edit) use this slot; tools without a Codex header (e.g.
-  request_permissions) keep the overlay status row.
+  colors and renderer-owned shared state. Default header path is
+  `singleLineHeader`/`single`; optional `headerLayout: "wrap-command"` routes
+  through reserved `WrappedCommandHeader`. Peer extensions may stamp a permanent
+  leading glyph badge via `context.state.leadingIconOverride` (plain string).
+  When set, the icon color is pinned to warning; verb still follows status.
+  Codex-header tools (bash/write/edit) use this slot; tools without a Codex
+  header (e.g. request_permissions) keep the overlay status row.
 - `output-padding.ts` — watches effective settings only in TUI mode. Shared
   through `globalThis`/`Symbol.for` so renderers imported by pi-permissions
   through a separate jiti instance see the same value. **Internal only** (not

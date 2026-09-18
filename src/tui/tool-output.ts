@@ -21,7 +21,29 @@ export function toolResultText(result: AgentToolResult<unknown>): string {
 }
 
 export function countNonEmptyLines(text: string): number {
-  return text.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+  return text.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+}
+
+/** Pi bash success placeholder — not real stdout. Single source of truth. */
+const NO_OUTPUT_PLACEHOLDER = /^\(no output\)\s*$/u;
+
+export function isNoOutputPlaceholder(line: string): boolean {
+  return NO_OUTPUT_PLACEHOLDER.test(line.trim());
+}
+
+/**
+ * Meaningful bash stdout lines: non-empty, excluding Pi's `(no output)`.
+ * Used for header line-count summaries and empty-preview gating.
+ */
+export function countMeaningfulBashLines(text: string): number {
+  return text
+    .replace(/\r?\n/gu, "\n")
+    .split("\n")
+    .filter((line) => line.trim().length > 0 && !isNoOutputPlaceholder(line)).length;
+}
+
+export function hasMeaningfulToolOutput(text: string): boolean {
+  return countMeaningfulBashLines(text) > 0;
 }
 
 function createOutputLayout(width: number, outputPad: OutputPad): OutputLayout {
@@ -59,11 +81,14 @@ function withPrefixes(rows: readonly string[], layout: OutputLayout): string[] {
   );
 }
 
+export type PreviewEdge = "head-tail" | "tail";
+
 export function buildOutputPreview(
   text: string,
   width: number,
   maxRows = 5,
   outputPad: OutputPad = 0,
+  edge: PreviewEdge = "head-tail",
 ): string[] {
   if (text.length === 0 || width <= 0 || maxRows <= 0) return [];
   const layout = createOutputLayout(width, outputPad);
@@ -71,6 +96,12 @@ export function buildOutputPreview(
   if (rows.length <= maxRows) return withPrefixes(rows, layout);
   if (maxRows === 1) {
     return withPrefixes([`… +${rows.length} lines`], layout);
+  }
+
+  if (edge === "tail") {
+    const tailCount = maxRows - 1;
+    const omitted = rows.length - tailCount;
+    return withPrefixes([`… +${omitted} lines`, ...rows.slice(-tailCount)], layout);
   }
 
   const contentRows = maxRows - 1;

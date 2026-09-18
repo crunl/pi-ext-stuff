@@ -1,14 +1,23 @@
-import { highlightCode } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OutputPad } from "./output-padding.ts";
+import { highlightShellCommandLines, MAX_COMMAND_CHARS } from "./shell-command-highlight.ts";
+
+/**
+ * Codex ExecCell wrap-command layout — **reserved**.
+ *
+ * No production `CodexToolRendererSpec` sets `headerLayout: "wrap-command"`
+ * anymore (`codexBashToolSpec` uses glance + `bash-evidence`). The renderer
+ * still routes this layout for tests and any future opt-in callers. Do not
+ * add new live imports of this module for glance/evidence concerns.
+ */
 
 /** Codex ExecCell `command_continuation_max_lines`. */
 export const COMMAND_CONTINUATION_MAX_LINES = 2;
 /** Codex `  │ ` continuation prefix (two leading spaces + bar). */
 export const COMMAND_CONTINUATION_PREFIX = "  │ ";
 
-/** Cap before highlight so pathological commands cannot stall the renderer. */
-const MAX_COMMAND_CHARS = 4_000;
+/** @deprecated Import `MAX_COMMAND_CHARS` from `shell-command-highlight.ts`. */
+export { MAX_COMMAND_CHARS };
 
 export interface HeaderLeading {
   /** Already colored icon including trailing space, or empty when the host owns the mark. */
@@ -21,7 +30,7 @@ export interface HeaderLeading {
 
 function highlightCommand(command: string): string[] {
   const source = command.length > MAX_COMMAND_CHARS ? command.slice(0, MAX_COMMAND_CHARS) : command;
-  return highlightCode(source, "bash");
+  return highlightShellCommandLines(source);
 }
 
 function wrapHighlightedLines(
@@ -43,8 +52,8 @@ function wrapHighlightedLines(
 }
 
 /**
- * Codex-style bash header: status verb on the first row with the start of the
- * command, continuation rows under a `  │ ` rail, bash syntax highlighting.
+ * Codex-style bash header — **@reserved** wrap-command layout.
+ * Production `codexBashToolSpec` uses glance + `bash-evidence` instead.
  * Display-only; never mutates tool args.
  */
 export class WrappedCommandHeader {
