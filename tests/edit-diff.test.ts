@@ -3,14 +3,13 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { createEditDiffBox, parseEditDiff } from "../src/tui/edit-diff.ts";
 
-// Truecolor fake theme: base surface + green/red diff foregrounds, so
-// buildRowBackgrounds can derive tinted row backgrounds.
+// Theme fake: MiniMax dedicated diff backgrounds apply regardless of fg tint.
 const BASE_BG = "\u001b[48;2;60;60;70m";
 const GREEN_FG = "\u001b[38;2;0;200;0m";
 const RED_FG = "\u001b[38;2;220;40;40m";
-// Expected tints: base*0.7 + diff*0.3 per channel
-const ADDED_BG = "\u001b[48;2;42;102;49m";
-const REMOVED_BG = "\u001b[48;2;108;54;61m";
+// MiniMax dark palette (packages/tui/theme/palettes.ts)
+const ADDED_BG = "\u001b[48;2;33;58;43m"; // #213A2B MiniMax dark
+const REMOVED_BG = "\u001b[48;2;74;34;29m"; // #4A221D MiniMax dark
 // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matches ANSI escape sequences
 const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
@@ -69,8 +68,8 @@ describe("createEditDiffBox", () => {
     expect(plain).toContain("- 10 │ old value");
     expect(plain).toContain("+ 10 │ new value");
     expect(rendered[0]).toContain(BASE_BG); // context: neutral box background
-    expect(rendered[1]).toContain(REMOVED_BG); // removed: red-tinted
-    expect(rendered[2]).toContain(ADDED_BG); // added: green-tinted
+    expect(rendered[1]).toContain(REMOVED_BG); // MiniMax removed background
+    expect(rendered[2]).toContain(ADDED_BG); // added: MiniMax #213A2B
     expect(rendered.every((line) => line.startsWith(" "))).toBe(true);
   });
 
@@ -89,11 +88,11 @@ describe("createEditDiffBox", () => {
     } as unknown as Theme;
     const component = createEditDiffBox("+10 x\n-11 y", nonTruecolor, { outputPad: 0 });
     const rendered = component.render(40);
-    expect(rendered[0]).toContain(BASE_BG); // both rows: plain box bg
-    expect(rendered[1]).toContain(BASE_BG);
+    expect(rendered[0]).toContain(ADDED_BG); // MiniMax palette independent of theme fg
+    expect(rendered[1]).toContain(REMOVED_BG);
   });
 
-  it("uses an empty gutter when a long CJK diff row wraps", () => {
+  it("wraps long CJK diff rows with an empty continuation gutter", () => {
     const component = createEditDiffBox("+120 新增内容需要在狭窄终端正确换行", theme, {
       outputPad: 0,
     });
@@ -121,7 +120,7 @@ describe("createEditDiffBox", () => {
     expect(rendered[0]).toContain("\x1b[35mbefore\x1b[39m"); // context highlighted
     expect(rendered[2]).toContain("\x1b[35mnew value\x1b[39m"); // added highlighted
     expect(rendered[1]).toContain("\x1b[35mold value\x1b[39m"); // removed highlighted too
-    expect(rendered[1]).toContain(REMOVED_BG); // removal signaled by background
+    expect(rendered[1]).toContain(REMOVED_BG); // removal uses MiniMax removed bg */
     expect(stripAnsi(rendered[1])).toContain("- 10 │ old value");
   });
 

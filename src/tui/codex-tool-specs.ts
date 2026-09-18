@@ -226,6 +226,8 @@ export const codexEditToolSpec: CodexToolRendererSpec = {
   runningVerb: "Editing",
   completedVerb: "Edited",
   argument: toolPath,
+  singleLineHeader: true,
+  showExpandIndicator: true,
   collapsed: summarizeEditDiff,
   formatSummary: colorizeEditDiffSummary,
   renderExpandedResult: (result, args, theme, outputPad, _meta) => {
