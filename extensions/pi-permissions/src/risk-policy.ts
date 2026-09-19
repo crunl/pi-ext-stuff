@@ -3,6 +3,7 @@ import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem
 import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { type ResidualSignal, residualsForPrompt } from "./permissions/residual.ts";
 import {
   analyzeShellGitNetwork,
   classifyRisk,
@@ -30,6 +31,7 @@ export type RiskDecision =
       filesystemWriteRoots?: string[];
       justification?: string;
       executionMode?: "escalated";
+      residuals?: ResidualSignal[];
     }
   | { action: "block"; risk: Risk; reason: string };
 
@@ -150,6 +152,13 @@ async function evaluateRequestPermissions(
       network.network_access === true
         ? "Whole-network outbound authority (subject to hard destination and private-target policy), current turn only"
         : summarize("request_permissions", input),
+    residuals: residualsForPrompt({
+      permissionAmendment: true,
+      networkUncovered:
+        network.network_access === true || normalized.amendment.networkHosts.length > 0,
+      writeUncovered: normalized.amendment.writeRoots.length > 0,
+      risk: "REVIEW",
+    }),
     ...(network.network_access === true ? { networkAll: true as const } : {}),
     ...(normalized.amendment.networkHosts.length > 0
       ? { networkHosts: normalized.amendment.networkHosts }
@@ -180,8 +189,27 @@ function pathOperation(operation: string): "read" | "write" | undefined {
 }
 
 /**
- * Host-owned tools keep their owner's approval and enforcement semantics.
- * pi-permissions only contributes explicit user rules at this boundary.
+ * Host-first B: only configured `rules` deny blocks. ask/allow/no-match do
+ * not enter Engine or Guardian — host-first tools have no sandbox ownership.
+ */
+export function evaluateHostFirstRulesOnly(
+  tool: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  config: PermissionsConfig,
+): { block: true; reason: string } | undefined {
+  const request = normalizeToolCall(tool, input, cwd);
+  const match = matchRules(request, config.rules);
+  if (match?.action === "deny") {
+    return { block: true, reason: "Denied by permissions rule" };
+  }
+  return undefined;
+}
+
+/**
+ * Compatibility RiskDecision shape for host-first tools under product scope B.
+ * Prefer `evaluateHostFirstRulesOnly` at production call sites. Not used by
+ * register.ts host-first path after foreign A / host-first B cut.
  */
 export async function evaluateHostRiskRequest(
   tool: string,
@@ -189,31 +217,14 @@ export async function evaluateHostRiskRequest(
   cwd: string,
   config: PermissionsConfig,
 ): Promise<RiskDecision> {
-  const rule = matchRules(
-    {
-      tool,
-      operation: "external",
-      input,
-      cwd,
-      resolvedPaths: [],
-    },
-    config.rules,
-  );
-  if (rule?.action === "deny") {
-    return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
-  }
-  if (rule?.action === "ask") {
-    return {
-      action: "prompt",
-      risk: "REVIEW",
-      reason: "Approval required by permissions rule",
-      summary: summarize(tool, input),
-    };
+  const denial = evaluateHostFirstRulesOnly(tool, input, cwd, config);
+  if (denial) {
+    return { action: "block", risk: "HARD", reason: denial.reason };
   }
   return {
     action: "allow",
     risk: "LOW",
-    reason: rule?.action === "allow" ? "Allowed by permissions rule" : "Host tool policy",
+    reason: "Host tool policy",
   };
 }
 
@@ -293,12 +304,21 @@ export async function evaluateRiskRequest(
     return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
   }
   if (request.operation === "external") {
+    // Product scope 2026-09-19: owned tools do not produce operation=external;
+    // host-first B uses evaluateHostFirstRulesOnly and foreign A is out of
+    // tool_call governance. This branch is compatibility-only — do not route
+    // host-first/foreign here to resurrect host-admission review.
     if (rule?.action === "ask") {
       return {
         action: "prompt",
         risk: "REVIEW",
         reason: "Approval required by permissions rule",
         summary: summarize(tool, input),
+        residuals: residualsForPrompt({
+          ruleAsk: true,
+          hostAdmissionReview: true,
+          risk: "REVIEW",
+        }),
       };
     }
     return {
@@ -367,6 +387,7 @@ export async function evaluateRiskRequest(
     }
   }
   const operation = pathOperation(request.operation);
+  let writeOutsideRoots = false;
   if (operation) {
     for (const path of request.resolvedPaths) {
       const decision = await isPathAllowed(path, {
@@ -380,6 +401,7 @@ export async function evaluateRiskRequest(
       if (decision.allowed) continue;
       if (decision.reason === "write path is outside allowed roots") {
         risk = risk === "HARD" ? "HARD" : "REVIEW";
+        writeOutsideRoots = true;
         continue;
       }
       return { action: "block", risk: "HARD", reason: decision.reason };
@@ -407,6 +429,13 @@ export async function evaluateRiskRequest(
           ? "Approval required by permissions rule"
           : `${risk} operation`,
       summary: summarize(tool, input),
+      residuals: residualsForPrompt({
+        ruleAsk: promptedByRule,
+        escalation: escalationRequested,
+        risk,
+        writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
+        actionReview: risk !== "LOW" && filesystemWriteRoots.length === 0 && !escalationRequested,
+      }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
       justification: escalation.requested
         ? escalation.justification

@@ -26,6 +26,7 @@ import {
   type RuntimeDenialPolicy,
   type TurnHandle,
 } from "./approve-for-me-engine.ts";
+import { ensureNonEmptyResiduals } from "./permissions/residual.ts";
 import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
 import type { ReviewUi } from "./review-presenter.ts";
 import { ReviewPresenter, type ReviewStatusBinding } from "./review-presenter.ts";
@@ -158,11 +159,20 @@ function engineOwnership(kind: PiActionKind): InvocationOwnership {
   return "sandbox-owned";
 }
 
+/**
+ * Non-production compatibility for `kind:"host"`. Product scope 2026-09-19:
+ * register.ts no longer constructs host actions (foreign A / host-first B).
+ * Do not wire host-first/foreign tool_call back to this projection.
+ */
 function hostAdmission(admission: EngineAdmissionPlan, tool: string): EngineAdmissionPlan {
   const requested = [{ kind: "external-tool" as const, provider: "pi-host", name: tool }];
   if (admission.kind === "deny") return admission;
   if (admission.kind === "allow") return { ...admission, requested };
-  return { ...admission, requested, review: "action" };
+  const existing = admission.residuals ?? [];
+  const residuals = ensureNonEmptyResiduals(
+    existing.includes("host_admission_review") ? existing : [...existing, "host_admission_review"],
+  );
+  return { ...admission, requested, review: "action", residuals };
 }
 
 function admissionForAction(

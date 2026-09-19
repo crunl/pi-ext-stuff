@@ -589,8 +589,9 @@ describe("Permission mode registration", () => {
     expect(app.handlers.has("before_agent_start")).toBe(false);
     await startAgent(app);
 
-    await executeHostCall(app, "WebFetch", "host-context-file");
+    await executeBash(app, "guardian-context", "printf context");
 
+    expect(app.reviewInputs).toHaveLength(1);
     const reviewerContext = app.reviewContexts[0] as Record<string, unknown>;
     expect(reviewerContext).not.toHaveProperty("parentInstructions");
   });
@@ -894,7 +895,7 @@ describe("Permission mode registration", () => {
     expect(app.notify).not.toHaveBeenCalled();
   });
 
-  it("reviews Bash network access at the exact boundary without replaying the command", async () => {
+  it("fail-closes uncovered Bash network at the boundary without inline Guardian", async () => {
     const host = "api.example.com";
     const app = await makeHarness({
       risk: () => lowRisk(),
@@ -904,15 +905,13 @@ describe("Permission mode registration", () => {
     await startAgent(app);
     app.setStatus.mockClear();
 
-    await executeBash(app, "runtime-network", "curl https://api.example.com/data");
+    await expect(
+      executeBash(app, "runtime-network", "curl https://api.example.com/data"),
+    ).rejects.toMatchObject({ code: "permission-required" });
 
     expect(app.riskEvaluator).toHaveBeenCalledOnce();
-    expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([
-      { host, port: 443 },
-    ]);
+    expect(app.reviewInputs).toHaveLength(0);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
-    expect(reviewStatusCalls(app)).toHaveLength(0);
   });
 
   it("defers a default private Bash target to the runtime boundary", async () => {
@@ -979,7 +978,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
   });
 
-  it("sends a private DNS answer through normal runtime review when local binding is enabled", async () => {
+  it("fail-closes uncovered private DNS at runtime even when local binding is enabled", async () => {
     const host = "router.internal";
     const app = await makeHarness({
       config: { sandbox: { network: { allowLocalBinding: true } } },
@@ -990,14 +989,10 @@ describe("Permission mode registration", () => {
     await startSession(app);
     await startAgent(app);
 
-    await expect(executeBash(app, "local-binding", `curl http://${host}/admin`)).resolves.toEqual({
-      content: [],
-      details: undefined,
-    });
-    expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.requestedNetworkTargets).toEqual([
-      { host, port: 80 },
-    ]);
+    await expect(
+      executeBash(app, "local-binding", `curl http://${host}/admin`),
+    ).rejects.toMatchObject({ code: "permission-required" });
+    expect(app.reviewInputs).toHaveLength(0);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
   });
 
@@ -1765,67 +1760,128 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
-  it("reviews a generic host tool without claiming sandbox enforcement", async () => {
+  it("passes foreign host tools through without risk or Guardian", async () => {
     const app = await makeHarness({ risk: () => promptRisk() });
     await startSession(app);
     await startAgent(app);
 
-    await expect(executeHostCall(app, "WebFetch", "host-approve")).resolves.toBeUndefined();
+    for (const toolName of ["WebFetch", "mcp__github__get_issue", "HardTool"]) {
+      await expect(executeHostCall(app, toolName, `foreign-${toolName}`)).resolves.toBeUndefined();
+    }
 
-    expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.sandboxEnforcesAction).toBe(false);
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
-  it("lets a default-allowed host tool bypass Guardian", async () => {
-    const app = await makeHarness({ risk: () => lowRisk() });
+  it("passes host-first tools through when rules are empty", async () => {
+    const app = await makeHarness({ risk: () => promptRisk() });
     await startSession(app);
     await startAgent(app);
 
-    await expect(
-      executeHostCall(app, "mcp__github__get_issue", "host-default"),
-    ).resolves.toBeUndefined();
+    for (const toolName of ["read", "grep", "find", "ls"]) {
+      await expect(
+        invoke(app, "tool_call", {
+          type: "tool_call",
+          toolName,
+          toolCallId: `hf-${toolName}`,
+          input: { path: "README.md" },
+        }),
+      ).resolves.toBeUndefined();
+    }
 
     expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
   });
 
-  it("reviews an explicitly asked host tool even when the main sandbox is disabled", async () => {
+  it("blocks host-first tools only on configured rules deny, without Guardian", async () => {
     const app = await makeHarness({
-      config: { sandbox: { enabled: false } },
+      config: {
+        rules: [
+          { action: "deny", tool: "read", pattern: "*/Library/*" },
+          { action: "deny", tool: "ls" },
+          { action: "ask", tool: "grep", pattern: "*" },
+        ],
+      },
       risk: () => promptRisk(),
     });
     await startSession(app);
     await startAgent(app);
 
+    const denied = await invoke(app, "tool_call", {
+      type: "tool_call",
+      toolName: "read",
+      toolCallId: "hf-deny-read",
+      input: { path: "/Users/example/Library/Preferences/x" },
+    });
+    expect(denied).toMatchObject({ block: true });
+    expect((denied as { reason?: string }).reason).toContain("Denied by permissions rule");
+
+    const deniedLs = await invoke(app, "tool_call", {
+      type: "tool_call",
+      toolName: "ls",
+      toolCallId: "hf-deny-ls",
+      input: { path: "." },
+    });
+    expect(deniedLs).toMatchObject({ block: true });
+
+    // rules.ask on host-first is ignored — no Engine/Guardian prompt path.
     await expect(
-      executeHostCall(app, "WebFetch", "host-disabled-sandbox"),
+      invoke(app, "tool_call", {
+        type: "tool_call",
+        toolName: "grep",
+        toolCallId: "hf-ask-ignored",
+        input: { pattern: "foo" },
+      }),
     ).resolves.toBeUndefined();
 
-    expect(app.reviewInputs).toHaveLength(1);
-    expect(app.reviewInputs[0]?.permissionContext.sandboxEnforcesAction).toBe(false);
-    expect(app.reviewInputs[0]?.permissionContext.filesystemDenyRead).toEqual([]);
+    // Non-matching path still passes.
+    await expect(
+      invoke(app, "tool_call", {
+        type: "tool_call",
+        toolName: "read",
+        toolCallId: "hf-allow-read",
+        input: { path: "README.md" },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+
+    // Exact host API block shape: only block + reason.
+    const keys = Object.keys(denied as object).sort();
+    expect(keys).toEqual(["block", "reason"].sort());
   });
 
-  it("adds no-workaround guidance for a generic denial and never reviews a hard block", async () => {
+  it("yolo skips host-first B deny and subagent spawn gate (documented exception)", async () => {
     const app = await makeHarness({
-      risk: (tool) => (tool === "HardTool" ? blockRisk("Hard policy") : promptRisk()),
-      review: () => denied("Not authorized."),
+      config: {
+        rules: [{ action: "deny", tool: "read", pattern: "*" }],
+        delegation: { allowReDelegate: false, maxDepth: 0 },
+      },
+      risk: () => promptRisk(),
     });
     await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
     await startAgent(app);
 
-    const deniedCall = await executeHostCall(app, "WebFetch", "host-deny");
-    expect(deniedCall).toMatchObject({ block: true });
-    expect((deniedCall as { reason?: string }).reason).toContain(
-      "must not attempt to achieve the same outcome through a workaround",
-    );
+    await expect(
+      invoke(app, "tool_call", {
+        type: "tool_call",
+        toolName: "read",
+        toolCallId: "yolo-read",
+        input: { path: "secret.env" },
+      }),
+    ).resolves.toBeUndefined();
 
-    const reviewCount = app.reviewInputs.length;
-    const hardCall = await executeHostCall(app, "HardTool", "host-hard");
-    expect(hardCall).toMatchObject({ block: true });
-    expect(app.reviewInputs).toHaveLength(reviewCount);
+    await expect(executeHostCall(app, "subagent", "yolo-spawn")).resolves.toBeUndefined();
+
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
   });
 
   it("retains real permissions-command activation and rollback for explicit policy", async () => {
@@ -2097,11 +2153,6 @@ describe("Permission mode registration", () => {
       });
       const configs: unknown[] = [];
       const runtime: SrtRuntimeLike = {
-        getNetworkModeCapabilities: () => ({
-          apiVersion: 1,
-          platform: "macos",
-          modes: ["restricted", "proxy", "direct"],
-        }),
         isSupportedPlatform: () => true,
         checkDependenciesAsync: async () => ({ errors: [], warnings: [] }),
         initialize: async () => {},
@@ -2120,9 +2171,15 @@ describe("Permission mode registration", () => {
           return { argv: [process.execPath, "-e", ""], env: {} };
         },
       };
+      const weakerWrap = { enableWeakerNetworkIsolation: true };
       const guard = new SandboxConnectGuard();
       vi.spyOn(guard, "start").mockResolvedValue(undefined);
       vi.spyOn(guard, "close").mockResolvedValue(undefined);
+      // start() is stubbed so port never binds; product still keys weaker
+      // isolation off parentProxyUrl when a guard seam is present.
+      Object.defineProperty(guard, "parentProxyUrl", {
+        get: () => "http://pi-permissions:test@127.0.0.1:43123",
+      });
       const manager = new SrtSandboxManager(runtime, guard);
       const app = await makeHarness({
         useRealBashTool: true,
@@ -2206,7 +2263,7 @@ describe("Permission mode registration", () => {
         }
         expect(manager.describeState()).toMatchObject({ healthy: true, draining: false });
         await executeBash(app, "post-drain-child", "printf child");
-        expect(configs).toEqual([{ network: { mode: "direct" } }, { network: { mode: "proxy" } }]);
+        expect(configs).toEqual([weakerWrap, weakerWrap]);
         expect(app.reviewInputs).toHaveLength(0);
       } finally {
         // Teardown only after the detached operation settles and failure assertions;
@@ -2329,51 +2386,19 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(3);
   });
 
-  it("reports pending inline AllowOnce without inventing a future exemption", async () => {
-    let entered!: () => void;
-    const entry = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+  it("reports no pending inline AllowOnce after uncovered network fail-closed", async () => {
     const app = await makeHarness({
       useRealBashTool: true,
       useRealPermissionRuntime: true,
       sandboxNetworkAttempt: { host: "api.example.com", port: 443 },
-      review: async (_request, ordinal) => {
-        if (ordinal === 1) {
-          entered();
-          await gate;
-        }
-        return approved();
-      },
+      review: async () => approved(),
     });
     await startSession(app);
     await startAgent(app);
-    const first = executeBash(app, "pending-inline", "printf A");
-    await entry;
-    try {
-      await app.commands.get("permissions")!.handler("status", app.context);
-      const view = JSON.parse(
-        String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
-      );
-      expect(view.authority).toMatchObject({
-        pendingReviews: 1,
-        pendingConnections: 1,
-        actionGrants: [],
-        turn: { networkAll: false, networkHosts: [] },
-      });
-      expect(app.reviewInputs[0]?.permissionContext.permissionLifetime).toBe(
-        "pending-connection-only",
-      );
-    } finally {
-      release();
-    }
-    await first;
-    await executeBash(app, "new-inline", "printf B");
-    expect(app.reviewInputs).toHaveLength(2);
+    await expect(executeBash(app, "pending-inline", "printf A")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    expect(app.reviewInputs).toHaveLength(0);
     await app.commands.get("permissions")!.handler("status", app.context);
     const view = JSON.parse(
       String(app.notify.mock.calls.at(-1)?.[0]).split("\n").slice(1).join("\n"),
@@ -3364,7 +3389,7 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps legacy real Bash inline AllowOnce separate from durable host grants", async () => {
+  it("keeps uncovered Bash network fail-closed until request_permissions grants a lease", async () => {
     const app = await makeHarness({
       useRealBashTool: true,
       useRealPermissionRuntime: true,
@@ -3372,14 +3397,17 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
-    await executeBash(app, "legacy-A", "printf A");
-    await executeBash(app, "legacy-B", "printf B");
-    expect(app.reviewInputs).toHaveLength(2);
+    await expect(executeBash(app, "legacy-A", "printf A")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    await expect(executeBash(app, "legacy-B", "printf B")).rejects.toMatchObject({
+      code: "permission-required",
+    });
+    expect(app.reviewInputs).toHaveLength(0);
     await executeRequestPermissions(app, "legacy-turn", "api.example.com");
     await executeBash(app, "legacy-C", "printf C");
-    expect(app.reviewInputs).toHaveLength(3);
+    expect(app.reviewInputs).toHaveLength(1); // amendment review only
     expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
-      execution: { kind: "proxy", inlineReview: true },
       allowedDomains: [],
     });
     expect(app.sandboxManager.execute.mock.calls[2]?.[0].policy.network.allowedDomains).toEqual([
@@ -3990,20 +4018,31 @@ describe("Permission mode registration", () => {
     await invoke(app, "agent_settled", { type: "agent_settled" });
   });
 
-  it("blocks declared host-tool capabilities outside the envelope", async () => {
+  it("blocks host-first tools by rules deny inside a nested child turn", async () => {
     const app = await makeHarness({
-      config: { delegation: { networkHosts: [] } },
-      risk: (tool) =>
-        tool === "WebFetch" ? promptRisk({ networkHosts: ["outside.example"] }) : lowRisk(),
+      config: {
+        rules: [{ action: "deny", tool: "read", pattern: "*/Library/*" }],
+        delegation: { networkHosts: [] },
+      },
+      risk: () => promptRisk(),
     });
     await startSession(app);
     await startAgent(app);
     await startAgent(app);
 
-    const blocked = await executeHostCall(app, "WebFetch", "child-fetch");
+    const blocked = await invoke(app, "tool_call", {
+      type: "tool_call",
+      toolName: "read",
+      toolCallId: "child-read-deny",
+      input: { path: "/Users/example/Library/Secrets" },
+    });
     expect(blocked).toMatchObject({ block: true });
-    expect((blocked as { reason?: string }).reason).toContain("delegation envelope");
+    expect((blocked as { reason?: string }).reason).toContain("Denied by permissions rule");
     expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
+
+    // Foreign tools remain pass-through even under an active delegation envelope.
+    await expect(executeHostCall(app, "WebFetch", "child-fetch")).resolves.toBeUndefined();
 
     await endAgent(app);
     await invoke(app, "agent_settled", { type: "agent_settled" });

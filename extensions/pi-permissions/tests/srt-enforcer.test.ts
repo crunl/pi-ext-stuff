@@ -6,7 +6,6 @@ import type {
   SandboxAskCallback,
   SandboxRuntimeConfig,
   SandboxViolationStore,
-  SandboxWrapConfig,
 } from "@anthropic-ai/sandbox-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { expandSymlinkAliases } from "../src/filesystem-policy.ts";
@@ -80,12 +79,8 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   readonly initialized: SandboxRuntimeConfig[] = [];
   readonly updated: SandboxRuntimeConfig[] = [];
   readonly wrapped: string[] = [];
-  readonly wrapConfigs: Array<SandboxWrapConfig | undefined> = [];
-  getNetworkModeCapabilities: SrtRuntimeLike["getNetworkModeCapabilities"] = () => ({
-    apiVersion: 1,
-    platform: "macos",
-    modes: ["restricted", "proxy"],
-  });
+  /** Pristine SRT wrap customConfig is unused; product never injects network.mode. */
+  readonly wrapConfigs: Array<Record<string, unknown> | undefined> = [];
   readonly violationsByCommand = new Map<string, Array<{ line: string }>>();
   lastWrapOptions: { commandId?: string; commandText?: string } | undefined;
   cleanupCalls = 0;
@@ -123,7 +118,7 @@ class FakeSrtRuntime implements SrtRuntimeLike {
   async wrapWithSandboxArgv(
     command: string,
     _binShell?: string,
-    customConfig?: SandboxWrapConfig,
+    customConfig?: Record<string, unknown>,
     _abortSignal?: AbortSignal,
     _cwd?: string,
     options?: { commandId?: string; commandText?: string },
@@ -237,8 +232,10 @@ function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
   };
 }
 
+const weakerWrap = { enableWeakerNetworkIsolation: true };
+
 describe("SRT executor contract", () => {
-  it("runs the hermetic system fake-SRT fixture from a simulated Linux host descriptor", async () => {
+  it("runs hermetic fake-SRT without inject wrap network.mode (pristine)", async () => {
     const original = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { ...original, value: "linux" });
     const simulated = Object.getOwnPropertyDescriptor(process, "platform");
@@ -251,9 +248,7 @@ describe("SRT executor contract", () => {
         try {
           await manager.activate(policy);
           await execute(manager, policy);
-          expect(runtime.wrapConfigs).toEqual([
-            { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
-          ]);
+          expect(runtime.wrapConfigs).toEqual([undefined]);
         } finally {
           await manager.reset();
         }
@@ -264,95 +259,76 @@ describe("SRT executor contract", () => {
     }
   });
 
-  it(
-    "maps eligible direct and startup system TLS per attempt without widening the initialized base",
-    withDarwin(async () => {
-      const runtime = new FakeSrtRuntime();
-      runtime.getNetworkModeCapabilities = () => ({
-        apiVersion: 1,
-        platform: "macos",
-        modes: ["restricted", "proxy", "direct"],
-      });
-      const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
-      const configuredSystem = basePolicy();
-      configuredSystem.network.access = { kind: "explicit", transport: "proxy" };
-      configuredSystem.network.macosTls = "system";
-      await manager.activate(configuredSystem);
-      await execute(manager, configuredSystem);
-      const authorized = structuredClone(configuredSystem);
-      authorized.network.network_access = true;
-      authorized.network.allowLocalBinding = false;
-      await execute(manager, authorized);
-      const direct = basePolicy();
-      Object.assign(direct.network, {
-        access: { kind: "explicit", transport: "direct" },
-        network_access: true,
-        allowPrivateTargets: true,
-      });
-      await execute(manager, direct, { networkAuthorize: async () => ({ allowed: false }) });
-      expect(runtime.wrapped[2]).not.toContain("NO_PROXY");
-      expect(runtime.wrapConfigs).toEqual([
-        { network: { mode: "restricted" }, enableWeakerNetworkIsolation: false },
-        { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
-        { network: { mode: "direct" } },
-      ]);
-      expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
-      expect(runtime.updated.every((config) => config.enableWeakerNetworkIsolation !== true)).toBe(
-        true,
-      );
-      expect(runtime.updated.every((config) => config.network.allowedDomains.length === 0)).toBe(
-        true,
-      );
-      await manager.reset();
-    }),
-  );
+  it("does not inject enableWeakerNetworkIsolation without a connect-guard", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const policy = basePolicy();
+    policy.network.network_access = true;
+    await manager.activate(policy);
+    await execute(manager, policy);
+    expect(runtime.wrapConfigs).toEqual([undefined]);
+    expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
+    expect(runtime.updated.every((c) => !("enableWeakerNetworkIsolation" in c))).toBe(true);
+    await manager.reset();
+  });
 
-  it.each(["direct-missing", "system-platform", "system-api-missing"] as const)(
-    "fails closed before wrap when the public backend cannot provide %s",
-    withDarwin(async (surface) => {
-      const runtime = new FakeSrtRuntime();
-      const manager = new SrtSandboxManager(runtime);
-      const policy = basePolicy();
-      if (surface === "direct-missing")
-        Object.assign(policy.network, {
-          access: { kind: "explicit", transport: "direct" },
-          network_access: true,
-          allowPrivateTargets: true,
-        });
-      else {
-        policy.network.macosTls = "system";
-        runtime.getNetworkModeCapabilities =
-          surface === "system-api-missing"
-            ? undefined
-            : () => ({ apiVersion: 1, platform: "linux", modes: ["restricted", "proxy"] });
+  it("does not inject weaker isolation when the guard has not started (no parentProxyUrl)", async () => {
+    class UnstartedGuard extends SandboxConnectGuard {
+      override get parentProxyUrl(): string | undefined {
+        return undefined;
       }
-      await expect(execute(manager, policy)).rejects.toThrow(
-        /public restricted\/proxy mode capability/,
-      );
-      expect(runtime.wrapped).toEqual([]);
-      expect(runtime.initialized).toEqual([]);
-      await manager.reset();
-    }),
-  );
+    }
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime, new UnstartedGuard());
+    await manager.activate(basePolicy());
+    await execute(manager, basePolicy());
+    expect(runtime.wrapConfigs).toEqual([undefined]);
+    expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
+    expect(runtime.updated.every((c) => !("enableWeakerNetworkIsolation" in c))).toBe(true);
+    await manager.reset();
+  });
 
-  it(
-    "selects opted-in legacy inline system helpers before any future connection review",
-    withDarwin(async () => {
-      const runtime = new FakeSrtRuntime();
-      const manager = new SrtSandboxManager(runtime);
-      const policy = basePolicy();
-      policy.network.macosTls = "system";
-      await manager.activate(policy);
-      await execute(manager, policy);
-      expect(runtime.wrapConfigs).toEqual([
-        { network: { mode: "proxy" }, enableWeakerNetworkIsolation: true },
-      ]);
-      expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
-      await manager.reset();
-    }),
-  );
+  it("injects weaker isolation only when guard parentProxyUrl is live", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
+    await manager.activate(basePolicy());
+    await execute(manager, basePolicy());
+    expect(runtime.wrapConfigs).toEqual([weakerWrap]);
+    expect(runtime.initialized[0]).toHaveProperty("enableWeakerNetworkIsolation", true);
+    const network = runtime.initialized[0]?.network as
+      | { allowedDomains?: string[]; parentProxy?: unknown }
+      | undefined;
+    expect(network).toHaveProperty("parentProxy");
+    expect(network?.allowedDomains).toEqual([]);
+    await manager.reset();
+  });
 
-  it("maps frozen explicit attempts to public per-wrap modes and keeps legacy absent", async () => {
+  it("uses native initialize/update network lists; wrap never carries network.mode", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
+    const policy = basePolicy();
+    policy.network.access = { kind: "explicit", transport: "proxy" };
+    policy.network.macosTls = "system";
+    await manager.activate(policy);
+    await execute(manager, policy);
+    const authorized = structuredClone(policy);
+    authorized.network.network_access = true;
+    authorized.network.allowLocalBinding = false;
+    await execute(manager, authorized);
+    expect(runtime.wrapConfigs).toEqual([weakerWrap, weakerWrap]);
+    expect(runtime.initialized[0]).toHaveProperty("enableWeakerNetworkIsolation", true);
+    expect(runtime.initialized[0]?.network).not.toHaveProperty("mode");
+    expect(runtime.updated.every((config) => config.network.allowedDomains.length === 0)).toBe(
+      true,
+    );
+    expect(runtime.updated.every((config) => !("mode" in (config.network ?? {})))).toBe(true);
+    expect(runtime.updated.every((config) => config.enableWeakerNetworkIsolation === true)).toBe(
+      true,
+    );
+    await manager.reset();
+  });
+
+  it("never injects OS network.mode customConfig on wrap", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
     const restricted = basePolicy();
@@ -363,18 +339,13 @@ describe("SRT executor contract", () => {
     proxy.network.allowedDomains = ["api.example.com"];
     await execute(manager, proxy);
     await execute(manager, basePolicy());
-    expect(runtime.wrapConfigs).toEqual([
-      { network: { mode: "restricted" } },
-      { network: { mode: "proxy" } },
-      undefined,
-    ]);
+    expect(runtime.wrapConfigs).toEqual([weakerWrap, weakerWrap, weakerWrap]);
     expect(runtime.initialized[0]?.network).not.toHaveProperty("mode");
-    expect(runtime.updated.every((config) => !("mode" in config.network))).toBe(true);
     expect(manager.isHealthy()).toBe(true);
     await manager.reset();
   });
 
-  it("captures queued explicit policy before caller mutation and restores the initialized base", async () => {
+  it("captures queued policy before caller mutation without wrap mode", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime);
     const restricted = basePolicy();
@@ -400,10 +371,7 @@ describe("SRT executor contract", () => {
     proxy.network.access = { kind: "inline-proxy" };
     release.resolve();
     await Promise.all([a, b]);
-    expect(runtime.wrapConfigs).toEqual([
-      { network: { mode: "restricted" } },
-      { network: { mode: "proxy" } },
-    ]);
+    expect(runtime.wrapConfigs).toEqual([undefined, undefined]);
     expect(runtime.updated.map((config) => config.network.allowedDomains)).toEqual([
       ["api.example.com"],
       [],
@@ -413,7 +381,7 @@ describe("SRT executor contract", () => {
   });
 
   it.each(["cleanup", "restore"])(
-    "preserves explicit %s failure poison and activation recovery",
+    "preserves %s failure poison and activation recovery without wrap mode",
     async (stage) => {
       const runtime = new FakeSrtRuntime();
       const manager = new SrtSandboxManager(runtime);
@@ -425,7 +393,7 @@ describe("SRT executor contract", () => {
       if (stage === "cleanup") runtime.failCleanup = true;
       else runtime.failUpdateCall = 2;
       await expect(execute(manager, proxy)).rejects.toThrow(`SRT ${stage} failed`);
-      expect(runtime.wrapConfigs).toEqual([{ network: { mode: "proxy" } }]);
+      expect(runtime.wrapConfigs).toEqual([undefined]);
       expect(runtime.updated.at(-1)?.network.allowedDomains).toEqual([]);
       expect(manager.isHealthy()).toBe(false);
       await expect(execute(manager, restricted)).rejects.toThrow(/poison|cleanup|restore/);
@@ -435,42 +403,7 @@ describe("SRT executor contract", () => {
       await manager.activate(restricted);
       expect(manager.isHealthy()).toBe(true);
       await execute(manager, restricted);
-      expect(runtime.wrapConfigs.at(-1)).toEqual({ network: { mode: "restricted" } });
-      await manager.reset();
-    },
-  );
-
-  it("rejects a forged attempt projection before public wrapping", async () => {
-    const runtime = new FakeSrtRuntime();
-    const manager = new SrtSandboxManager(runtime);
-    await manager.activate(basePolicy());
-    const policy = basePolicy();
-    policy.network.access = { kind: "explicit", transport: "proxy" };
-    policy.network.execution = { kind: "proxy", inlineReview: false };
-    await expect(execute(manager, policy)).rejects.toThrow(/projection/);
-    expect(runtime.wrapped).toEqual([]);
-    await manager.reset();
-  });
-
-  it.each(["missing", "unsupported"])(
-    "rejects %s explicit mode capability before launch",
-    async (capability) => {
-      const runtime = new FakeSrtRuntime();
-      runtime.getNetworkModeCapabilities =
-        capability === "missing"
-          ? undefined
-          : () => ({
-              apiVersion: 1,
-              platform: "linux",
-              modes: [],
-            });
-      const manager = new SrtSandboxManager(runtime);
-      await manager.activate(basePolicy());
-      const policy = basePolicy();
-      policy.network.access = { kind: "explicit", transport: "proxy" };
-      await expect(execute(manager, policy)).rejects.toThrow(/explicit network/);
-      expect(runtime.wrapped).toEqual([]);
-      expect(manager.isHealthy()).toBe(true);
+      expect(runtime.wrapConfigs.at(-1)).toBeUndefined();
       await manager.reset();
     },
   );
@@ -571,11 +504,7 @@ describe("SRT executor contract", () => {
       runtime.wrapGate = undefined;
       await expect(execute(manager, policy)).resolves.toMatchObject({ exitCode: 0 });
       expect(runtime.maxActiveWraps).toBe(1);
-      expect(runtime.wrapConfigs).toEqual(
-        explicit
-          ? [{ network: { mode: "restricted" } }, { network: { mode: "restricted" } }]
-          : [undefined, undefined],
-      );
+      expect(runtime.wrapConfigs.every((config) => config === undefined)).toBe(true);
       await manager.reset();
     },
   );
@@ -584,11 +513,6 @@ describe("SRT executor contract", () => {
     "keeps the public idle barrier behind cancelled %s wrapping and cleanup",
     withDarwin(async (surface) => {
       const runtime = new FakeSrtRuntime();
-      runtime.getNetworkModeCapabilities = () => ({
-        apiVersion: 1,
-        platform: "macos",
-        modes: ["restricted", "proxy", "direct"],
-      });
       const manager = new SrtSandboxManager(runtime);
       const policy = basePolicy();
       Object.assign(policy.network, {

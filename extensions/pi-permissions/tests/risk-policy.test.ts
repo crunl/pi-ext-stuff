@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type PermissionsConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
 import {
+  evaluateHostFirstRulesOnly,
   evaluateHostRiskRequest,
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
@@ -149,10 +150,11 @@ describe("Permission request own-property shape", () => {
 });
 
 describe("Risk policy gate", () => {
-  it("leaves every host-owned tool to its owner unless a rule opts into review", async () => {
+  it("host-first B: empty rules never block; only deny does; ask is ignored", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-host-"));
 
     for (const [tool, input] of [
+      ["read", { path: "README.md" }],
       ["WebFetch", { url: "http://127.0.0.1/internal" }],
       ["apply_patch", { path: "/outside/file", content: "updated" }],
       ["powershell", { command: "Remove-Item -Recurse C:\\\\workspace" }],
@@ -161,14 +163,38 @@ describe("Risk policy gate", () => {
         action: "allow",
         risk: "LOW",
       });
+      expect(evaluateHostFirstRulesOnly(tool, input, cwd, config())).toBeUndefined();
     }
 
-    const configured = config({
+    const askOnly = config({
       rules: [{ action: "ask", tool: "WebFetch", pattern: "*example.com*" }],
     });
+    expect(
+      evaluateHostFirstRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
+    ).toBeUndefined();
     await expect(
-      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, configured),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
+    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+
+    const denyRules = config({
+      rules: [{ action: "deny", tool: "read", pattern: "*/Library/*" }],
+    });
+    expect(
+      evaluateHostFirstRulesOnly(
+        "read",
+        { path: "/Users/example/Library/Preferences/x" },
+        cwd,
+        denyRules,
+      ),
+    ).toMatchObject({ block: true, reason: "Denied by permissions rule" });
+    await expect(
+      evaluateHostRiskRequest(
+        "read",
+        { path: "/Users/example/Library/Preferences/x" },
+        cwd,
+        denyRules,
+      ),
+    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
   });
 
   it("allows ordinary workspace reads and writes", async () => {
@@ -1390,5 +1416,97 @@ describe("custom/MCP tool approvals (codex-aligned)", () => {
     await expect(
       evaluateRiskRequest("read", { path: "README.md" }, cwd, configured),
     ).resolves.toMatchObject({ action: "allow" });
+  });
+});
+
+describe("RiskDecision residual stamps", () => {
+  it("stamps rule_ask on owned rule.ask prompts; host-first B has no prompt residuals", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-host-"));
+    const hostConfig = config({
+      rules: [{ action: "ask", tool: "WebFetch", pattern: "*example.com*" }],
+    });
+    expect(
+      evaluateHostFirstRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
+    ).toBeUndefined();
+    await expect(
+      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
+    ).resolves.toMatchObject({ action: "allow" });
+
+    const bashConfig = config({
+      rules: [{ action: "ask", tool: "bash", pattern: "npm test*" }],
+    });
+    const owned = await evaluateRiskRequest("bash", { command: "npm test" }, cwd, bashConfig);
+    expect(owned).toMatchObject({
+      action: "prompt",
+      residuals: expect.arrayContaining(["rule_ask"]),
+    });
+  });
+
+  it("stamps escalation on require_escalated prompts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-esc-"));
+    const decision = await evaluateRiskRequest(
+      "bash",
+      {
+        command: "git add README.md && git commit -m update",
+        sandbox_permissions: "require_escalated",
+        justification: "Update the isolated fixture repository",
+      },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
+      action: "prompt",
+      residuals: expect.arrayContaining(["escalation"]),
+    });
+  });
+
+  it("stamps permission_amendment on request_permissions prompts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-amend-"));
+    const decision = await evaluateRiskRequest(
+      "request_permissions",
+      { permissions: { filesystem: { write: [join(cwd, "out")] } }, scope: "turn" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({
+      action: "prompt",
+      residuals: expect.arrayContaining(["permission_amendment", "write_root_uncovered"]),
+    });
+  });
+
+  it("keeps sandboxed non-dangerous bash allow/LOW without residuals", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-allow-"));
+    const decision = await evaluateRiskRequest("bash", { command: "npm test" }, cwd, config());
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).not.toHaveProperty("residuals");
+  });
+
+  it("keeps the rule.allow short-circuit allow without residuals", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-allow-rule-"));
+    const configured = config({
+      rules: [{ action: "allow", tool: "bash", pattern: "curl *" }],
+    });
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "curl -X POST https://example.com/api" },
+      cwd,
+      configured,
+    );
+    expect(decision).toMatchObject({
+      action: "allow",
+      risk: "LOW",
+      reason: "Allowed by permissions rule",
+    });
+    expect(decision).not.toHaveProperty("residuals");
+  });
+
+  it("stamps risk_not_low on dangerous/HARD prompts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-permissions-residual-hard-"));
+    const decision = await evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config());
+    expect(decision).toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+      residuals: expect.arrayContaining(["risk_not_low"]),
+    });
   });
 });

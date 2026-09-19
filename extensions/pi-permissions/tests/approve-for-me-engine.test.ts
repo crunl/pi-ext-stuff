@@ -310,87 +310,64 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it.each([
-    {
-      label: "approval",
-      guardian: async () => ({ kind: "approve" as const, rationale: "endpoint approved" }),
-      expectedCode: undefined,
-    },
-    {
-      label: "denial",
-      guardian: async () => ({ kind: "deny" as const, rationale: "endpoint denied" }),
-      expectedCode: "review-denied",
-    },
-    {
-      label: "review timeout",
-      guardian: async () => ({ kind: "timed-out" as const }),
-      expectedCode: "review-timeout",
-    },
-    {
-      label: "review unavailable",
-      guardian: async () => ({ kind: "failed" as const, reason: "reviewer unavailable" }),
-      expectedCode: "review-unavailable",
-    },
-  ])(
-    "reviews sequential inline requests independently and aborts on terminal denial ($label)",
-    async ({ guardian, expectedCode }) => {
-      const { engine, review } = createEngine(guardian);
-      const turn = engine.beginTurn(snapshot());
-      const executor = vi.fn(async (attempt) => {
-        const request = {
-          capability: { kind: "network" as const, host: "api.other.org", port: 443 },
-        };
-        const first = await attempt.authorizeCapability(request);
-        const second = await attempt.authorizeCapability(request);
-        for (const decision of [first, second]) {
-          if (expectedCode === undefined) expect(decision).toMatchObject({ kind: "allow" });
-          else expect(decision).toMatchObject({ kind: "deny", error: { code: expectedCode } });
-        }
-        expect(attempt.signal.aborted).toBe(expectedCode !== undefined);
-        return completed("command continued");
-      });
-
-      const result = await turn.execute(call(executor));
-      if (expectedCode === undefined) {
-        expect(result).toEqual({ kind: "completed", value: "command continued" });
-      } else {
-        expect(result).toMatchObject({ kind: "blocked", error: { code: expectedCode } });
-      }
-      expect(executor).toHaveBeenCalledOnce();
-      expect(review).toHaveBeenCalledTimes(expectedCode === undefined ? 2 : 1);
-    },
-  );
-
-  it("coalesces concurrent inline reviews for the same pending capability", async () => {
-    let releaseReview: (() => void) | undefined;
-    const reviewGate = new Promise<void>((resolve) => {
-      releaseReview = resolve;
-    });
-    const { engine, review } = createEngine(async () => {
-      await reviewGate;
-      return { kind: "approve", rationale: "endpoint approved" };
-    });
+  it("fail-closes uncovered inline network without Guardian firewall review", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve" as const,
+      rationale: "must not be used as a network firewall",
+    }));
     const turn = engine.beginTurn(snapshot());
     const executor = vi.fn(async (attempt) => {
       const request = {
         capability: { kind: "network" as const, host: "api.other.org", port: 443 },
       };
-      const first = attempt.authorizeCapability(request);
-      const second = attempt.authorizeCapability(request);
-      releaseReview?.();
-      await expect(Promise.all([first, second])).resolves.toEqual([
-        { kind: "allow", capability: request.capability },
-        { kind: "allow", capability: request.capability },
+      const first = await attempt.authorizeCapability(request);
+      const second = await attempt.authorizeCapability(request);
+      for (const decision of [first, second]) {
+        expect(decision).toMatchObject({
+          kind: "deny",
+          error: { code: "permission-required" },
+        });
+      }
+      expect(attempt.signal.aborted).toBe(true);
+      return completed("should not finish");
+    });
+
+    const result = await turn.execute(call(executor));
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: { code: "permission-required" },
+    });
+    expect(executor).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("coalesces nothing: uncovered concurrent network asks all fail-closed without review", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve" as const,
+      rationale: "unused",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const executor = vi.fn(async (attempt) => {
+      const request = {
+        capability: { kind: "network" as const, host: "api.other.org", port: 443 },
+      };
+      const decisions = await Promise.all([
+        attempt.authorizeCapability(request),
+        attempt.authorizeCapability(request),
+      ]);
+      expect(decisions).toEqual([
+        expect.objectContaining({ kind: "deny", error: { code: "permission-required" } }),
+        expect.objectContaining({ kind: "deny", error: { code: "permission-required" } }),
       ]);
       return completed("command continued");
     });
 
-    await expect(turn.execute(call(executor))).resolves.toEqual({
-      kind: "completed",
-      value: "command continued",
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "permission-required" },
     });
     expect(executor).toHaveBeenCalledOnce();
-    expect(review).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("allows an exact local address from the static policy without reviewer escalation", async () => {
@@ -423,10 +400,10 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("lets allowLocalBinding send a private DNS capability through normal review", async () => {
+  it("fail-closes uncovered private DNS capability even when allowLocalBinding is set", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
-      rationale: "local target approved",
+      rationale: "must not review",
     }));
     const turn = engine.beginTurn(
       snapshot({
@@ -441,15 +418,15 @@ describe("ApproveForMeEngine public seam", () => {
         capability: { kind: "network", host: "router.internal", port: 80 },
       });
       return decision.kind === "allow"
-        ? completed("reviewed local")
+        ? completed("must not allow")
         : failed(decision.error.reason);
     });
 
-    await expect(turn.execute(call(executor))).resolves.toEqual({
-      kind: "completed",
-      value: "reviewed local",
+    await expect(turn.execute(call(executor))).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "permission-required" },
     });
-    expect(review).toHaveBeenCalledOnce();
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("keeps explicit network denies ahead of local-binding and static allows", async () => {
@@ -521,14 +498,14 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("preserves an inline reviewer denial when the turn closes during executor drain", async () => {
+  it("preserves permission-required for uncovered network when the turn closes during executor drain", async () => {
     let releaseDrain: (() => void) | undefined;
     const drain = new Promise<void>((resolve) => {
       releaseDrain = resolve;
     });
-    const { engine } = createEngine(async () => ({
+    const { engine, review } = createEngine(async () => ({
       kind: "deny",
-      rationale: "The endpoint is not authorized.",
+      rationale: "must not review as network firewall",
     }));
     const turn = engine.beginTurn(snapshot());
     let decisionCode: string | undefined;
@@ -541,7 +518,7 @@ describe("ApproveForMeEngine public seam", () => {
       return completed("late completion");
     });
     const result = turn.execute(call(executor));
-    await vi.waitFor(() => expect(decisionCode).toBe("review-denied"));
+    await vi.waitFor(() => expect(decisionCode).toBe("permission-required"));
 
     turn.close("user closed the turn");
     releaseDrain?.();
@@ -549,11 +526,11 @@ describe("ApproveForMeEngine public seam", () => {
     await expect(result).resolves.toMatchObject({
       kind: "blocked",
       error: {
-        code: "review-denied",
-        reason: "The endpoint is not authorized.",
+        code: "permission-required",
         effectsMayHaveOccurred: true,
       },
     });
+    expect(review).not.toHaveBeenCalled();
   });
 
   it("does not treat a wildcard as an exact local exception", async () => {
@@ -1130,6 +1107,155 @@ describe("ApproveForMeEngine public seam", () => {
     expect(result).toEqual({ kind: "completed", value: "action" });
     expect(review).toHaveBeenCalledOnce();
     expect(executor).toHaveBeenCalledOnce();
+  });
+
+  it("does not call Guardian for a static allow admission", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("static-ok"));
+    const result = await turn.execute(call(execute, { admission: { kind: "allow" } }));
+
+    expect(result).toEqual({ kind: "completed", value: "static-ok" });
+    expect(review).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+    turn.close();
+  });
+
+  it("passes residual stamps into Guardian review input", async () => {
+    const { engine, review } = createEngine(async (request) => {
+      expect(request.source).toBe("preview");
+      expect(request.residuals).toEqual(["rule_ask", "risk_not_low"]);
+      return { kind: "approve", rationale: "stamped review" };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("reviewed"));
+    const result = await turn.execute(
+      call(execute, {
+        admission: {
+          kind: "review",
+          risk: "REVIEW",
+          review: "action",
+          reason: "Approval required by permissions rule",
+          summary: "npm test",
+          residuals: ["rule_ask", "risk_not_low"],
+        },
+      }),
+    );
+
+    expect(result).toEqual({ kind: "completed", value: "reviewed" });
+    expect(review).toHaveBeenCalledOnce();
+    turn.close();
+  });
+
+  it("still reviews a review admission missing residual stamps (empty residuals never skip)", async () => {
+    const { engine, review } = createEngine(async (request) => {
+      expect(request.residuals === undefined || request.residuals.length === 0).toBe(true);
+      return { kind: "approve", rationale: "unstamped review still reviewed" };
+    });
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("reviewed-unstamped"));
+    const result = await turn.execute(
+      call(execute, {
+        admission: {
+          kind: "review",
+          risk: "REVIEW",
+          review: "action",
+          reason: "Approval required",
+          summary: "npm test",
+        },
+      }),
+    );
+
+    expect(result).toEqual({ kind: "completed", value: "reviewed-unstamped" });
+    expect(review).toHaveBeenCalledOnce();
+    turn.close();
+  });
+
+  it("blocks review admission with empty residual array (normalize fail-closed)", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not run",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("nope"));
+    const result = await turn.execute(
+      call(execute, {
+        admission: {
+          kind: "review",
+          risk: "REVIEW",
+          review: "action",
+          reason: "Approval required",
+          summary: "npm test",
+          residuals: [],
+        },
+      }),
+    );
+
+    expect(result.kind).toBe("blocked");
+    if (result.kind === "blocked") expect(result.error.code).toBe("policy-denied");
+    expect(review).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    turn.close();
+  });
+
+  it("blocks review admission with an illegal residual signal", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not run",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("nope"));
+    const result = await turn.execute(
+      call(execute, {
+        admission: {
+          kind: "review",
+          risk: "REVIEW",
+          review: "action",
+          reason: "Approval required",
+          summary: "npm test",
+          residuals: ["not_a_signal" as never],
+        },
+      }),
+    );
+
+    expect(result.kind).toBe("blocked");
+    if (result.kind === "blocked") expect(result.error.code).toBe("policy-denied");
+    expect(review).not.toHaveBeenCalled();
+    turn.close();
+  });
+
+  it("skips review when capability caps are covered regardless of residual labels", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve",
+      rationale: "must not review covered caps",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const execute = vi.fn(async () => completed("covered-ok"));
+    const covered: CapabilityRequestInput = {
+      kind: "filesystem",
+      operation: "write",
+      path: "/workspace/covered.txt",
+    };
+    const result = await turn.execute(
+      call(execute, {
+        admission: {
+          kind: "review",
+          risk: "REVIEW",
+          review: "capability",
+          reason: "covered",
+          summary: "write",
+          requested: [covered],
+          residuals: ["capability_uncovered"],
+        },
+      }),
+    );
+
+    expect(result).toEqual({ kind: "completed", value: "covered-ok" });
+    expect(review).not.toHaveBeenCalled();
+    turn.close();
   });
 
   it("preserves hard deny rules while applying an approved one-shot grant", async () => {

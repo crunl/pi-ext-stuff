@@ -5,7 +5,7 @@ import {
   type SandboxRuntimeConfig,
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
-import { effectiveNetworkAuthority } from "../config.ts";
+import { effectiveNetworkAuthority, validateNetworkPolicy } from "../config.ts";
 import { expandSymlinkAliases, hasGlobSyntax } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
 import {
@@ -46,8 +46,7 @@ export type SrtRuntimeLike = Pick<
   | "cleanupAfterCommand"
   | "reset"
   | "getSandboxViolationStore"
-> &
-  Partial<Pick<typeof SrtManager, "getNetworkModeCapabilities">>;
+>;
 
 /** State mirrors SRT's own process-global mutable singleton. */
 const processSandboxState: {
@@ -100,6 +99,21 @@ export function assertSrtPolicySupported(
   }
 }
 
+/**
+ * True only when the guard has a live listen port (`parentProxyUrl` is set
+ * after successful `start()`). Unstarted guards stay `undefined` → no weaker
+ * isolation, no parentProxy URL.
+ */
+function parentProxyActive(connectGuard?: SandboxConnectGuard): boolean {
+  return connectGuard?.parentProxyUrl !== undefined;
+}
+
+/**
+ * Native SRT config only — never network.mode (pristine 0.0.77).
+ * When connect-guard supplies parentProxy, inject the public
+ * enableWeakerNetworkIsolation so Go TLS (gh/gcloud/…) can reach trustd
+ * inside the seatbelt; documented security tradeoff in AGENTS.md.
+ */
 function toSrtConfig(
   policy: SandboxPolicy,
   connectGuard?: SandboxConnectGuard,
@@ -139,7 +153,13 @@ function toSrtConfig(
           }
         : {}),
     },
+    ...(parentProxyActive(connectGuard) ? { enableWeakerNetworkIsolation: true } : {}),
   };
+}
+
+/** Per-wrap native customConfig; empty when no parentProxy seam. */
+function wrapCustomConfig(connectGuard?: SandboxConnectGuard): Record<string, unknown> | undefined {
+  return parentProxyActive(connectGuard) ? { enableWeakerNetworkIsolation: true } : undefined;
 }
 
 async function askNetwork(params: { host: string; port?: number }): Promise<boolean> {
@@ -429,7 +449,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
           if (dependency.errors.length > 0) {
             throw sandboxUnavailable(dependency.errors.join("; "));
           }
-          this.executionNetworkMode(snapshot);
+          validateNetworkPolicy(snapshot.network);
           await this.connectGuard?.start();
           if (activation.signal.aborted) throw new Error("aborted");
           processSandboxState.connectGuard = this.connectGuard;
@@ -507,7 +527,6 @@ export class SrtSandboxManager implements SandboxManagerLike {
     if (srtProcessCoordinator.isPoisoned) {
       throw poisonedSandboxUnavailable();
     }
-    const networkMode = this.executionNetworkMode(request.policy);
     const { signal, timedOut } = deadlineSignal(request.timeoutMs, request.signal);
     return srtProcessCoordinator.runExclusiveDetached(
       async () => {
@@ -563,22 +582,14 @@ export class SrtSandboxManager implements SandboxManagerLike {
           try {
             if (changed) this.runtime.updateConfig(toSrtConfig(derived, this.connectGuard));
             const command = serializeProgram(request.program, {
-              forceProxyForLocalTargets:
-                request.networkAuthorize !== undefined &&
-                networkMode !== "restricted" &&
-                networkMode !== "direct",
+              // Native SRT has no network.mode. With connect-guard the egress
+              // path is parentProxy; without it, keep serializeProgram defaults.
+              forceProxyForLocalTargets: request.networkAuthorize !== undefined,
             });
             const wrapped = await this.runtime.wrapWithSandboxArgv(
               command,
               POSIX_SHELL,
-              networkMode === undefined
-                ? undefined
-                : {
-                    network: { mode: networkMode },
-                    ...(request.policy.network.macosTls === "system"
-                      ? { enableWeakerNetworkIsolation: networkMode === "proxy" }
-                      : {}),
-                  },
+              wrapCustomConfig(this.connectGuard),
               signal,
               request.cwd,
               {
@@ -649,7 +660,7 @@ export class SrtSandboxManager implements SandboxManagerLike {
       ...(srtProcessCoordinator.isPoisoned
         ? { fault: srtProcessCoordinator.poisonedError().message }
         : {}),
-      networkSupport: this.runtime.getNetworkModeCapabilities?.(),
+      networkSupport: undefined,
       execution: processSandboxState.networkExecution ? "active-lifecycle" : "idle",
       requiredNetwork: processSandboxState.networkExecution?.requiredNetwork,
       nativeEnforcement: "unknown",
@@ -693,33 +704,10 @@ export class SrtSandboxManager implements SandboxManagerLike {
     }
   }
 
-  private executionNetworkMode(
-    policy: SandboxPolicy,
-  ): "restricted" | "proxy" | "direct" | undefined {
-    const projection = projectExecutionNetwork(policy);
-    const frozen = policy.network.execution;
-    if (frozen && JSON.stringify(frozen) !== JSON.stringify(projection)) {
-      throw sandboxUnavailable("execution network projection does not match its frozen policy");
-    }
-    if (projection.kind === "proxy" && projection.inlineReview && projection.tls !== "system")
-      return undefined;
-    const capabilities = this.runtime.getNetworkModeCapabilities?.();
-    if (
-      capabilities?.apiVersion !== 1 ||
-      !capabilities.modes.includes("restricted") ||
-      !capabilities.modes.includes("proxy") ||
-      !capabilities.modes.includes(projection.kind) ||
-      (policy.network.macosTls === "system" && capabilities.platform !== "macos")
-    ) {
-      throw sandboxUnavailable(
-        "explicit network access requires public restricted/proxy mode capability and the requested transport/platform",
-      );
-    }
-    return projection.kind;
-  }
-
   private async initializeSrt(config: SandboxPolicy, signal?: AbortSignal): Promise<void> {
-    this.executionNetworkMode(config);
+    // Pristine SRT has no network.mode. Network authority is the Engine lease
+    // plus connect-guard tickets on native parentProxy + empty allowlist.
+    validateNetworkPolicy(config.network);
     if (!this.runtime.isSupportedPlatform()) {
       throw sandboxUnavailable(`unsupported platform: ${process.platform}`);
     }

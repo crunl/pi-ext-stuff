@@ -4,16 +4,13 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  '@anthropic-ai/sandbox-runtime@0.0.74': 5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4
-
 importers:
 
   .:
     dependencies:
       '@anthropic-ai/sandbox-runtime':
-        specifier: 0.0.74
-        version: 0.0.74(patch_hash=5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4)
+        specifier: 0.0.77
+        version: 0.0.77
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.4
@@ -42,8 +39,8 @@ importers:
 
 packages:
 
-  '@anthropic-ai/sandbox-runtime@0.0.74':
-    resolution: {integrity: sha512-k6xD9HPp4gCwIAQtAloTBSaKGGNQhH7o1ck0057iBxu3iHclM2vx+JzIXLDB9j4oaP9hwGcNlWSP5K7bgc1CIQ==}
+  '@anthropic-ai/sandbox-runtime@0.0.77':
+    resolution: {integrity: sha512-uOe6kkAbo91r5shXXBxZ1DKbOpWmnXkNDDujXrFJRaHSG7D7s8b7Yfsu0pGDkYFgKZ2ECtVCNisl6pCYcaMF7A==}
     engines: {node: '>=20.11.0'}
     hasBin: true
 
@@ -1253,7 +1250,7 @@ packages:
 
 snapshots:
 
-  '@anthropic-ai/sandbox-runtime@0.0.74(patch_hash=5c0cf1408645484a26c82289f17f1744ccf0e7d7e8a9cb57aadb0a19e19217f4)':
+  '@anthropic-ai/sandbox-runtime@0.0.77':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0

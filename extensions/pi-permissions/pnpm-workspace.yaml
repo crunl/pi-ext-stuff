@@ -9,5 +9,4 @@ minimumReleaseAgeExclude:
   - '@earendil-works/pi-telemetry@0.85.1'
   - '@earendil-works/pi-tui@0.85.1'
   - '@earendil-works/chord@0.85.1'
-patchedDependencies:
-  '@anthropic-ai/sandbox-runtime@0.0.74': patches/anthropic-ai__sandbox-runtime@0.0.74.patch
+  - '@anthropic-ai/sandbox-runtime@0.0.77'

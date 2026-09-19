@@ -49,7 +49,11 @@ export interface SandboxPolicy {
   };
 }
 
-/** Pure projection of already-authorized policy, never a grant or a review decision. */
+/**
+ * Ledger projection of already-authorized network policy. Not an OS network
+ * mode: pristine SRT has no network.mode. `access` is deprecated for
+ * enforcement; authority lives in Engine lease / requestCovered.
+ */
 export function projectExecutionNetwork(policy: SandboxPolicy): ExecutionNetwork {
   const network = policy.network;
   const access = "access" in network ? validateNetworkAccess(network.access) : undefined;

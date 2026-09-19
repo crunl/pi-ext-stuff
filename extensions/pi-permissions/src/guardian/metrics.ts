@@ -47,6 +47,9 @@ export interface GuardianMetricsRecord {
   readonly outcome: string;
   readonly guardian_model: string;
   readonly guardian_reasoning_effort: string;
+  readonly static_risk: string;
+  readonly review_source: string;
+  readonly residual_signals?: readonly string[];
   readonly duration_ms: number;
   readonly token_usage: {
     readonly input: number;
@@ -122,6 +125,9 @@ export function buildGuardianMetricsRecord(input: {
   outcome?: string;
   guardianModel?: string;
   guardianReasoningEffort?: string;
+  staticRisk?: string;
+  reviewSource?: string;
+  residualSignals?: readonly string[];
   durationMs: number;
   tokenUsage?: {
     input?: number;
@@ -133,6 +139,9 @@ export function buildGuardianMetricsRecord(input: {
   };
 }): GuardianMetricsRecord {
   const usage = input.tokenUsage ?? {};
+  const residualSignals = (input.residualSignals ?? [])
+    .map((tag) => sanitizeMetricTag(tag))
+    .filter((tag) => tag !== "none");
   return Object.freeze({
     schema: 1 as const,
     reviewId: input.reviewId,
@@ -149,6 +158,9 @@ export function buildGuardianMetricsRecord(input: {
     outcome: input.outcome ?? "none",
     guardian_model: sanitizeMetricTag(input.guardianModel),
     guardian_reasoning_effort: sanitizeMetricTag(input.guardianReasoningEffort),
+    static_risk: sanitizeMetricTag(input.staticRisk ?? "none"),
+    review_source: sanitizeMetricTag(input.reviewSource ?? "unknown"),
+    ...(residualSignals.length > 0 ? { residual_signals: Object.freeze(residualSignals) } : {}),
     duration_ms: Math.max(0, Math.round(input.durationMs)),
     token_usage: Object.freeze({
       input: usage.input ?? 0,

@@ -260,17 +260,8 @@ async function bootstrap(request) {
   const canonicalScopeCwd = await canonicalCwd(scope.cwd);
   const denyWrite = defaultWriteDenials();
   if (fatalStarted || shuttingDown) throw new Error("reviewer worker bootstrap interrupted");
-  // This worker owns its own singleton and policy. Host TLS/network authority
-  // never crosses bootstrap; feature detection selects stronger isolation only
-  // where the public backend advertises it, retaining strict legacy elsewhere.
-  const capabilities =
-    typeof SandboxManager.getNetworkModeCapabilities === "function"
-      ? SandboxManager.getNetworkModeCapabilities()
-      : undefined;
-  const restricted =
-    capabilities?.apiVersion === 1 &&
-    capabilities.platform === "macos" &&
-    capabilities.modes.includes("restricted");
+  // Pristine SRT has no network.mode. Guardian evidence tools stay fully offline:
+  // empty allowlist + deny-all + no local binding on the native proxy seam.
   readOnlySandboxConfig = Object.freeze({
     filesystem: Object.freeze({
       denyRead: Object.freeze([...scope.denyRead]),
@@ -278,7 +269,6 @@ async function bootstrap(request) {
       denyWrite,
     }),
     network: Object.freeze({
-      ...(restricted ? { mode: "restricted" } : {}),
       allowedDomains: Object.freeze([]),
       deniedDomains: Object.freeze(["*"]),
       allowLocalBinding: false,

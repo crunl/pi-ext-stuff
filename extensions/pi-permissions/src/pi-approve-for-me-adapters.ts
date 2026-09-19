@@ -22,6 +22,12 @@ import {
 } from "./auto-reviewer.ts";
 import { fingerprintValue } from "./config.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
+import {
+  ensureNonEmptyResiduals,
+  mapReviewSource,
+  type ResidualSignal,
+  residualSignalsForReviewSource,
+} from "./permissions/residual.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import {
   createGuardianEvidencePolicyCeiling,
@@ -91,6 +97,10 @@ function requestedCapabilities(
  * Translate the legacy/static risk vocabulary into the Engine's admission
  * vocabulary. This is intentionally a projection, not an authorization
  * decision: the Engine and its execution Adapter remain authoritative.
+ *
+ * Fail-closed residual constraint: a prompt that would become `kind:"review"`
+ * must carry non-empty residuals. Missing stamps are replaced with
+ * `other_explicit_review` — never mapped to allow/skip.
  */
 export function admissionPlanFromRiskDecision(decision: RiskDecision): AdmissionPlan {
   if (decision.action === "block") {
@@ -101,6 +111,7 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
   }
 
   const requested = requestedCapabilities(decision);
+  const residuals = ensureNonEmptyResiduals(decision.residuals);
   return {
     kind: "review",
     risk: decision.risk,
@@ -108,6 +119,7 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
     review: requested.length > 0 ? "capability" : "action",
     reason: decision.reason,
     summary: decision.summary,
+    residuals,
     ...(decision.executionMode === undefined ? {} : { executionMode: decision.executionMode }),
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
@@ -231,14 +243,12 @@ function guardianPermissionContext(
     permissionLifetime:
       input.ownership === "permission-amendment"
         ? "turn-end-after-confirmation"
-        : input.source === "inline"
-          ? "pending-connection-only"
-          : "exact-action-only",
+        : "exact-action-only",
     networkWarning: !policy
       ? "This action has no sandbox network/TLS profile (host-admitted or escalated). Baseline evidence is not enforcement; execution and TLS success are unknown."
       : policy.network.macosTls === "system"
-        ? "Host opted into startup system TLS: authorized proxy processes permit trustd/helper-mediated egress outside proxy destination/ticket enforcement. Restricted attempts remain strict. Inline/system enables helpers before future connection reviews. Approval does not prove TLS success or execution success."
-        : "Strict startup TLS; approval does not prove execution or TLS success. Pending connection approval is not a future exemption.",
+        ? "Host opted into startup system TLS: authorized proxy processes may egress via helpers outside ticket enforcement. Approval does not prove TLS success or execution success."
+        : "Strict startup TLS; approval does not prove execution or TLS success. Uncovered network fail-closed; this review is not a connection firewall.",
     allowedNetworkHosts: escalated ? [] : [...(policy?.network.allowedDomains ?? [])],
     deniedNetworkHosts: escalated ? [] : [...(policy?.network.deniedDomains ?? [])],
     staticRisk: decision.risk,
@@ -247,19 +257,43 @@ function guardianPermissionContext(
   };
 }
 
+function residualsForEngineReview(
+  input: GuardianReviewInput<PiGuardianReviewContext>,
+): ResidualSignal[] {
+  return ensureNonEmptyResiduals(
+    input.residuals !== undefined && input.residuals.length > 0
+      ? input.residuals
+      : residualSignalsForReviewSource(input.source),
+  );
+}
+
 function promptDecisionFromEngine(
   input: GuardianReviewInput<PiGuardianReviewContext>,
 ): PromptRiskDecision {
+  const residuals = residualsForEngineReview(input);
   return {
     action: "prompt",
     risk: input.risk ?? "REVIEW",
     reason: input.reason ?? "Permission review requested",
     summary: input.summary ?? input.call.tool,
+    residuals,
     ...(input.source === "permission-amendment" && input.reason !== undefined
       ? { justification: input.reason }
       : {}),
     ...(input.executionMode === undefined ? {} : { executionMode: input.executionMode }),
     ...(input.justification === undefined ? {} : { justification: input.justification }),
+  };
+}
+
+function observationalReviewMetrics(input: GuardianReviewInput<PiGuardianReviewContext>): {
+  staticRisk: string;
+  reviewSource: string;
+  residualSignals: ResidualSignal[];
+} {
+  return {
+    staticRisk: input.risk ?? "none",
+    reviewSource: mapReviewSource(input.source),
+    residualSignals: residualsForEngineReview(input),
   };
 }
 
@@ -296,24 +330,25 @@ export function createPiGuardianAdapter(
           (error instanceof AutoReviewerFailure ? error.guardian?.reasoningEffort : undefined);
         const effortMetrics =
           failureEffort === undefined ? {} : { guardianReasoningEffort: failureEffort };
+        const obs = observationalReviewMetrics(input);
         if (error instanceof AutoReviewerFailure) {
           const failureKind = error.kind;
           if (error.kind === "timeout") {
-            return { kind: "timed-out", metrics: { failureKind, ...effortMetrics } };
+            return { kind: "timed-out", metrics: { failureKind, ...obs, ...effortMetrics } };
           }
           if (error.kind === "cancelled") {
-            return { kind: "cancelled", metrics: { failureKind, ...effortMetrics } };
+            return { kind: "cancelled", metrics: { failureKind, ...obs, ...effortMetrics } };
           }
           return {
             kind: "failed",
             reason: errorMessage(error),
-            metrics: { failureKind, ...effortMetrics },
+            metrics: { failureKind, ...obs, ...effortMetrics },
           };
         }
         return {
           kind: "failed",
           reason: errorMessage(error),
-          metrics: Object.keys(effortMetrics).length > 0 ? effortMetrics : undefined,
+          metrics: { ...obs, ...effortMetrics },
         };
       }
       try {
@@ -322,10 +357,14 @@ export function createPiGuardianAdapter(
         // Reviewer identity/status reporting is observational. A UI or event
         // consumer must never turn an approval into an authorization failure.
       }
+      const obs = observationalReviewMetrics(input);
       const metrics = {
         riskLevel: result.risk,
         userAuthorization: result.userAuthorization,
         outcome: result.decision,
+        staticRisk: obs.staticRisk,
+        reviewSource: obs.reviewSource,
+        residualSignals: obs.residualSignals,
         ...(result.guardian?.model === undefined ? {} : { guardianModel: result.guardian.model }),
         ...(result.guardian?.reasoningEffort === undefined
           ? {}

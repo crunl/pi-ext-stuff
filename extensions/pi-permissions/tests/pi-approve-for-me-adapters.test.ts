@@ -147,6 +147,7 @@ describe("admissionPlanFromRiskDecision", () => {
       summary: "npm test",
       networkHosts: ["registry.npmjs.org"],
       filesystemWriteRoots: ["/workspace/generated"],
+      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_low"],
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
@@ -158,6 +159,7 @@ describe("admissionPlanFromRiskDecision", () => {
       risk: "REVIEW",
       reason: "Outside the baseline",
       summary: "npm test",
+      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_low"],
     });
   });
 
@@ -167,6 +169,7 @@ describe("admissionPlanFromRiskDecision", () => {
       risk: "REVIEW",
       reason: "The action needs review",
       summary: "custom tool",
+      residuals: ["risk_not_low"],
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
@@ -174,6 +177,7 @@ describe("admissionPlanFromRiskDecision", () => {
       risk: "REVIEW",
       reason: "The action needs review",
       summary: "custom tool",
+      residuals: ["risk_not_low"],
     });
   });
 
@@ -185,6 +189,7 @@ describe("admissionPlanFromRiskDecision", () => {
       summary: "git add README.md && git commit -m update",
       executionMode: "escalated",
       justification: "Update the isolated fixture repository",
+      residuals: ["escalation"],
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
@@ -194,7 +199,20 @@ describe("admissionPlanFromRiskDecision", () => {
       summary: "git add README.md && git commit -m update",
       executionMode: "escalated",
       justification: "Update the isolated fixture repository",
+      residuals: ["escalation"],
     });
+  });
+
+  it("still emits review and stamps other_explicit_review when prompt residuals are missing", () => {
+    const decision: RiskDecision = {
+      action: "prompt",
+      risk: "REVIEW",
+      reason: "The action needs review",
+      summary: "unstamped prompt",
+    };
+    const plan = admissionPlanFromRiskDecision(decision);
+    expect(plan.kind).toBe("review");
+    expect(plan).toMatchObject({ residuals: ["other_explicit_review"] });
   });
 });
 
@@ -485,7 +503,47 @@ describe("createPiGuardianAdapter", () => {
         guardianReasoningEffort: "low",
         sessionKind: "trunk_reused",
         hadPriorReviewContext: true,
+        staticRisk: "none",
+        reviewSource: "preview",
+        residualSignals: ["other_explicit_review"],
       }),
+    });
+  });
+
+  it("carries residual_signals and static_risk through Guardian metrics", async () => {
+    const result = reviewResult("approve");
+    const { reviewer } = createReviewer(result);
+    const adapter = createPiGuardianAdapter(reviewer);
+
+    const decision = await adapter.review(
+      reviewInput({
+        risk: "REVIEW",
+        residuals: ["rule_ask", "risk_not_low"],
+        source: "preview",
+      }),
+    );
+
+    expect(decision.kind).toBe("approve");
+    expect(decision).toMatchObject({
+      metrics: {
+        staticRisk: "REVIEW",
+        reviewSource: "preview",
+        residualSignals: ["rule_ask", "risk_not_low"],
+      },
+    });
+  });
+
+  it("labels manual-retry reviews even when residual stamps are absent", async () => {
+    const result = reviewResult("approve");
+    const { reviewer } = createReviewer(result);
+    const adapter = createPiGuardianAdapter(reviewer);
+
+    const decision = await adapter.review(reviewInput({ source: "manual-retry" }));
+    expect(decision).toMatchObject({
+      metrics: {
+        reviewSource: "manual-retry",
+        residualSignals: ["manual_retry"],
+      },
     });
   });
 
@@ -530,23 +588,28 @@ describe("createPiGuardianAdapter", () => {
       review,
     };
     const adapter = createPiGuardianAdapter(reviewer);
+    const failureObs = {
+      staticRisk: "none",
+      reviewSource: "preview",
+      residualSignals: ["other_explicit_review"],
+    };
 
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "failed",
       reason: "review provider unavailable",
-      metrics: { guardianReasoningEffort: "low" },
+      metrics: { guardianReasoningEffort: "low", ...failureObs },
     });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("timeout", "review timed out"));
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "timed-out",
-      metrics: { failureKind: "timeout", guardianReasoningEffort: "low" },
+      metrics: { failureKind: "timeout", guardianReasoningEffort: "low", ...failureObs },
     });
 
     review.mockRejectedValueOnce(new AutoReviewerFailure("cancelled", "review cancelled"));
     await expect(adapter.review(reviewInput())).resolves.toEqual({
       kind: "cancelled",
-      metrics: { failureKind: "cancelled", guardianReasoningEffort: "low" },
+      metrics: { failureKind: "cancelled", guardianReasoningEffort: "low", ...failureObs },
     });
   });
 });

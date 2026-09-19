@@ -532,19 +532,26 @@ describe("GuardianWorkerClient", () => {
         cwd: fixture.directory,
         program: { executable: process.execPath, args: ["-e", ""] },
       });
-      expect(JSON.parse(await readFile(fixture.configMarker, "utf8"))).toEqual({
+      const config = JSON.parse(await readFile(fixture.configMarker, "utf8")) as {
+        network?: Record<string, unknown>;
+      };
+      expect(config).toEqual({
         filesystem: {
           allowWrite: [],
           denyWrite: [join(fixture.directory, "ordinary-default")],
           denyRead: [join(fixture.directory, "denied")],
         },
         network: {
-          mode: "restricted",
           allowedDomains: [],
           deniedDomains: ["*"],
           allowLocalBinding: false,
         },
       });
+      // Guardian evidence SRT must stay offline even when host uses parentProxy
+      // weaker isolation for owned bash.
+      expect(config.network).not.toHaveProperty("enableWeakerNetworkIsolation");
+      expect(config.network).not.toHaveProperty("parentProxy");
+      expect(config.network).not.toHaveProperty("mode");
     } finally {
       await client.close();
     }

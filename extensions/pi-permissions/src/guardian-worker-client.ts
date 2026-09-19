@@ -20,7 +20,7 @@ export const GUARDIAN_WORKER_MAX_STDERR_BYTES = MAX_STDERR_BYTES;
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL("./guardian-worker.mjs", import.meta.url));
 const WORKER_TERMINATE_WAIT_MS = 1_000;
-// SRT 0.0.74's reset bridge may take up to 1.5s. Keep graceful shutdown
+// Pristine SRT reset bridge may take up to ~1.5s. Keep graceful shutdown
 // separate from hard request cancellation and leave bounded recovery margin.
 const WORKER_SHUTDOWN_TIMEOUT_MS = 3_000;
 const MAX_ID_LENGTH = 128;

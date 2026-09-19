@@ -7,6 +7,7 @@ import {
   matchesNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, isValidNetworkPort, normalizeNetworkHost } from "./network-host.ts";
+import { normalizeResidualSignals, type ResidualSignal } from "./permissions/residual.ts";
 import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import {
   type NativeFileOperationFailure,
@@ -17,6 +18,7 @@ import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.
 export { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
+export type { ResidualSignal } from "./permissions/residual.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
@@ -57,6 +59,8 @@ export type AdmissionPlan =
       /** Exact Bash action may run outside the coding-agent sandbox once approved. */
       executionMode?: CommandExecutionMode;
       justification?: string;
+      /** Stamped residual facts from the static projection; never a skip signal. */
+      residuals?: readonly ResidualSignal[];
     }
   | {
       kind: "deny";
@@ -177,6 +181,7 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   summary?: string;
   executionMode?: CommandExecutionMode;
   justification?: string;
+  residuals?: readonly ResidualSignal[];
   context: ReviewContext;
   authority?: {
     generation: number;
@@ -196,6 +201,9 @@ export interface GuardianDecisionMetrics {
   readonly failureKind?: string;
   readonly sessionKind?: "trunk_new" | "trunk_reused" | "ephemeral_forked";
   readonly hadPriorReviewContext?: boolean;
+  readonly staticRisk?: string;
+  readonly reviewSource?: string;
+  readonly residualSignals?: readonly string[];
   readonly tokenUsage?: {
     input?: number;
     output?: number;
@@ -439,6 +447,7 @@ interface ReviewRequest {
   readonly approvalOverride?: ApprovalOverride;
   readonly executionMode?: CommandExecutionMode;
   readonly justification?: string;
+  readonly residuals?: readonly ResidualSignal[];
 }
 
 interface RuntimeAttemptContext {
@@ -471,6 +480,7 @@ type ResolvedAdmission =
       summary?: string;
       executionMode?: CommandExecutionMode;
       justification?: string;
+      residuals?: ResidualSignal[];
     }
   | { kind: "deny"; reason: string };
 
@@ -753,6 +763,8 @@ function normalizeAdmission(
   if (raw.executionMode === "escalated" && raw.justification === undefined) {
     return { ok: false };
   }
+  const residuals = normalizeResidualSignals(raw.residuals);
+  if (residuals === false) return { ok: false };
   return {
     ok: true,
     admission: {
@@ -764,6 +776,7 @@ function normalizeAdmission(
       ...(raw.summary === undefined ? {} : { summary: raw.summary }),
       ...(raw.executionMode === undefined ? {} : { executionMode: raw.executionMode }),
       ...(raw.justification === undefined ? {} : { justification: raw.justification.trim() }),
+      ...(residuals === undefined ? {} : { residuals }),
     },
   };
 }
@@ -981,7 +994,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
   const reviewControllers = new Set<AbortController>();
   const inFlightCallIds = new Set<string>();
   const inFlightAttempts = new Map<string, InFlightAttempt<ReviewContext>>();
-  const inlineCapabilityReviews = new Map<string, Promise<CapabilityAuthorizationDecision>>();
   const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
   const denialWindowSize = options.denialWindowSize ?? DEFAULT_DENIAL_WINDOW_SIZE;
   const maxWindowDenials = options.maxWindowDenials ?? DEFAULT_MAX_WINDOW_DENIALS;
@@ -1245,6 +1257,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           summary: review.summary,
           ...(review.executionMode === undefined ? {} : { executionMode: review.executionMode }),
           ...(review.justification === undefined ? {} : { justification: review.justification }),
+          ...(review.residuals === undefined || review.residuals.length === 0
+            ? {}
+            : { residuals: review.residuals }),
           context: request.reviewContext,
           ...(review.approvalOverride === undefined
             ? {}
@@ -1692,6 +1707,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         effective,
         risk: "REVIEW",
         summary: `${request.call.tool} native preparation recovery`,
+        residuals: ["native_recovery", "write_root_uncovered", "risk_not_low"],
         reason: `Review re-entering the original complete ${request.call.tool} action once, not a proven sandbox denial. Observed ${failure.operation} access failure before any content write. Additional write root: ${JSON.stringify(root)}${mkdir ? " (immediate-parent subtree scope, not mkdir-only)" : " (original file write root)"}. Re-entry rereads current content and repeats native preparation; partial directory effects may already exist.\n${evidence}`,
       },
     );
@@ -2097,6 +2113,10 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           risk: "REVIEW",
           reason: amendmentReason,
           summary: amendmentSummary,
+          residuals:
+            amendmentSource === "manual-retry"
+              ? ["manual_retry", "permission_amendment"]
+              : ["permission_amendment"],
           approvalOverride: amendmentApprovalOverride,
         },
       );
@@ -2223,6 +2243,12 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           effective: effectiveLeaseOverride,
           executionMode: admission.kind === "review" ? admission.executionMode : undefined,
           justification: admission.kind === "review" ? admission.justification : undefined,
+          residuals:
+            admission.kind === "review" &&
+            admission.residuals !== undefined &&
+            admission.residuals.length > 0
+              ? admission.residuals
+              : undefined,
         },
       );
       if ("code" in decision) return blocked(decision);
@@ -2417,73 +2443,15 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return { kind: "allow", capability: normalized };
     }
 
-    if (
-      baseline.policy?.network.execution?.kind === "restricted" ||
-      (baseline.policy?.network.execution?.kind === "proxy" &&
-        !baseline.policy.network.execution.inlineReview)
-    ) {
-      return denyAttemptForAttempt({
-        code: "permission-required",
-        reason:
-          "Network authority was not granted for this execution. Use request_permissions for a later new invocation; this Bash action is not replayed.",
-        request: normalized,
-      });
-    }
-
-    const capabilityKey = requestKey(normalized);
-    const key = `${state.generation}:${attempt.call.id}:${capabilityKey}`;
-    const existing = inlineCapabilityReviews.get(key);
-    if (existing) return existing;
-    const pending = (async (): Promise<CapabilityAuthorizationDecision> => {
-      const decision = await runReview(
-        state,
-        {
-          ownership: attempt.ownership,
-          call: cloneInvocationCall(attempt.call),
-          reviewContext: attempt.reviewContext,
-          signal,
-          executor: async () => ({
-            kind: "failed",
-            error: new Error("inline review cannot execute"),
-          }),
-        },
-        baseline,
-        {
-          source: "inline",
-          requested: [normalized],
-          risk: "REVIEW",
-          reason: input.reason ?? "Network access requires approval",
-          summary: `${normalized.host}:${normalized.port}`,
-        },
-      );
-      if ("code" in decision) {
-        return denyAttemptForAttempt(decision);
-      }
-      if (decision.kind === "approve") {
-        return { kind: "allow", capability: normalized };
-      }
-      if (decision.kind !== "deny") {
-        return denyAttemptForAttempt({
-          code: "review-unavailable",
-          reason: "The reviewer returned no decision",
-        });
-      }
-      // Inline network denials are final for this connection attempt. They do
-      // not mint a replay handle: there is no safe whole-command replay after
-      // a mid-execution denial.
-      recordDenialStats();
-      return denyAttemptForAttempt({
-        code: "review-denied",
-        reason: decision.rationale,
-        request: normalized,
-      });
-    })().finally(() => {
-      // Retire this exact pending generation before publishing its terminal
-      // decision, so a retry cannot inherit an already-consumed AllowOnce.
-      if (inlineCapabilityReviews.get(key) === pending) inlineCapabilityReviews.delete(key);
+    // Uncovered network: fail-closed at the connection/spawn decision.
+    // Guardian is not a network firewall; expand the lease via request_permissions
+    // for a later new invocation. Mid-exec denials do not mint a Bash replay.
+    return denyAttemptForAttempt({
+      code: "permission-required",
+      reason:
+        "Network authority was not granted for this execution. Use request_permissions for a later new invocation; this Bash action is not replayed.",
+      request: normalized,
     });
-    inlineCapabilityReviews.set(key, pending);
-    return pending;
   };
 
   const listDenials = (): readonly DenialNotice[] =>
@@ -2614,7 +2582,8 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         phase: "planned-or-executing" as const,
       })),
       pendingReviews: reviewControllers.size,
-      pendingConnections: inlineCapabilityReviews.size,
+      // Inline connection reviews retired (Native Proxy + Lease Spawn Gate).
+      pendingConnections: 0,
     });
   };
   return { beginTurn, refreshTurnMode, invalidate, listDenials, armRetry, inspect };

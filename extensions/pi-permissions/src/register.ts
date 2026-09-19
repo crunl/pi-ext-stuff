@@ -76,7 +76,6 @@ import { canonicalize } from "./permissions/paths.ts";
 import {
   createPiGuardianAdapter,
   type PiGuardianReviewContext,
-  toolCallEventMetadata,
 } from "./pi-approve-for-me-adapters.ts";
 import {
   type PiAction,
@@ -100,7 +99,7 @@ import {
   type ReviewRenderResult,
 } from "./review-renderer.ts";
 import {
-  evaluateHostRiskRequest,
+  evaluateHostFirstRulesOnly,
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
   type RiskDecision,
@@ -169,6 +168,15 @@ const ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE =
   "The active permission context is unavailable. Retry in the current task.";
 const guardianFallbackNoticeKeys = new Set<string>();
 
+/** Owned tools: same-name registerTool.execute owns risk → Engine → SRT. */
+const PI_OWNED_TOOL_NAMES = new Set(["bash", "write", "edit", "request_permissions"]);
+
+/**
+ * Pi host-first read-only tools: tool_call B (rules deny only). Foreign
+ * MCP/custom tools are out of scope (A pass-through).
+ */
+const PI_HOST_FIRST_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
+
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
   const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
@@ -179,7 +187,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const baseEdit = createEditTool(process.cwd());
   const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
   const managedRiskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
-  const hostRiskEvaluator = options.riskEvaluator ?? evaluateHostRiskRequest;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
   let loaded: LoadedPermissionsConfig | undefined;
@@ -239,6 +246,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           ...(event.metrics.guardianReasoningEffort === undefined
             ? {}
             : { guardianReasoningEffort: event.metrics.guardianReasoningEffort }),
+          ...(event.metrics.staticRisk === undefined
+            ? {}
+            : { staticRisk: event.metrics.staticRisk }),
+          ...(event.metrics.reviewSource === undefined
+            ? {}
+            : { reviewSource: event.metrics.reviewSource }),
+          ...(event.metrics.residualSignals === undefined
+            ? {}
+            : { residualSignals: event.metrics.residualSignals }),
           durationMs: event.metrics.durationMs,
           ...(event.metrics.tokenUsage === undefined
             ? {}
@@ -1468,7 +1484,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return { allowed: true, endpoint: endpoint.endpoint };
     };
 
-  const authorizeHostTool = async (
+  /**
+   * Host-first B / residual special tools: rules deny only. Never submits
+   * Engine/Guardian — host-owned execution is outside sandbox enforcement.
+   */
+  const evaluateHostFirstToolCall = async (
     event: ToolCallEvent,
     ctx: ExtensionContext,
   ): Promise<ToolCallEventResult | undefined> => {
@@ -1478,31 +1498,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         reason: "The host did not provide an action identifier. The action was not run.",
       };
     }
-
-    // Capture the host action before any asynchronous preparation or risk
-    // evaluation. Every later observer receives this immutable-at-ingress
-    // value instead of a mutable object owned by the host.
-    const actionSignal = ctx.signal;
-    const captured = permissions.captureAction({
-      id: event.toolCallId,
-      tool: event.toolName,
-      input: event.input,
-      cwd: resolve(ctx.cwd),
-      metadata: toolCallEventMetadata(event),
-    });
-    const { call } = captured;
-    const actionId = call.id;
-    const actionTool = call.tool;
-    const canonicalCwd = call.cwd;
-    const canonicalInput = call.input;
-    const canonicalEvent: ToolCallEvent = {
-      ...(isRecord(call.metadata) ? call.metadata : {}),
-      type: "tool_call",
-      toolCallId: actionId,
-      toolName: actionTool,
-      input: canonicalInput,
-    } as ToolCallEvent;
-    const capturedTranscript = currentGuardianTranscriptSnapshot();
 
     let prepared: PreparedPermissionExecution;
     try {
@@ -1525,10 +1520,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
 
     const { executionSnapshot, executionContext } = prepared;
-    // Delegation point: a subagent spawn declares the child's upper bound.
-    // Re-delegation and depth are gated here, before any risk review.
-    if (executionSnapshot.mode !== "yolo" && executionContext.config.delegation.enabled) {
-      const spawn = checkDelegateSpawn(actionTool, executionContext.config);
+    if (executionSnapshot.mode === "yolo") {
+      return;
+    }
+
+    // Product delegation spawn gate (not foreign tool governance).
+    if (executionContext.config.delegation.enabled && DELEGATED_TOOL_NAMES.has(event.toolName)) {
+      const spawn = checkDelegateSpawn(event.toolName, executionContext.config);
       if (spawn.blocked) {
         return {
           block: true,
@@ -1539,85 +1537,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         };
       }
     }
-    let risk: RiskDecision | undefined;
-    if (executionSnapshot.mode !== "yolo") {
-      try {
-        risk = await hostRiskEvaluator(
-          actionTool,
-          structuredClone(canonicalInput) as Record<string, unknown>,
-          canonicalCwd,
-          executionContext.config,
-          defaultProtectedWritePaths(canonicalCwd, agentDir),
-        );
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          block: true,
-          reason: renderPermissionErrorForAgent({ code: "policy-error", reason: message }),
-        };
-      }
-    }
 
-    // Static capabilities declared by the risk verdict stay inside the
-    // envelope. Opaque host-tool side effects remain under risk-policy +
-    // Guardian review with the narrowed child context (see mintNestedPermissionTurn).
-    if (risk?.action === "prompt") {
-      for (const root of risk.filesystemWriteRoots ?? []) {
-        const violation = checkDelegationWrite(
-          resolvePolicyPath(root, canonicalCwd),
-          executionSnapshot.mode,
-          executionContext.config,
-        );
-        if (violation) {
-          return {
-            block: true,
-            reason: renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          };
-        }
-      }
-      for (const host of risk.networkHosts ?? []) {
-        const violation = checkDelegationNetwork(
-          host,
-          executionSnapshot.mode,
-          executionContext.config,
-        );
-        if (violation) {
-          return {
-            block: true,
-            reason: renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          };
-        }
-      }
-    }
-
-    const action: PiAction<undefined, PiGuardianReviewContext> = {
-      captured,
-      kind: "host",
-      risk,
-      reviewContext: createPiGuardianReviewContext(
-        canonicalEvent,
-        executionContext,
-        ctx,
-        capturedTranscript,
-        canonicalCwd,
-      ),
-      signal: actionSignal,
-      execute: async (): Promise<PiActionOutcome<undefined>> => ({
-        kind: "completed",
-        value: undefined,
-      }),
-    };
-    const outcome = await permissions.submit(action);
-    if (outcome.kind === "completed") return;
-    if (outcome.kind === "failed") {
-      const message =
-        outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+    const denial = evaluateHostFirstRulesOnly(
+      event.toolName,
+      structuredClone(event.input) as Record<string, unknown>,
+      resolve(ctx.cwd),
+      executionContext.config,
+    );
+    if (denial) {
       return {
         block: true,
-        reason: renderPermissionErrorForAgent({ code: "execution-failed", reason: message }),
+        reason: renderPermissionErrorForAgent({
+          code: "policy-denied",
+          reason: denial.reason,
+        }),
       };
     }
-    return { block: true, reason: renderPermissionErrorForAgent(outcome.error) };
+    return;
   };
 
   const evaluateManagedRisk = async (
@@ -2566,15 +2502,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on(
     "tool_call",
     async (event: ToolCallEvent, ctx): Promise<ToolCallEventResult | undefined> => {
-      if (
-        event.toolName === "bash" ||
-        event.toolName === "write" ||
-        event.toolName === "edit" ||
-        event.toolName === "request_permissions"
-      ) {
+      if (PI_OWNED_TOOL_NAMES.has(event.toolName)) {
         return;
       }
-      return authorizeHostTool(event, ctx);
+      if (
+        PI_HOST_FIRST_TOOL_NAMES.has(event.toolName) ||
+        DELEGATED_TOOL_NAMES.has(event.toolName)
+      ) {
+        return evaluateHostFirstToolCall(event, ctx);
+      }
+      // Foreign A: MCP / custom / other extension tools — host-native execution.
+      return;
     },
   );
 

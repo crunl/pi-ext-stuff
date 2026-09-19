@@ -116,10 +116,15 @@ export interface PermissionsConfig {
       denyWrite: string[];
     };
     network: {
+      /**
+       * @deprecated No OS network.mode on pristine SRT. Ledger/status only;
+       * Engine lease (`network_access` / allowedDomains) is the authority.
+       */
       access?: NetworkAccess;
-      /** Codex `network_access`: whole TCP network including private/loopback/bind when true. */
+      /** Engine lease: whole-TCP authorized for owned spawn/connection cover. Not OS open. */
       network_access?: boolean;
       allowPrivateTargets?: boolean;
+      /** @deprecated system TLS no longer pairs with wrap-level network modes. */
       macosTls?: "strict" | "system";
       allowedDomains: string[];
       deniedDomains: string[];

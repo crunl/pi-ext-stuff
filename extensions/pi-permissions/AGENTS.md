@@ -45,10 +45,12 @@ imports must use explicit `.ts` extensions.
 Approve for me runs entirely in this extension; the Pi host has no first-class
 permission mode, grant store, or sandbox. Standing Codex pin for alignment
 claims is `129fd21687fbd4ac48133b7abfdcaf52cb6cb01f`. Host API limits
-(owned tools vs host-admission review-only, parallel execute vs attempt
-freeze, missing host primitives) are documented in
+(owned tools vs host-first B vs foreign A; parallel execute vs attempt
+freeze; missing host primitives) are documented in
 `docs/host-api-boundaries.md`. Do not schedule work that contradicts that
-boundary note without an explicit product decision.
+boundary note without an explicit product decision. Do not reintroduce
+host-admission Guardian review for foreign/host-first tools without a new
+product decision.
 
 ## Cross-extension dependency
 
@@ -87,21 +89,26 @@ Runtime config is resolved from `agentDir` (official `getAgentDir()`:
 Both paths are protected write targets. Fingerprint binds content only, not
 path. `config.example.json` in the package root is the schema example.
 
-`sandbox.network.network_access` is the Codex `sandbox_workspace_write.network_access`
-analogue: when `true`, the whole TCP network is open (public + private outbound +
-loopback + bind/inbound), aligned with Codex Enabled without proxy. Fine axes
-(`allowPrivateTargets` / `allowLocalBinding`) may tighten it: explicit `false`
-wins over `network_access`; `undefined` inherits. `deniedDomains` always
-vetoes. The old `sandbox.network.enabled` field was removed; loading it throws
-a migration error.
+`sandbox.network.network_access` is a **lease / Engine authority** axis
+(Codex `sandbox_workspace_write.network_access` name analogue): when `true`,
+`requestCovered` / `effectiveNetworkAuthority` treat whole-TCP as authorized
+for **owned** spawn/connection decisions. It is **not** an OS direct
+whole-open on pristine SRT. Fine axes (`allowPrivateTargets` /
+`allowLocalBinding`) may tighten the ledger: explicit `false` wins over
+`network_access`; `undefined` inherits. `deniedDomains` always vetoes.
+`sandbox.network.access` and `macosTls:"system"` no longer drive wrap-level
+OS network modes (pristine SRT has no `network.mode`). The old
+`sandbox.network.enabled` field was removed; loading it throws a migration
+error.
 
 This axis is orthogonal to auto/yolo: auto still only means Guardian reviews on
-the user's behalf. Production still keeps the connect-guard (SRT allowlist
-forced empty) and `deniedDomains` still apply, so we remain stricter than
-Codex Enabled-direct. Whole-network authority is **not** inherited by delegated
-child turns (`delegation.ts` pins child `network_access: false` +
-`delegated: true`); a parent config grant does not open subagent network. Yolo
-remains the only unrestricted path.
+the user's behalf. Production keeps connect-guard on **native parentProxy +
+empty SRT allowedDomains** + `deniedDomains` + one-shot tickets. Uncovered
+network fail-closed at Engine (`permission-required`); Guardian is not a
+network firewall. Whole-network lease is **not** inherited by delegated child
+turns (`delegation.ts` pins child `network_access: false` + `delegated: true`);
+a parent config grant does not open subagent network. Yolo remains the only
+unrestricted path.
 
 ## Layout notes
 
@@ -132,24 +139,41 @@ remains the only unrestricted path.
   lists inherit the parent allow set; a resolved empty intersection grants
   nothing. Active delegation ceilings are read from the live nested stack,
   while the audit trail is historical only.
-- Sandbox enforcement is backed by the pinned `@anthropic-ai/sandbox-runtime`
-  `0.0.74` adapter (`src/sandbox/srt-enforcer.ts`). The public seam is the
-  backend-neutral `SandboxManagerLike.execute({ policy, program, cwd, env })`;
-  only the adapter serializes argv for SRT's `wrapWithSandboxArgv()` and
-  spawns with `shell: false`. `src/sandbox/srt-coordinator.ts` owns one
-  exclusive lease per Pi host process. It serializes SRT mutation across every
-  registration and ordinary sandboxed tool; the production Guardian does not
-  enter this coordinator. Host SRT state lives in `processSandboxState` in
-  `src/sandbox/srt-enforcer.ts`, while host draining and persistent fault state
-  live on `srtProcessCoordinator`. Execution cancellation or timeout returns
-  to the caller immediately, but the detached drain keeps the lease until
-  every mutable SRT operation settles and child/cleanup completes. Successful
-  cancellation cleanup permits the next execution without clearing a global
-  fault or reactivating SRT. Draining is temporarily unhealthy for bare command
-  escalation; ordinary sandbox requests wait behind the lease with cancellation
-  and deadline handling. A drain deadline never releases an unsettled lease.
-  Cleanup, policy-restore, or drain failure poisons the host with its actual
-  lifecycle cause, and later executions fail closed.
+- Sandbox enforcement is backed by **pristine** `@anthropic-ai/sandbox-runtime@0.0.77`
+  (no pnpm patch). The public seam is the backend-neutral
+  `SandboxManagerLike.execute({ policy, program, cwd, env })`; only the adapter
+  serializes argv for SRT's `wrapWithSandboxArgv()` and spawns with
+  `shell: false`. Network on this path is **native allowlist + parentProxy**:
+  production keeps SRT `allowedDomains` forced empty when connect-guard is on,
+  plus deniedDomains veto and Engine lease (`requestCovered`) at spawn/connection
+  decisions. **Uncovered network fail-closed** (`permission-required`); Guardian
+  is not a network firewall. `sandbox.network.network_access` is a **lease**
+  (Engine/requestCovered), not an OS direct whole-open. `access` /
+  `macosTls:"system"` no longer drive wrap-level OS network modes. When
+  connect-guard supplies **parentProxy** (live `parentProxyUrl` after `start`),
+  initialize/wrap inject the native SRT field `enableWeakerNetworkIsolation: true`
+  so Go TLS tools (`gh`, gcloud, …) can evaluate certificates via trustd inside
+  seatbelt. **Product default:** this is a deliberate security downgrade from
+  SRT's native default `false` (Anthropic SRT security warning: trustd helper-
+  mediated egress). Functionality (e.g. `gh` under Clash TUN) proves connectivity
+  only — **not** isolation equivalence. Unstarted guards do not inject. Guardian
+  worker stays zero-net without this field. Ticket + empty allowlist +
+  `requestCovered` remain the authorization seam; weaker isolation does **not**
+  authorize arbitrary network. Not a return of the deleted `network.mode` patch.
+  `src/sandbox/srt-coordinator.ts` owns one exclusive lease per Pi host process.
+  It serializes SRT mutation across every registration and ordinary sandboxed tool;
+  the production Guardian does not enter this coordinator. Host SRT state lives
+  in `processSandboxState` in `src/sandbox/srt-enforcer.ts`, while host draining
+  and persistent fault state live on `srtProcessCoordinator`. Execution
+  cancellation or timeout returns to the caller immediately, but the detached
+  drain keeps the lease until every mutable SRT operation settles and
+  child/cleanup completes. Successful cancellation cleanup permits the next
+  execution without clearing a global fault or reactivating SRT. Draining is
+  temporarily unhealthy for bare command escalation; ordinary sandbox requests
+  wait behind the lease with cancellation and deadline handling. A drain
+  deadline never releases an unsettled lease. Cleanup, policy-restore, or drain
+  failure poisons the host with its actual lifecycle cause, and later executions
+  fail closed.
   Only a successful `SrtSandboxManager.activate()` clears host poison after its
   bounded reset and base-policy initialization. `reset()` (including
   `yolo`/disabled transitions) tears down host SRT/base/connect state but does
@@ -209,24 +233,25 @@ remains the only unrestricted path.
   appends deny rules to that invocation's policy; discovery failures fail
   closed before execution. This does not modify the Engine snapshot or lease
   and does not cross the independent Guardian worker boundary.
-- Generic tools use `host-admission`: the Engine can review their exact
-  external-tool capability, but SRT only enforces sandbox-owned
-  bash/write/edit and permission-amendment executions. Temporary scratch
-  follows the SRT backend defaults and is not treated as a workspace grant.
+- Tool governance channels (product scope 2026-09-19):
+  - **Owned** `bash` / `write` / `edit` / `request_permissions`: Engine +
+    Guardian residual + SRT/escalated/amendment — full chain.
+  - **Host-first B** `read` / `grep` / `find` / `ls`: `tool_call` only honors
+    `permissions.json` `rules[]` **deny** → `{ block: true, reason }`. No
+    Engine authorization decision and no Guardian. `rules.ask`/`allow` on this
+    channel are ignored; empty `rules` means no extra gate. No sandbox
+    ownership. (Host-first may still touch permission **lifecycle**
+    activation via `preparePermissionExecution`; that is not an Engine grant.)
+  - **Foreign A** MCP/custom/other extension tools: `tool_call` returns
+    `undefined` (host-native). Out of governance scope.
+  - **`subagent`** remains a residual special: `checkDelegateSpawn` then
+    host-first B (not owned execute).
+  - **yolo** is unrestricted for this preflight: `tool_call` returns
+    `undefined` for host-first **and** `subagent` (skips B deny and the spawn
+    gate), consistent with owned yolo skipping static risk. Documented
+    product exception — not a silent drop.
+  - Temporary scratch for owned SRT still follows SRT backend defaults.
 - Permission rule evaluation lives under `src/permissions/`.
-- Dependency patch: the pinned `@anthropic-ai/sandbox-runtime@0.0.74` network-mode
-  patch lives in `patches/anthropic-ai__sandbox-runtime@0.0.74.patch` and is
-  registered via `pnpm-workspace.yaml` `patchedDependencies`. The committed
-  product contract is `tests/srt-network-mode-patch.test.ts` (static package
-  entrypoint). The native/static harness under `patches/srt-network-mode/` is
-  tracked for provenance but stays **outside product acceptance**; `npm test`
-  does not run it. Run its `README.md` procedures from that directory only when
-  explicitly verifying the patch. `prepare.mjs --package isolated` copies the
-  **unpatched** pnpm store package (not the patched project link). Do not treat
-  a green suite as proof those helpers were exercised. If
-  `verify.mjs --package installed` reports a digest-only mismatch on a patched
-  package file (often README), restore from the lockfile with `pnpm install`
-  and re-run verify; do not hand-edit the installed copy.
 - Design history: dated notes in `docs/research/` only. Each note must state
   scope, the standing upstream pin (or an explicit day-of snapshot), and what it
   does not claim. Re-check when the pinned upstream moves or a cited tree path

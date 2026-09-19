@@ -75,6 +75,30 @@ describe("guardian metrics mapping", () => {
     });
     expect(record.guardian_model).toBe("none");
     expect(record.risk_level).toBe("none");
+    expect(record.static_risk).toBe("none");
+    expect(record.review_source).toBe("unknown");
+    expect(record.residual_signals).toBeUndefined();
     expect(record.duration_ms).toBe(0);
+  });
+
+  it("keeps additive static_risk, review_source and residual_signals schema-compatible", () => {
+    const record = buildGuardianMetricsRecord({
+      reviewId: "review-3",
+      terminalStatus: "approved",
+      action: "shell",
+      ownership: "sandbox-owned",
+      sessionKind: "trunk_new",
+      hadPriorReviewContext: false,
+      riskLevel: "low",
+      outcome: "approve",
+      staticRisk: "REVIEW",
+      reviewSource: "preview",
+      residualSignals: ["rule_ask", "risk_not_low"],
+      durationMs: 10,
+    });
+    expect(record.static_risk).toBe("REVIEW");
+    expect(record.review_source).toBe("preview");
+    expect(record.residual_signals).toEqual(["rule_ask", "risk_not_low"]);
+    expect(Object.isFrozen(record.residual_signals)).toBe(true);
   });
 });
