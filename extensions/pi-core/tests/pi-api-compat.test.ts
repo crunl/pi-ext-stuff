@@ -2,17 +2,24 @@ import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SettingsManager, SettingsSelectorComponent } from "@earendil-works/pi-coding-agent";
-import { Editor, Markdown } from "@earendil-works/pi-tui";
+import {
+  AssistantMessageComponent,
+  SettingsManager,
+  SettingsSelectorComponent,
+} from "@earendil-works/pi-coding-agent";
+import { Editor, Markdown, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
+import { applyThinkingGlance, resetThinkingGlance } from "../src/tui/thinking-glance.ts";
+import { createThinkingTimingTracker } from "../src/tui/thinking-timing.ts";
 
 /**
- * Pi 0.85.1 has no public hook for moving the built-in autocomplete list,
- * replacing only fenced-code token rendering, or identifying the active host
- * selector. Keep these deliberate runtime seams loud: a future Pi upgrade
- * should fail here instead of degrading later in an interactive session.
+ * Pi 0.86.0 (validation pin) still has no public hook for moving the built-in
+ * autocomplete list, replacing only fenced-code token rendering, or
+ * identifying the active host selector. Keep these deliberate runtime seams
+ * loud: a future Pi upgrade should fail here instead of degrading later in an
+ * interactive session.
  */
-describe("Pi 0.85.1 compatibility seams", () => {
+describe("Pi 0.86.0 compatibility seams", () => {
   it("retains the Editor autocomplete fields used for above-editor placement", () => {
     const editor = new Editor(
       { requestRender: () => {}, terminal: { rows: 24, columns: 80 } } as never,
@@ -33,6 +40,37 @@ describe("Pi 0.85.1 compatibility seams", () => {
 
     expect(typeof prototype.renderToken).toBe("function");
     expect(Object.hasOwn(runtime, "theme")).toBe(true);
+  });
+
+  it("retains AssistantMessageComponent.updateContent for thinking glance patch", () => {
+    const proto = AssistantMessageComponent.prototype as unknown as Record<string, unknown>;
+    expect(typeof proto.updateContent).toBe("function");
+    expect(typeof proto.setHiddenThinkingLabel).toBe("function");
+  });
+
+  it("keeps hidden thinking glance replaceable after host updateContent", () => {
+    // Behavioral snapshot: hideThinkingBlock=true renders a tree glance row
+    // (pi-core patch) rather than only the host "Thinking..." label.
+    applyThinkingGlance(createThinkingTimingTracker());
+    try {
+      const component = new AssistantMessageComponent(undefined, true);
+      component.updateContent(
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "hello" }],
+          stopReason: "stop",
+        } as never,
+        false,
+      );
+      const text = (component as unknown as { render(width: number): string[] })
+        .render(80)
+        .map((line) => stripTerminalSequences(line))
+        .join("\n");
+      expect(text).toContain("└ ");
+      expect(text).not.toContain("▶");
+    } finally {
+      resetThinkingGlance();
+    }
   });
 
   it("retains the exported settings-selector constructor identity", () => {

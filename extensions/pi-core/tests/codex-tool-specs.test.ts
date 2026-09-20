@@ -98,7 +98,7 @@ describe("codex tool specs", () => {
     const running = rendering.renderCall(args, theme as never, ctx as never);
     const runningText = stripTerminalSequences(running.render(100).join("\n"));
     expect(runningText).toContain("Editing src/a.ts");
-    expect(runningText).toContain("▶");
+    expect(runningText).not.toContain("▶");
 
     rendering.renderResult(
       {
@@ -113,10 +113,11 @@ describe("codex tool specs", () => {
     const text = stripTerminalSequences(completed.render(100).join("\n"));
     expect(text).toContain("Edited src/a.ts");
     expect(text).toContain("+2 -1");
-    expect(text).toContain("▶");
+    expect(text).not.toContain("▶");
+    expect(text).not.toContain("▼");
   });
 
-  it("edit expanded header switches chevron to ▼", () => {
+  it("edit expanded header omits expand chevron", () => {
     const rendering = createCodexToolRendering(codexEditToolSpec, padSource);
     const args = { path: "src/a.ts" };
     const ctx = context({ args, expanded: true });
@@ -137,7 +138,7 @@ describe("codex tool specs", () => {
         .join("\n"),
     );
     expect(header).toContain("Edited src/a.ts");
-    expect(header).toContain("▼");
+    expect(header).not.toContain("▼");
     expect(header).not.toContain("▶");
     const body = result.render(100).map((row) => stripTerminalSequences(row));
     expect(body.length).toBeGreaterThan(0);
@@ -159,7 +160,7 @@ describe("codex tool specs", () => {
     expect(text).toContain("+2");
   });
 
-  it("read settled header is path · N lines + chevron with empty body", () => {
+  it("read settled header is path · N lines without expand chevron", () => {
     const rendering = createCodexToolRendering(codexReadToolSpec, padSource);
     const args = { path: "/repo/src/a.ts" };
     const ctx = context({ args });
@@ -173,7 +174,8 @@ describe("codex tool specs", () => {
     const line = stripTerminalSequences(header.render(100).join("\n"));
     expect(line).toContain("Read /repo/src/a.ts");
     expect(line).toContain("· 3 lines");
-    expect(line).toContain("▶");
+    expect(line).not.toContain("▶");
+    expect(line).not.toContain("▼");
     expect(result.render(100)).toEqual([]);
   });
 
@@ -188,7 +190,9 @@ describe("codex tool specs", () => {
       theme as never,
       ctx as never,
     );
-    expect(stripTerminalSequences(header.render(100).join("\n"))).toContain("▼");
+    const headerLine = stripTerminalSequences(header.render(100).join("\n"));
+    expect(headerLine).not.toContain("▼");
+    expect(headerLine).not.toContain("▶");
     const body = result.render(100).map((row) => stripTerminalSequences(row));
     const joined = body.join("\n");
     expect(joined).toContain("10 │");
@@ -207,7 +211,9 @@ describe("codex tool specs", () => {
       theme as never,
       ctx as never,
     );
-    expect(stripTerminalSequences(header.render(100).join("\n"))).toContain("▼");
+    const headerLine = stripTerminalSequences(header.render(100).join("\n"));
+    expect(headerLine).not.toContain("▼");
+    expect(headerLine).not.toContain("▶");
     const joined = result
       .render(100)
       .map((row) => stripTerminalSequences(row))
@@ -482,16 +488,16 @@ describe("CodexToolRendererSpec type surface", () => {
   it("read spec exposes file-evidence contract fields", () => {
     const spec: CodexToolRendererSpec = codexReadToolSpec;
     expect(spec.singleLineHeader).toBe(true);
-    expect(spec.showExpandIndicator).toBe(true);
+    expect(spec.showExpandIndicator).toBe(false);
     expect(typeof spec.summarizeResult).toBe("function");
     expect(typeof spec.renderExpandedResult).toBe("function");
     expect(spec.expandedResultOnFailed).toBeFalsy();
   });
 
-  it("edit spec exposes expand chevron with diff summary", () => {
+  it("edit spec exposes diff summary without expand chevron", () => {
     const spec: CodexToolRendererSpec = codexEditToolSpec;
     expect(spec.singleLineHeader).toBe(true);
-    expect(spec.showExpandIndicator).toBe(true);
+    expect(spec.showExpandIndicator).toBe(false);
     expect(typeof spec.collapsed).toBe("function");
     expect(typeof spec.renderExpandedResult).toBe("function");
   });

@@ -105,7 +105,7 @@ export const codexReadToolSpec: CodexToolRendererSpec = {
   argument: readArgument,
   collapsed: "hidden",
   singleLineHeader: true,
-  showExpandIndicator: true,
+  showExpandIndicator: false,
   summarizeResult: summarizeReadLines,
   renderExpandedResult(result, args, theme, outputPad, _meta) {
     return createReadEvidence({
@@ -227,7 +227,7 @@ export const codexEditToolSpec: CodexToolRendererSpec = {
   completedVerb: "Edited",
   argument: toolPath,
   singleLineHeader: true,
-  showExpandIndicator: true,
+  showExpandIndicator: false,
   collapsed: summarizeEditDiff,
   formatSummary: colorizeEditDiffSummary,
   renderExpandedResult: (result, args, theme, outputPad, _meta) => {

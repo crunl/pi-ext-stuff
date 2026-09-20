@@ -45,13 +45,13 @@ Adding an export here is the only supported way to widen the contract.
 - `canonical-tool-fallback.ts` — TUI-only adapter for canonical bash/write/edit.
   It snapshots `getAllTools()` before registering anything, skips extension/SDK
   owners, reconstructs definitions with Pi's public factories, and never calls
-  `setActiveTools`. Pi 0.85.1 cannot expose the actual definition or host
+  `setActiveTools`. Validation pin 0.86.0 still cannot expose the actual definition or host
   `SettingsManager` through the extension context, so an SDK
   `baseToolsOverride`, custom/non-file-backed shell settings, and a later
   dynamic same-name registration cannot be distinguished safely. Those SDK
   configurations should use the `off` flag; these remain documented
   compatibility boundaries rather than private-registry patch points.
-- Pi 0.85.1 has no public renderer-only registration API: execution and
+- Validation pin 0.86.0 still has no public renderer-only registration API: execution and
   rendering are combined in `ToolDefinition`. If a future Pi release exposes
   an API such as `registerToolRenderer(name, renderer)`, replace this Adapter
   with that host integration while keeping `withCodexToolPresentation` as the
@@ -61,9 +61,9 @@ Adding an export here is the only supported way to widen the contract.
   count/colorize, write line-count colorize). **Bash glance header (design B)**:
   `singleLineHeader`, command first line capped at `BASH_GLANCE_BUDGET` + `…`,
   dim `· N output lines` / `· no output` on the same row, host-driven
-  `▶`/`▼` expand chevron (`showExpandIndicator`), `failedVerb: "Command failed"`.
+  `▶`/`▼` expand chevron (`showExpandIndicator`, **bash only**), `failedVerb: "Command failed"`.
   Settled success + collapsed = header-only body; failed keeps error preview.
-  **Read**: header `path[:range] · N lines` + chevron; expand only shows
+  **Read**: header `path[:range] · N lines` (no expand chevron); expand only shows
   file evidence via `read-evidence.ts` (never bash `└` stdout rail).
 - `bash-evidence.ts` — `commandGlance` + expanded bash evidence
   (`$ ` full command under `  │ `, then full output). Imports command caps from
@@ -91,6 +91,12 @@ Adding an export here is the only supported way to widen the contract.
   through a separate jiti instance see the same value. **Internal only** (not
   exported from `standalone.ts`); statusline reads `settings.outputPad` itself.
 - `write-preview.ts` — streaming write preview; `edit-diff.ts` — diff box.
+- `thinking-glance.ts` / `thinking-timing.ts` — patch
+  `AssistantMessageComponent.updateContent` so hidden thinking runs show
+  MiniMax-style glance (`└ Thought for 1.4s` / `└ Thinking…`, **no `▶`**).
+  Duration is a memory side-channel from `thinking_start`/`thinking_delta`;
+  resume degrades to `Thought`. Expand remains host-owned (click / ctrl+t).
+  Not exported from `standalone.ts`.
 - Floating overlay chain (call order): `autocomplete-above.ts` installs the
   autocomplete provider and the editor float panel
   (`editor-float-panel.ts`); `selector-float.ts` marks floatable selectors and

@@ -7,6 +7,7 @@ import { registerExitCommand } from "./tui/exit-command.ts";
 import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
 import { registerOutputPaddingSync } from "./tui/output-padding.ts";
 import { registerSelectorTabNav } from "./tui/selector-tab-nav.ts";
+import { registerThinkingGlance } from "./tui/thinking-glance.ts";
 import { registerUserMessageBar } from "./tui/user-message-bar.ts";
 import { registerWorkingTokenRate } from "./tui/working-token-rate.ts";
 
@@ -19,6 +20,7 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerEffortCommand(pi);
   registerExitCommand(pi);
   registerWorkingTokenRate(pi);
+  registerThinkingGlance(pi);
   applyMarkdownCodeFrame();
   registerUserMessageBar(pi);
 }
