@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { defaultPermissionsConfigPath, legacyPermissionsConfigPath } from "./filesystem-policy.ts";
+import {
+  defaultPermissionsConfigPath,
+  hasGlobSyntax,
+  legacyPermissionsConfigPath,
+} from "./filesystem-policy.ts";
 import { networkPatternHasLocalException } from "./network-domain-pattern.ts";
 import { isValidNetworkCidr } from "./network-host.ts";
 import { isRecord } from "./unknown-value.ts";
@@ -132,6 +136,19 @@ export interface PermissionsConfig {
       trustedFakeIpRanges: string[];
       /** High privilege: SRT may allow local bind/inbound and loopback outbound. */
       allowLocalBinding?: boolean;
+      /**
+       * Absolute unix-socket path allowlist projected to SRT
+       * `network.allowUnixSockets` (macOS seatbelt). Default/empty = omit =
+       * SRT blocks AF_UNIX. Orthogonal to Engine `network_access` (TCP lease).
+       * Codex analogue: `features.network_proxy.unix_sockets` allow entries.
+       * docker.sock etc. ≈ host privilege — opt-in only.
+       */
+      allowUnixSockets?: string[];
+      /**
+       * Projected to SRT `network.allowAllUnixSockets`. Codex analogue:
+       * `dangerously_allow_all_unix_sockets` (default false). High privilege.
+       */
+      dangerouslyAllowAllUnixSockets?: boolean;
     };
   };
   rules: Array<{ action: "allow" | "ask" | "deny"; tool: string; pattern?: string }>;
@@ -179,6 +196,8 @@ export type PermissionsConfigOverlay = {
       deniedDomains?: string[];
       trustedFakeIpRanges?: string[];
       allowLocalBinding?: boolean;
+      allowUnixSockets?: string[];
+      dangerouslyAllowAllUnixSockets?: boolean;
     };
   };
   rules?: PermissionsConfig["rules"];
@@ -246,6 +265,33 @@ function expectString(value: unknown, path: string): string {
 function expectBoolean(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") throw new ConfigError(`${path} must be a boolean`);
   return value;
+}
+
+function expectAbsoluteUnixSocketPaths(value: unknown, path: string): string[] {
+  return expectStrings(value, path).map((entry, index) => {
+    if (!entry.startsWith("/")) {
+      throw new ConfigError(`${path}[${index}] must be an absolute unix socket path`);
+    }
+    if (hasGlobSyntax(entry)) {
+      throw new ConfigError(`${path}[${index}] must not contain glob syntax`);
+    }
+    // macOS SRT matches allowlist entries as seatbelt subpaths: "/" or any
+    // directory prefix would silently grant every AF_UNIX path under it.
+    const basename = entry.slice(entry.lastIndexOf("/") + 1);
+    if (
+      entry === "/" ||
+      entry.endsWith("/") ||
+      basename.length === 0 ||
+      basename === "." ||
+      basename === ".."
+    ) {
+      throw new ConfigError(
+        `${path}[${index}] must be an exact socket file path, not "/" or a directory ` +
+          `(macOS SRT subpath match would widen the allowlist)`,
+      );
+    }
+    return entry;
+  });
 }
 
 function expectStrings(value: unknown, path: string): string[] {
@@ -437,11 +483,17 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
           "deniedDomains",
           "trustedFakeIpRanges",
           "allowLocalBinding",
+          "allowUnixSockets",
+          "dangerouslyAllowAllUnixSockets",
         ],
         "sandbox.network",
       );
       const network: NonNullable<NonNullable<PermissionsConfigOverlay["sandbox"]>["network"]> = {};
-      for (const key of ["network_access", "allowPrivateTargets"] as const) {
+      for (const key of [
+        "network_access",
+        "allowPrivateTargets",
+        "dangerouslyAllowAllUnixSockets",
+      ] as const) {
         if (key in input.sandbox.network)
           network[key] = expectBoolean(input.sandbox.network[key], `sandbox.network.${key}`);
       }
@@ -487,6 +539,14 @@ function parseOverlay(input: unknown): PermissionsConfigOverlay {
         network.allowLocalBinding = expectBoolean(
           input.sandbox.network.allowLocalBinding,
           "sandbox.network.allowLocalBinding",
+        );
+      if (
+        "allowUnixSockets" in input.sandbox.network &&
+        input.sandbox.network.allowUnixSockets !== undefined
+      )
+        network.allowUnixSockets = expectAbsoluteUnixSocketPaths(
+          input.sandbox.network.allowUnixSockets,
+          "sandbox.network.allowUnixSockets",
         );
       sandbox.network = network;
     }
@@ -580,6 +640,11 @@ function applyOverlay(
       config.sandbox.network.trustedFakeIpRanges = [...overlay.sandbox.network.trustedFakeIpRanges];
     if (overlay.sandbox.network?.allowLocalBinding !== undefined)
       config.sandbox.network.allowLocalBinding = overlay.sandbox.network.allowLocalBinding;
+    if (overlay.sandbox.network?.allowUnixSockets !== undefined)
+      config.sandbox.network.allowUnixSockets = [...overlay.sandbox.network.allowUnixSockets];
+    if (overlay.sandbox.network?.dangerouslyAllowAllUnixSockets !== undefined)
+      config.sandbox.network.dangerouslyAllowAllUnixSockets =
+        overlay.sandbox.network.dangerouslyAllowAllUnixSockets;
   }
   if (overlay.rules !== undefined) config.rules = structuredClone(overlay.rules);
   if (overlay.delegation !== undefined) {

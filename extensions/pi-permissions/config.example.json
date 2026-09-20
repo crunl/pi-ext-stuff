@@ -21,7 +21,9 @@
       "allowedDomains": [],
       "deniedDomains": [],
       "trustedFakeIpRanges": [],
-      "allowLocalBinding": false
+      "allowLocalBinding": false,
+      "allowUnixSockets": [],
+      "dangerouslyAllowAllUnixSockets": false
     }
   },
   "rules": [],

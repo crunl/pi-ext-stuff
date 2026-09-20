@@ -272,6 +272,60 @@ describe("SRT executor contract", () => {
     await manager.reset();
   });
 
+  it("omits unix socket fields when policy does not set them (SRT default block)", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const policy = basePolicy();
+    policy.network.network_access = true;
+    await manager.activate(policy);
+    await execute(manager, policy);
+    const network = runtime.initialized[0]?.network as Record<string, unknown> | undefined;
+    expect(network).not.toHaveProperty("allowUnixSockets");
+    expect(network).not.toHaveProperty("allowAllUnixSockets");
+    await manager.reset();
+  });
+
+  it("omits unix socket fields when policy sets empty list and danger=false", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const policy: SandboxPolicy = {
+      ...basePolicy(),
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        allowUnixSockets: [],
+        dangerouslyAllowAllUnixSockets: false,
+      },
+    };
+    await manager.activate(policy);
+    await execute(manager, policy);
+    const network = runtime.initialized[0]?.network as Record<string, unknown> | undefined;
+    expect(network).not.toHaveProperty("allowUnixSockets");
+    expect(network).not.toHaveProperty("allowAllUnixSockets");
+    await manager.reset();
+  });
+
+  it("projects allowUnixSockets and dangerouslyAllowAllUnixSockets to native SRT", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime);
+    const policy: SandboxPolicy = {
+      ...basePolicy(),
+      network: {
+        allowedDomains: [],
+        deniedDomains: [],
+        allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+        dangerouslyAllowAllUnixSockets: true,
+      },
+    };
+    await manager.activate(policy);
+    await execute(manager, policy);
+    const network = runtime.initialized[0]?.network as Record<string, unknown> | undefined;
+    expect(network?.allowUnixSockets).toEqual(["/Users/x1a2h1/.orbstack/run/docker.sock"]);
+    expect(network?.allowAllUnixSockets).toBe(true);
+    expect(network).not.toHaveProperty("mode");
+    await manager.reset();
+  });
+
   it("does not inject weaker isolation when the guard has not started (no parentProxyUrl)", async () => {
     class UnstartedGuard extends SandboxConnectGuard {
       override get parentProxyUrl(): string | undefined {

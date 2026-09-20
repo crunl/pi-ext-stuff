@@ -12,8 +12,9 @@
 Replace `sandbox.network.enabled` with Codex-named `sandbox.network.network_access`.
 
 `network_access: true` = whole TCP network open (Codex Enabled without proxy):
-public + private outbound + loopback + bind/inbound. Unix sockets stay a separate
-future axis. Fine axes remain:
+public + private outbound + loopback + bind/inbound. Unix sockets are a
+**separate OS axis** — config surface shipped in `2026-09-19-unix-sockets-srt-allowlist.md`
+(A2); `network_access` still does not open AF_UNIX. Fine axes remain:
 
 | Field | Role |
 |---|---|
@@ -58,8 +59,10 @@ lease. To keep a static system-TLS profile, set
 
 - No claim that auto mode is yolo; auto still only Guardian-reviews.
 - No claim that connect-guard or `deniedDomains` are relaxed.
-- No claim that unix sockets or bind are independently configurable beyond
-  `allowLocalBinding`.
+- No claim that unix sockets are authorized by `network_access`; they require
+  `allowUnixSockets` / `dangerouslyAllowAllUnixSockets` (see
+  `2026-09-19-unix-sockets-srt-allowlist.md`).
+- No claim that bind is independently configurable beyond `allowLocalBinding`.
 - No native SRT isolation proof; contract tests are hermetic Engine/config tests.
 - Sibling `pi-core` was dirty during local acceptance; pair results are
   provisional until a clean sibling run.

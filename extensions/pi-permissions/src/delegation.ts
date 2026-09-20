@@ -212,6 +212,9 @@ export function intersectSandboxPolicy(
         : { trustedFakeIpRanges: [...base.network.trustedFakeIpRanges] }),
       // Finite destination ceilings cannot permit native local socket bypasses.
       allowLocalBinding: false,
+      // Unix sockets are OS privilege (docker.sock ≈ host); children never inherit.
+      allowUnixSockets: [],
+      dangerouslyAllowAllUnixSockets: false,
     },
   };
 }

@@ -3424,6 +3424,9 @@ describe("Permission mode registration", () => {
     const serialized = JSON.stringify(tool?.parameters);
     expect(serialized).toContain("network_access");
     expect(serialized).not.toContain('"enabled"');
+    expect(serialized).not.toContain("allowUnixSockets");
+    expect(serialized).not.toContain("unixSockets");
+    expect(serialized).not.toContain("dangerouslyAllowAllUnixSockets");
     await expect(
       tool?.execute(
         "schema-shaped",
@@ -3462,6 +3465,29 @@ describe("Permission mode registration", () => {
     { permissions: { network: { hosts: ["api.example.com"], port: 443 } } },
     { permissions: { network: { hosts: ["api.example.com:443"] } } },
     { permissions: { network: { hosts: ["api.example.com", null] } } },
+    {
+      permissions: {
+        network: {
+          hosts: ["api.example.com"],
+          unixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+        },
+      },
+    },
+    {
+      permissions: {
+        network: {
+          allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+        },
+      },
+    },
+    {
+      permissions: {
+        network: {
+          network_access: true,
+          dangerouslyAllowAllUnixSockets: true,
+        },
+      },
+    },
   ])("rejects unsupported explicit scope without granting a broader host: %j", async (params) => {
     const app = await makeHarness({
       useRealBashTool: true,

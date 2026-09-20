@@ -46,6 +46,10 @@ export interface SandboxPolicy {
     deniedDomains: string[];
     trustedFakeIpRanges?: string[];
     allowLocalBinding?: boolean;
+    /** Absolute AF_UNIX allowlist → SRT; empty/absent = OS socket block. */
+    allowUnixSockets?: string[];
+    /** SRT allowAllUnixSockets (Codex dangerously_allow_all_* analogue). */
+    dangerouslyAllowAllUnixSockets?: boolean;
   };
 }
 
@@ -389,6 +393,12 @@ export function createSandboxRuntimeConfig(
       ...(config.network.allowLocalBinding === undefined
         ? {}
         : { allowLocalBinding: config.network.allowLocalBinding }),
+      ...(config.network.allowUnixSockets === undefined
+        ? {}
+        : { allowUnixSockets: [...config.network.allowUnixSockets] }),
+      ...(config.network.dangerouslyAllowAllUnixSockets === undefined
+        ? {}
+        : { dangerouslyAllowAllUnixSockets: config.network.dangerouslyAllowAllUnixSockets }),
     },
   };
 }

@@ -160,6 +160,24 @@ unrestricted path.
   worker stays zero-net without this field. Ticket + empty allowlist +
   `requestCovered` remain the authorization seam; weaker isolation does **not**
   authorize arbitrary network. Not a return of the deleted `network.mode` patch.
+  Unix sockets are a **separate OS axis** from Engine `network_access` (TCP
+  lease): `sandbox.network.allowUnixSockets` (absolute paths, default/empty)
+  and `dangerouslyAllowAllUnixSockets` (default unset/false) project only to
+  native SRT `network.allowUnixSockets` / `allowAllUnixSockets`. Empty/absent
+  omits the fields so SRT keeps AF_UNIX blocked (Codex
+  `dangerously_allow_all_unix_sockets` default `false`). `network_access:true`
+  never opens sockets. Delegation pins child sockets to empty/false; Guardian
+  worker never injects them. **Security honesty:** allowing
+  `~/.orbstack/run/docker.sock` / `/var/run/docker.sock` ≈ host docker-group
+  privilege (SRT README). Linux path lists are ignored by SRT (seccomp
+  all-or-nothing). Config load rejects `"/"` and directory prefixes because
+  macOS SRT allowlist entries are seatbelt **subpath** matches (a directory
+  silently grants every socket beneath it). Prefer exact socket files.
+  Socket denials are seatbelt hard-blocks and do **not** enter
+  LLM review. Prefer exact socket files, not directories (macOS subpath match).
+  `request_permissions` still cannot grant sockets — use
+  `sandbox_permissions=require_escalated` or yolo/host shell for daemon tools
+  when the allowlist stays empty.
   `src/sandbox/srt-coordinator.ts` owns one exclusive lease per Pi host process.
   It serializes SRT mutation across every registration and ordinary sandboxed tool;
   the production Guardian does not enter this coordinator. Host SRT state lives

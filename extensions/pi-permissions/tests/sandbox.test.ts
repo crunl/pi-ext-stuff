@@ -452,6 +452,28 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.allowWrite).toContain("/private/tmp");
   });
 
+  it("projects unix socket axes only when configured; default omits them", () => {
+    const defaultRuntime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
+    expect(defaultRuntime.network.allowUnixSockets).toBeUndefined();
+    expect(defaultRuntime.network.dangerouslyAllowAllUnixSockets).toBeUndefined();
+
+    const openRuntime = createSandboxRuntimeConfig(
+      {
+        ...DEFAULT_CONFIG.sandbox,
+        network: {
+          ...DEFAULT_CONFIG.sandbox.network,
+          allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+          dangerouslyAllowAllUnixSockets: false,
+        },
+      },
+      "/workspace/project",
+    );
+    expect(openRuntime.network.allowUnixSockets).toEqual([
+      "/Users/x1a2h1/.orbstack/run/docker.sock",
+    ]);
+    expect(openRuntime.network.dangerouslyAllowAllUnixSockets).toBe(false);
+  });
+
   it("keeps Codex-style defaults while resolving protected workspace metadata", () => {
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
 

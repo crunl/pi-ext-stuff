@@ -198,6 +198,60 @@ describe("permissions config", () => {
     expect(config.sandbox.network.allowLocalBinding).toBe(true);
   });
 
+  it("accepts absolute allowUnixSockets and dangerouslyAllowAllUnixSockets", () => {
+    const config = validatePermissionsConfig({
+      sandbox: {
+        network: {
+          allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+          dangerouslyAllowAllUnixSockets: false,
+        },
+      },
+    });
+    expect(config.sandbox.network.allowUnixSockets).toEqual([
+      "/Users/x1a2h1/.orbstack/run/docker.sock",
+    ]);
+    expect(config.sandbox.network.dangerouslyAllowAllUnixSockets).toBe(false);
+  });
+
+  it("fingerprints independently when unix socket axes change", () => {
+    const withSocket = validatePermissionsConfig({
+      sandbox: {
+        network: { allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"] },
+      },
+    });
+    const withDanger = validatePermissionsConfig({
+      sandbox: { network: { dangerouslyAllowAllUnixSockets: true } },
+    });
+    const base = fingerprintConfig(DEFAULT_CONFIG);
+    expect(fingerprintConfig(withSocket)).not.toBe(base);
+    expect(fingerprintConfig(withDanger)).not.toBe(base);
+    expect(fingerprintConfig(withSocket)).not.toBe(fingerprintConfig(withDanger));
+  });
+
+  it("keeps unix socket fields absent on DEFAULT_CONFIG", () => {
+    expect(DEFAULT_CONFIG.sandbox.network.allowUnixSockets).toBeUndefined();
+    expect(DEFAULT_CONFIG.sandbox.network.dangerouslyAllowAllUnixSockets).toBeUndefined();
+  });
+
+  it.each([
+    { allowUnixSockets: ["relative/docker.sock"] },
+    { allowUnixSockets: ["~/orbstack/run/docker.sock"] },
+    { allowUnixSockets: ["/Users/*/docker.sock"] },
+    { allowUnixSockets: ["/"] },
+    { allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/"] },
+    { allowUnixSockets: ["/Users/x1a2h1/.."] },
+  ])("rejects non-absolute, glob, or directory unix socket paths: %j", (network) => {
+    expect(() => validatePermissionsConfig({ sandbox: { network } })).toThrow(/allowUnixSockets/);
+  });
+
+  it("rejects unknown unix socket-shaped network keys", () => {
+    expect(() =>
+      validatePermissionsConfig({
+        sandbox: { network: { unixSockets: { "/tmp/x.sock": "allow" } } },
+      }),
+    ).toThrow(/unixSockets/);
+  });
+
   it.each([
     { deniedDomains: ["*"] },
     { deniedDomains: ["blocked.example.com"] },

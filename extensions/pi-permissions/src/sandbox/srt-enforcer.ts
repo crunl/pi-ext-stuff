@@ -113,6 +113,8 @@ function parentProxyActive(connectGuard?: SandboxConnectGuard): boolean {
  * When connect-guard supplies parentProxy, inject the public
  * enableWeakerNetworkIsolation so Go TLS (gh/gcloud/…) can reach trustd
  * inside the seatbelt; documented security tradeoff in AGENTS.md.
+ * Unix sockets: only explicit allowUnixSockets / dangerouslyAllowAllUnixSockets
+ * are projected; empty/absent omits the fields so SRT keeps AF_UNIX blocked.
  */
 function toSrtConfig(
   policy: SandboxPolicy,
@@ -130,6 +132,10 @@ function toSrtConfig(
     policy.filesystem.allowWrite.length === 0
       ? [...policy.filesystem.allowWrite]
       : [...new Set([...policy.filesystem.allowWrite, ...expandSymlinkAliases(tmpdir())])];
+  const allowUnixSockets =
+    policy.network.allowUnixSockets === undefined
+      ? []
+      : [...new Set(policy.network.allowUnixSockets)];
   return {
     filesystem: {
       denyRead: [...policy.filesystem.denyRead],
@@ -143,6 +149,10 @@ function toSrtConfig(
       allowedDomains: connectGuard ? [] : [...policy.network.allowedDomains],
       deniedDomains: [...policy.network.deniedDomains],
       ...(authority.localBinding ? { allowLocalBinding: true } : {}),
+      ...(allowUnixSockets.length > 0 ? { allowUnixSockets } : {}),
+      ...(policy.network.dangerouslyAllowAllUnixSockets === true
+        ? { allowAllUnixSockets: true }
+        : {}),
       ...(connectGuard?.parentProxyUrl
         ? {
             parentProxy: {

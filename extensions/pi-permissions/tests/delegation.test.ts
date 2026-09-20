@@ -21,6 +21,9 @@ function basePolicy(): SandboxPolicy {
     network: {
       allowedDomains: ["example.com", "api.example.com"],
       deniedDomains: ["evil.example"],
+      allowUnixSockets: ["/Users/x1a2h1/.orbstack/run/docker.sock"],
+      dangerouslyAllowAllUnixSockets: true,
+      allowLocalBinding: true,
     },
   };
 }
@@ -101,6 +104,18 @@ describe("DelegationPlan", () => {
     expect(child.filesystem.denyWrite).toEqual(["/proj/secret"]);
     expect(child.network.allowedDomains).toEqual(["example.com"]);
     expect(child.network.deniedDomains).toEqual(["evil.example"]);
+  });
+
+  it("pins child unix sockets and local binding closed even when parent is open", () => {
+    const parent = basePolicy();
+    expect(parent.network.allowUnixSockets).toEqual(["/Users/x1a2h1/.orbstack/run/docker.sock"]);
+    const child = intersectSandboxPolicy(parent, {
+      writeRoots: ["/proj"],
+      networkHosts: ["example.com"],
+    });
+    expect(child.network.allowUnixSockets).toEqual([]);
+    expect(child.network.dangerouslyAllowAllUnixSockets).toBe(false);
+    expect(child.network.allowLocalBinding).toBe(false);
   });
 
   it("resolves the child envelope by inheriting empty configured lists", () => {
