@@ -288,7 +288,8 @@ unrestricted path.
   commit body or the dated research note for that slice. There is no CI; green
   checks are voluntary until a remote gate exists.
 
-Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.85.1 —
+Development dependencies pin the validation target: `@earendil-works/pi-coding-agent` 0.86.0 —
 check its API surface before upgrading assumptions about extension hooks. Use pnpm
 for dependency installation and recheck the pinned Pi package versions on the next
-Pi upgrade.
+Pi upgrade. (Host runtime and extension validation pin are independent: the global
+`pi` CLI may differ from this repo's devDependency.)

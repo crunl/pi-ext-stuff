@@ -29,8 +29,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.4",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "0.86.0",
+    "@earendil-works/pi-coding-agent": "0.86.0",
     "@types/node": "^24.0.0",
     "jiti": "2.7.0",
     "typebox": "1.1.38",

@@ -1,7 +1,7 @@
 # Host API boundaries for Approve for me
 
 **Standing Codex pin:** `129fd21687fbd4ac48133b7abfdcaf52cb6cb01f`  
-**Pi host pin:** `@earendil-works/pi-coding-agent@0.85.1`  
+**Pi host pin:** `@earendil-works/pi-coding-agent@0.86.0`  
 **SRT pin:** `@anthropic-ai/sandbox-runtime@0.0.77` (pristine; no patch)
 
 This note records what the Pi host Extension API can and cannot express. It is
