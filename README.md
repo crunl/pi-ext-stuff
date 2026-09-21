@@ -76,7 +76,19 @@ extensions/
   pi-permissions/       permission modes, sandbox, guardian reviewer
   statusline/           footer and status line rendering
   tool-result-budget/   per-turn tool-result size limit with spill files
+APPEND_SYSTEM.md      published copy of the global pi append-prompt
 ```
+
+## Published append-prompt
+
+[`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root is the global
+`~/.pi/agent/APPEND_SYSTEM.md` for this machine — pi loads it as an addition to
+the default system prompt in every session. It lives here so the prompt is
+versioned alongside the extensions; the home copy is a symlink to this file.
+
+It is generic working instructions (reply format, honesty rules, tool
+preferences), not anything private. Anyone is free to reuse it as their own
+`APPEND_SYSTEM.md`.
 
 `main` is this monorepo. The tag `pre-monorepo-pi-core` preserves the
 pre-monorepo single-package history of pi-core — 81 commits with their original
