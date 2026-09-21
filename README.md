@@ -70,5 +70,6 @@ extensions/
   statusline/       footer and status line rendering
 ```
 
-`main` is this monorepo. `pi-core-archive` preserves the pre-monorepo
-single-package history of pi-core — 81 commits with their original SHAs.
+`main` is this monorepo. The tag `pre-monorepo-pi-core` preserves the
+pre-monorepo single-package history of pi-core — 81 commits with their original
+SHAs, which `git-filter-repo` rewrote when the three packages were merged.
