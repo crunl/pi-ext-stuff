@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+dist/
+work/
+graphify-out/
+.pi/
+.pi-subagents/
+*.log

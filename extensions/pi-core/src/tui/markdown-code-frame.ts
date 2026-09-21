@@ -1,0 +1,119 @@
+/**
+ * markdown-code-frame - restyle fenced code blocks in assistant markdown.
+ *
+ * pi-tui's Markdown component hardcodes raw fence lines around code blocks:
+ *
+ *   ```ts        <- theme.codeBlockBorder("```" + lang)
+ *     code...
+ *   ```
+ *
+ * There is no official hook to change this (codeBlockBorder only colors the
+ * text), so we patch Markdown.prototype.renderToken and take over the
+ * "code" token branch, delegating every other token to the original.
+ *
+ * Shape (aligned with Codex CLI): pure syntax-highlighted content. No
+ * language label, no indent, no rails — selection copies just the code.
+ *
+ *   const x = 1;
+ *   console.log(x);
+ *
+ * Syntax highlighting is untouched: theme.highlightCode (when present)
+ * still colors the code; fallback is theme.codeBlock per line.
+ */
+import { Markdown, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+
+interface CodeToken {
+  type: string;
+  text: string;
+  lang?: string;
+}
+
+interface MarkdownThemeInternals {
+  codeBlockBorder(text: string): string;
+  codeBlock(text: string): string;
+  highlightCode?(code: string, lang?: string): string[];
+}
+
+interface MarkdownInternals {
+  theme: MarkdownThemeInternals;
+  renderToken(
+    token: CodeToken,
+    width: number,
+    nextTokenType?: string,
+    styleContext?: unknown,
+  ): string[];
+}
+
+type RenderToken = MarkdownInternals["renderToken"];
+
+interface PatchCarrier extends MarkdownInternals {
+  /** Pristine renderToken, stashed on the prototype so hot reloads can find it. */
+  __codeFrameOriginal?: RenderToken;
+}
+
+/**
+ * Patch Markdown.prototype.renderToken to restyle code blocks. Re-entrant:
+ * the pristine original is stashed on the prototype itself, so calling
+ * again (e.g. after /reload re-evaluates this module while the host keeps
+ * the same Markdown class) replaces the wrapper with the current version
+ * instead of keeping a stale closure pinned.
+ * Failures degrade to the original fence rendering: the wrapper only
+ * replaces the "code" branch and falls back to the original on any error.
+ */
+export function applyMarkdownCodeFrame(): void {
+  const proto = Markdown.prototype as unknown as PatchCarrier;
+  if (typeof proto.renderToken !== "function") return;
+
+  const original = proto.__codeFrameOriginal ?? proto.renderToken;
+  proto.__codeFrameOriginal = original;
+  proto.renderToken = function (
+    this: MarkdownInternals,
+    token: CodeToken,
+    width: number,
+    nextTokenType?: string,
+    styleContext?: unknown,
+  ): string[] {
+    if (token.type === "code") {
+      try {
+        return renderCodeFrame(this.theme, token, width, nextTokenType);
+      } catch {
+        // fall through to the original fence rendering
+      }
+    }
+    return original.call(this, token, width, nextTokenType, styleContext);
+  };
+}
+
+/** Undo the prototype patch (test helper). */
+export function resetMarkdownCodeFrame(): void {
+  const proto = Markdown.prototype as unknown as PatchCarrier;
+  if (proto.__codeFrameOriginal) {
+    proto.renderToken = proto.__codeFrameOriginal;
+    proto.__codeFrameOriginal = undefined;
+  }
+}
+
+function renderCodeFrame(
+  theme: MarkdownThemeInternals,
+  token: CodeToken,
+  width: number,
+  nextTokenType?: string,
+): string[] {
+  const contentLines = theme.highlightCode
+    ? theme.highlightCode(token.text, token.lang)
+    : token.text.split("\n").map((line) => theme.codeBlock(line));
+
+  const lines: string[] = [];
+  const innerWidth = Math.max(1, width);
+  for (const contentLine of contentLines) {
+    const wrapped = wrapTextWithAnsi(contentLine, innerWidth);
+    for (const row of wrapped.length > 0 ? wrapped : [""]) {
+      lines.push(row);
+    }
+  }
+
+  if (nextTokenType && nextTokenType !== "space") {
+    lines.push(""); // spacing after the block, mirroring the original
+  }
+  return lines;
+}

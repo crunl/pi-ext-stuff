@@ -1,0 +1,593 @@
+import { stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, it, vi } from "vitest";
+import { compactBashStatusSpacing, summarizeEditDiff } from "../src/tui/codex-tool-specs.ts";
+import { createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+
+const theme = {
+  fg: (_color: string, text: string) => text,
+  bold: (text: string) => text,
+} as any;
+
+function context(state: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+  return {
+    args: { command: "npm test" },
+    toolCallId: "call-1",
+    invalidate() {},
+    lastComponent: undefined,
+    state,
+    cwd: "/repo",
+    executionStarted: true,
+    argsComplete: true,
+    isPartial: false,
+    expanded: false,
+    showImages: true,
+    isError: false,
+    ...overrides,
+  } as any;
+}
+
+describe("createCodexToolRendering", () => {
+  it("lets a host-owned tool-call mark replace the renderer icon", () => {
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+
+    const header = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context({}, { toolCallMark: { icon: "\u{F105E}", color: "warning" } }),
+    );
+
+    expect(header.render(80).join("\n").trim()).toBe("Running npm test");
+  });
+
+  it("replaces the leading glyph from leadingIconOverride and pins warning color", () => {
+    const colors: string[] = [];
+    const spyTheme = {
+      fg: (color: string, text: string) => {
+        colors.push(color);
+        return text;
+      },
+      bold: (text: string) => text,
+    } as any;
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = { leadingIconOverride: "review" };
+
+    const running = rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(stripTerminalSequences(running.render(80).join("\n")).trim()).toBe(
+      "review Running npm test",
+    );
+    expect(colors).toContain("warning");
+    expect(colors).not.toContain("dim");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "ok" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state),
+    );
+    const completed = rendering.renderCall!(
+      { command: "npm test" } as any,
+      spyTheme,
+      context(state),
+    );
+    expect(stripTerminalSequences(completed.render(80).join("\n")).trim()).toBe(
+      "review Ran npm test",
+    );
+    expect(colors).toContain("warning");
+    expect(colors).not.toContain("success");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state, { isError: true }),
+    );
+    const failed = rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(stripTerminalSequences(failed.render(80).join("\n")).trim()).toBe(
+      "review Failed npm test",
+    );
+    // warning = reviewed icon pin; error = Failed verb (result), not the icon.
+    expect(colors).toContain("warning");
+    expect(colors).toContain("error");
+  });
+
+  it("keeps status colors for calls without leadingIconOverride", () => {
+    const colors: string[] = [];
+    const spyTheme = {
+      fg: (color: string, text: string) => {
+        colors.push(color);
+        return text;
+      },
+      bold: (text: string) => text,
+    } as any;
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = {};
+
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("dim");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "ok" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state),
+    );
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("success");
+    expect(colors).not.toContain("warning");
+
+    colors.length = 0;
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      spyTheme,
+      context(state, { isError: true }),
+    );
+    rendering.renderCall!({ command: "npm test" } as any, spyTheme, context(state));
+    expect(colors).toContain("error");
+    expect(colors).not.toContain("warning");
+  });
+
+  it("prefers toolCallMark over leadingIconOverride", () => {
+    const rendering = createCodexToolRendering({
+      icon: "original",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const header = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context({ leadingIconOverride: "review" }, { toolCallMark: { icon: "m", color: "warning" } }),
+    );
+    expect(header.render(80).join("\n").trim()).toBe("Running npm test");
+  });
+
+  it("applies leadingIconOverride on the wrap-command layout", () => {
+    const rendering = createCodexToolRendering(
+      {
+        icon: "original",
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        headerLayout: "wrap-command",
+        collapsed: "hidden",
+      },
+      { getOutputPad: () => 0, track() {} },
+    );
+    const header = rendering.renderCall!(
+      { command: "echo a\necho b" } as any,
+      theme,
+      context({ leadingIconOverride: "review" }),
+    );
+    const lines = header.render(80).map((line) => stripTerminalSequences(line));
+    expect(lines[0]).toContain("review Running echo a");
+    expect(lines[1]).toContain("echo b");
+    expect(visibleWidth(lines[0])).toBeLessThanOrEqual(80);
+  });
+
+  it("keeps whitespace-heavy headers within an interactive rendering budget", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+        singleLineHeader: true,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const whitespace = " ".repeat(20_000);
+    const commands = [whitespace, `echo ok\nfinished${whitespace}`];
+
+    const startedAt = performance.now();
+    const headers = commands.map((command) =>
+      rendering.renderCall!({ command } as any, theme, context({})),
+    );
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(250);
+    for (const header of headers) expect(header.render(40)).toHaveLength(1);
+  });
+
+  it.each([
+    ["LF", "alpha \t\n  beta"],
+    ["CRLF", "alpha\t\r\n \tbeta"],
+    ["bare CR", "alpha \r\t beta"],
+  ])("renders %s and its adjacent whitespace as a visible break", (_name, command) => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+        singleLineHeader: true,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!({ command } as any, theme, context({}));
+
+    expect(header.render(80)[0].trimEnd()).toBe("• Running alpha ↵ beta");
+  });
+
+  it("preserves multiline headers unless the tool opts into a single line", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!({ command: "alpha\nbeta" } as any, theme, context({}));
+
+    expect(header.render(80).map((line) => line.trimEnd())).toEqual(["• Running alpha", "beta"]);
+  });
+
+  it("keeps ANSI-styled CJK and emoji headers width-safe after folding a line break", () => {
+    const ansiTheme = {
+      fg: (_color: string, text: string) => `\u001b[36m${text}\u001b[0m`,
+      bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
+    } as any;
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "hidden",
+        singleLineHeader: true,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const header = rendering.renderCall!(
+      { command: "编译🙂\n下一步" } as any,
+      ansiTheme,
+      context({}),
+    );
+    const [line] = header.render(32);
+
+    expect(visibleWidth(line)).toBe(32);
+    expect(stripTerminalSequences(line).trimEnd()).toBe("• Running 编译🙂 ↵ 下一步");
+  });
+
+  it("updates the shared header from Running to Ran when a result arrives", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "preview",
+    });
+    const state = {};
+    const header = rendering.renderCall!({ command: "npm test" } as any, theme, context(state));
+
+    expect(header.render(80).join("\n")).toContain("• Running npm test");
+
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "still running" }] } as any,
+      { expanded: false, isPartial: true },
+      theme,
+      context(state, { lastComponent: undefined }),
+    );
+    const repeatedHeader = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      context(state),
+    );
+    expect(repeatedHeader).toBe(header);
+
+    rendering.renderResult!(
+      { content: [{ type: "text", text: "ok" }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state, { lastComponent: undefined }),
+    );
+
+    expect(header.render(80).join("\n")).toContain("• Ran npm test");
+  });
+
+  it("marks a failed call and keeps its error visible when collapsed", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = {};
+    const header = rendering.renderCall!({ command: "npm test" } as any, theme, context(state));
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: "tests failed" }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state, { isError: true }),
+    );
+
+    expect(header.render(80).join("\n")).toContain("• Failed npm test");
+    expect(result.render(80).join("\n")).toContain("tests failed");
+  });
+
+  it("folds a successful collapsed summary into the completed header", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Searching",
+      completedVerb: "Searched",
+      argument: () => '"renderCall" in src',
+      collapsed: () => "12 matches",
+    });
+    const state = {};
+    const header = rendering.renderCall!({ pattern: "renderCall" } as any, theme, context(state));
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: "12 matching lines" }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state),
+    );
+
+    expect(header.render(80).join("\n")).toContain('• Searched "renderCall" in src · 12 matches');
+    expect(result.render(80)).toEqual([]);
+  });
+
+  it("uses a configured Nerd Font glyph as the lifecycle marker", () => {
+    const rendering = createCodexToolRendering({
+      icon: "",
+      runningVerb: "Running",
+      completedVerb: "Ran",
+      argument: (args) => String(args.command),
+      collapsed: "hidden",
+    });
+    const state = {};
+    const header = rendering.renderCall!({ command: "npm test" } as any, theme, context(state));
+
+    expect(header.render(80).join("\n")).toContain(" Running npm test");
+
+    rendering.renderResult!(
+      { content: [] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state),
+    );
+    expect(header.render(80).join("\n")).toContain(" Ran npm test");
+  });
+
+  it("removes only the blank separator before a trailing Bash status", () => {
+    const rendering = createCodexToolRendering(
+      {
+        icon: "",
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "preview",
+        transformOutput: compactBashStatusSpacing,
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const state = {};
+    rendering.renderCall!({ command: "gh api repos/example" } as any, theme, context(state));
+    const result = rendering.renderResult!(
+      {
+        content: [
+          {
+            type: "text",
+            text: "Forbidden\n\nCommand exited with code 1",
+          },
+        ],
+      } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state, { isError: true }),
+    );
+
+    expect(result.render(80)).toEqual(["  └ Forbidden", "    Command exited with code 1"]);
+    expect(compactBashStatusSpacing("first\n\nsecond")).toBe("first\n\nsecond");
+  });
+
+  it("recreates a working tool row when output padding changes", () => {
+    let outputPad: 0 | 1 = 0;
+    const paddingSource = {
+      getOutputPad: () => outputPad,
+      track: vi.fn(),
+    };
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: (args) => String(args.command),
+        collapsed: "preview",
+      },
+      paddingSource,
+    );
+    const state = {};
+    const renderContext = context(state);
+
+    const unpaddedHeader = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      renderContext,
+    );
+    expect(unpaddedHeader.render(80)[0]).toMatch(/^• Running/);
+
+    outputPad = 1;
+    const paddedHeader = rendering.renderCall!(
+      { command: "npm test" } as any,
+      theme,
+      renderContext,
+    );
+    expect(paddedHeader).not.toBe(unpaddedHeader);
+    expect(paddedHeader.render(80)[0]).toMatch(/^ • Running/);
+
+    // Settled success collapsed is header-only; failed still paints the preview rail.
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: "boom" }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context(state, { isError: true }),
+    );
+    expect(result.render(80)[0]).toMatch(/^ {3}└ boom/);
+    expect(paddingSource.track).toHaveBeenCalledWith("call-1", renderContext.invalidate);
+  });
+
+  it("uses a custom component for a successful expanded result", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Editing",
+        completedVerb: "Edited",
+        argument: () => "file.ts",
+        collapsed: summarizeEditDiff,
+        renderExpandedResult: (_result, _args, _theme, outputPad) =>
+          new Text(`custom diff at pad ${outputPad}`, 0, 0),
+      },
+      {
+        getOutputPad: () => 1,
+        track() {},
+      },
+    );
+    const state = {};
+    const result = rendering.renderResult!(
+      {
+        content: [
+          {
+            type: "text",
+            text: "Successfully replaced 1 block.",
+          },
+        ],
+        details: { diff: "+1 added" },
+      } as any,
+      { expanded: true, isPartial: false },
+      theme,
+      context(state, { args: { path: "file.ts" } }),
+    );
+    const output = result.render(80).join("\n");
+
+    expect(output).toContain("custom diff at pad 1");
+    expect(output).not.toContain("Successfully replaced");
+  });
+
+  it("does not invoke the custom component renderer while collapsed", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: () => "file.ts",
+      collapsed: summarizeEditDiff,
+      renderExpandedResult: () => {
+        throw new Error("collapsed rendering must not create the diff panel");
+      },
+    });
+    const result = rendering.renderResult!(
+      {
+        content: [
+          {
+            type: "text",
+            text: "Successfully replaced 1 block.",
+          },
+        ],
+        details: { diff: "+1 added" },
+      } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context({}, { args: { path: "file.ts" } }),
+    );
+
+    expect(result.render(80)).toEqual([]);
+  });
+
+  it("keeps expanded failures on the existing error output path", () => {
+    const rendering = createCodexToolRendering({
+      runningVerb: "Editing",
+      completedVerb: "Edited",
+      argument: () => "file.ts",
+      collapsed: summarizeEditDiff,
+      renderExpandedResult: () => {
+        throw new Error("failed rendering must not create the diff panel");
+      },
+    });
+    const result = rendering.renderResult!(
+      {
+        content: [
+          {
+            type: "text",
+            text: "oldText did not match",
+          },
+        ],
+      } as any,
+      { expanded: true, isPartial: false },
+      theme,
+      context(
+        {},
+        {
+          args: { path: "file.ts" },
+          isError: true,
+        },
+      ),
+    );
+
+    expect(result.render(80).join("\n")).toContain("oldText did not match");
+  });
+
+  it("caches tool output lines across repeated renders at the same width", () => {
+    const rendering = createCodexToolRendering(
+      {
+        runningVerb: "Running",
+        completedVerb: "Ran",
+        argument: () => "npm test",
+        collapsed: "preview",
+      },
+      {
+        getOutputPad: () => 0,
+        track() {},
+      },
+    );
+    const body = Array.from({ length: 400 }, (_, i) => `line ${i} ${"x".repeat(40)}`).join("\n");
+    const result = rendering.renderResult!(
+      { content: [{ type: "text", text: body }] } as any,
+      { expanded: false, isPartial: false },
+      theme,
+      context({}, { isError: true }),
+    );
+
+    const first = result.render(80);
+    expect(first.length).toBeGreaterThan(0);
+    expect(result.render(80)).toBe(first);
+
+    result.invalidate();
+    const rebuilt = result.render(80);
+    expect(rebuilt).not.toBe(first);
+    expect(rebuilt).toEqual(first);
+
+    expect(result.render(40)).not.toBe(rebuilt);
+  });
+});
