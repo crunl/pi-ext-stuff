@@ -11,7 +11,7 @@ const theme = {
 } as unknown as Theme;
 
 const REVIEW_ICON = "\u{F105E}";
-const REVIEW_DETAILS = Symbol.for("pi-permissions-review-details");
+const REVIEW_DETAILS = Symbol.for("pi-safety-review-details");
 
 function decorateReviewDetails(details: unknown, status: string): unknown {
   return Object.freeze({ [REVIEW_DETAILS]: true, base: details, status });
@@ -61,7 +61,7 @@ function hostRenderPass(
 }
 
 /**
- * Mirror of pi-permissions createReviewResultRenderer("header-icon"): stamp
+ * Mirror of pi-safety createReviewResultRenderer("header-icon"): stamp
  * leadingIconOverride when review status is present, never clear it, never overlay.
  */
 function stampReviewBadge(

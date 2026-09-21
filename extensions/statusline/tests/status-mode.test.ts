@@ -57,11 +57,11 @@ test("powerlineChain returns empty for no segments", () => {
 	assert.equal(powerlineChain([]), "");
 });
 
-test("partition splits pi-permissions from unrelated statuses", () => {
+test("partition splits pi-safety from unrelated statuses", () => {
 	const result = partitionExtensionStatuses(
 		new Map([
 			["other", "Indexing"],
-			["pi-permissions", "default"],
+			["pi-safety", "default"],
 		]),
 	);
 	assert.equal(result.mode, "default");
@@ -121,24 +121,6 @@ test("event severity drives badge visibility and color", () => {
 	assert.equal(state.severity(), "error");
 });
 
-test("legacy labels map to severities until the first event arrives", () => {
-	const state = new PermissionsModeState();
-	assert.equal(state.applyLegacyLabel("default"), false);
-	assert.equal(state.get(), undefined);
-
-	assert.equal(state.applyLegacyLabel("Approve for me"), true);
-	assert.equal(state.get(), "Approve for me");
-	assert.equal(state.severity(), "warning");
-
-	assert.equal(state.applyLegacyLabel("Full bypass"), true);
-	assert.equal(state.severity(), "error");
-
-	// Once events flow, legacy strings are ignored.
-	state.applyEvent({ mode: "default", label: "default", severity: "none" });
-	assert.equal(state.applyLegacyLabel("Full bypass"), false);
-	assert.equal(state.get(), undefined);
-});
-
 test("mode state reports only distinct changes", () => {
 	const state = new PermissionsModeState();
 	const event = {
@@ -152,31 +134,14 @@ test("mode state reports only distinct changes", () => {
 	assert.equal(state.reset(), false);
 });
 
-test("sync requests one render per distinct legacy mode and returns other statuses", () => {
-	const state = new PermissionsModeState();
-	let renders = 0;
+test("sync strips pi-safety from the statuses shown in the footer", () => {
 	const statuses = new Map([
 		["other", "Indexing"],
-		["pi-permissions", "default"],
+		["pi-safety", "Approve for me"],
 	]);
 
 	assert.deepEqual(
-		syncPermissionsMode(statuses, state, () => renders++),
+		syncPermissionsMode(statuses),
 		[["other", "Indexing"]],
 	);
-	assert.equal(state.get(), undefined);
-	syncPermissionsMode(statuses, state, () => renders++);
-	assert.equal(renders, 0);
-
-	syncPermissionsMode(
-		new Map([["pi-permissions", "Approve for me"]]),
-		state,
-		() => renders++,
-	);
-	assert.equal(renders, 1);
-	assert.equal(state.get(), "Approve for me");
-
-	syncPermissionsMode(statuses, state, () => renders++);
-	assert.equal(renders, 2);
-	assert.equal(state.get(), undefined);
 });

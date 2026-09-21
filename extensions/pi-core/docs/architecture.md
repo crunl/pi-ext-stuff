@@ -8,7 +8,7 @@ layout or cross-extension contract changes.
 | File | Role |
 | --- | --- |
 | `index.ts` | Package entry (`package.json` `pi.extensions`). Loads the register graph. |
-| `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-permissions, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
+| `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-safety, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
 | `src/register.ts` | Pure orchestration facade: calls every `register*` once, in order. |
 | `src/tui/*` | All rendering and UI state. Modules are named by concern; pure factories use `create*`, host patches use `apply*`/`install*`, extension hooks use `register*`. |
 
@@ -18,17 +18,17 @@ layout or cross-extension contract changes.
 | --- | --- | --- |
 | read / grep / find / ls | pi-core `src/tui/built-in-tools.ts` (`registerCodexToolRendering`) | Wraps the built-in tools with Codex-style rendering. |
 | bash / write / edit (canonical builtin owner) | pi-core `src/tui/canonical-tool-fallback.ts` (`registerCanonicalBuiltinFallback`) | In interactive TUI only, when the complete public metadata and synthetic builtin source match Pi's canonical definitions. The `core-builtin-presentation` flag supports `auto` (default) or `off`. |
-| bash / write / edit (extension owner) | pi-permissions | Permission extensions retain execution ownership and may apply pi-core's side-effect-free presentation decorator. First registration per name remains authoritative. |
+| bash / write / edit (extension owner) | pi-safety | Permission extensions retain execution ownership and may apply pi-core's side-effect-free presentation decorator. First registration per name remains authoritative. |
 
 ## standalone.ts surface
 
 Exports (no side effects on import):
 
 - `applyAutocompleteAbove` — statusline
-- `withCodexToolPresentation` — pi-permissions; decorates a complete tool definition while preserving its execution and metadata
-- `createEditDiffBox` — pi-permissions
-- `createCodexToolRendering` — pi-permissions
-- `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` and `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `summarizeEditDiff` — pi-permissions migration compatibility; marked `@deprecated` in `standalone.ts`, prefer `withCodexToolPresentation` for new code
+- `withCodexToolPresentation` — pi-safety; decorates a complete tool definition while preserving its execution and metadata
+- `createEditDiffBox` — pi-safety
+- `createCodexToolRendering` — pi-safety
+- `codexBashToolSpec` / `codexEditToolSpec` / `codexWriteToolSpec` and `colorizeEditDiffSummary` / `compactBashStatusSpacing` / `summarizeEditDiff` — pi-safety migration compatibility; marked `@deprecated` in `standalone.ts`, prefer `withCodexToolPresentation` for new code
 
 Adding an export here is the only supported way to widen the contract.
 
@@ -87,7 +87,7 @@ Adding an export here is the only supported way to widen the contract.
   Codex-header tools (bash/write/edit) use this slot; tools without a Codex
   header (e.g. request_permissions) keep the overlay status row.
 - `output-padding.ts` — watches effective settings only in TUI mode. Shared
-  through `globalThis`/`Symbol.for` so renderers imported by pi-permissions
+  through `globalThis`/`Symbol.for` so renderers imported by pi-safety
   through a separate jiti instance see the same value. **Internal only** (not
   exported from `standalone.ts`); statusline reads `settings.outputPad` itself.
 - `write-preview.ts` — streaming write preview; `edit-diff.ts` — diff box.

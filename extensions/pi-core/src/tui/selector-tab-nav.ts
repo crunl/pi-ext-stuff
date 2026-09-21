@@ -35,7 +35,7 @@ export const SELECT_DOWN = "\x1b[B";
  * pi-core's copy; the live editor is usually patched from statusline's copy
  * (it replaces the factory rather than wrapping). The listener then saw a
  * stale/empty anchor, `isSelectorOpen()` stuck true, and shift+tab was always
- * rewritten to ↑ — killing pi-permissions mode cycling in the normal editor.
+ * rewritten to ↑ — killing pi-safety mode cycling in the normal editor.
  *
  * Same pattern pi uses for its theme singleton. Last writer wins: whoever
  * last called applyAutocompleteAbove holds the mounted editor.
@@ -98,7 +98,7 @@ export function rewriteSelectorNavInput(data: string): { data: string } | undefi
 /**
  * Install the raw-input rewrite. Registered once per session_start;
  * onTerminalInput runs before focused-component dispatch and extension
- * shortcuts, so shift+tab also stops cycling the pi-permissions mode
+ * shortcuts, so shift+tab also stops cycling the pi-safety mode
  * while a selector is open.
  */
 export function registerSelectorTabNav(pi: ExtensionAPI): void {

@@ -27,7 +27,6 @@ import { getOutputPad } from "./output-pad.ts";
 import { effortColor, isLightThemeFrom, paletteForLight, truecolorFg } from "./palette.ts";
 import {
 	type ModelStatusInfo,
-	PermissionsModeState,
 	type PowerlineSegment,
 	powerlineChain,
 	syncPermissionsMode,
@@ -49,7 +48,6 @@ export interface FooterOptions {
 
 export function installFooter(
 	ctx: ExtensionContext,
-	permissionsMode: PermissionsModeState,
 	options: FooterOptions = {},
 ): void {
 	const { getModelInfo, onTheme, onRequestRender } = options;
@@ -87,6 +85,8 @@ export function installFooter(
 				const model = getModelInfo?.();
 
 				// Catppuccin latte/frappe accents; light/dark from live bg.
+				// SAFETY: theme is the live TUI theme object; FooterTheme is the
+				// structural subset isLightThemeFrom reads (getFgAnsi / bg).
 				const pal = paletteForLight(
 					isLightThemeFrom(theme as unknown as FooterTheme),
 				);
@@ -165,8 +165,6 @@ export function installFooter(
 				// ---- extension statuses (from other extensions' setStatus) ----
 				const statuses = syncPermissionsMode(
 					footerData.getExtensionStatuses(),
-					permissionsMode,
-					() => queueMicrotask(() => tui.requestRender()),
 				);
 				// pi-lens LSP state is dropped here (the widget surfaces it) —
 				// the footer owns presentation, upstream keeps publishing.

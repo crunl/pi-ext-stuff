@@ -309,7 +309,7 @@ const pad = readOutputPad(ctx.cwd, ctx.isProjectTrusted());
 1. 更新 `statusline/README.md`「实现方式」：删除 pi-core outputPadding
    描述，写明自读 settings；依赖表只留 `applyAutocompleteAbove`。
 2. 更新 `pi-core/AGENTS.md` 与 `standalone.ts` 头注释的消费者表：
-   `outputPaddingController` 一行标为「statusline 已迁出；仅 pi-permissions
+   `outputPaddingController` 一行标为「statusline 已迁出；仅 pi-safety
    / tool-renderer 内部使用」（若 standalone 无其他消费者，可评估是否
    仍需 export——**本次不动 pi-core 代码**，只改文档注释可选）。
 3. 门禁：
@@ -350,7 +350,7 @@ const pad = readOutputPad(ctx.cwd, ctx.isProjectTrusted());
 - 不引入 settings watcher / 全局单例 / `Symbol.for`。
 - 不把 footer 改造成 message renderer，也不注册探针 renderer。
 - 不在本次向上游提 PR（issue 可选并行）。
-- 不处理 `pi-permissions` 对 pi-core 的依赖（本案范围外）。
+- 不处理 `pi-safety` 对 pi-core 的依赖（本案范围外）。
 
 ---
 

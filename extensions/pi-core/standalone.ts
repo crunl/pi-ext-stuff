@@ -4,7 +4,7 @@
  * Import from here (not index.ts, not src/tui/* deep paths) when another
  * extension needs pi-core components without pulling the register graph
  * into its own jiti instance:
- *   - pi-permissions → withCodexToolPresentation / createCodexToolRendering / …
+ *   - pi-safety → withCodexToolPresentation / createCodexToolRendering / …
  *   - permission UIs → markToolCall
  *   - statusline     → applyAutocompleteAbove
  *
@@ -19,7 +19,7 @@ export { withCodexToolPresentation } from "./src/tui/codex-tool-presentation.ts"
  * @deprecated Migration-compatibility surface: these piecewise spec/helper
  * exports predate `withCodexToolPresentation`, which decorates a complete
  * tool definition in one step. Prefer the decorator for new code.
- * **Consumers (pi-permissions) should migrate**; piecewise exports remain
+ * **Consumers (pi-safety) should migrate**; piecewise exports remain
  * only until that cutover and may be narrowed later without a long dual-run.
  */
 export {

@@ -1,0 +1,40 @@
+{
+  "name": "pi-safety",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "check:host-turn-boundary": "node scripts/host-turn-boundary.mjs",
+    "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
+    "lint": "biome check .",
+    "preflight:sibling": "node scripts/preflight-sibling.mjs",
+    "test": "vitest --run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@earendil-works/pi-ai": "0.86.0",
+    "@earendil-works/pi-coding-agent": "0.86.0",
+    "@types/node": "^24.0.0",
+    "jiti": "2.7.0",
+    "typebox": "1.1.38",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  }
+}

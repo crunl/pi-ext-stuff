@@ -118,7 +118,7 @@ export class OutputPaddingController implements OutputPaddingSource {
 
 /**
  * Cross-jiti singleton. Pi loads extensions with isolated module caches, while
- * pi-permissions imports createCodexToolRendering from standalone.ts. Both
+ * pi-safety imports createCodexToolRendering from standalone.ts. Both
  * copies must observe the controller started by pi-core's register graph.
  */
 const OUTPUT_PADDING_CONTROLLER_KEY = Symbol.for("@x1a2h1/pi-core:output-padding-controller");

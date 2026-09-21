@@ -120,7 +120,7 @@ statusline/
 - `ModelLineEditor extends CustomEditor`，在 `super.render()` 后改写纯横线边框
 - 使用 `ctx.ui.setFooter()` 替换内置 footer
 - 使用 `footerData.onBranchChange()` 刷新 Git branch
-- 将 `pi-permissions` 的 mode 移入 editor 下边框，避免 footer 重复显示
+- 将 `pi-safety` 的 mode 移入 editor 下边框，避免 footer 重复显示
 - 继续在 footer 渲染其他扩展通过 `ctx.ui.setStatus()` 设置的状态
 - 实现模式参考 pi 官方 `examples/extensions/modal-editor.ts` 和 `custom-footer.ts`
 

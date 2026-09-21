@@ -12,7 +12,7 @@ import { withCodexToolPresentation } from "./codex-tool-presentation.ts";
  * Register the Codex-style rendering for the built-in read-only tools.
  *
  * write / edit / bash are handled by canonical-tool-fallback.ts when Pi's
- * canonical definitions remain the effective owner. pi-permissions registers
+ * canonical definitions remain the effective owner. pi-safety registers
  * them first when a permission gate is installed; tool registration is
  * first-wins. Both paths use the same side-effect-free presentation decorator.
  *

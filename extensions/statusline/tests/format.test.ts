@@ -8,6 +8,6 @@ test("hides the pi-lens LSP status", () => {
 
 test("keeps other extension statuses", () => {
 	assert.equal(isHiddenExtensionStatus("other"), false);
-	assert.equal(isHiddenExtensionStatus("pi-permissions"), false);
+	assert.equal(isHiddenExtensionStatus("pi-safety"), false);
 	assert.equal(isHiddenExtensionStatus(""), false);
 });

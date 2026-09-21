@@ -86,7 +86,7 @@ Seam remains the compatibility path for permission-owned definitions.
 - `index.ts` — package entry; loads the register graph. Default-exports
   `registerExtension(pi)`.
 - `standalone.ts` — **side-effect-free** cross-extension surface. Other
-  extensions (e.g. `pi-permissions`, `statusline`) must import from here,
+  extensions (e.g. `pi-safety`, `statusline`) must import from here,
   never from `index.ts` or `src/**` deep paths, to avoid double-registering
   and pulling the register graph into their jiti instance.
 - `src/register.ts` — orchestration facade; calls every `register*` once,

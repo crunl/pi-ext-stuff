@@ -83,10 +83,10 @@ function sep(leftAnsi: string | undefined, rightAnsi: string | undefined): strin
 	return `${fg}${bg}${PL_SEP}\x1b[39m\x1b[49m`;
 }
 
-/** Badge severity published by pi-permissions ("none" hides the badge). */
+/** Badge severity published by pi-safety ("none" hides the badge). */
 export type ModeSeverity = "none" | "warning" | "error";
 
-/** Structured mode event from pi-permissions ("pi-permissions:mode"). */
+/** Structured mode event from pi-safety ("pi-safety:mode"). */
 export interface PermissionsModeEvent {
 	mode: string;
 	label: string;
@@ -107,39 +107,27 @@ export function isPermissionsModeEvent(
 	);
 }
 
-/**
- * Legacy string fallback for pi-permissions builds that only publish
- * setStatus text. Kept in sync with the last known label set; the event
- * path makes future renames non-breaking.
- */
-function legacySeverityFor(label: string): ModeSeverity {
-	if (label === "default") return "none";
-	if (label === "Full bypass") return "error";
-	return "warning";
-}
-
 export function partitionExtensionStatuses(
 	statuses: ReadonlyMap<string, string>,
 ): { mode: string | undefined; remaining: Array<[string, string]> } {
-	const publishedMode = statuses.get("pi-permissions");
+	const publishedMode = statuses.get("pi-safety");
 	return {
 		mode: publishedMode,
 		remaining: [...statuses.entries()].filter(
-			([key]) => key !== "pi-permissions",
+			([key]) => key !== "pi-safety",
 		),
 	};
 }
 
 /**
- * Permissions badge state. Fed by two sources:
- * - preferred: structured "pi-permissions:mode" bus events (applyEvent)
- * - fallback: the setStatus string (applyLegacyLabel), used only until the
- *   first event arrives so old pi-permissions builds keep working.
+ * Permissions badge state. Fed by structured "pi-safety:mode" bus events
+ * only. The publisher emits the event and the setStatus string atomically
+ * in one call, so there is no window where only the string exists; the badge
+ * stays hidden until the first event arrives.
  */
 export class PermissionsModeState {
 	#label: string | undefined;
 	#severity: ModeSeverity = "none";
-	#eventSeen = false;
 
 	/** Badge text, or undefined when the badge is hidden. */
 	get(): string | undefined {
@@ -152,18 +140,10 @@ export class PermissionsModeState {
 
 	/** Apply a structured mode event. Returns true when a render is needed. */
 	applyEvent(event: PermissionsModeEvent): boolean {
-		this.#eventSeen = true;
 		return this.#set(event.label, event.severity);
 	}
 
-	/** Apply the legacy setStatus string. Ignored once events are flowing. */
-	applyLegacyLabel(label: string | undefined): boolean {
-		if (this.#eventSeen) return false;
-		if (label === undefined) return this.#set(undefined, "none");
-		return this.#set(label, legacySeverityFor(label));
-	}
-
-	/** Reset (e.g. statusline uninstall). Keeps the event/legacy source flag. */
+	/** Reset (e.g. statusline uninstall). */
 	reset(): boolean {
 		return this.#set(undefined, "none");
 	}
@@ -182,10 +162,6 @@ export class PermissionsModeState {
 
 export function syncPermissionsMode(
 	statuses: ReadonlyMap<string, string>,
-	state: PermissionsModeState,
-	requestRender: () => void,
 ): Array<[string, string]> {
-	const { mode, remaining } = partitionExtensionStatuses(statuses);
-	if (state.applyLegacyLabel(mode)) requestRender();
-	return remaining;
+	return partitionExtensionStatuses(statuses).remaining;
 }

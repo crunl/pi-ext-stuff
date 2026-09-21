@@ -56,7 +56,7 @@ export class ModelLineEditor extends CustomEditor {
 	getModelInfo: ModelInfoProvider = () => undefined;
 	/** Injected callback returning token totals for the top border. */
 	getStats: StatsProvider = () => undefined;
-	/** Injected callback returning the mode published by pi-permissions. */
+	/** Injected callback returning the mode published by pi-safety. */
 	getPermissionsMode: PermissionsModeProvider = () => undefined;
 	/** Badge-color ANSI provider (captured lazily from the footer theme). */
 	getBadgeFgAnsi: (color: "warning" | "error") => string | undefined = () => undefined;

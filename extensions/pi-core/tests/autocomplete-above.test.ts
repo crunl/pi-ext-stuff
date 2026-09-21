@@ -247,7 +247,7 @@ describe("applyAutocompleteAbove - tab navigation", () => {
     editor.handleInput(SHIFT_TAB);
 
     expect(editor.autocompleteList.__received).toEqual(["\x1b[A"]);
-    expect(editor.__received).toEqual([]); // pi-permissions shortcut not reached
+    expect(editor.__received).toEqual([]); // pi-safety shortcut not reached
   });
 
   it("passes tab and shift+tab through when the panel is closed", () => {

@@ -30,12 +30,13 @@ export default function statusline(pi: ExtensionAPI) {
 	let currentCtx: ExtensionContext | undefined;
 	const permissionsMode = new PermissionsModeState();
 
-	// Preferred mode source: structured events from pi-permissions. The
-	// setStatus string (see footer.ts / syncPermissionsMode) stays as a
-	// fallback for pi-permissions builds that predate this event.
+	// Mode badge source: structured "pi-safety:mode" bus events only. The
+	// event's label is the badge text; its severity drives visibility and
+	// color. The setStatus string the publisher emits in the same call is
+	// the built-in footer's generic status text and does not drive the badge.
 	// requestRender is captured from the footer factory once installed.
 	let requestRender: (() => void) | undefined;
-	pi.events.on("pi-permissions:mode", (data) => {
+	pi.events.on("pi-safety:mode", (data) => {
 		if (!isPermissionsModeEvent(data)) return;
 		if (permissionsMode.applyEvent(data)) requestRender?.();
 	});
@@ -63,7 +64,7 @@ export default function statusline(pi: ExtensionAPI) {
 		// Captured from the footer factory's theme (full Theme, not EditorTheme).
 		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
 		const pillFgAnsi: Partial<Record<"mdLink" | "accent", string>> = {};
-		installFooter(ctx, permissionsMode, {
+		installFooter(ctx, {
 			getModelInfo: modelInfo,
 			onTheme: (theme) => {
 				badgeFgAnsi.warning = theme.getFgAnsi("warning");
