@@ -177,7 +177,6 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   icon: "\uF155", // fa-upload / bash
   runningVerb: "Running",
   completedVerb: "Ran",
-  failedVerb: "Command failed",
   argument: (args) => commandGlance(typeof args.command === "string" ? args.command : ""),
   highlightArgument: (argument) =>
     argument.length > 0 ? highlightShellCommandLines(argument).join("\n") : argument,
@@ -185,8 +184,7 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   showExpandIndicator: true,
   collapsed: "preview",
   summarizeResult: summarizeBashOutput,
-  // failedOutputRows exceeds renderer DEFAULT_MAX_OUTPUT_ROWS (5) on purpose.
-  failedOutputRows: 8,
+  failedCollapsed: "last-line",
   transformOutput: compactBashStatusSpacing,
   expandedResultOnFailed: true,
   renderExpandedResult(result, args, theme, outputPad, meta) {

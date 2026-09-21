@@ -306,13 +306,13 @@ describe("codex tool specs", () => {
     expect(text).toContain("▶");
   });
 
-  it("bash failed header uses Command failed and keeps an error preview", () => {
+  it("bash failed header uses Failed and keeps an error preview", () => {
     const { headerLines, resultLines } = renderBashLifecycle({
       args: { command: "npm test" },
       resultText: "FAIL b\nCommand exited with code 1",
       isError: true,
     });
-    expect(headerLines()[0]).toContain("Command failed npm test");
+    expect(headerLines()[0]).toContain("Failed npm test");
     expect(headerLines()[0]).toContain("· 2 output lines");
     expect(headerLines()[0]).toContain("▶");
     const body = resultLines().join("\n");
@@ -342,7 +342,7 @@ describe("codex tool specs", () => {
       expanded: true,
     });
     expect(headerLines()).toHaveLength(1);
-    expect(headerLines()[0]).toContain("Command failed");
+    expect(headerLines()[0]).toContain("Failed");
     expect(headerLines()[0]).toContain("…");
     expect(headerLines()[0]).toContain("▼");
     const body = resultLines().join("\n");
@@ -362,16 +362,14 @@ describe("codex tool specs", () => {
     expect(resultLines()).toEqual([]);
   });
 
-  it("bash failed collapsed keeps an error preview capped at failedOutputRows", () => {
+  it("bash failed collapsed shows only the last output line", () => {
     const { headerLines, resultLines } = renderBashLifecycle({
       args: { command: "seq 1 20" },
-      resultText: Array.from({ length: 20 }, (_, index) => `err ${index + 1}`).join("\n"),
+      resultText: Array.from({ length: 20 }, (_, index) => `err ${index + 1}`).join("\n\n"),
       isError: true,
     });
-    expect(headerLines()[0]).toContain("Command failed");
-    const rows = resultLines();
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.length).toBeLessThanOrEqual(8);
+    expect(headerLines()[0]).toContain("Failed");
+    expect(resultLines()).toEqual(["  └ err 20"]);
   });
 });
 
@@ -477,10 +475,10 @@ describe("commandGlance / summarizeBashOutput", () => {
 describe("CodexToolRendererSpec type surface", () => {
   it("bash spec exposes glance + summary contract fields", () => {
     const spec: CodexToolRendererSpec = codexBashToolSpec;
-    expect(spec.failedVerb).toBe("Command failed");
+    expect(spec.failedVerb).toBeUndefined();
     expect(spec.singleLineHeader).toBe(true);
     expect(typeof spec.summarizeResult).toBe("function");
-    expect(spec.failedOutputRows).toBe(8);
+    expect(spec.failedCollapsed).toBe("last-line");
     expect(spec.expandedResultOnFailed).toBe(true);
     expect(spec.showExpandIndicator).toBe(true);
   });

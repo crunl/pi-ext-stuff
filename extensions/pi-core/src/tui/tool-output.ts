@@ -125,3 +125,23 @@ export function buildExpandedOutput(
   const layout = createOutputLayout(width, outputPad);
   return withPrefixes(wrappedRows(text, layout.contentWidth), layout);
 }
+
+/** One collapsed row: the last non-empty logical line, truncated to the width. */
+export function buildLastOutputLine(
+  text: string,
+  width: number,
+  outputPad: OutputPad = 0,
+): string[] {
+  if (text.length === 0 || width <= 0) return [];
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  let last = "";
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (line.trim().length === 0 || isNoOutputPlaceholder(line)) continue;
+    last = line;
+    break;
+  }
+  if (!last) return [];
+  const layout = createOutputLayout(width, outputPad);
+  return withPrefixes([truncateToWidth(last, layout.contentWidth, "…")], layout);
+}

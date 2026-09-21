@@ -12,6 +12,7 @@ import {
 } from "./output-padding.ts";
 import {
   buildExpandedOutput,
+  buildLastOutputLine,
   buildOutputPreview,
   hasMeaningfulToolOutput,
   toolResultText,
@@ -40,7 +41,7 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   icon?: string;
   runningVerb: string;
   completedVerb: string;
-  /** Failed verb; defaults to `Failed`. Bash uses `Command failed`. */
+  /** Failed verb; defaults to `Failed`. */
   failedVerb?: string;
   argument: (args: Record<string, unknown>, cwd: string) => string;
   /** Truncate the header to one row and expose embedded line breaks as `↵`. */
@@ -66,6 +67,11 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   ) => string | undefined;
   /** Preview row budget when the call failed (falls back to maxOutputRows). */
   failedOutputRows?: number;
+  /**
+   * Collapsed failure body. "tail" is the multi-row preview. "last-line"
+   * keeps only the last non-empty logical line. Success stays header-only.
+   */
+  failedCollapsed?: "tail" | "last-line";
   /**
    * Optional component rendered below the header while the call is being
    * streamed (partial args) and the result view is expanded. Lets a tool
@@ -281,14 +287,17 @@ class ToolOutputComponent implements Component {
     private readonly maxRows: number,
     private readonly style: (text: string) => string,
     private readonly outputPad: OutputPad,
-    private readonly edge: "head-tail" | "tail" = "head-tail",
+    private readonly edge: "head-tail" | "tail" | "last-line" = "head-tail",
   ) {}
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-    const lines = this.expanded
-      ? buildExpandedOutput(this.text, width, this.outputPad)
-      : buildOutputPreview(this.text, width, this.maxRows, this.outputPad, this.edge);
+    const lines =
+      this.edge === "last-line"
+        ? buildLastOutputLine(this.text, width, this.outputPad)
+        : this.expanded
+          ? buildExpandedOutput(this.text, width, this.outputPad)
+          : buildOutputPreview(this.text, width, this.maxRows, this.outputPad, this.edge);
     this.cachedWidth = width;
     this.cachedLines = lines.map(this.style);
     return this.cachedLines;
@@ -404,7 +413,7 @@ export function createCodexToolRendering<TPreviewState = unknown>(
           maxRows,
           (line) => theme.fg("error", line),
           outputPad,
-          "tail",
+          spec.failedCollapsed === "last-line" ? "last-line" : "tail",
         );
       }
       // MiniMax-aligned: settled success stays header-only when collapsed.
