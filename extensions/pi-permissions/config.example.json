@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "reviewer": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6",
+    "reasoningEffort": "low"
+  },
+  "sandbox": {
+    "enabled": true,
+    "profile": "workspace-write",
+    "filesystem": {
+      "allowWrite": [".", "/tmp"],
+      "denyRead": [],
+      "denyWrite": []
+    },
+    "network": {
+      "access": { "kind": "inline-proxy" },
+      "network_access": false,
+      "allowPrivateTargets": false,
+      "macosTls": "strict",
+      "allowedDomains": [],
+      "deniedDomains": [],
+      "trustedFakeIpRanges": [],
+      "allowLocalBinding": false,
+      "allowUnixSockets": [],
+      "dangerouslyAllowAllUnixSockets": false
+    }
+  },
+  "rules": [],
+  "delegation": {
+    "enabled": true,
+    "maxDepth": 8,
+    "allowReDelegate": true,
+    "writeRoots": [],
+    "networkHosts": []
+  }
+}
