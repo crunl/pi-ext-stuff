@@ -7,11 +7,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/crunl/pi-core.git"
+    "url": "git+https://github.com/crunl/pi-ext-stuff.git",
+    "directory": "extensions/pi-core"
   },
-  "homepage": "https://github.com/crunl/pi-core#readme",
+  "homepage": "https://github.com/crunl/pi-ext-stuff/tree/main/extensions/pi-core#readme",
   "bugs": {
-    "url": "https://github.com/crunl/pi-core/issues"
+    "url": "https://github.com/crunl/pi-ext-stuff/issues"
   },
   "keywords": [
     "pi-package"
