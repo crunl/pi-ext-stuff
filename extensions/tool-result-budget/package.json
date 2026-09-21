@@ -1,0 +1,15 @@
+{
+  "name": "tool-result-budget",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bounds how many characters a single turn may add to context via tool results; overflow is spilled to a file and replaced with head + tail + a pointer.",
+  "files": [
+    "index.ts"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
