@@ -9,8 +9,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import {
+  type BashOperations,
   createBashTool,
   createEditTool,
+  createLocalBashOperations,
   createWriteTool,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
@@ -137,6 +139,8 @@ export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
   bashToolFactory?: typeof createBashTool;
+  /** Builds the operations used for unrestricted/escalated leases. Default: pi's local shell backend. */
+  localBashOperations?: () => BashOperations;
   sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
@@ -185,6 +189,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
   const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
+  // Builds the operations used for unrestricted/escalated leases. Test
+  // doubles replace this with a stub to avoid real spawns; production uses
+  // pi's local shell backend.
+  const resolveLocalBashOperations = options.localBashOperations ?? createLocalBashOperations;
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
@@ -1582,15 +1590,58 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  // Pi throws this only after the child has exited. A non-zero status is the
-  // command's result, not a permission failure, so it must not become isError.
-  const COMMAND_EXITED = /(?:^|\n\n)Command exited with code \d+$/;
+  // Pi converts a completed child's non-zero or null exit code into a thrown
+  // error. The exit code is a structured value at the operations seam, before
+  // pi renders it into a message; capture it there instead of parsing the
+  // text back out.
+  //
+  // A captured status (including null, which pi reports as "no exit code")
+  // means the child ran far enough to report one, so what follows is the
+  // command's result rather than a permission failure. The one exception is
+  // the sandboxed branch, where an authoritative SRT denial is checked first
+  // and wins over this classification.
+  //
+  // `backend` names which executor the wrapper delegated to, so test doubles
+  // can route a call to the right simulated backend without string matching.
+  type ExitCodeSlot = { code: number | null | undefined };
 
-  const completedIfCommandExited = (
-    thrown: unknown,
+  type CapturedBashOperations = BashOperations & {
+    readonly backend: "sandboxed" | "local";
+  };
+
+  const captureExitCode = (
+    base: BashOperations,
+    slot: ExitCodeSlot,
+    backend: "sandboxed" | "local",
+  ): CapturedBashOperations => ({
+    backend,
+    exec: async (command, cwd, options) => {
+      const result = await base.exec(command, cwd, options);
+      slot.code = result.exitCode;
+      return result;
+    },
+  });
+
+  const commandStatusSuffix = (code: number | null): string =>
+    code === null ? "Command terminated without an exit code" : `Command exited with code ${code}`;
+
+  const completedIfCommandRan = (
+    status: unknown,
     presented: unknown,
+    slot: ExitCodeSlot,
   ): BashResult | undefined => {
-    if (!COMMAND_EXITED.test(errorMessage(thrown).trimEnd())) return undefined;
+    // Only a child-reported failure status is its own result. Exit 0 never
+    // reaches the catch through pi's normal path (pi returns it as success);
+    // landing here with a 0 means a post-exec infrastructure error, which must
+    // stay a failure.
+    if (slot.code === undefined || slot.code === 0) return undefined;
+    // Pi flushes the child's output *after* capturing the exit code, so a
+    // non-zero status can be followed by an unrelated infrastructure failure.
+    // The slot proves the child ran; this confirms the thrown error is that
+    // status rather than the later failure, whose text must not be shown to
+    // the model as if it were the command's output. `status` is the raw error
+    // — diagnostics appended for the agent are checked around, not through.
+    if (!errorMessage(status).endsWith(commandStatusSuffix(slot.code))) return undefined;
     return {
       content: [{ type: "text", text: errorMessage(presented) }],
       details: undefined,
@@ -1725,12 +1776,23 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         authorizeCapability,
         rejectCapability,
       }) => {
+        // Records the child's exit code at the operations seam. `undefined`
+        // means the child never reported a status (denial, abort, or a failure
+        // before/at spawn); a timeout may also leave it undefined after the
+        // child had already started. All of these stay a failure.
+        const exitCodeSlot: ExitCodeSlot = { code: undefined };
+        // Unrestricted and escalated leases share the bare local backend;
+        // the sandboxed branch builds its own wrapper below.
+        const localBash = () =>
+          bashToolFactory(canonicalCwd, {
+            operations: captureExitCode(resolveLocalBashOperations(), exitCodeSlot, "local"),
+          });
         try {
           if (attemptSignal.aborted) throw new Error("aborted");
           if (mode === "unrestricted") {
             return {
               kind: "completed",
-              value: await bashToolFactory(canonicalCwd).execute(
+              value: await localBash().execute(
                 call.id,
                 call.input,
                 attemptSignal,
@@ -1757,7 +1819,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             if (attemptSignal.aborted) throw new Error("aborted");
             return {
               kind: "completed",
-              value: await bashToolFactory(canonicalCwd).execute(
+              value: await localBash().execute(
                 call.id,
                 call.input,
                 attemptSignal,
@@ -1777,16 +1839,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           // every lease reaching here is sandboxed and ceiling-bound.
           const delegationCeiling = session.activeDelegationCeiling();
           const sandboxedBash = bashToolFactory(canonicalCwd, {
-            operations: createSandboxedBashOperations(sandboxManager, policy, {
-              commandId: call.id,
-              networkAuthorize: createSandboxNetworkAuthorizer(
-                policy,
-                authorizeCapability,
-                rejectCapability,
-                attemptSignal,
-                delegationCeiling,
-              ),
-            }),
+            operations: captureExitCode(
+              createSandboxedBashOperations(sandboxManager, policy, {
+                commandId: call.id,
+                networkAuthorize: createSandboxNetworkAuthorizer(
+                  policy,
+                  authorizeCapability,
+                  rejectCapability,
+                  attemptSignal,
+                  delegationCeiling,
+                ),
+              }),
+              exitCodeSlot,
+              "sandboxed",
+            ),
           });
           return {
             kind: "completed",
@@ -1806,11 +1872,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             const diagnosed = await withFailureDiagnostics(call.id, error);
             const denied = await runtimeDenialOutcome(call.id, errorMessage(diagnosed));
             if (denied) return denied;
-            const completed = completedIfCommandExited(error, diagnosed);
+            const completed = completedIfCommandRan(error, diagnosed, exitCodeSlot);
             if (completed) return { kind: "completed", value: completed };
             return { kind: "failed", error: diagnosed };
           }
-          const completed = completedIfCommandExited(error, error);
+          const completed = completedIfCommandRan(error, error, exitCodeSlot);
           if (completed) return { kind: "completed", value: completed };
           return { kind: "failed", error };
         }

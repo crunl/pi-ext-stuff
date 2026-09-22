@@ -28,7 +28,10 @@ if (!fs.existsSync(sibling) || !fs.statSync(sibling).isDirectory()) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    status = execFileSync("git", ["-C", sibling, "status", "--porcelain"], {
+    // The sibling is a subtree of the monorepo checkout, so a bare
+    // `git status` reports the whole tree and any unrelated extension edit
+    // would fail this preflight. Scope it to the sibling subtree.
+    status = execFileSync("git", ["-C", sibling, "status", "--porcelain", "--", "."], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });

@@ -43,7 +43,16 @@ type SandboxOperations = {
   ) => Promise<{ exitCode: number | null }>;
 };
 
-type BashFactoryOptions = { operations?: SandboxOperations };
+type BashFactoryOptions = {
+  operations?: SandboxOperations & {
+    /** Mirrors the production `backend` discriminant set by captureExitCode. */
+    readonly backend?: "sandboxed" | "local";
+  };
+};
+
+const isSandboxOps = (
+  ops: BashFactoryOptions["operations"],
+): ops is SandboxOperations & { readonly backend: "sandboxed" } => ops?.backend === "sandboxed";
 
 interface HarnessOptions {
   config?: Record<string, unknown>;
@@ -68,6 +77,14 @@ interface HarnessOptions {
   sandboxNetworkAnswers?: Record<string, readonly string[]>;
   sandboxResetErrorAfter?: number;
   sandboxHealthy?: boolean;
+  /** Simulates a host-side failure right after a successful exit 0 (pi's post-exec output stage). */
+  sandboxPostExit0Error?: Error;
+  /** Exit code reported by the stubbed local backend in mock-path tests. Default: 0. */
+  localExitCode?: number | null;
+  /** Simulates a host-side failure after a successful local exit 0 (pi's finishOutput / closeTempFile stage). */
+  localPostExit0Error?: Error;
+  /** Simulates pi's finishOutput failing after a non-zero local exit, so the thrown error is not the exit-code message. */
+  localInfraErrorAfterNonZero?: Error;
   sandboxManagerOverride?: SandboxManagerLike;
   /** Replace the default stub reviewer (e.g. production PiAutoReviewer). */
   autoReviewer?: AutoReviewer;
@@ -195,6 +212,13 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     await writeFile(join(configDirectory, "safety.json"), JSON.stringify(options.config));
   }
 
+  // Simulates a host-side failure after a successful exit 0 (pi's
+  // finishOutput / closeTempFile stage). Set from the sandboxPostExit0Error
+  // option; read once by the mock bashToolFactory below.
+  let sandboxPostExit0ErrorState: Error | undefined = options.sandboxPostExit0Error;
+  let localPostExit0Error: Error | undefined = options.localPostExit0Error;
+  let localInfraErrorAfterNonZero: Error | undefined = options.localInfraErrorAfterNonZero;
+
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (...args: unknown[]) => unknown }>();
   const shortcuts = new Map<string, { handler: (...args: unknown[]) => unknown }>();
@@ -297,7 +321,20 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       signal: AbortSignal | undefined,
       onUpdate: unknown,
     ) => {
-      if (factoryOptions?.operations) {
+      // Mirror pi's own bash tool: a non-zero or null exit is a thrown result,
+      // not a returned success. Both branches below share this rendering.
+      const throwForExit = (exitCode: number | null, output: Buffer[] = []): never => {
+        const message = Buffer.concat(output).toString("utf8").trimEnd();
+        throw new Error(
+          exitCode === null
+            ? `${message}\n\nCommand terminated without an exit code`
+            : `${message}\n\nCommand exited with code ${exitCode}`,
+        );
+      };
+      // Every path now carries operations (the exit-code capture wrapper is
+      // applied uniformly). Route on the backend the wrapper delegated to,
+      // not on mere presence of operations.
+      if (factoryOptions?.operations && isSandboxOps(factoryOptions.operations)) {
         sandboxBashExecute(id, params, signal, onUpdate);
         const output: Buffer[] = [];
         const result = await factoryOptions.operations.exec(params.command, toolCwd, {
@@ -306,10 +343,41 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
           timeout: params.timeout,
         });
         if (result.exitCode !== 0 && result.exitCode !== null) {
-          const message = Buffer.concat(output).toString("utf8").trimEnd();
-          throw new Error(`${message}\n\nCommand exited with code ${result.exitCode}`);
+          throwForExit(result.exitCode, output);
+        }
+        if (result.exitCode === 0 && sandboxPostExit0ErrorState) {
+          const failure = sandboxPostExit0ErrorState;
+          sandboxPostExit0ErrorState = undefined;
+          throw failure;
         }
         return { content: [], details: undefined };
+      }
+      // The local path also drives the injected operations so the exit-code
+      // capture wrapper records the child's status, then reports through the
+      // bare backend. The local backend is a stub (see localBashOperations
+      // below), so no real process is spawned.
+      if (factoryOptions?.operations) {
+        const localResult = await factoryOptions.operations.exec(params.command, toolCwd, {
+          onData: () => undefined,
+          signal,
+          timeout: params.timeout,
+        });
+        if (localResult.exitCode !== 0 && localResult.exitCode !== null) {
+          if (localInfraErrorAfterNonZero) {
+            const failure = localInfraErrorAfterNonZero;
+            localInfraErrorAfterNonZero = undefined;
+            throw failure;
+          }
+          throwForExit(localResult.exitCode);
+        }
+        if (localResult.exitCode === null) {
+          throwForExit(null);
+        }
+        if (localResult.exitCode === 0 && localPostExit0Error) {
+          const failure = localPostExit0Error;
+          localPostExit0Error = undefined;
+          throw failure;
+        }
       }
       return bareBashExecute(id, params, signal, onUpdate);
     },
@@ -395,6 +463,17 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     agentDir,
     sandboxManager: options.sandboxManagerOverride ?? (sandboxManager as never),
     bashToolFactory: options.useRealBashTool ? undefined : (bashToolFactory as never),
+    // The local backend is stubbed so mock-path tests never spawn a real
+    // process; useRealBashTool exercises the real backend instead.
+    localBashOperations: options.useRealBashTool
+      ? undefined
+      : () => ({
+          // Parity with the other backends, which may report `null` (pi maps
+          // signals to 128+signal locally, so this keeps the stub honest).
+          exec: async () => ({
+            exitCode: options.localExitCode === undefined ? 0 : options.localExitCode,
+          }),
+        }),
     sandboxCoordinator:
       options.useRealPermissionRuntime || options.useRealCoordinator
         ? executionCoordinator
@@ -715,12 +794,46 @@ describe("Permission mode registration", () => {
       timeout: 120,
     });
     expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
-    expect(app.bashToolFactory.mock.calls.at(-1)?.[1]).toBeUndefined();
+    // The escalated lease runs on the bare local backend, not the sandbox one.
+    expect(app.bashToolFactory.mock.calls.at(-1)?.[1]?.operations?.backend).toBe("local");
 
     await executeBash(app, "ordinary-after-escalation", "printf ordinary");
     expect(app.bareBashExecute).toHaveBeenCalledOnce();
     expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
     expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a non-zero escalated exit out of permission failures without spawning", async () => {
+    // The stubbed local backend reports the exit code directly (no real
+    // process). A non-zero result must stay a completed command result, not
+    // a permission failure — and must not silently report success either.
+    const justification = "Read repository state";
+    const app = await makeHarness({
+      localExitCode: 2,
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification,
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const result = await executeBashWithParams(app, "escalated-exit", {
+      command: "git status --porcelain",
+      sandbox_permissions: "require_escalated",
+      justification,
+    });
+
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("Command exited with code 2") }],
+    });
+    expect(JSON.stringify(result)).not.toContain("The permitted action failed");
+    expect(app.sandboxManager.wrapWithSandbox).not.toHaveBeenCalled();
+    expect(app.sandboxManager.execute).not.toHaveBeenCalled();
   });
 
   it("does not bare-execute when risk still marks escalated but denyRead makes eligibility false", async () => {
@@ -1294,6 +1407,135 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(0);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
     expect(app.sandboxManager.classifyDenial).toHaveBeenCalledOnce();
+  });
+
+  it("treats a signal-terminated Bash command as a normal result", async () => {
+    // The child ran and was killed by a signal: SRT reports a null exit code,
+    // which pi renders as "Command terminated without an exit code". The old
+    // text-based check only recognized "Command exited with code N" and would
+    // have turned this terminal result into a permission failure.
+    const app = await makeHarness({
+      useRealBashTool: true,
+      risk: () => lowRisk(),
+      sandboxExecute: async (request) => {
+        const stderr = Buffer.from("terminated by signal");
+        request.onStderr?.(stderr);
+        return { stdout: Buffer.alloc(0), stderr, exitCode: null };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+    const result = await executeBash(app, "signal-bash", "printf original");
+    expect(result).toMatchObject({
+      content: [
+        {
+          type: "text",
+          text: expect.stringMatching(/terminated by signal[\s\S]*without an exit code/),
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("The permitted action failed");
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a post-exec infrastructure failure terminal even after exit 0", async () => {
+    // Exit 0 normally returns as success and never reaches the catch. If pi's
+    // post-exec output stage then fails, the captured 0 must not wash that
+    // infrastructure error into a completed command result.
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecute: async () => ({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        exitCode: 0,
+      }),
+      sandboxPostExit0Error: new Error("output temp file could not be closed"),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(executeBash(app, "post-exec-failure", "printf ok")).rejects.toThrow(
+      /output temp file could not be closed/,
+    );
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a non-zero exit on the unrestricted backend out of permission failures", async () => {
+    // The unrestricted (yolo) lease runs on the bare local backend. A command
+    // that exits non-zero there is the command's result, not a permission
+    // failure, so the captured exit code must keep it completed.
+    const app = await makeHarness({ useRealBashTool: true, risk: () => blockRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+
+    const result = await executeBash(app, "yolo-exit", "printf done; exit 3");
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("Command exited with code 3") }],
+    });
+    expect(JSON.stringify(result)).not.toContain("The permitted action failed");
+    expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local post-exec infrastructure failure terminal even after exit 0", async () => {
+    // Same invariant as the sandboxed variant, on the local backend: the
+    // mock-path stub returns exit 0 and the bare backend then fails, so the
+    // captured 0 must not wash it into a completed result. The escalated
+    // lease exercises the local backend without a real spawn.
+    const justification = "Read repository state";
+    const app = await makeHarness({
+      localPostExit0Error: new Error("output temp file could not be closed"),
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification,
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+    await expect(
+      executeBashWithParams(app, "local-post-exec-failure", {
+        command: "git status --porcelain",
+        sandbox_permissions: "require_escalated",
+        justification,
+      }),
+    ).rejects.toThrow(/output temp file could not be closed/);
+    expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local infrastructure failure after a non-zero exit terminal", async () => {
+    // Pi flushes output after capturing the exit code. If that flush fails, the
+    // thrown error is the infrastructure failure, not "Command exited with code
+    // N" — the captured non-zero code must not then present the infra error as
+    // if it were the command's own result.
+    const justification = "Read repository state";
+    const app = await makeHarness({
+      localExitCode: 3,
+      localInfraErrorAfterNonZero: new Error("output temp file could not be closed"),
+      risk: (tool, input) =>
+        tool === "bash" && input.sandbox_permissions === "require_escalated"
+          ? promptRisk({
+              reason: "Command requires escalated sandbox permissions",
+              executionMode: "escalated",
+              justification,
+            })
+          : lowRisk(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await expect(
+      executeBashWithParams(app, "local-infra-after-nonzero", {
+        command: "git status --porcelain",
+        sandbox_permissions: "require_escalated",
+        justification,
+      }),
+    ).rejects.toThrow(/output temp file could not be closed/);
+    expect(app.sandboxManager.execute).not.toHaveBeenCalled();
   });
 
   it("rejects a retry parent outside the live file-only delegation ceiling", async () => {
