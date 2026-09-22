@@ -10,21 +10,10 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import {
   buildExpandedOutput,
-  buildLastOutputLine,
   buildOutputPreview,
   countNonEmptyLines,
   hasMeaningfulToolOutput,
 } from "../src/tui/tool-output.ts";
-
-describe("buildLastOutputLine", () => {
-  it("keeps the last non-empty line and truncates it to one row", () => {
-    expect(buildLastOutputLine("alpha\n\nbeta\n", 80)).toEqual(["  └ beta"]);
-    expect(stripTerminalSequences(buildLastOutputLine("alpha\nbeta gamma delta", 12)[0] ?? "")).toBe(
-      "  └ beta ga…",
-    );
-    expect(buildLastOutputLine("\n\n", 80)).toEqual([]);
-  });
-});
 
 describe("buildOutputPreview", () => {
   it("keeps the head and tail within the Codex five-row budget", () => {

@@ -12,7 +12,6 @@ import {
 } from "./output-padding.ts";
 import {
   buildExpandedOutput,
-  buildLastOutputLine,
   buildOutputPreview,
   hasMeaningfulToolOutput,
   toolResultText,
@@ -68,10 +67,10 @@ export interface CodexToolRendererSpec<TPreviewState = unknown> {
   /** Preview row budget when the call failed (falls back to maxOutputRows). */
   failedOutputRows?: number;
   /**
-   * Collapsed failure body. "tail" is the multi-row preview. "last-line"
-   * keeps only the last non-empty logical line. Success stays header-only.
+   * Collapsed failure body. "tail" is the multi-row preview. "hidden" keeps
+   * the header only, matching settled success. Expanded output is unchanged.
    */
-  failedCollapsed?: "tail" | "last-line";
+  failedCollapsed?: "tail" | "hidden";
   /**
    * Optional component rendered below the header while the call is being
    * streamed (partial args) and the result view is expanded. Lets a tool
@@ -287,17 +286,14 @@ class ToolOutputComponent implements Component {
     private readonly maxRows: number,
     private readonly style: (text: string) => string,
     private readonly outputPad: OutputPad,
-    private readonly edge: "head-tail" | "tail" | "last-line" = "head-tail",
+    private readonly edge: "head-tail" | "tail" = "head-tail",
   ) {}
 
   render(width: number): string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-    const lines =
-      this.edge === "last-line"
-        ? buildLastOutputLine(this.text, width, this.outputPad)
-        : this.expanded
-          ? buildExpandedOutput(this.text, width, this.outputPad)
-          : buildOutputPreview(this.text, width, this.maxRows, this.outputPad, this.edge);
+    const lines = this.expanded
+      ? buildExpandedOutput(this.text, width, this.outputPad)
+      : buildOutputPreview(this.text, width, this.maxRows, this.outputPad, this.edge);
     this.cachedWidth = width;
     this.cachedLines = lines.map(this.style);
     return this.cachedLines;
@@ -406,18 +402,23 @@ export function createCodexToolRendering<TPreviewState = unknown>(
           outputPad,
         );
       }
-      if (context.isError && text.length > 0 && hasMeaningfulToolOutput(text)) {
+      if (
+        context.isError &&
+        text.length > 0 &&
+        hasMeaningfulToolOutput(text) &&
+        spec.failedCollapsed !== "hidden"
+      ) {
         return new ToolOutputComponent(
           text,
           false,
           maxRows,
           (line) => theme.fg("error", line),
           outputPad,
-          spec.failedCollapsed === "last-line" ? "last-line" : "tail",
+          "tail",
         );
       }
-      // MiniMax-aligned: settled success stays header-only when collapsed.
-      // Evidence preview remains for failed (above) and for expand (above).
+      // Settled bash stays header-only when collapsed, success and failure.
+      // Other failed tools still paint the tail preview above.
       return new Container();
     },
   };

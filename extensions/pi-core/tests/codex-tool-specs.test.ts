@@ -306,7 +306,7 @@ describe("codex tool specs", () => {
     expect(text).toContain("▶");
   });
 
-  it("bash failed header uses Failed and keeps an error preview", () => {
+  it("bash failed header uses Failed and stays header-only when collapsed", () => {
     const { headerLines, resultLines } = renderBashLifecycle({
       args: { command: "npm test" },
       resultText: "FAIL b\nCommand exited with code 1",
@@ -315,8 +315,7 @@ describe("codex tool specs", () => {
     expect(headerLines()[0]).toContain("Failed npm test");
     expect(headerLines()[0]).toContain("· 2 output lines");
     expect(headerLines()[0]).toContain("▶");
-    const body = resultLines().join("\n");
-    expect(body).toContain("Command exited with code 1");
+    expect(resultLines()).toEqual([]);
   });
 
   it("bash expanded body shows full command evidence then output", () => {
@@ -362,14 +361,16 @@ describe("codex tool specs", () => {
     expect(resultLines()).toEqual([]);
   });
 
-  it("bash failed collapsed shows only the last output line", () => {
+  it("bash failed collapsed is a single header row", () => {
     const { headerLines, resultLines } = renderBashLifecycle({
       args: { command: "seq 1 20" },
       resultText: Array.from({ length: 20 }, (_, index) => `err ${index + 1}`).join("\n\n"),
       isError: true,
     });
+    expect(headerLines()).toHaveLength(1);
     expect(headerLines()[0]).toContain("Failed");
-    expect(resultLines()).toEqual(["  └ err 20"]);
+    expect(headerLines()[0]).toContain("· 20 output lines");
+    expect(resultLines()).toEqual([]);
   });
 });
 
@@ -478,7 +479,7 @@ describe("CodexToolRendererSpec type surface", () => {
     expect(spec.failedVerb).toBeUndefined();
     expect(spec.singleLineHeader).toBe(true);
     expect(typeof spec.summarizeResult).toBe("function");
-    expect(spec.failedCollapsed).toBe("last-line");
+    expect(spec.failedCollapsed).toBe("hidden");
     expect(spec.expandedResultOnFailed).toBe(true);
     expect(spec.showExpandIndicator).toBe(true);
   });

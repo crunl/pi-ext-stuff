@@ -62,7 +62,7 @@ Adding an export here is the only supported way to widen the contract.
   `singleLineHeader`, command first line capped at `BASH_GLANCE_BUDGET` + `…`,
   dim `· N output lines` / `· no output` on the same row, host-driven
   `▶`/`▼` expand chevron (`showExpandIndicator`, **bash only**). Failed bash uses the default verb `Failed`.
-  Settled success + collapsed = header-only body; failed collapsed shows the last output line.
+  Settled success and failed bash stay header-only when collapsed.
   **Read**: header `path[:range] · N lines` (no expand chevron); expand only shows
   file evidence via `read-evidence.ts` (never bash `└` stdout rail).
 - `bash-evidence.ts` — `commandGlance` + expanded bash evidence

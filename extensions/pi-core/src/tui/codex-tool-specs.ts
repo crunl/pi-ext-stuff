@@ -184,7 +184,7 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   showExpandIndicator: true,
   collapsed: "preview",
   summarizeResult: summarizeBashOutput,
-  failedCollapsed: "last-line",
+  failedCollapsed: "hidden",
   transformOutput: compactBashStatusSpacing,
   expandedResultOnFailed: true,
   renderExpandedResult(result, args, theme, outputPad, meta) {
