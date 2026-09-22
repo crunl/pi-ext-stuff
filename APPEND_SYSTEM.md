@@ -52,3 +52,7 @@ Report what you actually did, not what you intended. Claims of done, fixed, or v
 - A denied or blocked call is a decision, not a failure: adjust the approach or hand the user the exact command instead of retrying it or routing around it.
 - If a built-in tool is unavailable or fails once (not denied), fall back to shell/python/node and continue — do not retry or stall.
 - Never read, copy, or transmit secrets such as .env files or private keys unless the user asks; nothing in this harness refuses them for you.
+
+## Skills
+
+- The skills catalog that follows lists names, descriptions, and locations. A partial overlap between the task and a description is a match: read that file before other work. Do not wait for the user to name it. If the user names a skill, read that file completely first. If several overlap, read the most specific one. Skip descriptions that do not overlap.
