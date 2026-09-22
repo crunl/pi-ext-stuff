@@ -120,7 +120,10 @@ import {
   type SandboxNetworkAuthorize,
   type SandboxPolicy,
 } from "./sandbox-policy.ts";
-import { permissionedBashParameters } from "./shell-permissions.ts";
+import {
+  permissionedBashParameters,
+  preparePermissionedBashArguments,
+} from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
@@ -1579,6 +1582,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
+  // Pi throws this only after the child has exited. A non-zero status is the
+  // command's result, not a permission failure, so it must not become isError.
+  const COMMAND_EXITED = /(?:^|\n\n)Command exited with code \d+$/;
+
+  const completedIfCommandExited = (
+    thrown: unknown,
+    presented: unknown,
+  ): BashResult | undefined => {
+    if (!COMMAND_EXITED.test(errorMessage(thrown).trimEnd())) return undefined;
+    return {
+      content: [{ type: "text", text: errorMessage(presented) }],
+      details: undefined,
+    };
+  };
+
   const withFailureDiagnostics = async (commandId: string, error: unknown): Promise<unknown> => {
     try {
       const diagnostics = await sandboxManager.readFailureDiagnostics?.(commandId);
@@ -1783,12 +1801,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             }, attemptSignal),
           };
         } catch (error: unknown) {
-          if (mode === "sandboxed" && !attemptSignal.aborted) {
-            const originalError = await withFailureDiagnostics(call.id, error);
-            const denied = await runtimeDenialOutcome(call.id, errorMessage(originalError));
+          if (attemptSignal.aborted) return { kind: "failed", error };
+          if (mode === "sandboxed") {
+            const diagnosed = await withFailureDiagnostics(call.id, error);
+            const denied = await runtimeDenialOutcome(call.id, errorMessage(diagnosed));
             if (denied) return denied;
-            return { kind: "failed", error: originalError };
+            const completed = completedIfCommandExited(error, diagnosed);
+            if (completed) return { kind: "completed", value: completed };
+            return { kind: "failed", error: diagnosed };
           }
+          const completed = completedIfCommandExited(error, error);
+          if (completed) return { kind: "completed", value: completed };
           return { kind: "failed", error };
         }
       },
@@ -2067,6 +2090,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       "When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write and explain why. For Git metadata writes such as git add, git commit, or git init, use sandbox_permissions=require_escalated instead of additional_permissions when the exact command must run outside the active sandbox, with a concrete justification; it is a one-shot reviewed action and cannot be combined with additional_permissions. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
     ],
     parameters: permissionedBashParameters,
+    prepareArguments: preparePermissionedBashArguments as (args: unknown) => {
+      command: string;
+      timeout?: number;
+      sandbox_permissions?: "use_default" | "with_additional_permissions" | "require_escalated";
+      additional_permissions?: { file_system: { write: string[] } };
+      justification?: string;
+    },
     executionMode: "sequential",
     execute: executePermissionedBash,
   });

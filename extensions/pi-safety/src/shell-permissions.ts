@@ -69,6 +69,31 @@ export const permissionedBashParameters = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Models sometimes emit harness fields such as `description`. Drop keys the
+ * closed schema does not declare, without changing values it does.
+ */
+export function preparePermissionedBashArguments(args: unknown): unknown {
+  if (!isRecord(args)) return args;
+  return retainClosedSchemaValue(permissionedBashParameters, args);
+}
+
+function retainClosedSchemaValue(schema: unknown, value: unknown): unknown {
+  if (!isRecord(schema)) return value;
+  if (schema.type === "array" && Array.isArray(value)) {
+    return value.map((item) => retainClosedSchemaValue(schema.items, item));
+  }
+  if (schema.additionalProperties !== false || !isRecord(schema.properties) || !isRecord(value)) {
+    return value;
+  }
+  const next: Record<string, unknown> = {};
+  for (const key of Object.keys(schema.properties)) {
+    if (!Object.hasOwn(value, key)) continue;
+    next[key] = retainClosedSchemaValue(schema.properties[key], value[key]);
+  }
+  return next;
+}
+
 export type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
   | { ok: false; reason: string };

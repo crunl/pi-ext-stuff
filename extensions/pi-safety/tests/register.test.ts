@@ -87,6 +87,7 @@ interface Harness {
       label?: string;
       description?: string;
       parameters?: unknown;
+      prepareArguments?: (args: unknown) => unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >;
@@ -203,6 +204,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       label?: string;
       description?: string;
       parameters?: unknown;
+      prepareArguments?: (args: unknown) => unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >();
@@ -355,6 +357,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       label?: string;
       description?: string;
       parameters?: unknown;
+      prepareArguments?: (args: unknown) => unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }) => tools.set(tool.name, tool),
     appendEntry,
@@ -527,6 +530,21 @@ function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
 }
 
 describe("Permission mode registration", () => {
+  it("strips unknown bash arguments on the registered tool", async () => {
+    const app = await makeHarness();
+    const input = {
+      command: "pwd",
+      description: "where am I",
+      timeout: 180000,
+    };
+
+    expect(app.tools.get("bash")?.prepareArguments?.(input)).toEqual({
+      command: "pwd",
+      timeout: 180000,
+    });
+    expect(input.description).toBe("where am I");
+  });
+
   it("runs the hermetic system registration fixture from a simulated Linux host descriptor", async () => {
     const original = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { ...original, value: "linux" });
@@ -1263,9 +1281,16 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
-    await expect(executeBash(app, "log-only-bash", "printf original")).rejects.toThrow(
-      /EPERM original Bash failure[\s\S]*SRT diagnostic/,
-    );
+    const result = await executeBash(app, "log-only-bash", "printf original");
+    expect(result).toMatchObject({
+      content: [
+        {
+          type: "text",
+          text: expect.stringMatching(/EPERM original Bash failure[\s\S]*SRT diagnostic/),
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("The permitted action failed");
     expect(app.reviewInputs).toHaveLength(0);
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
     expect(app.sandboxManager.classifyDenial).toHaveBeenCalledOnce();
