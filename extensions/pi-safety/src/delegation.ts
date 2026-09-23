@@ -1,10 +1,11 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
   intersectNetworkPatterns,
   isNetworkPatternCoveredBy,
   matchesNetworkDomainPattern,
   normalizeNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
+import { isPathWithin } from "./permissions/paths.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 /**
@@ -57,20 +58,8 @@ function normalizeRoots(roots: readonly string[]): string[] {
   return [...seen].sort();
 }
 
-/** Hierarchical coverage: entry is the root itself or nested beneath it. */
-function isCoveredBy(entry: string, roots: ReadonlySet<string>): boolean {
-  const normalized = resolve(entry);
-  for (const root of roots) {
-    const path = relative(resolve(root), normalized);
-    if (path === "" || (path !== ".." && !path.startsWith(`..${sep}`))) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function pathsIntersect(parent: string, requested: string): boolean {
-  return isCoveredBy(parent, new Set([requested])) || isCoveredBy(requested, new Set([parent]));
+  return isPathWithin(parent, requested) || isPathWithin(requested, parent);
 }
 
 function normalizeHosts(hosts: readonly string[]): string[] {
@@ -134,7 +123,7 @@ export function isEnvelopeSubset(child: DelegationEnvelope, parent: DelegationEn
   const childRoots = new Set(normalizeRoots(child.writeRoots ?? []));
   const parentRoots = new Set(normalizeRoots(parent.writeRoots ?? []));
   for (const root of childRoots) {
-    if (!isCoveredBy(root, parentRoots)) return false;
+    if (![...parentRoots].some((r) => isPathWithin(root, r))) return false;
   }
   const childHosts = normalizeHosts(child.networkHosts ?? []);
   const parentHosts = normalizeHosts(parent.networkHosts ?? []);
@@ -155,8 +144,8 @@ function intersectWriteRoots(
   for (const parentRoot of parentRoots) {
     for (const requestedRoot of requestedRoots) {
       if (!pathsIntersect(parentRoot, requestedRoot)) continue;
-      if (isCoveredBy(parentRoot, new Set([requestedRoot]))) result.add(resolve(parentRoot));
-      if (isCoveredBy(requestedRoot, new Set([parentRoot]))) result.add(resolve(requestedRoot));
+      if (isPathWithin(parentRoot, requestedRoot)) result.add(resolve(parentRoot));
+      if (isPathWithin(requestedRoot, parentRoot)) result.add(resolve(requestedRoot));
     }
   }
   return [...result].sort();
@@ -303,7 +292,7 @@ export function resolveChildEnvelope(input: {
 
 /** True when an absolute filesystem path is inside the envelope. */
 export function isWriteCovered(absolutePath: string, envelope: DelegationEnvelope): boolean {
-  return isCoveredBy(absolutePath, new Set(envelope.writeRoots ?? []));
+  return (envelope.writeRoots ?? []).some((r) => isPathWithin(absolutePath, r));
 }
 
 /**

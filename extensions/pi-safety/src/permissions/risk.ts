@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { basename, relative, resolve, sep } from "node:path";
+import { basename, resolve } from "node:path";
 import { defaultSafetyConfigPath, resolvePolicyPath } from "../filesystem-policy.ts";
 import {
   isPublicNetworkHost,
@@ -7,6 +7,7 @@ import {
   parseGitRemoteTarget,
 } from "../network-host.ts";
 import { isDangerousWords } from "./dangerous-commands.ts";
+import { isPathWithin } from "./paths.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 
 export type Risk = "LOW" | "REVIEW" | "HARD";
@@ -949,11 +950,6 @@ function webFetchRisk(request: PermissionRequest): Risk {
   return isPublicNetworkHost(parsed.hostname) ? "LOW" : "HARD";
 }
 
-function isWithin(path: string, root: string): boolean {
-  const remainder = relative(root, path);
-  return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
-}
-
 function writeRisk(
   request: PermissionRequest,
   approvedWriteRoots: string[],
@@ -962,14 +958,14 @@ function writeRisk(
 ): Risk {
   if (
     request.resolvedPaths.some((path) =>
-      protectedWritePaths.some((control) => path === control || isWithin(path, control)),
+      protectedWritePaths.some((control) => path === control || isPathWithin(path, control)),
     )
   ) {
     return "HARD";
   }
   const roots = [...workspaceWriteRoots, ...approvedWriteRoots];
   return request.resolvedPaths.length > 0 &&
-    request.resolvedPaths.every((path) => roots.some((root) => isWithin(path, root)))
+    request.resolvedPaths.every((path) => roots.some((root) => isPathWithin(path, root)))
     ? "LOW"
     : "REVIEW";
 }

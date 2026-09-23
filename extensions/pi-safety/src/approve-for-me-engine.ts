@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, dirname, relative, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { effectiveNetworkAuthority, fingerprintValue } from "./config.ts";
 import { hasGlobSyntax } from "./filesystem-policy.ts";
 import {
@@ -7,6 +7,7 @@ import {
   matchesNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, isValidNetworkPort, normalizeNetworkHost } from "./network-host.ts";
+import { isPathWithin } from "./permissions/paths.ts";
 import { normalizeResidualSignals, type ResidualSignal } from "./permissions/residual.ts";
 import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import {
@@ -588,16 +589,11 @@ function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
   };
 }
 
-function isPathWithin(root: string, path: string): boolean {
-  const rel = relative(resolve(root), resolve(path));
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${"/"}`));
-}
-
 function pathMatches(pattern: string, path: string): boolean {
   // A glob is a potentially matching deny rule. The Engine never tries to
   // interpret it as an allow; callers must let the real enforcer decide.
   if (hasGlobSyntax(pattern)) return true;
-  return isPathWithin(pattern, path);
+  return isPathWithin(path, pattern);
 }
 
 function exactLocalNetworkAllow(
@@ -790,7 +786,7 @@ function requestCovered(lease: CapabilityLease, request: CapabilityRequest): boo
       request.operation === "read" ? policy.filesystem.denyRead : policy.filesystem.denyWrite;
     if (denied.some((pattern) => pathMatches(pattern, request.path))) return false;
     if (request.operation === "read") return true;
-    return policy.filesystem.allowWrite.some((root) => isPathWithin(root, request.path));
+    return policy.filesystem.allowWrite.some((root) => isPathWithin(request.path, root));
   }
   if (request.kind === "network-all")
     return (
@@ -1657,7 +1653,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const root = mkdir ? dirname(target.path) : target.path;
     if (
       root === dirname(root) ||
-      isPathWithin(root, homedir()) ||
+      isPathWithin(homedir(), root) ||
       basename(root) === "Library" ||
       hasGlobSyntax(root)
     )

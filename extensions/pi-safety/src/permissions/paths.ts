@@ -20,7 +20,7 @@ function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? resolve(homedir(), value.slice(2)) : value;
 }
 
-function isWithin(path: string, root: string): boolean {
+export function isPathWithin(path: string, root: string): boolean {
   const remainder = relative(root, path);
   return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
 }
@@ -64,7 +64,9 @@ async function matchesProtectedPattern(
             return globMatches(lexicalPath, pattern) || globMatches(canonicalPath, pattern);
           }
           const canonicalPattern = await canonicalize(pattern);
-          return isWithin(lexicalPath, pattern) || isWithin(canonicalPath, canonicalPattern);
+          return (
+            isPathWithin(lexicalPath, pattern) || isPathWithin(canonicalPath, canonicalPattern)
+          );
         }
         const candidates = [
           basename(lexicalPath),
@@ -91,8 +93,8 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
 
   if (
     policy.operation === "write" &&
-    (protectedControls.some((control) => isWithin(requested, control)) ||
-      canonicalControls.some((control) => isWithin(canonicalPath, control)))
+    (protectedControls.some((control) => isPathWithin(requested, control)) ||
+      canonicalControls.some((control) => isPathWithin(canonicalPath, control)))
   ) {
     return { allowed: false, canonicalPath, reason: "permission control path is protected" };
   }
@@ -116,7 +118,8 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
   );
   if (
     !writeRoots.some(
-      (root) => isWithin(requested, root.lexical) && isWithin(canonicalPath, root.canonical),
+      (root) =>
+        isPathWithin(requested, root.lexical) && isPathWithin(canonicalPath, root.canonical),
     )
   ) {
     return { allowed: false, canonicalPath, reason: "write path is outside allowed roots" };
