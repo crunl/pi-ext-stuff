@@ -7,14 +7,7 @@ import {
   inspectRepositoryGitMetadata,
   readRepositoryRemoteHosts,
 } from "../src/git-metadata.ts";
-
-async function createGitDirectory(path: string, config = ""): Promise<void> {
-  await mkdir(path, { recursive: true });
-  await writeFile(join(path, "HEAD"), "ref: refs/heads/main\n");
-  await writeFile(join(path, "config"), config);
-  await mkdir(join(path, "objects"));
-  await mkdir(join(path, "refs"));
-}
+import { createGitDirectory } from "./git-fixtures.ts";
 
 describe("Git metadata ownership", () => {
   it("discovers a separate-git-dir target without requiring worktree ownership", async () => {

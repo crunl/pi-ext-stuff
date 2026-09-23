@@ -10,20 +10,13 @@ import {
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
 } from "../src/risk-policy.ts";
+import { createGitDirectory } from "./git-fixtures.ts";
 
 function config(overrides: Partial<SafetyConfig> = {}): SafetyConfig {
   return {
     ...structuredClone(DEFAULT_CONFIG),
     ...overrides,
   };
-}
-
-async function createGitDirectory(path: string, contents = ""): Promise<void> {
-  await mkdir(path, { recursive: true });
-  await writeFile(join(path, "HEAD"), "ref: refs/heads/main\n");
-  await writeFile(join(path, "config"), contents);
-  await mkdir(join(path, "objects"));
-  await mkdir(join(path, "refs"));
 }
 
 describe("Permission request own-property shape", () => {
