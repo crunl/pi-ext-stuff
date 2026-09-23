@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { defaultSafetyConfigPath } from "../filesystem-policy.ts";
 
@@ -22,7 +22,13 @@ function expandHome(value: string): string {
 
 export function isPathWithin(path: string, root: string): boolean {
   const remainder = relative(root, path);
-  return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== "..");
+  // `relative` returns an absolute path when the two paths share no root —
+  // different Windows drives (`C:\a` vs `D:\b`). That remainder is not a
+  // descendant, so it must fail closed rather than read as "inside".
+  return (
+    remainder === "" ||
+    (!isAbsolute(remainder) && remainder !== ".." && !remainder.startsWith(`..${sep}`))
+  );
 }
 
 /** Resolve existing path components while preserving the missing suffix. */
@@ -127,5 +133,3 @@ export async function isPathAllowed(path: string, policy: PathPolicy): Promise<P
 
   return { allowed: true, canonicalPath };
 }
-
-export const DEFAULT_WRITE_ROOTS = [".", tmpdir()];

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { completedIfCommandRan, runtimeDenialFromEvidence } from "../src/bash-outcome.ts";
+import {
+  commandExitCode,
+  completedIfCommandRan,
+  runtimeDenialFromEvidence,
+} from "../src/bash-outcome.ts";
 
 describe("completedIfCommandRan", () => {
   const slot = (code: number | null | undefined) => ({ code });
@@ -21,7 +25,7 @@ describe("completedIfCommandRan", () => {
     const presented = new Error("boom\n\nCommand exited with code 2\n\nSRT diagnostic");
     expect(completedIfCommandRan(status, presented, slot(2))).toEqual({
       content: [{ type: "text", text: "boom\n\nCommand exited with code 2\n\nSRT diagnostic" }],
-      details: undefined,
+      details: { exitCode: 2 },
     });
   });
 
@@ -35,8 +39,23 @@ describe("completedIfCommandRan", () => {
     const status = new Error("boom\n\nCommand terminated without an exit code");
     expect(completedIfCommandRan(status, status, slot(null))).toEqual({
       content: [{ type: "text", text: "boom\n\nCommand terminated without an exit code" }],
-      details: undefined,
+      details: { exitCode: null },
     });
+  });
+});
+
+describe("commandExitCode", () => {
+  it("reads the status a completed command carries", () => {
+    expect(commandExitCode({ exitCode: 2 })).toBe(2);
+    expect(commandExitCode({ exitCode: 0 })).toBe(0);
+    expect(commandExitCode({ exitCode: null })).toBeNull();
+  });
+
+  it("reports no status for pi's own success details or a missing result", () => {
+    expect(commandExitCode({ truncation: undefined })).toBeUndefined();
+    expect(commandExitCode(undefined)).toBeUndefined();
+    expect(commandExitCode(null)).toBeUndefined();
+    expect(commandExitCode({ exitCode: "2" })).toBeUndefined();
   });
 });
 

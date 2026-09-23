@@ -7,6 +7,8 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
   ToolDefinition,
+  ToolResultEvent,
+  ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import {
   type BashOperations,
@@ -27,6 +29,7 @@ import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   captureExitCode,
+  commandExitCode,
   completedIfCommandRan,
   type ExitCodeSlot,
   type RuntimeDenialOutcome,
@@ -2511,6 +2514,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return;
     },
   );
+
+  // A completed command that reported a non-zero or missing status is a
+  // failure the model must see. Pi returns every *returned* tool result as
+  // `isError: false` (it only sets `isError: true` for a thrown execute), so
+  // this event is the only channel that can correct it. Content is left alone:
+  // the command's own output is the failure report, not permission copy.
+  pi.on("tool_result", (event: ToolResultEvent): ToolResultEventResult | undefined => {
+    if (event.toolName !== "bash") return undefined;
+    const exitCode = commandExitCode(event.details);
+    return exitCode === undefined || exitCode === 0 ? undefined : { isError: true };
+  });
 
   pi.registerCommand("approve", {
     description: "Authorize one exact retry of a recent Auto-review denial",

@@ -1,4 +1,4 @@
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import type { BashOperations, BashToolDetails } from "@earendil-works/pi-coding-agent";
 
 import type { PiActionOutcome } from "./pi-safety.ts";
 import { looksLikeSandboxDenial, type SandboxDenialCapability } from "./sandbox-policy.ts";
@@ -26,10 +26,17 @@ type CapturedBashOperations = BashOperations & {
 
 export type RuntimeDenialOutcome = Extract<PiActionOutcome<never>, { kind: "capability-denied" }>;
 
+/**
+ * Details of a completed command's result. Pi's `BashToolDetails` has no exit
+ * code field, so the captured status rides along as an extra key; the host
+ * passes tool details through to the `tool_result` event unchanged.
+ */
+export type BashOutcomeDetails = BashToolDetails & { exitCode: number | null };
+
 /** A completed command's result — the shape pi's bash execute returns. */
 type BashOutcome = {
   content: Array<{ type: "text"; text: string }>;
-  details: undefined;
+  details: BashOutcomeDetails;
 };
 
 export function captureExitCode(
@@ -72,8 +79,23 @@ export function completedIfCommandRan(
   if (!errorMessage(status).endsWith(commandStatusSuffix(slot.code))) return undefined;
   return {
     content: [{ type: "text", text: errorMessage(presented) }],
-    details: undefined,
+    // The captured status is the structured marker that tells the `tool_result`
+    // handler this completed action is a failed *command*; nothing here parses
+    // the rendered text back out.
+    details: { exitCode: slot.code },
   };
+}
+
+/**
+ * Reads the command status a completed bash result carries, if any. `undefined`
+ * means the result did not come from a command that reported a status — a
+ * permission failure, or pi's own success path, which returns details without
+ * an exit code.
+ */
+export function commandExitCode(details: unknown): number | null | undefined {
+  if (details === null || typeof details !== "object") return undefined;
+  const value = (details as { exitCode?: unknown }).exitCode;
+  return typeof value === "number" || value === null ? value : undefined;
 }
 
 export function runtimeDenialFromEvidence(

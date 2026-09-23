@@ -336,6 +336,23 @@ describe("Risk policy gate", () => {
     }
   });
 
+  it("reviews deletion targets hidden behind control-flow keywords", async () => {
+    // parseCommandSegment normalizes the reserved word at the parse boundary,
+    // so the deletion consumer sees the real executable and checks `.git/HEAD`
+    // against the protected write roots instead of skipping the segment.
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    for (const command of [
+      "for i in a; do rm .git/HEAD; done",
+      "{ rm .git/HEAD; }",
+      "time rm .git/HEAD",
+    ]) {
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "REVIEW",
+      });
+    }
+  });
+
   it("keeps literal and sequenced non-dangerous commands auto-run", async () => {
     // Reserved-word stripping must not over-match: single-quoted text and plain
     // sequencing hide no forced rm and stay allow/LOW.
@@ -347,6 +364,11 @@ describe("Risk policy gate", () => {
       "trap 'echo rm -rf /tmp/x' EXIT",
       "FOO=1 echo hi",
       "do FOO=1 echo hi",
+      // Bash treats a reserved word behind an assignment as an ordinary command
+      // name (`do: command not found`), so it is not structural and must not be
+      // reduced into a forced rm.
+      "FOO=1 do rm -f /tmp/x",
+      "env FOO=1 do rm -f /tmp/x",
       "cmd=rm; $cmd -rf /tmp/x",
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({

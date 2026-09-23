@@ -153,12 +153,23 @@ function executableContext(words: readonly string[]): ExecutableContext {
   while (index < words.length) {
     const wrapperToken = words[index] ?? "";
     const wrapper = basename(wrapperToken).toLowerCase();
-    if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup") {
+    if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup" || wrapper === "time") {
       safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
       index += 1;
       direct = false;
       while (index < words.length && words[index]?.startsWith("-")) {
         if (words[index] === "-p") safe = false;
+        // `time -f FORMAT` / `time -o FILE` take a value argument; consume it so
+        // the real command is not mistaken for the format string.
+        if (
+          wrapper === "time" &&
+          (words[index] === "-f" ||
+            words[index] === "--format" ||
+            words[index] === "-o" ||
+            words[index] === "--output")
+        ) {
+          index += 1;
+        }
         index += 1;
       }
       continue;
@@ -309,10 +320,57 @@ function scanShellSyntax(source: string): ShellSyntax {
   return { hasExecutableSubstitution, hasActiveRedirect, hasActiveControl };
 }
 
+/**
+ * Shell reserved words: syntax, never real executables. A segment that begins
+ * with one (e.g. `do rm -f /`, `then rm --force x`, `{ rm -f /`) has its real
+ * command hidden behind control-flow / brace structure the char segmenter did
+ * not reduce. Stripping them here, at the single parse boundary, surfaces the
+ * hidden argv for every consumer — danger check, deletion targets, network and
+ * Git-invocation detection — without over-matching, since no binary is named
+ * `do`/`then`/`{`. Approximates codex's AST descent into control-flow clauses.
+ */
+const SHELL_RESERVED_WORDS = new Set([
+  "if",
+  "then",
+  "elif",
+  "else",
+  "fi",
+  "do",
+  "done",
+  "while",
+  "until",
+  "for",
+  "case",
+  "esac",
+  "select",
+  "{",
+  "}",
+  "!",
+]);
+
+/**
+ * Whether a leading token is a reserved word. Matching on the basename also
+ * covers a path form of the same keyword. (`time` is handled separately as a
+ * real executable wrapper in executableContext, since it is both a keyword and
+ * a binary.)
+ */
+function isReservedCommandWord(token: string): boolean {
+  return SHELL_RESERVED_WORDS.has(basename(token).toLowerCase());
+}
+
 function parseCommandSegment(source: string): CommandSegment {
   const words = shellWords(source);
-  const context = executableContext(words);
-  const { index } = context;
+  // Reserved words are structural only in command position, which the char
+  // segmenter already isolated: it splits on `;`/`&`/`|`/newline, so the
+  // keyword is leading. Bash treats one behind an assignment or wrapper
+  // (`FOO=1 do rm -f x`, `env FOO=1 do rm -f x`) as an ordinary command name,
+  // so only the leading run is dropped and the reduction still sees the real
+  // executable of `do FOO=1 rm -f x`. `source` keeps the original text for the
+  // regex consumers, and args stay offset from the real executable.
+  let start = 0;
+  while (start < words.length && isReservedCommandWord(words[start] ?? "")) start += 1;
+  const context = executableContext(words.slice(start));
+  const index = start + context.index;
   const executableToken = words[index] ?? "";
   const executable = basename(executableToken).toLowerCase();
   const args = words.slice(index + 1);
@@ -950,7 +1008,7 @@ function writeRisk(
 ): Risk {
   if (
     request.resolvedPaths.some((path) =>
-      protectedWritePaths.some((control) => path === control || isPathWithin(path, control)),
+      protectedWritePaths.some((control) => isPathWithin(path, control)),
     )
   ) {
     return "HARD";
@@ -963,58 +1021,16 @@ function writeRisk(
 }
 
 /**
- * Shell reserved words: syntax, never real executables. A segment that begins
- * with one (e.g. `do rm -f /`, `then rm --force x`, `{ rm -f /`) has its real
- * command hidden behind control-flow / brace structure the char segmenter did
- * not reduce. Stripping these surfaces the hidden argv for the danger check
- * (approximating codex's AST descent into control-flow clauses) without over-matching,
- * since no binary is named `do`/`then`/`{`.
- */
-const SHELL_RESERVED_WORDS = new Set([
-  "if",
-  "then",
-  "elif",
-  "else",
-  "fi",
-  "do",
-  "done",
-  "while",
-  "until",
-  "for",
-  "case",
-  "esac",
-  "select",
-  "{",
-  "}",
-  "!",
-  "time",
-]);
-
-/**
- * Codex-aligned dangerous-command check for one parsed segment. Leading
- * control-flow keywords and any assignment/wrapper hidden behind them are
- * reduced first, so the check always sees the real executable; `trap` actions
- * are shell code and are expanded and checked recursively. `bash -lc` bodies
- * are already expanded into their own segments by parseCommandSegments, so
- * nested `rm -f` is caught at the top level. Approximates codex's AST descent
- * into control-flow clauses via char segmentation + keyword reduction.
+ * Codex-aligned dangerous-command check for one parsed segment. Reserved
+ * control-flow keywords, assignments, and wrappers are reduced by
+ * `parseCommandSegment`, so the segment already names the real executable;
+ * `trap` actions are shell code and are expanded and checked recursively.
+ * `bash -lc` bodies are already expanded into their own segments by
+ * parseCommandSegments, so nested `rm -f` is caught at the top level.
  */
 function isDangerousSegment(segment: CommandSegment): boolean {
-  // Reduce past leading control-flow keywords to the real argv first, so a
-  // hidden `trap` or assignment/wrapper is judged on its real executable:
-  // `do rm -f /` is `rm -f /`; `do trap 'rm -rf x' EXIT` is that trap.
-  // Reserved words are never executables, so this cannot over-match; plain
-  // sequencing (`cat a; pwd`) is untouched.
-  const tokens = [segment.executable, ...segment.args];
-  // Index scan (O(n)). The keyword can hide assignments/wrappers (`do FOO=1
-  // rm -f x`, `do sudo rm -rf x`), so re-normalize exactly as
-  // parseCommandSegment does before judging.
-  let start = 0;
-  while (start < tokens.length && SHELL_RESERVED_WORDS.has(tokens[start] ?? "")) start += 1;
-  const { index } = executableContext(tokens.slice(start));
-  const words = tokens.slice(start + index);
-  const executable = basename(words[0] ?? "").toLowerCase();
-  if (executable === "trap") {
+  const words = [segment.executable, ...segment.args];
+  if (words[0] === "trap") {
     // words[0] is the `trap` itself, so the action starts at index 1.
     let actionIndex = 1;
     if ((words[actionIndex] ?? "") === "--") actionIndex += 1;
@@ -1022,7 +1038,7 @@ function isDangerousSegment(segment: CommandSegment): boolean {
     if (action === undefined || action.startsWith("-")) return false;
     return parseCommandSegments(action).some(isDangerousSegment);
   }
-  return words.length > 0 && isDangerousWords([executable, ...words.slice(1)]);
+  return words.length > 0 && isDangerousWords(words);
 }
 
 /** Matches Codex's pre-sandbox dangerous-command gate. */

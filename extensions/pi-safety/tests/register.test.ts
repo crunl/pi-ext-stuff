@@ -836,6 +836,99 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { label: "a non-zero exit", exitCode: 2, expected: "Command exited with code 2" },
+    {
+      label: "a signal termination",
+      exitCode: null,
+      expected: "Command terminated without an exit code",
+    },
+  ])(
+    "marks $label as a tool error without replacing the command output",
+    async ({ exitCode, expected }) => {
+      // Pi returns every *returned* tool result as isError:false (only a thrown
+      // execute is an error), so a completed failed command would reach the
+      // model looking successful. The structured exit-code marker in details
+      // plus the tool_result hook is the only channel that can correct it; the
+      // content must stay the command's own output, never permission copy.
+      const app = await makeHarness({
+        useRealBashTool: true,
+        risk: () => lowRisk(),
+        sandboxExecute: async (request) => {
+          const stdout = Buffer.from("boom");
+          request.onStdout?.(stdout);
+          return { stdout, stderr: Buffer.alloc(0), exitCode };
+        },
+      });
+      await startSession(app);
+      await startAgent(app);
+
+      const result = (await executeBash(app, "failed-bash", "printf boom")) as {
+        content: Array<{ type: "text"; text: string }>;
+        details: { exitCode?: number | null };
+      };
+      expect(result.details.exitCode).toBe(exitCode);
+      expect(result.content[0]?.text).toContain("boom");
+      expect(result.content[0]?.text).toContain(expected);
+
+      const hookResult = await invoke(app, "tool_result", {
+        type: "tool_result",
+        toolCallId: "failed-bash",
+        toolName: "bash",
+        input: { command: "printf boom" },
+        content: result.content,
+        details: result.details,
+        isError: false,
+      });
+      // Only the flag is set: the host keeps the tool result's own content.
+      expect(hookResult).toEqual({ isError: true });
+    },
+  );
+
+  it("leaves a successful command and a thrown failure unflagged", async () => {
+    // Exit 0 already reports success, and a thrown execute is already an error
+    // (it carries no exit-code marker). Neither may be rewritten by the hook.
+    const app = await makeHarness({
+      useRealBashTool: true,
+      risk: () => lowRisk(),
+      sandboxExecute: async (request) => {
+        const stdout = Buffer.from("ok");
+        request.onStdout?.(stdout);
+        return { stdout, stderr: Buffer.alloc(0), exitCode: 0 };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const success = (await executeBash(app, "ok-bash", "printf ok")) as {
+      content: Array<{ type: "text"; text: string }>;
+      details: unknown;
+    };
+    await expect(
+      invoke(app, "tool_result", {
+        type: "tool_result",
+        toolCallId: "ok-bash",
+        toolName: "bash",
+        input: { command: "printf ok" },
+        content: success.content,
+        details: success.details,
+        isError: false,
+      }),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      invoke(app, "tool_result", {
+        type: "tool_result",
+        toolCallId: "denied-bash",
+        toolName: "bash",
+        input: { command: "printf boom" },
+        content: [{ type: "text", text: "denied" }],
+        details: undefined,
+        isError: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("does not bare-execute when risk still marks escalated but denyRead makes eligibility false", async () => {
     const justification = "Run a controlled command";
     const app = await makeHarness({
