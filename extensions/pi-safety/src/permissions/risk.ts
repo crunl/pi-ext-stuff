@@ -6,7 +6,7 @@ import {
   normalizeNetworkHost,
   parseGitRemoteTarget,
 } from "../network-host.ts";
-import { isDangerousWords } from "./dangerous-commands.ts";
+import { assignmentName, isDangerousWords } from "./dangerous-commands.ts";
 import { isPathWithin } from "./paths.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 
@@ -135,16 +135,8 @@ interface ExecutableContext {
   direct: boolean;
 }
 
-function assignmentName(token: string): string | undefined {
-  return /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
-}
-
 function isUnsafeGitContextVariable(name: string): boolean {
   return name === "PATH" || name.startsWith("GIT_");
-}
-
-function isTrustedWrapperToken(token: string, wrapper: string): boolean {
-  return token === wrapper || token === `/usr/bin/${wrapper}` || token === `/bin/${wrapper}`;
 }
 
 function executableContext(words: readonly string[]): ExecutableContext {
@@ -162,7 +154,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
     const wrapperToken = words[index] ?? "";
     const wrapper = basename(wrapperToken).toLowerCase();
     if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup") {
-      safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
+      safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
       index += 1;
       direct = false;
       while (index < words.length && words[index]?.startsWith("-")) {
@@ -172,7 +164,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
       continue;
     }
     if (wrapper === "env") {
-      safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
+      safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
       index += 1;
       direct = false;
       while (index < words.length) {
@@ -219,7 +211,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
       continue;
     }
     if (wrapper !== "sudo") break;
-    safe = safe && isTrustedWrapperToken(wrapperToken, wrapper);
+    safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
     index += 1;
     direct = false;
     while (index < words.length) {

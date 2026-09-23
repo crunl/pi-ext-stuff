@@ -18,8 +18,8 @@ export function rmArgsIncludeForce(args: string[]): boolean {
   return false;
 }
 
-function isAssignment(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+export function assignmentName(token: string): string | undefined {
+  return /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
 }
 
 function dangerousEnv(words: string[], depth: number): boolean {
@@ -30,7 +30,11 @@ function dangerousEnv(words: string[], depth: number): boolean {
       index += 1;
       break;
     }
-    if (argument === "-i" || argument === "--ignore-environment" || isAssignment(argument)) {
+    if (
+      argument === "-i" ||
+      argument === "--ignore-environment" ||
+      assignmentName(argument) !== undefined
+    ) {
       index += 1;
       continue;
     }

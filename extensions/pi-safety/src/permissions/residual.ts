@@ -36,15 +36,6 @@ export function ensureNonEmptyResiduals(
   return [fallback];
 }
 
-export function assertNonEmptyResiduals(
-  residuals: readonly ResidualSignal[] | null | undefined,
-): ResidualSignal[] {
-  if (!Array.isArray(residuals) || residuals.length === 0) {
-    throw new Error("pi-safety: review residuals must be non-empty");
-  }
-  return [...residuals];
-}
-
 export function residualsForPrompt(input: {
   ruleAsk?: boolean;
   ruleDeny?: boolean;

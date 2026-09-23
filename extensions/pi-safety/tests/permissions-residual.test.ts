@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertNonEmptyResiduals,
   ensureNonEmptyResiduals,
   hasResiduals,
   isResidualSignal,
@@ -50,12 +49,6 @@ describe("residual helpers", () => {
     expect(ensureNonEmptyResiduals(undefined)).toEqual(["other_explicit_review"]);
     expect(ensureNonEmptyResiduals([])).toEqual(["other_explicit_review"]);
     expect(ensureNonEmptyResiduals(["escalation"])).toEqual(["escalation"]);
-  });
-
-  it("assertNonEmptyResiduals rejects empty stamps", () => {
-    expect(() => assertNonEmptyResiduals(undefined)).toThrow(/non-empty/);
-    expect(() => assertNonEmptyResiduals([])).toThrow(/non-empty/);
-    expect(assertNonEmptyResiduals(["rule_ask"])).toEqual(["rule_ask"]);
   });
 
   it("stamps the most specific prompt facts known", () => {
