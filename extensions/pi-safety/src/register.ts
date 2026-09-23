@@ -137,6 +137,13 @@ import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
+function policyDeniedError(reason: string): Error {
+  return Object.assign(
+    new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
+    { code: "policy-denied", reason },
+  );
+}
+
 export type GuardianPolicySource = (context: {
   cwd: string;
   configFingerprint: string;
@@ -1660,11 +1667,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           executionContext.config,
         );
         if (violation) {
-          const error = new Error(
-            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          );
-          Object.assign(error, { code: "policy-denied", reason: violation });
-          throw error;
+          throw policyDeniedError(violation);
         }
       }
       for (const host of risk.networkHosts ?? []) {
@@ -1674,11 +1677,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           executionContext.config,
         );
         if (violation) {
-          const error = new Error(
-            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          );
-          Object.assign(error, { code: "policy-denied", reason: violation });
-          throw error;
+          throw policyDeniedError(violation);
         }
       }
     }
@@ -2152,10 +2151,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!isSupportedPermissionRequestShape(params)) {
         const reason =
           "request_permissions requires an unambiguous turn-scoped network.hosts OR network_access:true request, and/or filesystem.write";
-        throw Object.assign(
-          new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
-          { code: "policy-denied", reason },
-        );
+        throw policyDeniedError(reason);
       }
       const actionSignal = _signal;
       const captured = permissions.captureAction({
@@ -2178,11 +2174,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         canonicalCwd,
       );
       if (decision.action === "block") {
-        const error = new Error(
-          renderPermissionErrorForAgent({ code: "policy-denied", reason: decision.reason }),
-        );
-        Object.assign(error, { code: "policy-denied", reason: decision.reason });
-        throw error;
+        throw policyDeniedError(decision.reason);
       }
       if (
         decision.action !== "prompt" ||
@@ -2190,23 +2182,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           (decision.networkHosts?.length ?? 0) === 0 &&
           (decision.filesystemWriteRoots?.length ?? 0) === 0)
       ) {
-        const error = new Error(
-          renderPermissionErrorForAgent({
-            code: "policy-denied",
-            reason: "request_permissions requires a non-empty capability request",
-          }),
-        );
-        Object.assign(error, {
-          code: "policy-denied",
-          reason: "request_permissions requires a non-empty capability request",
-        });
-        throw error;
+        throw policyDeniedError("request_permissions requires a non-empty capability request");
       }
       if (decision.networkAll && session.activeDelegationCeiling()) {
-        throw Object.assign(
-          new Error("Whole-network authority is outside the delegation envelope"),
-          { code: "policy-denied" },
-        );
+        throw policyDeniedError("Whole-network authority is outside the delegation envelope");
       }
       // A nested amendment may only request capabilities inside its
       // delegation envelope; the child Engine would otherwise accumulate
@@ -2218,11 +2197,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           executionContext.config,
         );
         if (violation) {
-          const error = new Error(
-            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          );
-          Object.assign(error, { code: "policy-denied", reason: violation });
-          throw error;
+          throw policyDeniedError(violation);
         }
       }
       for (const host of decision.networkHosts ?? []) {
@@ -2232,11 +2207,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           executionContext.config,
         );
         if (violation) {
-          const error = new Error(
-            renderPermissionErrorForAgent({ code: "policy-denied", reason: violation }),
-          );
-          Object.assign(error, { code: "policy-denied", reason: violation });
-          throw error;
+          throw policyDeniedError(violation);
         }
       }
       const reason = canonicalParams.reason ?? decision.reason;

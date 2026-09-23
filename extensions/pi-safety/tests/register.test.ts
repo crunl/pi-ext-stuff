@@ -2988,7 +2988,11 @@ describe("Permission mode registration", () => {
             undefined,
             app.context,
           ),
-      ).rejects.toMatchObject({ code: "policy-denied" });
+      ).rejects.toMatchObject({
+        code: "policy-denied",
+        reason: expect.stringContaining("outside the delegation envelope"),
+        message: expect.stringContaining("blocked by the active permission policy"),
+      });
       await executeBash(app, "child-host-only", "printf child");
       expect(app.sandboxManager.execute.mock.calls[0]?.[0].policy.network).toMatchObject({
         network_access: false,
