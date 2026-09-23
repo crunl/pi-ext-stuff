@@ -321,6 +321,48 @@ describe("Risk policy gate", () => {
     ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
   });
 
+  it("reviews a forced rm hidden behind control-flow keywords (Codex parity)", async () => {
+    // The char segmenter leaves do/then/{ as the segment executable; stripping
+    // those syntax keywords surfaces the real argv so a forced rm is still
+    // caught (matches codex's AST descent into control-flow clauses).
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    for (const command of [
+      'for target in /tmp/a /tmp/b; do rm -r -f "$target"; done',
+      "if test -d /tmp/example; then rm --force /tmp/example; fi",
+      "{ rm -f /tmp/example; }",
+      "for i in a; do trap 'rm -rf /tmp/example' EXIT; done",
+      "{ trap 'rm -rf /tmp/example' EXIT; }",
+      "do FOO=1 rm -f /tmp/example",
+      "if true; then BAR=1 rm --force /tmp/example; fi",
+      "for i in a; do FOO=1 trap 'rm -f /tmp/example' EXIT; done",
+    ]) {
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "HARD",
+      });
+    }
+  });
+
+  it("keeps literal and sequenced non-dangerous commands auto-run", async () => {
+    // Reserved-word stripping must not over-match: single-quoted text and plain
+    // sequencing hide no forced rm and stay allow/LOW.
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    for (const command of [
+      "echo 'rm -rf /tmp/x'",
+      "cat a; pwd",
+      "env FOO=1 npm test",
+      "trap 'echo rm -rf /tmp/x' EXIT",
+      "FOO=1 echo hi",
+      "do FOO=1 echo hi",
+      "cmd=rm; $cmd -rf /tmp/x",
+    ]) {
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "LOW",
+      });
+    }
+  });
+
   it("auto-runs ordinary shell syntax inside the sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 

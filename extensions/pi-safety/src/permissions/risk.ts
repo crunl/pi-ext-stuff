@@ -975,20 +975,66 @@ function writeRisk(
 }
 
 /**
- * Codex-aligned dangerous-command check for one parsed segment. `trap`
- * actions are shell code, so they are expanded and checked recursively;
- * `bash -lc` bodies are already expanded into their own segments by
- * parseCommandSegments, so nested `rm -f` is caught at the top level.
+ * Shell reserved words: syntax, never real executables. A segment that begins
+ * with one (e.g. `do rm -f /`, `then rm --force x`, `{ rm -f /`) has its real
+ * command hidden behind control-flow / brace structure the char segmenter did
+ * not reduce. Stripping these surfaces the hidden argv for the danger check
+ * (approximating codex's AST descent into control-flow clauses) without over-matching,
+ * since no binary is named `do`/`then`/`{`.
+ */
+const SHELL_RESERVED_WORDS = new Set([
+  "if",
+  "then",
+  "elif",
+  "else",
+  "fi",
+  "do",
+  "done",
+  "while",
+  "until",
+  "for",
+  "case",
+  "esac",
+  "select",
+  "{",
+  "}",
+  "!",
+  "time",
+]);
+
+/**
+ * Codex-aligned dangerous-command check for one parsed segment. Leading
+ * control-flow keywords and any assignment/wrapper hidden behind them are
+ * reduced first, so the check always sees the real executable; `trap` actions
+ * are shell code and are expanded and checked recursively. `bash -lc` bodies
+ * are already expanded into their own segments by parseCommandSegments, so
+ * nested `rm -f` is caught at the top level. Approximates codex's AST descent
+ * into control-flow clauses via char segmentation + keyword reduction.
  */
 function isDangerousSegment(segment: CommandSegment): boolean {
-  if (segment.executable === "trap") {
-    let actionIndex = 0;
-    if ((segment.args[0] ?? "") === "--") actionIndex += 1;
-    const action = segment.args[actionIndex];
+  // Reduce past leading control-flow keywords to the real argv first, so a
+  // hidden `trap` or assignment/wrapper is judged on its real executable:
+  // `do rm -f /` is `rm -f /`; `do trap 'rm -rf x' EXIT` is that trap.
+  // Reserved words are never executables, so this cannot over-match; plain
+  // sequencing (`cat a; pwd`) is untouched.
+  const tokens = [segment.executable, ...segment.args];
+  // Index scan (O(n)). The keyword can hide assignments/wrappers (`do FOO=1
+  // rm -f x`, `do sudo rm -rf x`), so re-normalize exactly as
+  // parseCommandSegment does before judging.
+  let start = 0;
+  while (start < tokens.length && SHELL_RESERVED_WORDS.has(tokens[start] ?? "")) start += 1;
+  const { index } = executableContext(tokens.slice(start));
+  const words = tokens.slice(start + index);
+  const executable = basename(words[0] ?? "").toLowerCase();
+  if (executable === "trap") {
+    // words[0] is the `trap` itself, so the action starts at index 1.
+    let actionIndex = 1;
+    if ((words[actionIndex] ?? "") === "--") actionIndex += 1;
+    const action = words[actionIndex];
     if (action === undefined || action.startsWith("-")) return false;
     return parseCommandSegments(action).some(isDangerousSegment);
   }
-  return isDangerousWords([segment.executable, ...segment.args]);
+  return words.length > 0 && isDangerousWords([executable, ...words.slice(1)]);
 }
 
 /** Matches Codex's pre-sandbox dangerous-command gate. */

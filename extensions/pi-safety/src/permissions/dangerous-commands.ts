@@ -44,7 +44,14 @@ function dangerousEnv(words: string[], depth: number): boolean {
  * the caller (it needs shell-command parsing of the action string).
  */
 export function isDangerousWords(words: string[], depth = 0): boolean {
-  if (depth > MAX_DANGEROUS_WRAPPER_DEPTH || words.length === 0) return false;
+  // Defensive, codex-aligned invariant: past the wrapper-reasoning depth we
+  // can no longer prove the nested sudo/env chain safe, so fail closed and
+  // treat it as dangerous (mirrors codex's Some(Other) at the same bound).
+  // The segment path pre-strips wrappers via executableContext before calling
+  // in, so this bound guards direct calls to this exported helper and future
+  // callers that hand over raw words.
+  if (depth > MAX_DANGEROUS_WRAPPER_DEPTH) return true;
+  if (words.length === 0) return false;
   const executable = words[0] ?? "";
   if (executable === "rm") return rmArgsIncludeForce(words.slice(1));
   if (executable === "sudo") return isDangerousWords(words.slice(1), depth + 1);
