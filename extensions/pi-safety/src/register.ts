@@ -26,6 +26,13 @@ import {
 import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
+  captureExitCode,
+  completedIfCommandRan,
+  type ExitCodeSlot,
+  type RuntimeDenialOutcome,
+  runtimeDenialFromEvidence,
+} from "./bash-outcome.ts";
+import {
   ConfigError,
   effectiveNetworkAuthority,
   fingerprintConfig,
@@ -1590,64 +1597,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  // Pi converts a completed child's non-zero or null exit code into a thrown
-  // error. The exit code is a structured value at the operations seam, before
-  // pi renders it into a message; capture it there instead of parsing the
-  // text back out.
-  //
-  // A captured status (including null, which pi reports as "no exit code")
-  // means the child ran far enough to report one, so what follows is the
-  // command's result rather than a permission failure. The one exception is
-  // the sandboxed branch, where an authoritative SRT denial is checked first
-  // and wins over this classification.
-  //
-  // `backend` names which executor the wrapper delegated to, so test doubles
-  // can route a call to the right simulated backend without string matching.
-  type ExitCodeSlot = { code: number | null | undefined };
-
-  type CapturedBashOperations = BashOperations & {
-    readonly backend: "sandboxed" | "local";
-  };
-
-  const captureExitCode = (
-    base: BashOperations,
-    slot: ExitCodeSlot,
-    backend: "sandboxed" | "local",
-  ): CapturedBashOperations => ({
-    backend,
-    exec: async (command, cwd, options) => {
-      const result = await base.exec(command, cwd, options);
-      slot.code = result.exitCode;
-      return result;
-    },
-  });
-
-  const commandStatusSuffix = (code: number | null): string =>
-    code === null ? "Command terminated without an exit code" : `Command exited with code ${code}`;
-
-  const completedIfCommandRan = (
-    status: unknown,
-    presented: unknown,
-    slot: ExitCodeSlot,
-  ): BashResult | undefined => {
-    // Only a child-reported failure status is its own result. Exit 0 never
-    // reaches the catch through pi's normal path (pi returns it as success);
-    // landing here with a 0 means a post-exec infrastructure error, which must
-    // stay a failure.
-    if (slot.code === undefined || slot.code === 0) return undefined;
-    // Pi flushes the child's output *after* capturing the exit code, so a
-    // non-zero status can be followed by an unrelated infrastructure failure.
-    // The slot proves the child ran; this confirms the thrown error is that
-    // status rather than the later failure, whose text must not be shown to
-    // the model as if it were the command's output. `status` is the raw error
-    // — diagnostics appended for the agent are checked around, not through.
-    if (!errorMessage(status).endsWith(commandStatusSuffix(slot.code))) return undefined;
-    return {
-      content: [{ type: "text", text: errorMessage(presented) }],
-      details: undefined,
-    };
-  };
-
   const withFailureDiagnostics = async (commandId: string, error: unknown): Promise<unknown> => {
     try {
       const diagnostics = await sandboxManager.readFailureDiagnostics?.(commandId);
@@ -1659,21 +1608,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  type RuntimeDenialOutcome = Extract<PiActionOutcome<never>, { kind: "capability-denied" }>;
-
   const runtimeDenialOutcome = async (
     commandId: string,
     evidence: string,
   ): Promise<RuntimeDenialOutcome | undefined> => {
-    if (!looksLikeSandboxDenial(evidence)) return undefined;
-    const capability = await sandboxManager.classifyDenial?.(commandId);
-    // Network authorization happens before the connection through the SRT
-    // callback. A post-failure network denial is not replayable because it
-    // would reopen an entire command rather than authorize one connection.
-    if (capability?.kind !== "filesystem") return undefined;
-    const operation = capability.operation === "write" ? "writing" : "reading";
-    const detail = `Sandbox enforcement denied ${operation} ${capability.path} during execution\nOriginal error: ${evidence}`;
-    return { kind: "capability-denied", request: capability, detail };
+    const capability = looksLikeSandboxDenial(evidence)
+      ? await sandboxManager.classifyDenial?.(commandId)
+      : undefined;
+    return runtimeDenialFromEvidence(evidence, capability);
   };
 
   const executePermissionedBash = async (
