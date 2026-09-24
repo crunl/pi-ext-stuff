@@ -494,6 +494,11 @@ function isReservedCommandWord(token: string): boolean {
  * - pathname expansion: `r?m`, `r*m`, `[a-z]m` name whichever cwd entry
  *   matches. Whether anything matches is not knowable statically, and a
  *   non-matching pattern is left literal, so both outcomes are possible.
+ * - zsh's `=command`: expands to the full path of `command`, so `=rm -f x`
+ *   runs rm. Verified in a real zsh (`zsh -fc '=echo hi'` prints). Bash treats
+ *   a leading `=` literally, but the cost of the shared rule is a review on a
+ *   command word no one writes, while the cost of missing the zsh form is a
+ *   deletion.
  *
  * Only the command word is checked. Expansion in an argument position leaves
  * the executable alone (`ls {a,b}` still runs `ls`), so `awk '{ print }'` and
@@ -503,6 +508,7 @@ function isReservedCommandWord(token: string): boolean {
  * is exempt; `[...]` with any other character is a glob.
  */
 function commandWordIsUnprovable(token: string): boolean {
+  if (token.startsWith("=")) return true;
   if (token.includes("$") || token.includes("`")) return true;
   if (token.includes("*") || token.includes("?") || token.includes("{") || token.includes("}")) {
     return true;

@@ -48,8 +48,24 @@ export function invocationControlsProcesses(segment: CommandSegment): boolean {
 }
 
 /**
+ * What the static layer can prove about one invocation's remote effect.
+ *
+ * `proved` and `refuted` are both answers; `unknown` is the absence of one and
+ * is deliberately not a synonym for `refuted`. An invocation whose option
+ * grammar the table cannot read may still be a mutation with the verb hidden
+ * behind an option value, so it routes to review rather than to LOW. This is
+ * the only fail-open that survived a full audit of the dual-reading scan it
+ * replaced: two unknown options admit four grammars, and enumerating readings
+ * does not generalise past the second option.
+ */
+export type ExternalEffect = "proved" | "refuted" | "unknown";
+
+/**
  * Global options that take a value across the CLIs below, so the word after one
- * is an option value rather than the subcommand.
+ * is an option value rather than the subcommand. A flag that is *not* here and
+ * appears before the verb makes the grammar unprovable, so this table is a
+ * usability budget as much as a safety table: every entry added is a class of
+ * read-only command that stays auto-approvable.
  */
 const cliGlobalValueFlags = new Set([
   "-n",
@@ -67,38 +83,103 @@ const cliGlobalValueFlags = new Set([
   "--user",
   "-t",
   "--tenant",
+  // The second tier: value-taking options common enough on read-only queries
+  // that leaving them out would push ordinary inspection into review.
+  "--repo",
+  "-R",
+  "--format",
+  "--output",
+  "-o",
+  "--query",
+  "--jq",
+  "--filter",
+  "--fields",
+  "--limit",
+  "--page",
+  "--per-page",
+  "--state",
+  "--sort",
+  "--search",
+  "--assignee",
+  "--author",
+  "--label",
+  "--milestone",
+  "--since",
+  "--until",
+  "--chdir",
+  "--prefix",
+  "--workspace",
+  "-w",
+  "--template",
+  "--params",
+  "--values",
+  "--set",
+  "--values-file",
+  // Resource selectors, which are values on the mutation forms these tools are
+  // gated for (`aws ec2 terminate-instances --instance-ids i-1`).
+  "--instance-ids",
+  "--ids",
+  "--name",
+  "--names",
+  "--zone",
+  "--location",
+  "--resource-group",
+  "--subscription",
 ]);
 
 /**
- * The operand positions at which a verb may appear, under one reading of the
- * options this table does not know.
+ * The operand positions at which a verb may appear, or `undefined` when the
+ * option grammar makes the positions unprovable.
  *
- * Verb depth varies by tool — `kubectl exec` puts it first, `aws s3 rm` and
- * `gh pr merge` second, `gcloud compute instances delete` third — so callers
- * pass how many leading positions to collect. `nounLed` tools put a noun
- * first, so that position is dropped before the result is used as a verb.
+ * There is no fixed verb depth to scan to. `kubectl exec` puts the verb first,
+ * `aws s3 rm` second, `gcloud compute instances delete` third, and
+ * `gcloud compute instance-groups managed delete` fourth, so the scan
+ * collects every operand rather than a window — a window silently drops the
+ * deepest forms, which is the fail-open this replaces.
  *
- * `unknownOptionTakesValue` decides what to do with a flag outside
- * `valueFlags`: when true the following word is consumed as its value, when
- * false the scan continues past the flag alone. Neither reading can be chosen
- * without knowing the tool's grammar, so the caller runs both and unions them.
+ * The cost of no window is that an option *value* can be mistaken for an
+ * operand. That is only a problem for tools whose verb sits at a known
+ * position, which is why `collect` caps those separately: `terraform` reads
+ * one operand, so `-out apply` in `terraform plan -out apply` contributes
+ * nothing instead of being read as the verb `apply`.
+ *
+ * An option outside `valueFlags` is the real ambiguity: it may consume the
+ * next word, shifting every later operand one position left. Guessing is not
+ * sound — with two such options there are four readings, and enumerating them
+ * does not generalise. The scan gives up instead, but only while the shift
+ * could still hide the verb. Once any operand has been read, skipping the
+ * option without its value leaves every later operand in the list one place
+ * to the right, and the verb is still in there: a shift can only introduce a
+ * spurious candidate, never remove a real one. That is why the threshold is
+ * one operand rather than a full window — `kubectl get pods --all-namespaces`
+ * has long since named its verb, and the flag after it cannot move it.
+ *
+ * `nounLed` tools put a noun first, so that position is dropped before the
+ * result is read as a verb.
  */
 function verbOperands(
   args: readonly string[],
   valueFlags: ReadonlySet<string>,
   nounLed: boolean,
-  unknownOptionTakesValue: boolean,
-  limit: number,
-): string[] {
+  collect: number,
+): string[] | undefined {
   const operands: string[] = [];
-  for (let index = 0; index < args.length && operands.length < limit; index += 1) {
+  for (let index = 0; index < args.length; index += 1) {
     const token = args[index] ?? "";
+    if (operands.length >= collect) break;
+    if (token === "--") {
+      // Everything after the separator is positional by definition. Nothing
+      // there can be an option value, so the verb can no longer move and the
+      // ambiguity that would otherwise abort the scan does not apply.
+      operands.push(...args.slice(index + 1).map((rest) => rest.toLowerCase()));
+      break;
+    }
     if (valueFlags.has(token)) {
       index += 1;
       continue;
     }
     if (token.startsWith("-")) {
-      if (unknownOptionTakesValue) index += 1;
+      if (operands.length === 0) return undefined;
       continue;
     }
     operands.push(token.toLowerCase());
@@ -256,37 +337,31 @@ const terraformMutationSubcommands = new Set([
 /** CLIs whose bare invocation already deploys or mutates external state. */
 const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
 
-export function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
+export function invocationHasExternalSideEffect(segment: CommandSegment): ExternalEffect {
+  // `--version` and `--help` print and exit for every tool in these tables, so
+  // the invocation cannot be a mutation whatever its other options say. This is
+  // checked before the grammar scan because an otherwise-unreadable option list
+  // is common on exactly these two forms (`gh --version`).
+  if (hasTerminalInfoFlag(segment.args)) return "refuted";
   if (wholeInvocationIsExternal.has(segment.executable)) {
     // These CLIs deploy by default, so the invocation as a whole is external.
-    // A version or help query still only prints.
-    return !hasTerminalInfoFlag(segment.args);
+    return "proved";
   }
-  // `terraform`/`tofu` take global options before the verb, and the verb is the
-  // first operand (`terraform --chdir /tmp apply`). They go through the same
-  // operand scan as every other tool rather than reading `args[0]`, which would
-  // have read `/tmp` as the subcommand and missed the apply.
-  const verbs =
-    segment.executable === "terraform" || segment.executable === "tofu"
-      ? terraformMutationSubcommands
-      : cliMutationVerbs.get(segment.executable);
-  if (verbs === undefined) return false;
+  // `terraform`/`tofu` put global options before a verb that is always the
+  // first operand, so one operand settles it. Every other tool is verb-led at a
+  // depth that varies by subcommand, so all operands are collected and the verb
+  // is looked for at any of them.
+  const terraform = segment.executable === "terraform" || segment.executable === "tofu";
+  const verbs = terraform ? terraformMutationSubcommands : cliMutationVerbs.get(segment.executable);
+  if (verbs === undefined) return "refuted";
   const nounLed = cliNounLedCommands.has(segment.executable);
-  // `terraform`/`tofu` take global options before the verb, and the verb is the
-  // first operand, so only that one position is read. A wider window would
-  // read `-out apply` in `terraform plan -out apply` as the verb `apply`, when
-  // `apply` is the plan file's name and the subcommand is the read-only
-  // `plan`. The other tools are verb-led deeper, so they read three.
-  const limit = verbs === terraformMutationSubcommands ? 1 : 3;
-  // An option outside the table is scanned both ways and the two readings are
-  // unioned, so `gcloud --format json compute instances delete vm` reaches
-  // `delete` under the value-taking reading and `gcloud --quiet compute
-  // instances delete vm` reaches it under the value-less one. Skipping the
-  // unknown flag outright would let a value-taking option consume an operand
-  // slot and push the verb out of the window — the fail-open this replaces.
-  const candidates = [
-    ...verbOperands(segment.args, cliGlobalValueFlags, nounLed, true, limit),
-    ...verbOperands(segment.args, cliGlobalValueFlags, nounLed, false, limit),
-  ];
-  return candidates.some((operand) => matchesMutationVerb(operand, verbs));
+  const operands = verbOperands(
+    segment.args,
+    cliGlobalValueFlags,
+    nounLed,
+    terraform ? 1 : Number.POSITIVE_INFINITY,
+  );
+  // An option grammar this table cannot read is not evidence of safety.
+  if (operands === undefined) return "unknown";
+  return operands.some((operand) => matchesMutationVerb(operand, verbs)) ? "proved" : "refuted";
 }

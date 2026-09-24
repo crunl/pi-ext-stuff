@@ -170,12 +170,13 @@ export function classifyRisk(
   // Tier 1 — proven dangerous (forced rm, non-exempt network, external side
   // effect) is never downgraded to a review.
   if (!networkApproved && request.networkTargets?.length) return "HARD";
+  const externalEffects = segments.map(invocationHasExternalSideEffect);
   if (
     segments.some(
-      (segment) =>
+      (segment, index) =>
         isDangerousSegment(segment) ||
         (!networkApproved && invocationUsesNetwork(segment)) ||
-        invocationHasExternalSideEffect(segment),
+        externalEffects[index] === "proved",
     )
   )
     return "HARD";
@@ -186,10 +187,13 @@ export function classifyRisk(
   if (segments.some(invocationControlsProcesses)) return "REVIEW";
   // Tier 3 — proven safe: static argv equals runtime argv for the whole
   // command, so nothing is left to prove. An *unknown* executable is still
-  // this tier; only a rewritable argv is not.
+  // this tier; only a rewritable argv or an unreadable option grammar is not.
   const decomposable =
     !scanShellSyntax(command).hasExecutableSubstitution &&
-    segments.every((segment) => segment.decomposable);
+    segments.every((segment) => segment.decomposable) &&
+    // An external CLI whose options this layer cannot parse has not been shown
+    // to be read-only, so it cannot reach this tier.
+    !externalEffects.includes("unknown");
   // Tier 4 — unclassifiable: a dynamic executable word, a re-interpreted
   // string or stdin program, a substitution, a heredoc, or a brace group. The
   // static word list is not the argv that runs, so fail closed into review

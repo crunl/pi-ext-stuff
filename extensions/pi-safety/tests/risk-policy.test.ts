@@ -535,6 +535,9 @@ describe("Risk policy gate", () => {
     // subcommand and the real `apply`/`delete` was never compared.
     "terraform --chdir /tmp apply -auto-approve",
     "gcloud --format json compute instances delete vm",
+    // The verb sits one position deeper than the old window, so it was never
+    // compared against the verb table at all.
+    "gcloud compute instance-groups managed delete group",
   ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
@@ -557,6 +560,12 @@ describe("Risk policy gate", () => {
     // read-only `plan`.
     "terraform plan -out apply",
     "terraform plan -out=tf.plan",
+    "gh pr list --state open",
+    // A verb deeper than the old three-position window, and an option list
+    // whose grammar cannot be read — the second is a review, not a LOW.
+    "gcloud compute instance-groups managed list group",
+    "helm list -A",
+    "kubectl get pods --all-namespaces",
     "gh pr list --state open",
   ])("keeps a read-only control-plane query out of the mutation table: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));

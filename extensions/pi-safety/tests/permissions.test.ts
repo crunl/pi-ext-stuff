@@ -460,6 +460,23 @@ describe("narrow static risk contract", () => {
     ["npm install lodash", "HARD"],
     // `[` is the one glob metacharacter that is also a real builtin.
     ["[ -f README.md ]", "LOW"],
+    // zsh expands a leading `=` to the full path of the command, so `=rm` is
+    // rm. Verified in a real zsh.
+    ["zsh -c '=rm -f /tmp/x'", "REVIEW"],
+    // Program-valued config keys the earlier name list did not cover. The
+    // check is now an allowlist of scalar key segments, so an unlisted key is
+    // unproven rather than allowed.
+    ["git -c 'credential.https://x.com.helper=!echo EVIL' credential fill", "REVIEW"],
+    ["git -c 'pager.foo.cmd=!echo EVIL' log", "REVIEW"],
+    ["git -c 'color.pager=!echo EVIL' log", "REVIEW"],
+    // Scalar keys stay allowed, including the URL-scoped and per-branch forms
+    // the allowlist matches on the last segment.
+    ["git -c user.name=Ada commit -m x", "LOW"],
+    ["git -c core.autocrlf=false status", "LOW"],
+    ["git -c init.defaultbranch=main status", "LOW"],
+    ["git config --global user.name Ada", "LOW"],
+    // A noun-led package manager puts its verb after `workspace <name>`.
+    ["yarn workspace foo add lodash", "HARD"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

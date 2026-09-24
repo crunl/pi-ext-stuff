@@ -60,31 +60,23 @@ function normalizeHostToken(value: string): string | undefined {
 }
 
 /**
- * The leading operands under both readings of an option this module cannot
- * classify: a value-taking option consumes the following word, a value-less
- * one does not. Both readings are returned because neither can be chosen
- * without the tool's grammar, and picking wrong lets a global option hide the
- * subcommand — `npm --prefix /tmp install lodash` reads `/tmp` as the
- * subcommand under a naive "first non-flag token" scan.
+ * Every operand position, or `undefined` when an option this module cannot
+ * read leaves the positions unprovable.
  *
- * Two positions are collected because the tools here are noun-led
- * (`cargo yank`) as well as verb-led (`npm install`).
+ * There is no fixed depth to scan. `npm install` puts the subcommand first,
+ * `cargo yank` first, and `yarn workspace <name> add` third, so all operands
+ * are collected. An option outside the grammar may consume the next word and
+ * shift every later operand; that cannot be guessed (two such options admit
+ * four readings), so the scan gives up instead of picking one.
  */
-function leadingOperands(args: readonly string[]): string[] {
-  const candidates = new Set<string>();
-  for (const unknownTakesValue of [true, false]) {
-    const operands: string[] = [];
-    for (let index = 0; index < args.length && operands.length < 2; index += 1) {
-      const token = args[index] ?? "";
-      if (token.startsWith("-")) {
-        if (unknownTakesValue) index += 1;
-        continue;
-      }
-      operands.push(token.toLowerCase());
-    }
-    for (const operand of operands) candidates.add(operand);
+function leadingOperands(args: readonly string[]): string[] | undefined {
+  const operands: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] ?? "";
+    if (token.startsWith("-")) return undefined;
+    operands.push(token.toLowerCase());
   }
-  return [...candidates];
+  return operands;
 }
 
 export function invocationUsesNetwork(segment: CommandSegment): boolean {
@@ -111,7 +103,11 @@ export function invocationUsesNetwork(segment: CommandSegment): boolean {
     return invocation ? gitInvocationUsesNetwork(invocation) : false;
   }
   if (new Set(["npm", "pnpm", "yarn", "bun"]).has(segment.executable)) {
-    return leadingOperands(args).some((operand) => packageNetworkSubcommands.has(operand));
+    const operands = leadingOperands(args);
+    // An unreadable grammar is not evidence of staying offline, so it counts as
+    // network use and is gated by the connection boundary like any other.
+    if (operands === undefined) return true;
+    return operands.some((operand) => packageNetworkSubcommands.has(operand));
   }
   if (segment.executable === "pip" || segment.executable === "pip3") {
     return args.some((arg) => new Set(["install", "uninstall", "download", "index"]).has(arg));

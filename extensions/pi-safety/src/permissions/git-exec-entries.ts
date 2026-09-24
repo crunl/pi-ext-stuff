@@ -13,36 +13,87 @@
 import { assignmentName } from "./shell-lexer.ts";
 
 /**
- * Config keys whose value is a program Git will run directly. A shell alias is
- * matched by prefix, since `alias.<anything>` is invoked as a command.
+ * The final dotted segment of a config key whose value is a setting rather
+ * than a program Git will run.
  *
- * `core.hooksPath` is deliberately absent: it names a directory Git searches
- * for hook files rather than a program it execs, and gating ordinary mutations
- * on it is a locked contract (`tests/risk-policy.test.ts:825-840`). The
- * residual path — write an executable hook, then point Git at its directory —
- * depends on writing a runnable file first, which the static layer does not
- * police either.
+ * This is an allowlist, which inverts the earlier design. A list of known
+ * program-valued keys has to be complete, and Git's namespace defeats that:
+ * besides `core.pager` and `credential.helper` there are `color.pager`,
+ * `pager.<cmd>.cmd`, `diff.<driver>.textconv`, `merge.<driver>.driver`,
+ * `gpg.<format>.program`, `remote.<name>.uploadpack`, and forms a future
+ * release can add. Each one found by an audit is another entry, and the entry
+ * that is missed is a fail-open — `git -c 'credential.https://x.helper=!cmd'`
+ * reached the sandbox as LOW because the URL-scoped spelling was not in the
+ * list. Here a key is treated as safe only if its last segment is a name that
+ * cannot denote a program, so an unlisted key is unproven instead of allowed.
+ *
+ * Matching on the last segment rather than the whole key is what keeps the
+ * list short: `remote.origin.url` and `core.url` are both safe because the
+ * segment is `url`, while `remote.origin.uploadpack` is not because the
+ * segment is `uploadpack`. No program-valued key ends in one of these names.
+ *
+ * `core.hooksPath` is deliberately safe here (`hooksPath` is not a program
+ * name): it names a directory Git searches for hook files rather than a program
+ * it execs, and gating ordinary mutations on it is a locked contract
+ * (`tests/risk-policy.test.ts:825-840`). The residual path — write an
+ * executable hook, then point Git at its directory — depends on writing a
+ * runnable file first, which the static layer does not police either.
  */
-const gitExecutableConfigKeys = new Set([
-  "core.pager",
-  "core.editor",
-  "core.sshcommand",
-  "core.gitproxy",
-  "core.askpass",
-  "core.fsmonitor",
-  "sequence.editor",
-  "credential.helper",
-  "diff.external",
-  // Git config keys are matched lowercased, so this entry is too.
-  "interactive.difffilter",
-  "merge.tool",
-  "gpg.program",
-  "uploadpack.packobjectshook",
-  "receivepack.packobjectshook",
+const gitScalarConfigSegments = new Set([
+  "abbrev",
+  "algorithm",
+  "annotated",
+  "auto",
+  "autocrlf",
+  "autostash",
+  "branch",
+  "compression",
+  "context",
+  "defaultbranch",
+  "depth",
+  "detachedhead",
+  "diff",
+  "eol",
+  "ff",
+  "forcesignannotated",
+  "gpgsign",
+  "hookspath",
+  "ignorecase",
+  "logallrefupdates",
+  "name",
+  "prune",
+  "pushrejected",
+  "quotepath",
+  "rebase",
+  "recursesubmodules",
+  "renames",
+  "required",
+  "safecrlf",
+  "signoff",
+  "status",
+  "tagopt",
+  "ui",
+  "url",
+  "usehttppath",
+  "version",
 ]);
 
-/** Per-driver config keys whose value is a command Git execs. */
-const gitExecutableConfigSuffixes = [".clean", ".smudge", ".process", ".command"];
+/**
+ * Whether a `-c KEY=VALUE` / config-subcommand key is a plain setting. Anything
+ * not recognised is treated as a possible program, which is the safe direction:
+ * an unlisted key costs a review, a missed program key costs an auto-approval.
+ */
+function gitConfigKeyIsScalar(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  if (normalized === "") return false;
+  const segment = normalized.split(".").pop() ?? "";
+  return gitScalarConfigSegments.has(segment);
+}
+
+/** The inverse, named for the call sites: an unlisted key may name a program. */
+function unprovenGitConfigKey(key: string): boolean {
+  return !gitConfigKeyIsScalar(key);
+}
 
 /** `GIT_*` overrides that substitute an executable Git will run. */
 const gitExecutableEnvNames = new Set([
@@ -81,19 +132,6 @@ const gitGlobalValueOptions = new Set([
   "--work-tree",
 ]);
 
-function gitConfigKeyIsExecutable(key: string): boolean {
-  const normalized = key.trim().toLowerCase();
-  if (gitExecutableConfigKeys.has(normalized)) return true;
-  if (normalized.startsWith("alias.")) return true;
-  // `include.path` and `includeIf.<condition>.path` make Git parse another
-  // config file, and that file may define `alias.<name> = !cmd` — the same
-  // executable entry point as an inline alias, reached in one more hop. The
-  // condition half of an `includeIf` key is an arbitrary user-chosen string,
-  // so the prefix match cannot enumerate it.
-  if (normalized === "include.path" || normalized.startsWith("includeif.")) return true;
-  return gitExecutableConfigSuffixes.some((suffix) => normalized.endsWith(suffix));
-}
-
 /**
  * Whether this Git invocation can run a program the static words never name.
  * Once Git has been told to execute something, the segment's argv describes the
@@ -120,18 +158,18 @@ export function gitExecutesNestedProgram(
     if (token === "--exec-path" || token.startsWith("--exec-path=")) return true;
     if (token === "-c" || token === "--config-env") {
       const value = args[index + 1];
-      if (value === undefined || gitConfigKeyIsExecutable(value.split("=", 1)[0] ?? "")) {
+      if (value === undefined || unprovenGitConfigKey(value.split("=", 1)[0] ?? "")) {
         return true;
       }
       index += 1;
       continue;
     }
     if (token.startsWith("-c") && token.length > 2) {
-      if (gitConfigKeyIsExecutable(token.slice(2).split("=", 1)[0] ?? "")) return true;
+      if (unprovenGitConfigKey(token.slice(2).split("=", 1)[0] ?? "")) return true;
       continue;
     }
     if (token.startsWith("--config-env=")) {
-      if (gitConfigKeyIsExecutable(token.slice("--config-env=".length).split("=", 1)[0] ?? "")) {
+      if (unprovenGitConfigKey(token.slice("--config-env=".length).split("=", 1)[0] ?? "")) {
         return true;
       }
       continue;
@@ -153,7 +191,13 @@ export function gitExecutesNestedProgram(
     // `git config alias.x '!cmd'` persists an executable entry point. It runs
     // on some later Git invocation, not this one, but the write is what makes
     // the next call dangerous.
-    return args.some((arg) => gitConfigKeyIsExecutable(arg.split("=", 1)[0] ?? ""));
+    //
+    // Only the first non-flag operand *after the subcommand* is the key; the
+    // one after it is the value. `git config --global user.name Ada` must not
+    // be read as two unproven keys, and neither must the literal subcommand
+    // word `config` be mistaken for the key it introduces.
+    const key = args.slice(subcommandIndex + 1).find((arg) => !arg.startsWith("-"));
+    return key !== undefined && unprovenGitConfigKey(key.split("=", 1)[0] ?? "");
   }
   if (!gitCommandRunningSubcommands.has(subcommand)) {
     return subcommand === "submodule" && args.some((arg) => arg === "foreach" || arg === "--exec");
