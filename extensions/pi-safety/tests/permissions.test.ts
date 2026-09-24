@@ -468,6 +468,12 @@ describe("narrow static risk contract", () => {
     // unproven rather than allowed.
     ["git -c 'credential.https://x.com.helper=!echo EVIL' credential fill", "REVIEW"],
     ["git -c 'pager.foo.cmd=!echo EVIL' log", "REVIEW"],
+    // `alias.<name>` has an author-chosen tail, so its last segment carries no
+    // information: `alias.name` ends in a scalar name and is still a program.
+    ["git -c 'alias.name=!echo EVIL' name", "REVIEW"],
+    ["git -c 'alias.status=!echo EVIL' status", "REVIEW"],
+    ["git config alias.name '!echo EVIL'", "REVIEW"],
+    ["git -c 'pager.name=!echo EVIL' log", "REVIEW"],
     ["git -c 'color.pager=!echo EVIL' log", "REVIEW"],
     // Scalar keys stay allowed, including the URL-scoped and per-branch forms
     // the allowlist matches on the last segment.

@@ -121,6 +121,15 @@ to be complete; an allowlist only has to be incomplete in the safe direction.
 The URL-scoped credential helper was the concrete miss — it reached the sandbox
 as LOW because only the bare `credential.helper` spelling was listed.
 
+Matching is on the key's final dotted segment, which keeps the list short
+without naming namespaces. That has one exception the review found by
+executing it: a namespace whose tail is author-chosen rather than fixed carries
+no information in its last segment. `alias.name` ends in a perfectly ordinary
+scalar name and is still a program — `git -c 'alias.name=!touch probe' name`
+created the file — so `alias.` and `pager.` are excluded before the segment is
+read. The rule is "fixed tail ⇒ name it, arbitrary tail ⇒ never safe", and the
+bug was applying the first half without the second.
+
 `core.hooksPath` remains deliberately safe. It names a directory Git searches
 for hook files, not a program it execs, and gating ordinary mutations on it is
 a locked contract in `tests/risk-policy.test.ts`.
@@ -168,11 +177,15 @@ case was run against the previous revision's source to confirm it fails there.
 Seven of the added assertions fail on revert; the rest are contract cases that
 hold either way and are labelled as such in the test comments.
 
-**extglob was reported and did not reproduce.** `@(rm|echo) -f x` reaches LOW,
-but neither `bash -O extglob` nor zsh expands it into a command word; bash
-reports `command not found` and the file survives. It is recorded as
-unreproduced rather than fixed, because the fix would cost fidelity for a hole
-that was not shown to exist. zsh's `=command` *was* reproduced
+**extglob was reported three times and did not reproduce.** `@(rm|echo) -f x`
+reaches LOW, and the segmenter does split it into `@`, `rm`, `echo`, `-f x`, so
+the report is mechanically accurate. It does not execute. Ten forms were tried
+across `bash -O extglob` and zsh — `@(rm)`, `@(echo|rm)`, `+(rm)`, `?(rm)`,
+`*(rm)`, `@(/bin/ls|echo)` — and in every case bash reported `command not
+found` and the file survived. Bash does not apply extglob patterns to the
+command word. This is recorded as unreproduced after repeated attempts rather
+than fixed, because the fix would cost parser fidelity for a hole that three
+separate reviews failed to demonstrate. zsh's `=command` *was* reproduced
 (`zsh -fc '=echo hi'` prints) and is gated.
 
 ## What this note does not claim

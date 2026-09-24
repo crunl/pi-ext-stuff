@@ -31,6 +31,8 @@ import { assignmentName } from "./shell-lexer.ts";
  * list short: `remote.origin.url` and `core.url` are both safe because the
  * segment is `url`, while `remote.origin.uploadpack` is not because the
  * segment is `uploadpack`. No program-valued key ends in one of these names.
+ * The one exception is a namespace whose tail is author-chosen rather than
+ * fixed — `alias.<name>` above — which is why those are excluded first.
  *
  * `core.hooksPath` is deliberately safe here (`hooksPath` is not a program
  * name): it names a directory Git searches for hook files rather than a program
@@ -108,6 +110,19 @@ function firstOperandAfterValueOptions(
 }
 
 /**
+ * Config key namespaces whose final segment is chosen by the author rather than
+ * by Git, so the segment carries no information about the value.
+ *
+ * `alias.<name>` is the case that matters: `alias.name` and `alias.status` are
+ * both ordinary-looking keys whose last segment is a perfectly good scalar name,
+ * and both can carry `!cmd`. Verified: `git -c 'alias.name=!touch probe' name`
+ * created the file. The last-segment rule alone cannot see this, because the
+ * whole point of the namespace is that the tail is arbitrary. Checked before
+ * the scalar test for that reason.
+ */
+const gitArbitraryTailConfigPrefixes = ["alias.", "pager."];
+
+/**
  * Whether a `-c KEY=VALUE` / config-subcommand key is a plain setting. Anything
  * not recognised is treated as a possible program, which is the safe direction:
  * an unlisted key costs a review, a missed program key costs an auto-approval.
@@ -115,6 +130,7 @@ function firstOperandAfterValueOptions(
 function gitConfigKeyIsScalar(key: string): boolean {
   const normalized = key.trim().toLowerCase();
   if (normalized === "") return false;
+  if (gitArbitraryTailConfigPrefixes.some((prefix) => normalized.startsWith(prefix))) return false;
   const segment = normalized.split(".").pop() ?? "";
   return gitScalarConfigSegments.has(segment);
 }
