@@ -266,6 +266,8 @@ describe("narrow static risk contract", () => {
     ["trap 'ls' EXIT", "REVIEW"],
     ["php -r 'system(\"ls\");'", "REVIEW"],
     ["deno eval 'console.log(1)'", "REVIEW"],
+    ["perl -wE 'say 1'", "REVIEW"],
+    ["php -dr 'system(\"ls\");'", "REVIEW"],
     // A word after a value-taking option is that option's value, and a bare `-`
     // is the stdin sentinel: the program comes from a pipe, not the argv.
     ["bash -o pipefail", "REVIEW"],

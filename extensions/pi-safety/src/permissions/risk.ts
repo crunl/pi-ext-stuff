@@ -504,12 +504,13 @@ function scriptOperand(executable: string, args: readonly string[]): string | un
   return undefined;
 }
 
-/** Whether an argument names an inline program string (`python -c`, `perl -we`). */
+/** Whether an argument names an inline program string (`python -c`, `perl -we`, `php -r`, `perl -E`). */
 function hasInlineProgramArgument(args: readonly string[]): boolean {
   return args.some((arg) => {
     if (arg === "--" || !arg.startsWith("-")) return false;
     if (inlineProgramFlags.has(arg)) return true;
-    return /^-[A-Za-z]+$/.test(arg) && /[cep]/.test(arg.slice(1));
+    // Bundled single-letter flags mirror inlineProgramFlags exactly: c/e/E/p/r.
+    return /^-[A-Za-z]+$/.test(arg) && /[ceEpr]/.test(arg.slice(1));
   });
 }
 
@@ -1255,7 +1256,10 @@ function writeRisk(
  * `bash -lc` bodies are already expanded into their own segments by
  * parseCommandSegments, so nested `rm -f` is caught at the top level.
  */
-function isDangerousSegment(segment: CommandSegment): boolean {
+function isDangerousSegment(segment: CommandSegment, depth = 0): boolean {
+  // Mirror the wrapper-reasoning bound (Codex MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH):
+  // past it we can no longer prove the trap-action chain safe, so fail closed.
+  if (depth > 8) return true;
   const words = [segment.executable, ...segment.args];
   if (words[0] === "trap") {
     // words[0] is the `trap` itself, so the action starts at index 1.
@@ -1263,7 +1267,7 @@ function isDangerousSegment(segment: CommandSegment): boolean {
     if ((words[actionIndex] ?? "") === "--") actionIndex += 1;
     const action = words[actionIndex];
     if (action === undefined || action.startsWith("-")) return false;
-    return parseCommandSegments(action).some(isDangerousSegment);
+    return parseCommandSegments(action).some((nested) => isDangerousSegment(nested, depth + 1));
   }
   return words.length > 0 && isDangerousWords(words);
 }
