@@ -530,6 +530,11 @@ describe("Risk policy gate", () => {
     "npm publish",
     "cargo yank crate",
     "kubectl exec pod -- ls",
+    // A global option ahead of the verb used to hide it: the scan read the
+    // option's value as the verb, so `--chdir /tmp` looked like a harmless
+    // subcommand and the real `apply`/`delete` was never compared.
+    "terraform --chdir /tmp apply -auto-approve",
+    "gcloud --format json compute instances delete vm",
   ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
@@ -547,6 +552,12 @@ describe("Risk policy gate", () => {
     "gh run list",
     "gh pr list",
     "npm ls",
+    // The verb is the first operand, so an option *after* it must not be read
+    // as one: here `apply` is the plan file's name, and the subcommand is the
+    // read-only `plan`.
+    "terraform plan -out apply",
+    "terraform plan -out=tf.plan",
+    "gh pr list --state open",
   ])("keeps a read-only control-plane query out of the mutation table: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 

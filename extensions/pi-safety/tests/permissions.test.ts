@@ -438,6 +438,28 @@ describe("narrow static risk contract", () => {
     ["cat !README.md", "LOW"],
     ["cat ?README.md", "LOW"],
     ["cat [README].md", "LOW"],
+    // Expansion in the *command* position rewrites which binary runs, so the
+    // argv read here is not the argv that executes. `{rm,echo} -f build`
+    // expands to `rm echo -f build`, and rm deletes `build` and `echo`.
+    ["{rm,echo} -f build", "REVIEW"],
+    ["r?m -f build", "REVIEW"],
+    ["g{hc,cloud} pr merge 1", "REVIEW"],
+    // `include.path` / `includeIf.<condition>.path` make Git parse another
+    // config file, which can define `alias.<name> = !cmd` — the executable
+    // entry point an inline `git -c alias.x=` already guards, one hop away.
+    ["git -c include.path=/tmp/gcfg x", "REVIEW"],
+    ["git -c includeIf.hasconfig:remote.*.path=/tmp/gcfg x", "REVIEW"],
+    // A named module is not a script path: what runs is the module's
+    // `__main__`, whose contents are not in argv.
+    ["python3 -m pip install requests", "REVIEW"],
+    ["python3 -m pytest", "REVIEW"],
+    // A global option ahead of the subcommand used to hide it: the scan read
+    // the option's value as the subcommand, so `--prefix /tmp` was compared
+    // against the verb table and `install` was never seen.
+    ["npm --prefix /tmp install lodash", "HARD"],
+    ["npm install lodash", "HARD"],
+    // `[` is the one glob metacharacter that is also a real builtin.
+    ["[ -f README.md ]", "LOW"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

@@ -85,6 +85,12 @@ function gitConfigKeyIsExecutable(key: string): boolean {
   const normalized = key.trim().toLowerCase();
   if (gitExecutableConfigKeys.has(normalized)) return true;
   if (normalized.startsWith("alias.")) return true;
+  // `include.path` and `includeIf.<condition>.path` make Git parse another
+  // config file, and that file may define `alias.<name> = !cmd` — the same
+  // executable entry point as an inline alias, reached in one more hop. The
+  // condition half of an `includeIf` key is an arbitrary user-chosen string,
+  // so the prefix match cannot enumerate it.
+  if (normalized === "include.path" || normalized.startsWith("includeif.")) return true;
   return gitExecutableConfigSuffixes.some((suffix) => normalized.endsWith(suffix));
 }
 

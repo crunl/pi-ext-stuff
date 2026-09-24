@@ -72,6 +72,19 @@ const inlineProgramFlags = new Set([
 const inlineProgramSubcommands = new Map([["deno", "eval"]]);
 
 /**
+ * Runtimes that can run a *named module* as the program (`python3 -m pip`).
+ * The module name is an ordinary operand, so it reads like a script path, but
+ * what runs is the module's `__main__` — `pip` reaches an index, `http.server`
+ * binds a socket, `pytest` executes test files whose contents are not in argv.
+ * This is the same mechanism as an inline program string, reached by a
+ * different spelling, so it is unclassifiable for the same reason.
+ *
+ * Listed per runtime because the flag is not a shared convention: it is
+ * Python's `-m`, not a general interpreter flag.
+ */
+const moduleExecutionRuntimes = new Set(["python", "python3"]);
+
+/**
  * Flags that consume the *next word* as their value, so that word is not an
  * operand: `bash -o pipefail`, `python -X utf8`, `perl -I lib`, `php -d
  * memory_limit=1G`. Attached forms (`-Xutf8`, `-Ilib`) are one flag word and
@@ -468,19 +481,44 @@ function isReservedCommandWord(token: string): boolean {
 }
 
 /**
- * A dynamic executable word (`$CMD`, `` `cmd` ``, `$(cmd)`) means the binary
- * that runs is not the one this parser read. A dynamic *argument* (`ls $DIR`)
- * is not this class: the executable still is `ls`.
+ * Whether the command word can be rewritten before the shell runs it, so the
+ * binary this parser read is not provably the binary that executes.
+ *
+ * Three mechanisms, all fail-closed for the same reason — the effect lands on
+ * whichever word the expansion happens to yield first:
+ *
+ * - substitution: `$CMD`, `` `cmd` ``, `$(cmd)`.
+ * - brace expansion: `{rm,echo} -f x` yields `rm` and `echo` as separate
+ *   words, so `rm` receives `-f x` and deletes it. Bash expands this
+ *   unconditionally, so it needs no matching file to fire.
+ * - pathname expansion: `r?m`, `r*m`, `[a-z]m` name whichever cwd entry
+ *   matches. Whether anything matches is not knowable statically, and a
+ *   non-matching pattern is left literal, so both outcomes are possible.
+ *
+ * Only the command word is checked. Expansion in an argument position leaves
+ * the executable alone (`ls {a,b}` still runs `ls`), so `awk '{ print }'` and
+ * `find . -name '*.txt'` are unaffected.
+ *
+ * `[` is the one metacharacter that is also a real builtin, so the bare token
+ * is exempt; `[...]` with any other character is a glob.
  */
-function isDynamicExecutableToken(token: string): boolean {
-  return token.includes("$") || token.includes("`");
+function commandWordIsUnprovable(token: string): boolean {
+  if (token.includes("$") || token.includes("`")) return true;
+  if (token.includes("*") || token.includes("?") || token.includes("{") || token.includes("}")) {
+    return true;
+  }
+  return token.includes("[") && token !== "[";
 }
 
 /**
  * `{`/`}` as a standalone word is shell grouping, never an operand: the group
  * body is a separate argv the char segmenter did not reduce (`function f {
- * rm -f x; }`). Brace *expansion* (`{a,b}`, `awk '{ print }'`) is a single word
- * and stays decomposable.
+ * rm -f x; }`).
+ *
+ * Brace *expansion* is a different thing — it is one word that becomes several,
+ * and it is handled by `commandWordIsUnprovable` when that word is the command
+ * word. In an argument position the executable is unaffected, so `ls {a,b}` and
+ * `awk '{ print }'` stay decomposable.
  */
 function hasGroupingWord(words: readonly string[]): boolean {
   return words.some((word) => word === "{" || word === "}");
@@ -579,6 +617,7 @@ function reExecutesString(
   const subcommand = args.find((arg) => !arg.startsWith("-"));
   if (subcommand !== undefined && inlineProgramSubcommands.get(executable) === subcommand)
     return true;
+  if (moduleExecutionRuntimes.has(executable) && args.includes("-m")) return true;
   return (
     hasInlineProgramArgument(args) ||
     (scriptOperand(executable, args) === undefined && !hasTerminalInfoFlag(args))
@@ -639,7 +678,7 @@ function parseCommandSegment(source: string): CommandSegment {
       !nameless &&
       !context.unclassifiable &&
       !nestedGitProgram &&
-      !isDynamicExecutableToken(executableToken) &&
+      !commandWordIsUnprovable(executableToken) &&
       !reExec &&
       !syntax.hasExecutableSubstitution &&
       !syntax.hasHereDocument &&

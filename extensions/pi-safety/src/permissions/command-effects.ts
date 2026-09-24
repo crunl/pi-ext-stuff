@@ -70,23 +70,40 @@ const cliGlobalValueFlags = new Set([
 ]);
 
 /**
- * The leading operands that are neither flags nor the value of a value-taking
- * flag. Verb depth varies by tool — `kubectl exec` puts it first, `aws s3 rm`
- * and `gh pr merge` second, `gcloud compute instances delete` third — so the
- * first three positions are compared against the tool's verb set.
+ * The operand positions at which a verb may appear, under one reading of the
+ * options this table does not know.
+ *
+ * Verb depth varies by tool — `kubectl exec` puts it first, `aws s3 rm` and
+ * `gh pr merge` second, `gcloud compute instances delete` third — so callers
+ * pass how many leading positions to collect. `nounLed` tools put a noun
+ * first, so that position is dropped before the result is used as a verb.
+ *
+ * `unknownOptionTakesValue` decides what to do with a flag outside
+ * `valueFlags`: when true the following word is consumed as its value, when
+ * false the scan continues past the flag alone. Neither reading can be chosen
+ * without knowing the tool's grammar, so the caller runs both and unions them.
  */
-function leadingOperands(args: readonly string[], valueFlags: ReadonlySet<string>): string[] {
+function verbOperands(
+  args: readonly string[],
+  valueFlags: ReadonlySet<string>,
+  nounLed: boolean,
+  unknownOptionTakesValue: boolean,
+  limit: number,
+): string[] {
   const operands: string[] = [];
-  for (let index = 0; index < args.length && operands.length < 3; index += 1) {
+  for (let index = 0; index < args.length && operands.length < limit; index += 1) {
     const token = args[index] ?? "";
     if (valueFlags.has(token)) {
       index += 1;
       continue;
     }
-    if (token.startsWith("-")) continue;
+    if (token.startsWith("-")) {
+      if (unknownOptionTakesValue) index += 1;
+      continue;
+    }
     operands.push(token.toLowerCase());
   }
-  return operands;
+  return nounLed ? operands.slice(1) : operands;
 }
 
 /**
@@ -221,7 +238,11 @@ const cliMutationVerbs = new Map<string, ReadonlySet<string>>([
  */
 const cliNounLedCommands = new Set(["gh"]);
 
-/** `terraform`/`tofu` take their verb as the first operand. */
+/**
+ * `terraform`/`tofu` mutating subcommands. They are reached through the shared
+ * operand scan rather than `args[0]`, so a global option ahead of the verb
+ * (`--chdir DIR`, `-var NAME=VALUE`) cannot hide it.
+ */
 const terraformMutationSubcommands = new Set([
   "apply",
   "destroy",
@@ -236,17 +257,36 @@ const terraformMutationSubcommands = new Set([
 const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
 
 export function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
-  if (segment.executable === "terraform" || segment.executable === "tofu") {
-    return terraformMutationSubcommands.has(segment.args[0]?.toLowerCase() ?? "");
-  }
   if (wholeInvocationIsExternal.has(segment.executable)) {
     // These CLIs deploy by default, so the invocation as a whole is external.
     // A version or help query still only prints.
     return !hasTerminalInfoFlag(segment.args);
   }
-  const verbs = cliMutationVerbs.get(segment.executable);
+  // `terraform`/`tofu` take global options before the verb, and the verb is the
+  // first operand (`terraform --chdir /tmp apply`). They go through the same
+  // operand scan as every other tool rather than reading `args[0]`, which would
+  // have read `/tmp` as the subcommand and missed the apply.
+  const verbs =
+    segment.executable === "terraform" || segment.executable === "tofu"
+      ? terraformMutationSubcommands
+      : cliMutationVerbs.get(segment.executable);
   if (verbs === undefined) return false;
-  const operands = leadingOperands(segment.args, cliGlobalValueFlags);
-  const candidates = cliNounLedCommands.has(segment.executable) ? operands.slice(1) : operands;
+  const nounLed = cliNounLedCommands.has(segment.executable);
+  // `terraform`/`tofu` take global options before the verb, and the verb is the
+  // first operand, so only that one position is read. A wider window would
+  // read `-out apply` in `terraform plan -out apply` as the verb `apply`, when
+  // `apply` is the plan file's name and the subcommand is the read-only
+  // `plan`. The other tools are verb-led deeper, so they read three.
+  const limit = verbs === terraformMutationSubcommands ? 1 : 3;
+  // An option outside the table is scanned both ways and the two readings are
+  // unioned, so `gcloud --format json compute instances delete vm` reaches
+  // `delete` under the value-taking reading and `gcloud --quiet compute
+  // instances delete vm` reaches it under the value-less one. Skipping the
+  // unknown flag outright would let a value-taking option consume an operand
+  // slot and push the verb out of the window — the fail-open this replaces.
+  const candidates = [
+    ...verbOperands(segment.args, cliGlobalValueFlags, nounLed, true, limit),
+    ...verbOperands(segment.args, cliGlobalValueFlags, nounLed, false, limit),
+  ];
   return candidates.some((operand) => matchesMutationVerb(operand, verbs));
 }

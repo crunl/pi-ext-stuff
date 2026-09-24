@@ -59,6 +59,34 @@ function normalizeHostToken(value: string): string | undefined {
   return normalizeNetworkHost(token);
 }
 
+/**
+ * The leading operands under both readings of an option this module cannot
+ * classify: a value-taking option consumes the following word, a value-less
+ * one does not. Both readings are returned because neither can be chosen
+ * without the tool's grammar, and picking wrong lets a global option hide the
+ * subcommand — `npm --prefix /tmp install lodash` reads `/tmp` as the
+ * subcommand under a naive "first non-flag token" scan.
+ *
+ * Two positions are collected because the tools here are noun-led
+ * (`cargo yank`) as well as verb-led (`npm install`).
+ */
+function leadingOperands(args: readonly string[]): string[] {
+  const candidates = new Set<string>();
+  for (const unknownTakesValue of [true, false]) {
+    const operands: string[] = [];
+    for (let index = 0; index < args.length && operands.length < 2; index += 1) {
+      const token = args[index] ?? "";
+      if (token.startsWith("-")) {
+        if (unknownTakesValue) index += 1;
+        continue;
+      }
+      operands.push(token.toLowerCase());
+    }
+    for (const operand of operands) candidates.add(operand);
+  }
+  return [...candidates];
+}
+
 export function invocationUsesNetwork(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (directNetworkExecutables.has(segment.executable)) {
@@ -83,8 +111,7 @@ export function invocationUsesNetwork(segment: CommandSegment): boolean {
     return invocation ? gitInvocationUsesNetwork(invocation) : false;
   }
   if (new Set(["npm", "pnpm", "yarn", "bun"]).has(segment.executable)) {
-    const subcommand = args.find((arg) => !arg.startsWith("-"));
-    return subcommand !== undefined && packageNetworkSubcommands.has(subcommand);
+    return leadingOperands(args).some((operand) => packageNetworkSubcommands.has(operand));
   }
   if (segment.executable === "pip" || segment.executable === "pip3") {
     return args.some((arg) => new Set(["install", "uninstall", "download", "index"]).has(arg));
