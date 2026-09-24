@@ -39,17 +39,14 @@ pi loads extensions directly, so there is **no build step**.
 
 ## Install
 
-From a git repository:
+From a local checkout of this monorepo:
 
 ```bash
-pi install git:github.com/crunl/pi-core@main
+pi install /path/to/pi-ext-stuff/extensions/pi-core
 ```
 
-Or from a local checkout:
-
-```bash
-pi install /path/to/pi-core
-```
+Not installable as a git package (pi's source parser has no subdirectory
+support) and not published to npm yet (still `private`).
 
 ## Development
 
@@ -61,25 +58,9 @@ npm run test     # vitest --run
 ```
 
 Tests are flat `tests/*.test.ts` files mirroring `src/tui/*` by basename.
-`tests/pi-api-compat.test.ts` pins the few runtime seams for which Pi does not
-yet expose an equivalent extension API.
-
-The canonical mutating-tool fallback is controlled by the string flag
-`core-builtin-presentation` (`auto` by default, or `off`). Pi 0.84.1 does not
-provide a public renderer-only tool API; `ToolDefinition` combines execution
-and rendering. It also does not expose the effective `ToolDefinition` through
-`getAllTools()`, so SDK hosts that inject `baseToolsOverride`, a custom
-`SettingsManager`, or other non-file-backed shell configuration cannot be
-proven equivalent to the canonical CLI definitions. A later dynamic same-name
-registration is likewise indistinguishable after the fallback is installed.
-Those SDK configurations should set the flag to `off`. pi-core therefore skips
-all observable non-builtin owners and documents these cases as compatibility
-boundaries rather than patching Pi's private registry.
-
-If Pi eventually exposes a public API such as
-`registerToolRenderer(name, renderer)`, the canonical fallback Adapter should
-be replaced by that host integration. The `withCodexToolPresentation` decorator
-Seam remains the compatibility path for permission-owned definitions.
+The `core-builtin-presentation` flag (`auto`/`off`, default `auto`) and SDK
+compatibility boundaries are documented in `AGENTS.md` — SDK hosts injecting
+non-file-backed tool configuration should set it to `off`.
 
 ## Architecture
 

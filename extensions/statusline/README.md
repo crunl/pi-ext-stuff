@@ -2,10 +2,10 @@
 
 pi 全局 TUI 状态行扩展：重排 footer，并将 token、模型和 effort 信息嵌入 boxed editor 边框。
 
-安装位置：
+安装：
 
-```text
-~/.pi/agent/extensions/statusline/
+```bash
+pi install ~/path/to/pi-ext-stuff/extensions/statusline
 ```
 
 ## 当前布局
@@ -96,33 +96,13 @@ modeleffortfolderbranch
 /reload
 ```
 
-## 文件结构
+## 开发
 
-```text
-statusline/
-├── index.ts              # pi 自动发现入口，仅转发 src/index.ts
-├── src/
-│   ├── index.ts          # 扩展实现入口、事件接线、安装/卸载
-│   ├── model-editor.ts   # CustomEditor：boxed chrome + 状态嵌入
-│   ├── box-editor.ts     # 纯函数：圆角 + 竖轨包装
-│   ├── footer.ts         # 自定义 footer、Nerd Font、context meter
-│   ├── usage.ts          # 累加 session token/cache/cost usage
-│   └── format.ts         # token 格式、对齐、cwd、icons、meter 工具
-├── package.json          # ESM 模块配置
-└── README.md
-```
-
-根目录 `index.ts` 保持符合 pi 的 `extensions/*/index.ts` 自动发现规则；实际实现统一放在 `src/`。
-
-## 实现方式
-
-- 使用 `ctx.ui.setEditorComponent()` 安装 `ModelLineEditor`
-- `ModelLineEditor extends CustomEditor`，在 `super.render()` 后改写纯横线边框
-- 使用 `ctx.ui.setFooter()` 替换内置 footer
-- 使用 `footerData.onBranchChange()` 刷新 Git branch
-- 将 `pi-safety` 的 mode 移入 editor 下边框，避免 footer 重复显示
-- 继续在 footer 渲染其他扩展通过 `ctx.ui.setStatus()` 设置的状态
-- 实现模式参考 pi 官方 `examples/extensions/modal-editor.ts` 和 `custom-footer.ts`
+实现入口 `src/index.ts`（根 `index.ts` 仅转发，符合 pi 自动发现规则）；
+`model-editor.ts`（boxed chrome）/ `box-editor.ts`（纯函数）/ `footer.ts` /
+`usage.ts` / `format.ts` 各司其职。接线方式：`ctx.ui.setEditorComponent()` +
+`ctx.ui.setFooter()`，参考 pi 官方 `modal-editor.ts` / `custom-footer.ts`
+示例；并把 `pi-safety` 的 mode 移入 editor 下边框。
 
 ## 当前降级行为
 

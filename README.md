@@ -6,47 +6,28 @@ directly, so there is **no build step** in any package.
 
 ## Packages
 
-- **[`pi-core`](extensions/pi-core)** — Codex-style tool presentation, a live
-  token rate in the working indicator, edit-diff previews, and assorted TUI
-  polish. ([README](extensions/pi-core/README.md),
-  [architecture](extensions/pi-core/docs/architecture.md))
-- **[`pi-safety`](extensions/pi-safety)** — permission modes
-  (`auto` / `yolo`) with sandboxed tool execution and an external guardian
-  reviewer that approves on your behalf.
-  ([AGENTS.md](extensions/pi-safety/AGENTS.md),
-  [host API boundaries](extensions/pi-safety/docs/host-api-boundaries.md))
-- **[`statusline`](extensions/statusline)** — rebuilds the footer as a boxed
-  editor frame carrying token, model, and effort information.
-  ([README](extensions/statusline/README.md),
-  [palette research](extensions/statusline/docs/))
-- **[`tool-result-budget`](extensions/tool-result-budget)** — bounds how many
-  characters a single turn may add to context via tool results; overflow is
-  spilled to a file and replaced with head + tail + a pointer.
+- **[`pi-core`](extensions/pi-core)** — Codex-style tool presentation, live
+  token rate, edit-diff previews, TUI polish.
+- **[`pi-safety`](extensions/pi-safety)** — permission modes (`auto` / `yolo`)
+  with sandboxed tool execution and a guardian reviewer.
+- **[`statusline`](extensions/statusline)** — boxed editor frame carrying
+  token, model, and effort info.
+- **[`tool-result-budget`](extensions/tool-result-budget)** — per-turn
+  tool-result size limit with spill files.
 
-## How the packages relate
+Each package README covers install, config, and usage — start there.
 
-`pi-safety` and `statusline` both consume the side-effect-free surface in
-`pi-core/standalone.ts`:
+## How they relate
 
-| Consumer | Imports from `pi-core/standalone.ts` |
-| --- | --- |
-| `pi-safety` | `codexBashToolSpec`, `codexEditToolSpec`, `codexWriteToolSpec`, `createCodexToolRendering` |
-| `statusline` | `applyAutocompleteAbove` |
+```text
+[pi-core]──standalone.ts──┬──> [pi-safety] ──mode/review──> [statusline]
+                          └──> [statusline]
+[tool-result-budget] standalone (no cross-package imports)
+```
 
-So `pi-core` is not optional for the other two. `pi-core` imports nothing back.
-The only reverse direction is the event bus: `pi-safety` emits
-`pi-safety:mode` (also `:review` and `:delegation`), and `statusline`
-listens for `pi-safety:mode`.
-
-`tool-result-budget` is standalone — node builtins only, no cross-package
-imports.
+`pi-core` is required by `pi-safety` and `statusline`; it imports nothing back.
 
 ## Installing
-
-pi reads extension sources from the agent directory's `settings.json`. The
-agent directory is `$PI_CODING_AGENT_DIR` when that env var is set, otherwise
-`~/.pi/agent`; the examples below use the default. Point it at each package
-directory:
 
 ```bash
 pi install ~/path/to/pi-ext-stuff/extensions/pi-core
@@ -55,85 +36,17 @@ pi install ~/path/to/pi-ext-stuff/extensions/statusline
 pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
 ```
 
-`pi install` stores the path relative to the settings file, so the entries keep
-working if the whole home directory moves, as long as the layout is preserved.
-If you use `PI_CODING_AGENT_DIR`, `pi install` writes to that directory's
-`settings.json` instead.
+Not installable as a git package (no subdirectory support — use a local
+path), not published to npm yet (all `private`), and load each extension
+exactly once (symlink + settings entry loads it twice).
 
-Three things worth knowing before you try:
-
-- **Not installable as a git package.** pi's source parser has no subdirectory
-  support, so `git:github.com/crunl/pi-ext-stuff/extensions/pi-core` is read as
-  a repository URL and fails. Use a local path, or npm once published.
-- **Not published to npm yet.** All four packages are still `private`, and
-  `pi-safety` and `statusline` reach into `pi-core` by relative path, which
-  a published tarball would not contain.
-- **One loading mechanism per extension.** A package that is both symlinked into
-  `~/.pi/agent/extensions/` and listed in `settings.json` gets loaded twice —
-  deduplication compares resolved paths, not real paths.
-
-### Upgrading from `pi-permissions` (renamed to `pi-safety`)
-
-`pi-permissions` was renamed to `pi-safety` in September 2026.
-
-All paths below are relative to your agent directory — `$PI_CODING_AGENT_DIR`
-when set, otherwise `~/.pi/agent`. Export it once so the commands work either
-way:
-
-```bash
-AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-```
-
-Existing installs need three edits, in this order, with no new pi session
-started in between (a half-renamed state leaves guardian protection offline):
-
-1. Update the settings entry so pi can locate the package. If you installed
-   via `pi install`, the entry is a path in `$AGENT_DIR/settings.json`:
-   replace the `extensions/pi-permissions` segment with `extensions/pi-safety`.
-   If you symlinked the package into `$AGENT_DIR/extensions/` instead,
-   re-point that symlink at the new directory. Do not keep both the old and
-   the new entry — path-based dedup would load the package twice and the
-   duplicate tool registrations collide.
-2. Move the config file, which is the only piece the host knows nothing about
-   (it is a pure extension convention):
-   ```bash
-   mv "$AGENT_DIR/permissions.json" "$AGENT_DIR/safety.json"
-   ```
-   There is no legacy fallback: after this rename the extension reads
-   `safety.json` only, so a skipped move silently reverts to the default
-   config (workspace-write, empty rules) and your deny rules and network
-   restrictions stop applying.
-3. Start a new pi session. Mid-upgrade permission-mode state (auto-review
-   toggles, YOLO snapshots, denial-circuit counters) is keyed by the old
-   `pi-permissions-state` name and is intentionally not migrated — losing it
-   is fail-closed, and the defaults are the safe direction. Re-set the mode
-   if you had changed it.
-
-Old session logs under `$AGENT_DIR/sessions/` still mention `pi-permissions`;
-they are the audit trail and are not rewritten.
-
-## Layout
-
-```
-extensions/
-  pi-core/              shared TUI surface and core presentation
-  pi-safety/         permission modes, sandbox, guardian reviewer
-  statusline/           footer and status line rendering
-  tool-result-budget/   per-turn tool-result size limit with spill files
-APPEND_SYSTEM.md      published copy of the global pi append-prompt
-```
+Upgrading from the renamed `pi-permissions`? See
+[`pi-safety` migration](extensions/pi-safety/README.md#migrating-from-pi-permissions-renamed-september-2026).
 
 ## Published append-prompt
 
-[`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root is the global
-`~/.pi/agent/APPEND_SYSTEM.md` for this machine — pi loads it as an addition to
-the default system prompt in every session. It lives here so the prompt is
-versioned alongside the extensions; the home copy is a symlink to this file.
-
-It is generic working instructions (reply format, honesty rules, tool
-preferences), not anything private. Anyone is free to reuse it as their own
-`APPEND_SYSTEM.md`.
+[`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) is this machine's global pi
+append-prompt, versioned here (the home copy is a symlink to this file).
 
 `main` is this monorepo. The tag `pre-monorepo-pi-core` preserves the
-pre-monorepo single-package history of pi-core — 81 commits with their original
-SHAs, which `git-filter-repo` rewrote when the three packages were merged.
+pre-monorepo single-package history of pi-core.
