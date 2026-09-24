@@ -477,6 +477,21 @@ describe("narrow static risk contract", () => {
     ["git config --global user.name Ada", "LOW"],
     // A noun-led package manager puts its verb after `workspace <name>`.
     ["yarn workspace foo add lodash", "HARD"],
+    // `--help` is a value here, not a terminal flag, so the invocation goes on
+    // to create the pull request.
+    ["gh pr create --title --help --body x", "HARD"],
+    // The key comes after a value-taking option, so `--file`'s path must not
+    // be read as the key.
+    ["git config --file user.name --add core.pager '!echo EVIL'", "REVIEW"],
+    // `--edit` opens the config in $GIT_EDITOR.
+    ["git config --edit", "REVIEW"],
+    // A terminal flag is only terminal where it cannot be a value.
+    ["gh --version", "LOW"],
+    // An attached value cannot shift an operand, so it needs no table entry.
+    ["kubectl -n=default get pods", "LOW"],
+    ["git -c user.email=a@b status", "LOW"],
+    ["git -c status.short=true status", "LOW"],
+    ["git -c push.default=simple status", "LOW"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

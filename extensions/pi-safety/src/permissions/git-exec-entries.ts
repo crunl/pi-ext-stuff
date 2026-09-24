@@ -54,7 +54,10 @@ const gitScalarConfigSegments = new Set([
   "detachedhead",
   "diff",
   "eol",
+  "email",
   "ff",
+  "autosetuprebase",
+  "default",
   "forcesignannotated",
   "gpgsign",
   "hookspath",
@@ -69,6 +72,7 @@ const gitScalarConfigSegments = new Set([
   "renames",
   "required",
   "safecrlf",
+  "short",
   "signoff",
   "status",
   "tagopt",
@@ -77,6 +81,31 @@ const gitScalarConfigSegments = new Set([
   "usehttppath",
   "version",
 ]);
+
+/** `git config` options that consume the following word as their value. */
+const gitConfigValueOptions = new Set(["--file", "-f", "--blob", "--default"]);
+
+/**
+ * The first operand that is not a flag and not the value of a value-taking
+ * option. Without the second rule, `git config --file user.name --add
+ * core.pager '!cmd'` reads `user.name` — the file path — as the key, and the
+ * write of `core.pager` passes as a scalar setting.
+ */
+function firstOperandAfterValueOptions(
+  args: readonly string[],
+  valueOptions: ReadonlySet<string>,
+): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] ?? "";
+    if (valueOptions.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    return token;
+  }
+  return undefined;
+}
 
 /**
  * Whether a `-c KEY=VALUE` / config-subcommand key is a plain setting. Anything
@@ -191,12 +220,17 @@ export function gitExecutesNestedProgram(
     // `git config alias.x '!cmd'` persists an executable entry point. It runs
     // on some later Git invocation, not this one, but the write is what makes
     // the next call dangerous.
-    //
-    // Only the first non-flag operand *after the subcommand* is the key; the
-    // one after it is the value. `git config --global user.name Ada` must not
-    // be read as two unproven keys, and neither must the literal subcommand
-    // word `config` be mistaken for the key it introduces.
-    const key = args.slice(subcommandIndex + 1).find((arg) => !arg.startsWith("-"));
+    const rest = args.slice(subcommandIndex + 1);
+    // `--edit` opens the config file in $GIT_EDITOR, so the program it runs is
+    // named by the environment rather than by argv.
+    if (rest.includes("--edit") || rest.includes("-e")) return true;
+    // Options that take a value must be consumed first, or their value is read
+    // as the key: `git config --file user.name --add core.pager '!cmd'` writes
+    // `core.pager`, not `user.name`.
+    const key = firstOperandAfterValueOptions(rest, gitConfigValueOptions);
+    // Only the key is read. The word after it is the value, and `git config
+    // --global user.name Ada` must not be rejected because `Ada` is not a
+    // known setting name.
     return key !== undefined && unprovenGitConfigKey(key.split("=", 1)[0] ?? "");
   }
   if (!gitCommandRunningSubcommands.has(subcommand)) {

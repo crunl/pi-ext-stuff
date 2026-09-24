@@ -538,6 +538,13 @@ describe("Risk policy gate", () => {
     // The verb sits one position deeper than the old window, so it was never
     // compared against the verb table at all.
     "gcloud compute instance-groups managed delete group",
+    // `--` ends option parsing, so the payload after it is read as operands
+    // rather than making the grammar unprovable.
+    "kubectl exec pod -- rm -rf /tmp/x",
+    // Under an approved network lease the only thing that can make this HARD
+    // is the verb: `--help` is `--title`'s value, so the invocation creates the
+    // pull request rather than printing help.
+    "gh pr create --title --help --body x",
   ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
@@ -566,7 +573,10 @@ describe("Risk policy gate", () => {
     "gcloud compute instance-groups managed list group",
     "helm list -A",
     "kubectl get pods --all-namespaces",
-    "gh pr list --state open",
+    // A terminal flag after the verb is still a flag, not a mutation — the
+    // short-circuit that used to fire here also fired on `gh pr create
+    // --title --help`, where `--help` is the title.
+    "gh pr list --help",
   ])("keeps a read-only control-plane query out of the mutation table: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 

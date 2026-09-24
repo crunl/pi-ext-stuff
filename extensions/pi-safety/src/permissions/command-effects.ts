@@ -16,7 +16,6 @@
  */
 
 import type { CommandSegment } from "./rules.ts";
-import { hasTerminalInfoFlag } from "./shell-segment.ts";
 
 /**
  * Commands that act on process state rather than on files or arguments. SRT
@@ -179,6 +178,9 @@ function verbOperands(
       continue;
     }
     if (token.startsWith("-")) {
+      // `--opt=value` is self-contained: the value is in the same word, so it
+      // cannot shift anything and needs no entry in the table.
+      if (token.includes("=")) continue;
       if (operands.length === 0) return undefined;
       continue;
     }
@@ -338,11 +340,19 @@ const terraformMutationSubcommands = new Set([
 const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
 
 export function invocationHasExternalSideEffect(segment: CommandSegment): ExternalEffect {
-  // `--version` and `--help` print and exit for every tool in these tables, so
-  // the invocation cannot be a mutation whatever its other options say. This is
-  // checked before the grammar scan because an otherwise-unreadable option list
-  // is common on exactly these two forms (`gh --version`).
-  if (hasTerminalInfoFlag(segment.args)) return "refuted";
+  // `--version` and `--help` print and exit — but only in a position where they
+  // cannot be a value. `gh pr create --title --help --body x` passes `--help`
+  // to `--title` as its value and goes on to create the pull request, so an
+  // unconditional short-circuit is a fail-open. They are honoured only while no
+  // operand has been read, which is where a terminal flag is unambiguous.
+  const firstOperand = segment.args.findIndex((arg) => !arg.startsWith("-"));
+  const leadingTerminalInfo = segment.args.some(
+    (arg, index) =>
+      (arg === "--version" || arg === "--help") &&
+      (firstOperand === -1 || index < firstOperand) &&
+      !cliGlobalValueFlags.has(segment.args[index - 1] ?? ""),
+  );
+  if (leadingTerminalInfo) return "refuted";
   if (wholeInvocationIsExternal.has(segment.executable)) {
     // These CLIs deploy by default, so the invocation as a whole is external.
     return "proved";

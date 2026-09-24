@@ -13,7 +13,7 @@ guarantees, and where it was measured to stop. It covers the four
 `src/permissions/`. It does not cover the Engine, Guardian, or SRT layers, and
 it makes no claim about any tool other than the ones named.
 
-## The three rounds that produced the current shape
+## The four rounds that produced the current shape
 
 Round 1 (`fdc3ff6`) closed seven fail-open classes found by comparing the layer
 against codex and fx: wrapper bypass, lexical defects, line continuation,
@@ -25,8 +25,19 @@ refactor behaviour-preserving" and started asking "is the behaviour correct".
 It found brace and glob expansion in the command word, `git -c include.path`,
 and global options hiding a verb.
 
-Round 3 (this commit) reviewed round 2's own fix and found that its algorithm
+Round 3 (`728c2e9`) reviewed round 2's own fix and found that its algorithm
 was wrong rather than incomplete. That is the part worth recording.
+
+Round 4 (this commit) reviewed round 3 and found two more logic errors, both
+introduced *by* the round-3 fix rather than pre-existing. They are recorded here
+because the pattern matters more than the two holes: each round's repair created
+a new fail-open somewhere adjacent, and only adversarial review caught them.
+
+| Round | Introduced | Caught by |
+| --- | --- | --- |
+| 2 | dual-reading operand union | round 3 review |
+| 3 | unconditional `--help`/`--version` short-circuit | round 4 review |
+| 3 | `git config` key read without consuming value options | round 4 review |
 
 ## The finding that changed the design
 
@@ -51,6 +62,28 @@ threshold is therefore one operand, not a window.
 unknown` instead of a boolean, and `unknown` blocks Tier 3 rather than being
 folded into "safe". A similar change in `shell-network.ts` treats an unreadable
 package-manager grammar as network use, gated by the connection boundary.
+
+## The two errors round 3 introduced
+
+Both were found by the round-4 review and both were fail-opens, which is the
+reason they are written down rather than just fixed.
+
+**The terminal-flag short-circuit was unconditional.** `--help` and `--version`
+print and exit, so round 3 checked for them anywhere in argv before the grammar
+scan. But `gh pr create --title --help --body x` passes `--help` to `--title`
+as its value and goes on to create the pull request. A short-circuit that fires
+on a token without asking whether the token is a value is the same mistake as
+guessing a verb position. The check is now restricted to a position where no
+operand precedes it, which is the only place a terminal flag is unambiguous.
+
+**The `git config` key was read without consuming value options.** Round 3
+correctly stopped treating every argument as a potential key, and took the first
+non-flag one. But `--file` takes a value, so `git config --file user.name
+--add core.pager '!cmd'` reads the *file path* as the key, decides `user.name`
+is a scalar, and passes a write of `core.pager` as safe. The value-taking
+options are now consumed before the key is read, the same rule the CLI operand
+scan uses, and `--edit` is gated separately because it opens the file in
+`$GIT_EDITOR`.
 
 ## The other inversion: Git config keys
 
@@ -103,9 +136,16 @@ fail-closed direction.
 
 **Over-blocking was measured, not assumed.** Of 42 ordinary read-only
 control-plane and package commands under an approved network lease, 1 is not
-LOW (`cargo owner list`). The value-flag table in `command-effects.ts` is the
-budget: every entry added is a class of read-only command that stays
-auto-approvable, and the table is deliberately not a security list.
+LOW (`cargo owner list`). An earlier revision of the same measurement was 6 of
+42; the value-flag table in `command-effects.ts` and the attached-value rule
+(`--opt=value` is self-contained and needs no entry) account for the difference.
+The table is deliberately a usability budget rather than a security list: every
+entry added is a class of read-only command that stays auto-approvable.
+
+**Regression locks were checked by reverting, not by reading.** Each new test
+case was run against the previous revision's source to confirm it fails there.
+Seven of the added assertions fail on revert; the rest are contract cases that
+hold either way and are labelled as such in the test comments.
 
 **extglob was reported and did not reproduce.** `@(rm|echo) -f x` reaches LOW,
 but neither `bash -O extglob` nor zsh expands it into a command word; bash
