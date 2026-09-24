@@ -579,12 +579,23 @@ function hasInlineProgramArgument(args: readonly string[]): boolean {
 }
 
 /**
- * `--version`/`--help` are the one invocation form where every interpreter in
- * the set prints and exits without running a program, so the argv read here is
- * the argv that runs. The short forms stay unclassifiable: `sh -v` reads stdin.
+ * `--version`/`--help` as the *first* argument: the one invocation form where
+ * the interpreter prints and exits without running a program.
+ *
+ * The position restriction is the whole rule, and it is stricter than it looks.
+ * A flag that appears later may be the value of an option ahead of it, and
+ * then it is an ordinary operand rather than a terminal flag — verified, not
+ * assumed: `python3 -W --help` passes `--help` to `-W`, prints a warning, and
+ * goes on to run the program on stdin, and `kubectl --as --help delete pod x`
+ * prompts for a username and then deletes. Checking "is there a flag before
+ * it" is not enough either, because such a flag is exactly the thing that can
+ * consume it. Only the first argument has nothing in front of it.
+ *
+ * The short forms stay unclassifiable: `sh -v` reads stdin.
  */
 export function hasTerminalInfoFlag(args: readonly string[]): boolean {
-  return args.some((arg) => arg === "--version" || arg === "--help");
+  const first = args[0];
+  return first === "--version" || first === "--help";
 }
 
 /**

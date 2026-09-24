@@ -13,7 +13,7 @@ guarantees, and where it was measured to stop. It covers the four
 `src/permissions/`. It does not cover the Engine, Guardian, or SRT layers, and
 it makes no claim about any tool other than the ones named.
 
-## The four rounds that produced the current shape
+## The five rounds that produced the current shape
 
 Round 1 (`fdc3ff6`) closed seven fail-open classes found by comparing the layer
 against codex and fx: wrapper bypass, lexical defects, line continuation,
@@ -28,16 +28,28 @@ and global options hiding a verb.
 Round 3 (`728c2e9`) reviewed round 2's own fix and found that its algorithm
 was wrong rather than incomplete. That is the part worth recording.
 
-Round 4 (this commit) reviewed round 3 and found two more logic errors, both
-introduced *by* the round-3 fix rather than pre-existing. They are recorded here
-because the pattern matters more than the two holes: each round's repair created
-a new fail-open somewhere adjacent, and only adversarial review caught them.
+Round 4 (`716a13e`) reviewed round 3 and found two more logic errors, both
+introduced *by* the round-3 fix rather than pre-existing.
+
+Round 5 (this commit) reviewed round 4 and found that its terminal-flag rule
+was still positional rather than structural, in the same place as twice before.
+
+They are recorded here because the pattern matters more than the individual
+holes: each round's repair created a new fail-open somewhere adjacent, and only
+adversarial review caught it.
 
 | Round | Introduced | Caught by |
 | --- | --- | --- |
-| 2 | dual-reading operand union | round 3 review |
-| 3 | unconditional `--help`/`--version` short-circuit | round 4 review |
+| 2 | dual-reading operand union (2^N grammars) | round 3 review |
+| 3 | terminal-flag short-circuit firing on any position | round 4 review |
 | 3 | `git config` key read without consuming value options | round 4 review |
+| 4 | terminal-flag rule narrowed to "before the first operand" | round 5 review |
+
+The last row is the one worth reading twice. Round 4's rule was "honour
+`--help` only where no operand precedes it", which is *almost* right and still
+wrong: an option before the flag is exactly the thing that can consume it.
+`kubectl --as --help delete pod demo` prompts for a username and then deletes.
+Position was being used as a proxy for role, three rounds running.
 
 ## The finding that changed the design
 
@@ -84,6 +96,15 @@ is a scalar, and passes a write of `core.pager` as safe. The value-taking
 options are now consumed before the key is read, the same rule the CLI operand
 scan uses, and `--edit` is gated separately because it opens the file in
 `$GIT_EDITOR`.
+
+**The terminal-flag rule is now the first argument and nothing else.** Rounds 3
+and 4 each tried to widen or narrow "where is `--help` terminal" and both were
+wrong, because position was standing in for role. The rule that holds is the
+narrowest one: only `args[0]`, because only the first argument has nothing in
+front of it that could consume it. `hasTerminalInfoFlag` is shared by the
+interpreter analysis and the external-CLI analysis so the two cannot drift, and
+both of the round-4 holes were that same rule applied in two places —
+`python3 -W --help` runs the program on stdin while printing only a warning.
 
 ## The other inversion: Git config keys
 
@@ -159,9 +180,13 @@ that was not shown to exist. zsh's `=command` *was* reproduced
 It does not claim the static layer is complete. A shell command line and a CLI
 option grammar are both open vocabularies, and a static analyser over them has
 no terminating condition — every closed class exposes the next one. What the
-three rounds establish is a *stable* boundary rather than a complete one: the
+five rounds establish is a *stable* boundary rather than a complete one: the
 rules are now "unreadable means review" instead of "guess the position", so the
-remaining holes are missing vocabulary rather than wrong logic.
+remaining holes are missing vocabulary rather than wrong logic. That
+characterisation is a judgement made on this date, not a proof; the honest
+summary of five rounds is that each one found the previous one's logic error,
+and the argument that the current logic has none rests on the rule being
+narrowest-possible rather than on the review being exhaustive.
 
 It does not claim the residual list above is complete either. It is what was
 measured, on this date, against this upstream pin.

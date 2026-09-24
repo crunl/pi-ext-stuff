@@ -487,6 +487,12 @@ describe("narrow static risk contract", () => {
     ["git config --edit", "REVIEW"],
     // A terminal flag is only terminal where it cannot be a value.
     ["gh --version", "LOW"],
+    // `--help` here is `--as`'s value, so the invocation reaches `delete`
+    // rather than printing help. Verified against a real kubectl.
+    ["kubectl --as --help delete pod demo", "REVIEW"],
+    // Same shape in the interpreter analysis: `-W` takes the value, and python
+    // goes on to run the program it is handed.
+    ["python3 -W --help", "REVIEW"],
     // An attached value cannot shift an operand, so it needs no table entry.
     ["kubectl -n=default get pods", "LOW"],
     ["git -c user.email=a@b status", "LOW"],

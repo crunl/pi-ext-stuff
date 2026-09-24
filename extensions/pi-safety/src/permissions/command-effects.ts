@@ -16,6 +16,7 @@
  */
 
 import type { CommandSegment } from "./rules.ts";
+import { hasTerminalInfoFlag } from "./shell-segment.ts";
 
 /**
  * Commands that act on process state rather than on files or arguments. SRT
@@ -340,19 +341,13 @@ const terraformMutationSubcommands = new Set([
 const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
 
 export function invocationHasExternalSideEffect(segment: CommandSegment): ExternalEffect {
-  // `--version` and `--help` print and exit — but only in a position where they
-  // cannot be a value. `gh pr create --title --help --body x` passes `--help`
-  // to `--title` as its value and goes on to create the pull request, so an
-  // unconditional short-circuit is a fail-open. They are honoured only while no
-  // operand has been read, which is where a terminal flag is unambiguous.
-  const firstOperand = segment.args.findIndex((arg) => !arg.startsWith("-"));
-  const leadingTerminalInfo = segment.args.some(
-    (arg, index) =>
-      (arg === "--version" || arg === "--help") &&
-      (firstOperand === -1 || index < firstOperand) &&
-      !cliGlobalValueFlags.has(segment.args[index - 1] ?? ""),
-  );
-  if (leadingTerminalInfo) return "refuted";
+  // `--version` and `--help` print and exit — but only in the first argument
+  // position, which is the only place nothing can consume them as a value.
+  // `gh pr create --title --help --body x` passes `--help` to `--title` and
+  // creates the pull request; `kubectl --as --help delete pod x` passes it to
+  // `--as` and deletes the pod. `hasTerminalInfoFlag` encodes that rule and is
+  // shared with the interpreter analysis so the two cannot drift apart.
+  if (hasTerminalInfoFlag(segment.args)) return "refuted";
   if (wholeInvocationIsExternal.has(segment.executable)) {
     // These CLIs deploy by default, so the invocation as a whole is external.
     return "proved";

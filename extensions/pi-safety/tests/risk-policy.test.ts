@@ -447,6 +447,9 @@ describe("Risk policy gate", () => {
     // not the script operand either.
     "deno run -",
     "python -",
+    // `--help` is `--as`'s value, so the invocation reaches `delete` — but the
+    // option grammar cannot be read, which is a review rather than a proof.
+    "kubectl --as --help delete pod demo",
   ])("reviews unclassifiable Bash command %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
