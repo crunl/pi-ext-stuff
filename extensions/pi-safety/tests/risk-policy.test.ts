@@ -361,7 +361,6 @@ describe("Risk policy gate", () => {
       "echo 'rm -rf /tmp/x'",
       "cat a; pwd",
       "env FOO=1 npm test",
-      "trap 'echo rm -rf /tmp/x' EXIT",
       "FOO=1 echo hi",
       "do FOO=1 echo hi",
       // Bash treats a reserved word behind an assignment as an ordinary command
@@ -369,7 +368,6 @@ describe("Risk policy gate", () => {
       // reduced into a forced rm.
       "FOO=1 do rm -f /tmp/x",
       "env FOO=1 do rm -f /tmp/x",
-      "cmd=rm; $cmd -rf /tmp/x",
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
@@ -401,6 +399,134 @@ describe("Risk policy gate", () => {
     }
   });
 
+  // "Unclassifiable" is one predicate — the static argv is not the argv that
+  // runs — closed over mechanisms (string→command re-execution, string
+  // synthesis), not over command names. Such a command cannot be proven safe,
+  // so it is REVIEW (fail closed): never HARD (nothing was proven dangerous)
+  // and never a silent LOW. Enumerating `eval` bodies or blacklisting
+  // constructs (`$IFS`, `base64 | sh`) is deliberately not attempted.
+  it.each([
+    "eval 'rm -f /'",
+    "source ./x.sh",
+    ". ./x.sh",
+    "echo 'rm -rf /' | sh",
+    "sh < script.sh",
+    "sh <<< 'rm -rf /'",
+    "$(echo rm) -rf /",
+    'echo "$(rm -rf /)"',
+    "function f { rm -rf /; }; f",
+    "echo / | xargs rm -rf",
+    "find . -exec rm -rf {} +",
+    "find -exec rm -rf",
+    "python -c \"import os; os.system('rm -rf /')\"",
+    "node -e \"require('fs').rmSync('/')\"",
+    "perl -we 'system(\"rm -rf /\")'",
+    "php -r 'system(\"rm -rf /\");'",
+    "deno eval 'Deno.readTextFile(\"/etc/passwd\")'",
+    // `trap ACTION SIGNAL` stores shell code to run later: the action string is
+    // a program the static argv never showed.
+    'trap "$CMD" EXIT',
+    "trap 'ls' EXIT",
+    "cmd=rm; $cmd -rf /tmp/x",
+    'bash -c "$CMD -rf /"',
+    // The substitution is inert for the parent shell but live for the body.
+    "bash -c 'cat $(pwd)'",
+    "cat <<'EOF'\nhello\nEOF",
+    // The word after a value-taking option is that option's value, not a script
+    // operand: `bash -o pipefail` / `python -X utf8` read the program from the
+    // pipe in front of them, so no word in the argv names it.
+    "printf 'rm -rf /tmp/x\\n' | bash -o pipefail",
+    "echo 'import os;os.system(\"rm -rf /\")' | python -X utf8",
+    "python -X utf8",
+    "bash -o pipefail",
+    // `-s` makes a shell read the program from stdin; later words are $0/$1…,
+    // not the program (`bash -s name` / `bash -s name script.sh`).
+    "bash -s foo",
+    "bash -s foo script.sh",
+    // A bare `-` is the stdin sentinel, and for `deno` the mode word `run` is
+    // not the script operand either.
+    "deno run -",
+    "python -",
+  ])("reviews unclassifiable Bash command %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "REVIEW",
+    });
+  });
+
+  // A dynamic *argument* is not a dynamic command: the executable is still the
+  // one we read, so plain words, redirects, and parameter expansion stay LOW.
+  it.each([
+    "echo hello",
+    "ls $DIR",
+    "ls > out.log",
+    "cat README.md > copy.txt",
+    "cat README.md | wc -l",
+    "cat '$(pwd)'",
+    "bash script.sh",
+    "bash -x script.sh",
+    "python script.py",
+    "php script.php",
+    "deno run script.ts",
+    "node --version",
+    // An option's value is skipped, not swallowed: the operand behind it is
+    // still found, so the segment stays a fixed argv.
+    "bash -o pipefail script.sh",
+    "python -W ignore script.py",
+    "php -d memory_limit=1G script.php",
+    "perl -I lib script.pl",
+    "deno run -A script.ts",
+    "npm test && pnpm lint",
+    "echo 'a { b }'",
+    "awk '{ print $1 }'",
+  ])("keeps decomposable Bash command %s auto-run", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "allow",
+      risk: "LOW",
+    });
+  });
+
+  it("keeps a proven-dangerous segment HARD inside an unclassifiable command", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: 'rm -rf /tmp/x; echo "$(pwd)"' }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+  });
+
+  // A trap action that is itself a proven-dangerous command stays HARD: the
+  // dangerous tier is checked before the unclassifiable one, so the extra
+  // review never *downgrades* a proven rm.
+  it("keeps a proven-dangerous trap action HARD, not REVIEW", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "trap 'rm -rf /' EXIT" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+  });
+
+  // External side effects are not exempted by the sandbox's network approval:
+  // the sandbox guards the connection boundary, not the API semantics of the
+  // call, so `terraform apply` / `kubectl delete` stay HARD on the sandboxed
+  // Bash path (fail closed) instead of dropping to the old dangerous-only LOW.
+  it.each([
+    "terraform apply -auto-approve",
+    "tofu destroy -auto-approve",
+    "kubectl delete deployment production",
+    "vercel --prod",
+  ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "HARD",
+    });
+  });
+
   it("defers ordinary Bash network decisions to the runtime sandbox", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     const cases = [
@@ -409,8 +535,6 @@ describe("Risk policy gate", () => {
         ["api.github.com", "github.com", "uploads.github.com"],
       ],
       ["gh pr edit 1 --title x", ["api.github.com", "github.com", "uploads.github.com"]],
-      ["node -e \"fetch('https://api.github.com/repos')\"", ["api.github.com"]],
-      ["python -c \"requests.get('https://example.com')\"", ["example.com"]],
       ["/usr/bin/curl https://example.com", ["example.com"]],
       ["env curl https://example.com", ["example.com"]],
       ["env -u HTTPS_PROXY curl https://example.com", ["example.com"]],
@@ -803,9 +927,6 @@ describe("Risk policy gate", () => {
     "git add README.md > .git/hooks/pre-commit",
     'bash -c "git add README.md"',
     'fish -c "git add README.md"',
-    'git add "$(printf README.md)"',
-    'git add "$' + '{ touch .git/hooks/pre-commit; }"',
-    'git add "$' + '{| touch .git/hooks/pre-commit; }"',
     "git add README.md | tee result.txt",
   ])("leaves compound Git shell effects to the ordinary sandbox in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
@@ -815,6 +936,24 @@ describe("Risk policy gate", () => {
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
       risk: "LOW",
+    });
+  });
+
+  // Same Git-mutation shape, but the argument is a substitution, so the static
+  // word list is not the argv that runs: the unclassifiable tier reviews it
+  // instead of auto-running (the single-quoted forms above stay allow/LOW).
+  it.each([
+    'git add "$(printf README.md)"',
+    'git add "$' + '{ touch .git/hooks/pre-commit; }"',
+    'git add "$' + '{| touch .git/hooks/pre-commit; }"',
+  ])("reviews a substituted Git operand in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await mkdir(join(cwd, ".git"));
+    await writeFile(join(cwd, ".git", "config"), "");
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "REVIEW",
     });
   });
 

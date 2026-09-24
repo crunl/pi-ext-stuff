@@ -261,7 +261,19 @@ describe("narrow static risk contract", () => {
     ["trap 'rm -rf /tmp/x' EXIT", "HARD"],
     ['bash -lc "rm -rf build"', "HARD"],
     ['sh -c "rm -f x"', "HARD"],
-    ["trap 'ls' EXIT", "LOW"],
+    // `trap ACTION SIGNAL` stores shell code to run later, so the action is a
+    // program the static argv never showed: unclassifiable, hence REVIEW.
+    ["trap 'ls' EXIT", "REVIEW"],
+    ["php -r 'system(\"ls\");'", "REVIEW"],
+    ["deno eval 'console.log(1)'", "REVIEW"],
+    // A word after a value-taking option is that option's value, and a bare `-`
+    // is the stdin sentinel: the program comes from a pipe, not the argv.
+    ["bash -o pipefail", "REVIEW"],
+    ["python -X utf8", "REVIEW"],
+    ["deno run -", "REVIEW"],
+    // The operand behind an option's value is still read: a fixed argv.
+    ["bash -o pipefail script.sh", "LOW"],
+    ["php -d memory_limit=1G script.php", "LOW"],
     ["rm -r build", "LOW"],
     ["rm build/a.ts", "LOW"],
     ["rmdir build/cache", "LOW"],

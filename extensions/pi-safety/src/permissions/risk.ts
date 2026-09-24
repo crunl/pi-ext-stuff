@@ -28,6 +28,87 @@ const directNetworkExecutables = new Set([
   "bunx",
 ]);
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
+/**
+ * Interpreters that run a *string* (an argument or stdin) as a program, so the
+ * argv this parser reads is not the argv that runs. This is a mechanism-closed
+ * class, not a list of dangerous commands: `eval`/`source`/`.` take shell code,
+ * `trap ACTION` stores shell code to run later, `xargs` assembles argv from
+ * stdin words, `find -exec` runs a command per match, the shells run `-c
+ * STRING` (expanded recursively below) or a program from stdin, and the
+ * language runtimes run an inline program flag (`python -c`, `php -r`) or a
+ * subcommand (`deno eval`) or a stdin program.
+ */
+const stringInterpreters = new Set([
+  "eval",
+  "source",
+  ".",
+  "trap",
+  "xargs",
+  "find",
+  ...shellExecutables,
+  "python",
+  "python3",
+  "node",
+  "nodejs",
+  "perl",
+  "ruby",
+  "php",
+  "deno",
+]);
+/** `find` actions that run another command per match. */
+const findExecActions = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+/**
+ * Flags whose value is a program string. `-p`/`--print`, `-E`, and `-r` are
+ * included fail-closed: for perl/ruby `-p`/`-E` can be loop/encoding flags and
+ * for node `-r` is `--require`, where the extra review only costs a prompt,
+ * never a wrong auto-approval. `-r` is the php inline-program flag.
+ */
+const inlineProgramFlags = new Set([
+  "-c",
+  "--command",
+  "-e",
+  "--eval",
+  "-E",
+  "-p",
+  "--print",
+  "-r",
+]);
+/**
+ * Runtimes whose inline program is a *subcommand* rather than a flag
+ * (`deno eval STRING`), keyed to the first non-flag operand.
+ */
+const inlineProgramSubcommands = new Map([["deno", "eval"]]);
+/**
+ * Flags that consume the *next word* as their value, so that word is not an
+ * operand: `bash -o pipefail`, `python -X utf8`, `perl -I lib`, `php -d
+ * memory_limit=1G`. Attached forms (`-Xutf8`, `-Ilib`) are one flag word and
+ * need no entry here. The set is shared by the whole interpreter class (the
+ * mechanism is "an option that eats a word", not a per-runtime flag table) and
+ * fail-closed: a value-less flag read as value-taking (`python -I` isolated
+ * mode, `perl -d` debugger, `ruby -Ilibexec` attached) only costs an extra
+ * review, never a wrong auto-approval.
+ */
+const optionValueFlags = new Set([
+  "-o",
+  "+o",
+  "-O",
+  "+O",
+  "-X",
+  "-W",
+  "-I",
+  "-d",
+  "--init-file",
+  "--rcfile",
+]);
+/**
+ * Runtimes whose first operand is a *mode* word, not a script: `deno run
+ * script.ts` runs `script.ts`, so `run` is the subcommand and the script
+ * operand is the word after it. A mode word with no operand behind it (`deno
+ * test`, `deno fmt`) leaves the program to filesystem discovery, which is
+ * equally unclassifiable from the argv. `deno eval STRING` is caught earlier
+ * as an inline program.
+ */
+const subcommandRuntimes = new Set(["deno"]);
 const gitNetworkSubcommands = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
 const packageNetworkSubcommands = new Set([
   "add",
@@ -261,6 +342,7 @@ interface ShellSyntax {
   hasExecutableSubstitution: boolean;
   hasActiveRedirect: boolean;
   hasActiveControl: boolean;
+  hasHereDocument: boolean;
 }
 
 function scanShellSyntax(source: string): ShellSyntax {
@@ -269,6 +351,7 @@ function scanShellSyntax(source: string): ShellSyntax {
   let hasExecutableSubstitution = false;
   let hasActiveRedirect = false;
   let hasActiveControl = false;
+  let hasHereDocument = false;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (escaped) {
@@ -305,6 +388,12 @@ function scanShellSyntax(source: string): ShellSyntax {
     if (quote === undefined && (character === "<" || character === ">")) {
       hasActiveRedirect = true;
     }
+    // `<<WORD` (heredoc) and `<<<WORD` (here-string) feed content the char
+    // segmenter keeps as separate text, so the command's real input is not in
+    // the argv we parsed.
+    if (quote === undefined && character === "<" && source[index + 1] === "<") {
+      hasHereDocument = true;
+    }
     if (
       quote === undefined &&
       (character === "&" ||
@@ -317,7 +406,7 @@ function scanShellSyntax(source: string): ShellSyntax {
       hasActiveControl = true;
     }
   }
-  return { hasExecutableSubstitution, hasActiveRedirect, hasActiveControl };
+  return { hasExecutableSubstitution, hasActiveRedirect, hasActiveControl, hasHereDocument };
 }
 
 /**
@@ -358,6 +447,123 @@ function isReservedCommandWord(token: string): boolean {
   return SHELL_RESERVED_WORDS.has(basename(token).toLowerCase());
 }
 
+/**
+ * A dynamic executable word (`$CMD`, `` `cmd` ``, `$(cmd)`) means the binary
+ * that runs is not the one this parser read. A dynamic *argument* (`ls $DIR`)
+ * is not this class: the executable still is `ls`.
+ */
+function isDynamicExecutableToken(token: string): boolean {
+  return token.includes("$") || token.includes("`");
+}
+
+/**
+ * `{`/`}` as a standalone word is shell grouping, never an operand: the group
+ * body is a separate argv the char segmenter did not reduce (`function f {
+ * rm -f x; }`). Brace *expansion* (`{a,b}`, `awk '{ print }'`) is a single word
+ * and stays decomposable.
+ */
+function hasGroupingWord(words: readonly string[]): boolean {
+  return words.some((word) => word === "{" || word === "}");
+}
+
+/**
+ * First non-flag operand: the script file an interpreter would run, if any.
+ * Three kinds of word are not that operand. Redirect words leak into the word
+ * list (`sh < script`, `sh <<< 'code'`), and the word after one is a filename
+ * or here-string. A word after a value-taking option is that option's value
+ * (`bash -o pipefail`, `python -X utf8`). A runtime's leading mode word
+ * selects what runs (`deno run`). A bare `-` is the stdin sentinel (`deno run
+ * -`, `python -`): the program arrives on a pipe, so no word here names it and
+ * the caller must fail closed.
+ */
+function scriptOperand(executable: string, args: readonly string[]): string | undefined {
+  let skipNext = false;
+  let skipSubcommand = subcommandRuntimes.has(executable);
+  for (const arg of args) {
+    if (skipNext) {
+      skipNext = false;
+      continue;
+    }
+    if (arg === "-") return undefined;
+    // A shell given `-s` (`bash -s name`, where `name` is only $0) reads its
+    // program from stdin, so no argv operand names the program.
+    if (shellExecutables.has(executable) && /^-[^-]+$/.test(arg) && arg.includes("s")) {
+      return undefined;
+    }
+    if (arg.startsWith("<") || arg.startsWith(">") || optionValueFlags.has(arg)) {
+      skipNext = true;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    if (skipSubcommand) {
+      skipSubcommand = false;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+}
+
+/** Whether an argument names an inline program string (`python -c`, `perl -we`). */
+function hasInlineProgramArgument(args: readonly string[]): boolean {
+  return args.some((arg) => {
+    if (arg === "--" || !arg.startsWith("-")) return false;
+    if (inlineProgramFlags.has(arg)) return true;
+    return /^-[A-Za-z]+$/.test(arg) && /[cep]/.test(arg.slice(1));
+  });
+}
+
+/**
+ * `--version`/`--help` are the one invocation form where every interpreter in
+ * the set prints and exits without running a program, so the argv read here is
+ * the argv that runs. The short forms stay unclassifiable: `sh -v` reads stdin.
+ */
+function hasTerminalInfoFlag(args: readonly string[]): boolean {
+  return args.some((arg) => arg === "--version" || arg === "--help");
+}
+
+/**
+ * Whether a segment re-interprets a string or stdin as the program, so its
+ * static argv is not the argv that runs. Shell `-c STRING` bodies are expanded
+ * into their own segments by parseCommandSegments and therefore count as
+ * decomposed; `eval`/`source`/`.`, a `trap` action, `xargs`, `find -exec`, a
+ * bare or redirect-fed interpreter, and an inline program string do not. An
+ * interpreter with a script-file operand (`python script.py`) is a fixed argv
+ * and stays classifiable — an unknown *program* is not the same as a rewritable
+ * argv.
+ */
+function reExecutesString(
+  executable: string,
+  args: readonly string[],
+  nestedShell: boolean,
+): boolean {
+  if (!stringInterpreters.has(executable)) return false;
+  if (executable === "eval" || executable === "source" || executable === ".") return true;
+  if (executable === "trap") {
+    // `trap ACTION SIGNAL` stores shell code to run later, so ACTION is a
+    // program string. A bare `trap`, `trap -l`, `trap - SIGNAL` (reset), and
+    // `trap '' SIGNAL` (ignore) run nothing and stay classifiable.
+    let actionIndex = 0;
+    if (args[actionIndex] === "--") actionIndex += 1;
+    const action = args[actionIndex];
+    return action !== undefined && action !== "" && !action.startsWith("-");
+  }
+  if (executable === "xargs") return true;
+  if (executable === "find") return args.some((arg) => findExecActions.has(arg));
+  if (shellExecutables.has(executable)) {
+    return (
+      !nestedShell && scriptOperand(executable, args) === undefined && !hasTerminalInfoFlag(args)
+    );
+  }
+  const subcommand = args.find((arg) => !arg.startsWith("-"));
+  if (subcommand !== undefined && inlineProgramSubcommands.get(executable) === subcommand)
+    return true;
+  return (
+    hasInlineProgramArgument(args) ||
+    (scriptOperand(executable, args) === undefined && !hasTerminalInfoFlag(args))
+  );
+}
+
 function parseCommandSegment(source: string): CommandSegment {
   const words = shellWords(source);
   // Reserved words are structural only in command position, which the char
@@ -378,6 +584,8 @@ function parseCommandSegment(source: string): CommandSegment {
   const commandIndex = args.findIndex(
     (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
   );
+  const nestedShell = shellExecutables.has(executable) && commandIndex >= 0;
+  const reExec = reExecutesString(executable, args, nestedShell);
   return {
     source,
     executableToken,
@@ -387,7 +595,16 @@ function parseCommandSegment(source: string): CommandSegment {
     args,
     hasRedirect: syntax.hasActiveRedirect,
     hasSubstitution: syntax.hasExecutableSubstitution,
-    nestedShell: shellExecutables.has(executable) && commandIndex >= 0,
+    nestedShell,
+    // Static argv equals runtime argv only when nothing can rewrite the word
+    // list: no dynamic executable, no re-interpreted string, no substitution,
+    // no heredoc body, and no unreduced brace group.
+    decomposable:
+      !isDynamicExecutableToken(executableToken) &&
+      !reExec &&
+      !syntax.hasExecutableSubstitution &&
+      !syntax.hasHereDocument &&
+      !hasGroupingWord(words),
   };
 }
 
@@ -399,7 +616,17 @@ export function parseCommandSegments(command: string): CommandSegment[] {
       (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
     );
     const nestedCommand = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
-    return nestedCommand ? parseCommandSegments(nestedCommand) : [];
+    if (!nestedCommand) return [];
+    // The body is shell code, so a substitution or heredoc in it is live even
+    // when outer quoting made it inert for the parent shell: `bash -c 'cat
+    // $(pwd)'` runs the substitution. The char segmenter drops the `(`, so the
+    // body text itself is what proves the inner argv is not static.
+    const body = scanShellSyntax(nestedCommand);
+    const bodyRewritesArgv = body.hasExecutableSubstitution || body.hasHereDocument;
+    const inner = parseCommandSegments(nestedCommand);
+    return bodyRewritesArgv
+      ? inner.map((nestedSegment) => ({ ...nestedSegment, decomposable: false }))
+      : inner;
   });
   return [...segments, ...nested];
 }
@@ -1041,11 +1268,6 @@ function isDangerousSegment(segment: CommandSegment): boolean {
   return words.length > 0 && isDangerousWords(words);
 }
 
-/** Matches Codex's pre-sandbox dangerous-command gate. */
-export function shellCommandIsDangerous(command: string): boolean {
-  return parseCommandSegments(command).some(isDangerousSegment);
-}
-
 /** Deletion commands whose targets are checked against the sandbox write roots. */
 export const deletionExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
 
@@ -1099,6 +1321,8 @@ export function classifyRisk(
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "REVIEW";
   const segments = request.commandSegments ?? parseCommandSegments(command);
+  // Tier 1 — proven dangerous (forced rm, non-exempt network, external side
+  // effect) is never downgraded to a review.
   if (!networkApproved && request.networkTargets?.length) return "HARD";
   if (
     segments.some(
@@ -1109,10 +1333,15 @@ export function classifyRisk(
     )
   )
     return "HARD";
-  if (
-    scanShellSyntax(command).hasExecutableSubstitution ||
-    segments.some((segment) => segment.hasSubstitution)
-  )
-    return "REVIEW";
-  return "LOW";
+  // Tier 2 — proven safe: static argv equals runtime argv for the whole
+  // command, so nothing is left to prove. An *unknown* executable is still
+  // this tier; only a rewritable argv is not.
+  const decomposable =
+    !scanShellSyntax(command).hasExecutableSubstitution &&
+    segments.every((segment) => segment.decomposable);
+  // Tier 3 — unclassifiable: a dynamic executable word, a re-interpreted
+  // string or stdin program, a substitution, a heredoc, or a brace group. The
+  // static word list is not the argv that runs, so fail closed into review
+  // instead of guessing.
+  return decomposable ? "LOW" : "REVIEW";
 }

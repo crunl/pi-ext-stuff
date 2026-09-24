@@ -25,6 +25,12 @@ export interface CommandSegment {
   hasRedirect: boolean;
   hasSubstitution: boolean;
   nestedShell: boolean;
+  /**
+   * Static argv equals the argv the shell will run: no dynamic executable
+   * word, no re-interpreted string, no command substitution, no heredoc, no
+   * brace group. Only a decomposable segment can be proven safe by inspection.
+   */
+  decomposable: boolean;
 }
 
 export interface RuleMatch {

@@ -13,7 +13,6 @@ import {
   normalizeToolCall,
   parseCommandSegments,
   type Risk,
-  shellCommandIsDangerous,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { requestedEscalation, resolveAdditionalWriteRoots } from "./shell-permissions.ts";
@@ -348,13 +347,22 @@ export async function evaluateRiskRequest(
   // Bash is executed inside the active sandbox. Static policy identifies
   // explicit additional filesystem capabilities; network effects are
   // authorized at the SRT connection boundary so one approved endpoint never
-  // turns into a whole-command replay.
-  let risk =
-    request.operation === "execute" && tool.toLowerCase() === "bash" && config.sandbox.enabled
-      ? command !== undefined && shellCommandIsDangerous(command)
-        ? "HARD"
-        : "LOW"
-      : classifyRisk(request, false, [], filesystem.protectedWritePaths, filesystem.allowWrite);
+  // turns into a whole-command replay. The sandboxed Bash path therefore runs
+  // the same classifier with only that network exemption: a command whose
+  // static argv cannot be shown to equal its runtime argv stays REVIEW
+  // (fail closed) instead of a separate dangerous-only HARD/LOW ternary.
+  // The exemption covers network effects only (`networkTargets` /
+  // `invocationUsesNetwork`); an external side effect
+  // (`invocationHasExternalSideEffect`, e.g. `terraform apply`) is not
+  // exempted — the sandbox guards the connection boundary, not the API
+  // semantics of the call — so it stays HARD.
+  let risk = classifyRisk(
+    request,
+    sandboxedBashNetwork,
+    [],
+    filesystem.protectedWritePaths,
+    filesystem.allowWrite,
+  );
   if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
 
   const allowWrite = [...filesystem.allowWrite];
