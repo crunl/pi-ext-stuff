@@ -18,7 +18,7 @@ export const RESIDUAL_SIGNALS = [
 
 export type ResidualSignal = (typeof RESIDUAL_SIGNALS)[number];
 
-export const FALLBACK_RESIDUAL: ResidualSignal = "other_explicit_review";
+const FALLBACK_RESIDUAL: ResidualSignal = "other_explicit_review";
 
 export function isResidualSignal(value: unknown): value is ResidualSignal {
   return typeof value === "string" && (RESIDUAL_SIGNALS as readonly string[]).includes(value);

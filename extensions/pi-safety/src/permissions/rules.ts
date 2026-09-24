@@ -20,7 +20,6 @@ export interface CommandSegment {
   executableToken: string;
   executable: string;
   executableTrusted: boolean;
-  directExecutable: boolean;
   args: string[];
   hasRedirect: boolean;
   hasSubstitution: boolean;

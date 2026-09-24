@@ -8,7 +8,7 @@
 const MAX_DANGEROUS_WRAPPER_DEPTH = 8;
 
 /** True when `rm` was invoked with `-f`/`--force` (or a flag bundle containing `f`). */
-export function rmArgsIncludeForce(args: string[]): boolean {
+function rmArgsIncludeForce(args: string[]): boolean {
   for (const arg of args) {
     if (arg === "--") break;
     if (arg === "--force") return true;

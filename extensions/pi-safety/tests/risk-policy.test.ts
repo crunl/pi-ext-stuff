@@ -518,12 +518,41 @@ describe("Risk policy gate", () => {
     "tofu destroy -auto-approve",
     "kubectl delete deployment production",
     "vercel --prod",
+    // A network grant authorizes the connection, not what the API call does.
+    // These tools were previously invisible to the static classifier, so they
+    // reached the sandbox as LOW and only met the connection boundary.
+    "aws s3 rm s3://bucket/key",
+    "aws ec2 terminate-instances --instance-ids i-1",
+    "gcloud compute instances delete vm",
+    "az vm delete --name vm",
+    "helm uninstall release",
+    "gh pr merge 12",
+    "npm publish",
+    "cargo yank crate",
+    "kubectl exec pod -- ls",
   ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "prompt",
       risk: "HARD",
+    });
+  });
+
+  it.each([
+    "aws s3 ls s3://bucket",
+    "gcloud compute instances list",
+    "kubectl get pods",
+    "helm list",
+    "gh run list",
+    "gh pr list",
+    "npm ls",
+  ])("keeps a read-only control-plane query out of the mutation table: %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "allow",
+      risk: "LOW",
     });
   });
 

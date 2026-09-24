@@ -5,11 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultSafetyConfigPath } from "../src/filesystem-policy.ts";
 import { isPathAllowed } from "../src/permissions/paths.ts";
 import {
+  analyzeShellGitNetwork,
   classifyRisk,
   extractShellNetworkHosts,
   isPublicNetworkHost,
   normalizeToolCall,
-  shellCommandUsesDirectImplicitGitPush,
 } from "../src/permissions/risk.ts";
 import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
 
@@ -123,7 +123,7 @@ describe("Git network parsing", () => {
     ["git push origin main; git status", false],
     ["git push origin main > push.log", false],
   ] as const)("identifies one parsed implicit Git push in %s", (command, expected) => {
-    expect(shellCommandUsesDirectImplicitGitPush(command)).toBe(expected);
+    expect(analyzeShellGitNetwork(command).directImplicitPurpose === "push").toBe(expected);
   });
 });
 
@@ -258,6 +258,144 @@ describe("narrow static risk contract", () => {
     ["time -- rm -rf build", "HARD"],
     ["time -f %e rm -rf build", "HARD"],
     ["time -o /tmp/out rm -rf build", "HARD"],
+    // Delegating wrappers hide the real command behind a fixed-arity option
+    // grammar; stripping them is what exposes the nested forced removal.
+    ["timeout 1 rm -rf build", "HARD"],
+    ["timeout 30s rm -rf build", "HARD"],
+    ["timeout --foreground 30 rm -rf build", "HARD"],
+    ["timeout -k 5 30 rm -rf build", "HARD"],
+    ["timeout -s TERM 30 rm -rf build", "HARD"],
+    ["nice rm -rf build", "HARD"],
+    ["nice -n 10 rm -rf build", "HARD"],
+    ["nice --adjustment 5 rm -rf build", "HARD"],
+    ["stdbuf -o0 rm -rf build", "HARD"],
+    ["stdbuf --output=0 rm -rf build", "HARD"],
+    ["unbuffer rm -rf build", "HARD"],
+    // `su`/`doas` carry an identity operand and a per-platform inline-command
+    // grammar, so the real command is not provable from the static words.
+    ["su root -c 'rm -rf /tmp/x'", "REVIEW"],
+    ["doas rm -rf /tmp/x", "REVIEW"],
+    // A wrapper with no provable command operand names no runtime program.
+    ["timeout", "REVIEW"],
+    ["nice", "REVIEW"],
+    ["timeout --help", "REVIEW"],
+    ["time", "REVIEW"],
+    ["time -f", "REVIEW"],
+    ["nohup", "REVIEW"],
+    ["command", "REVIEW"],
+    ["sudo -u", "REVIEW"],
+    ["sudo -C", "REVIEW"],
+    // An option whose value could be read as the executable is not provable:
+    // unknown `env`/`sudo` value-taking options and non-canonical durations.
+    ["env -S 'rm -rf /tmp/x'", "REVIEW"],
+    ["env -P /usr/bin rm -rf /tmp/x", "REVIEW"],
+    ["sudo -D /tmp rm -rf /tmp/x", "REVIEW"],
+    ["sudo -R / rm -rf /tmp/x", "REVIEW"],
+    ["sudo -T 1 rm -rf /tmp/x", "REVIEW"],
+    ["timeout 1e3 rm -rf /tmp/x", "REVIEW"],
+    ["timeout 0x1 rm -rf /tmp/x", "REVIEW"],
+    ["timeout 1.2.3 rm -rf /tmp/x", "REVIEW"],
+    // GNU `nice` accepts a bare adjustment operand; it must not become the
+    // executable.
+    ["nice +5 rm -rf /tmp/x", "HARD"],
+    ["nice -10 rm -rf /tmp/x", "HARD"],
+    ["nice +5 ls -la", "LOW"],
+    // A backslash-newline is a line continuation removed before word
+    // splitting, so it must not split the command word apart.
+    ["r\\\nm -f /tmp/x", "HARD"],
+    ["rm \\\n-rf /tmp/x", "HARD"],
+    ["timeout \\\n1 rm -rf /tmp/x", "HARD"],
+    // A redirection is shell syntax: `>out rm -f x` runs `rm`, it does not run
+    // a program named `>out`.
+    [">out rm -f /tmp/x", "HARD"],
+    ["2>err rm -f /tmp/x", "HARD"],
+    ["<in rm -f /tmp/x", "HARD"],
+    [">>log rm -rf /tmp/x", "HARD"],
+    ["FOO=1 >out rm -rf /tmp/x", "HARD"],
+    ["ls -la >out", "LOW"],
+    ["cat <in", "LOW"],
+    // An unterminated lexical construct is unproven, not safe. A proven
+    // danger still outranks the lex defect, so `rm -f x \` stays HARD.
+    [">out", "REVIEW"],
+    ["echo 'unclosed", "REVIEW"],
+    ['echo "unclosed', "REVIEW"],
+    ["echo \\", "REVIEW"],
+    ["echo \u0000", "REVIEW"],
+    ["rm -f x \\", "HARD"],
+    // Git can run a program the argv never names: a shell alias, a config key
+    // whose value is an executable, a `GIT_*` override, or a subcommand that
+    // takes a command. Codex has no Git arm, so nothing upstream catches these.
+    ["git -c alias.x='!rm -f /tmp/x' x", "REVIEW"],
+    ["git -calias.x='!rm -f /tmp/x' x", "REVIEW"],
+    ["git -c core.pager='rm -f /tmp/x' log", "REVIEW"],
+    ["git --config-env=core.pager=EVIL log", "REVIEW"],
+    ["git -c credential.helper='!rm -f /tmp/x' status", "REVIEW"],
+    ["GIT_EXTERNAL_DIFF='rm -f /tmp/x' git diff", "REVIEW"],
+    ["GIT_PAGER='rm -f /tmp/x' git log", "REVIEW"],
+    ["GIT_EDITOR='rm -f /tmp/x' git commit", "REVIEW"],
+    ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x git x", "REVIEW"],
+    ["git filter-branch --tree-filter 'rm -f /tmp/x'", "REVIEW"],
+    ["git bisect run rm -f /tmp/x", "REVIEW"],
+    ["git hook run post-checkout", "REVIEW"],
+    ["git submodule foreach 'rm -f /tmp/x'", "REVIEW"],
+    // A config value that names no executable leaves the argv provable.
+    ["git -c core.quotepath=false status", "LOW"],
+    ["git -c user.name=Foo commit -m x", "LOW"],
+    ["git -c init.defaultBranch=main init", "LOW"],
+    ["git bisect start", "LOW"],
+    ["git hook list", "LOW"],
+    ["git submodule status", "LOW"],
+    ["GIT_AUTHOR_NAME=x git commit -m x", "LOW"],
+    // Process control is fully determined by its argv but is not confined by
+    // the filesystem or network policy, so it reviews rather than allowing.
+    // fx treats the same primitive as `process_or_system`
+    // (`command_effect.zig:894-906`).
+    ["kill -9 1", "REVIEW"],
+    ["pkill -9 node", "REVIEW"],
+    ["killall node", "REVIEW"],
+    ["timeout 1 kill -9 1", "REVIEW"],
+    ["sudo kill -9 1", "REVIEW"],
+    // A proven danger still outranks a process-control review.
+    ["kill -9 1; rm -rf /tmp/x", "HARD"],
+    // Process inspection is not process control.
+    ["ps aux", "LOW"],
+    ["pgrep node", "LOW"],
+    // A network grant authorizes the connection, not the API semantics carried
+    // over it, so a mutating control-plane verb is a proven external effect.
+    ["git config --global alias.x '!rm -f /tmp/x'", "REVIEW"],
+    ["git config alias.dg '!rm -f /tmp/x'", "REVIEW"],
+    // A value-taking global option must be consumed before the subcommand is
+    // read, or its value is mistaken for the subcommand.
+    ["git -C /tmp bisect run rm -f /tmp/x", "REVIEW"],
+    ["git --git-dir /tmp/r bisect run rm -f /tmp/x", "REVIEW"],
+    ["git -C /tmp -c alias.x='!rm -f /tmp/x' x", "REVIEW"],
+    ["git --exec-path=/tmp/x custom-subcommand", "REVIEW"],
+    ["GIT_EXEC_PATH=/tmp/x git custom-subcommand", "REVIEW"],
+    ["GIT_CONFIG_PARAMETERS='alias.x=!rm -f /tmp/x' git x", "REVIEW"],
+    ["git -c filter.blob.clean='rm -f /tmp/x' status", "REVIEW"],
+    ["git -c diff.mydriver.command='rm -f /tmp/x' diff", "REVIEW"],
+    ["git -c interactive.diffFilter=rm status", "REVIEW"],
+    ["git -c ALIAS.X='!rm -f /tmp/x' x", "REVIEW"],
+    ["git --config-env core.pager=EVIL log", "REVIEW"],
+    ["git -C /tmp status", "LOW"],
+    ["git --work-tree ../t status", "LOW"],
+    ["git -c filter.blob.required=false status", "LOW"],
+    // `kill` reporting forms do not signal; a mixed form still reviews.
+    ["kill -l", "LOW"],
+    ["kill -L", "LOW"],
+    ["kill --version", "LOW"],
+    ["kill -l -9 1", "REVIEW"],
+    ["kill -TERM -1", "REVIEW"],
+    // Read-only control-plane verbs must not be caught by the mutation table.
+    ["aws s3 ls s3://bucket", "LOW"],
+    ["aws ec2 describe-instances", "LOW"],
+    ["gcloud compute instances list", "LOW"],
+    ["kubectl get pods", "LOW"],
+    ["helm list", "LOW"],
+    ["npm ls", "LOW"],
+    ["vercel --version", "LOW"],
+    // A verb used as an option value is not a verb: `terraform plan -out apply`.
+    ["terraform plan -out apply", "LOW"],
     ["trap 'rm -rf /tmp/x' EXIT", "HARD"],
     ['bash -lc "rm -rf build"', "HARD"],
     ['sh -c "rm -f x"', "HARD"],
@@ -268,6 +406,9 @@ describe("narrow static risk contract", () => {
     ["deno eval 'console.log(1)'", "REVIEW"],
     ["perl -wE 'say 1'", "REVIEW"],
     ["php -dr 'system(\"ls\");'", "REVIEW"],
+    // Stripping a delegating wrapper must not disturb ordinary wrapped reads.
+    ["timeout 1 ls -la", "LOW"],
+    ["nice -n 5 git status", "LOW"],
     // A word after a value-taking option is that option's value, and a bare `-`
     // is the stdin sentinel: the program comes from a pipe, not the argv.
     ["bash -o pipefail", "REVIEW"],
@@ -307,6 +448,18 @@ describe("narrow static risk contract", () => {
       expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("REVIEW");
     },
   );
+
+  it("classifies wrapper option parsing without catastrophic backtracking", () => {
+    // A nested-quantifier regex on the `stdbuf` attached-value form made a
+    // 25-character token take seconds. Commands are agent-authored, so this
+    // input is reachable and must stay cheap.
+    for (const length of [20, 25, 40, 80]) {
+      const command = `stdbuf -o${"a".repeat(length)}! rm -rf build`;
+      const started = performance.now();
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("REVIEW");
+      expect(performance.now() - started).toBeLessThan(500);
+    }
+  });
 
   it.each([
     "printf '%s\\n' '$(rm -rf build)'",

@@ -163,18 +163,39 @@ function splitShellSegments(command: string): string[] {
   return segments;
 }
 
-function shellWords(source: string): string[] {
+/**
+ * Lexical defects that make the word list an incomplete picture of what the
+ * shell will run. Mirrors fx `command_lex.zig:43-75,483-486`
+ * (`ShellScan` / `LexError`): an unterminated construct is not a safe default,
+ * it is an unproven one.
+ */
+type ShellLexError = "unbalanced-quote" | "trailing-escape" | "nul-byte";
+
+interface ShellWords {
+  words: string[];
+  error?: ShellLexError;
+}
+
+function shellWords(source: string): ShellWords {
   const words: string[] = [];
   let current = "";
   let tokenStarted = false;
   let quote: "'" | '"' | undefined;
   let escaped = false;
+  let error: ShellLexError | undefined;
   const flush = (): void => {
     if (tokenStarted) words.push(current);
     current = "";
     tokenStarted = false;
   };
-  for (const character of source) {
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index] as string;
+    if (character === "\0") {
+      error ??= "nul-byte";
+      current += character;
+      tokenStarted = true;
+      continue;
+    }
     if (escaped) {
       current += character;
       tokenStarted = true;
@@ -182,6 +203,14 @@ function shellWords(source: string): string[] {
       continue;
     }
     if (character === "\\" && quote !== "'") {
+      // A backslash before a newline is a line continuation: it is removed
+      // before word splitting, so it must neither open an escape nor start a
+      // word. Without this, `r\` + newline + `m -f x` lexes as `r` and `m`,
+      // and the forced removal is never inspected.
+      if (source[index + 1] === "\n") {
+        index += 1;
+        continue;
+      }
       tokenStarted = true;
       escaped = true;
       continue;
@@ -206,38 +235,193 @@ function shellWords(source: string): string[] {
     current += character;
     tokenStarted = true;
   }
+  if (escaped) error ??= "trailing-escape";
+  if (quote !== undefined) error ??= "unbalanced-quote";
   flush();
-  return words;
+  return error === undefined ? { words } : { words, error };
+}
+
+/**
+ * A redirection operator, optionally prefixed by a file descriptor. In the
+ * shell grammar the target is part of the same word when it is attached
+ * (`>out`, `2>err`, `2>&1`) and a separate word when it is not (`> out`).
+ * Neither form is ever the command word.
+ */
+const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
+/** A redirection operator with no attached target, so its target is the next word. */
+const BARE_REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)$/;
+
+interface LeadingSyntax {
+  words: string[];
+  /** A redirect operator appeared without the target word it requires. */
+  incomplete: boolean;
+}
+
+/**
+ * Drop the leading assignments and redirections that precede the command word
+ * in a simple command. `executableContext` already reduces assignments, but a
+ * redirect such as `>out rm -f x` would otherwise be read as the executable and
+ * hide the real command.
+ */
+function stripLeadingSyntax(words: readonly string[]): LeadingSyntax {
+  const remaining: string[] = [];
+  let index = 0;
+  let incomplete = false;
+  while (index < words.length) {
+    const word = words[index] ?? "";
+    if (assignmentName(word) !== undefined) {
+      remaining.push(word);
+      index += 1;
+      continue;
+    }
+    if (BARE_REDIRECT_OPERATOR.test(word)) {
+      if (index + 1 >= words.length) {
+        incomplete = true;
+        break;
+      }
+      index += 2;
+      continue;
+    }
+    if (REDIRECT_OPERATOR.test(word)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  remaining.push(...words.slice(index));
+  return { words: remaining, incomplete };
 }
 
 interface ExecutableContext {
   index: number;
   safe: boolean;
-  direct: boolean;
+  /**
+   * An identity-changing prefix was present but its argument grammar was not
+   * fully reduced to the real command. The static word list then describes the
+   * prefix, not what runs, so the segment must not be treated as decomposable.
+   */
+  unclassifiable: boolean;
 }
 
 function isUnsafeGitContextVariable(name: string): boolean {
   return name === "PATH" || name.startsWith("GIT_");
 }
 
+/** `timeout` duration: decimal with at most one non-trailing dot, optional s/m/h/d. */
+const TIMEOUT_DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+
+/**
+ * Delegating process wrappers whose option words are value-taking. Stripping
+ * them must reach the real command, or a nested `rm -f` is never inspected.
+ * Mirrors fx `command_lex.zig:304-442` (`wrapper_strip_argv`): a wrapper is
+ * removed only when its own grammar is provable; anything ambiguous stays
+ * anchored and therefore never yields a `LOW` verdict.
+ */
+function delegatingWrapperOptionCount(
+  wrapper: string,
+  args: readonly string[],
+  start: number,
+): number | undefined {
+  let index = start;
+  while (index < args.length) {
+    const token = args[index] ?? "";
+    if (!token.startsWith("-") || token === "-") break;
+    if (wrapper === "timeout") {
+      if (token === "--foreground" || token === "--preserve-status" || token === "--verbose") {
+        index += 1;
+        continue;
+      }
+      if (token === "-v") {
+        index += 1;
+        continue;
+      }
+      // `-k DURATION` / `--kill-after[=]DURATION`, `-s SIGNAL` / `--signal[=]SIGNAL`
+      const takesValue =
+        token === "-k" || token === "--kill-after" || token === "-s" || token === "--signal";
+      if (takesValue) {
+        if (args[index + 1] === undefined) return undefined;
+        index += 2;
+        continue;
+      }
+      if (token.startsWith("--kill-after=") || token.startsWith("--signal=")) {
+        index += 1;
+        continue;
+      }
+      return undefined;
+    }
+    if (wrapper === "nice") {
+      if (token === "-n" || token === "--adjustment") {
+        const value = args[index + 1];
+        if (value === undefined || !/^[+-]?\d+$/.test(value)) return undefined;
+        index += 2;
+        continue;
+      }
+      if (token.startsWith("--adjustment=")) {
+        if (!/^[+-]?\d+$/.test(token.slice("--adjustment=".length))) return undefined;
+        index += 1;
+        continue;
+      }
+      if (/^-[+-]?\d+$/.test(token)) {
+        index += 1;
+        continue;
+      }
+      return undefined;
+    }
+    if (wrapper === "stdbuf") {
+      if (token === "-i" || token === "-o" || token === "-e") {
+        const value = args[index + 1];
+        if (value === undefined) return undefined;
+        index += 2;
+        continue;
+      }
+      if (
+        token === "--input" ||
+        token === "--output" ||
+        token === "--error" ||
+        token.startsWith("--input=") ||
+        token.startsWith("--output=") ||
+        token.startsWith("--error=")
+      ) {
+        index += token.includes("=") ? 1 : 2;
+        continue;
+      }
+      // Attached short forms: `-o0`, `-iL`, `-o4k`, `-ioe`. The leading run of
+      // `i`/`o`/`e` flags is consumed separately from the attached buffer-size
+      // value so neither alternative can backtrack (a nested quantifier here
+      // is a ReDoS on agent-authored commands).
+      const attached = /^(-[ioe]*)([A-Za-z0-9]+)?$/.exec(token);
+      if (attached) {
+        index += 1;
+        continue;
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+  return index;
+}
+
 function executableContext(words: readonly string[]): ExecutableContext {
   let index = 0;
   let safe = true;
-  let direct = true;
+  let unclassifiable = false;
   while (index < words.length) {
     const name = assignmentName(words[index] ?? "");
     if (!name) break;
     if (isUnsafeGitContextVariable(name)) safe = false;
     index += 1;
-    direct = false;
   }
   while (index < words.length) {
     const wrapperToken = words[index] ?? "";
     const wrapper = basename(wrapperToken).toLowerCase();
-    if (wrapper === "command" || wrapper === "builtin" || wrapper === "nohup" || wrapper === "time") {
+    if (
+      wrapper === "command" ||
+      wrapper === "builtin" ||
+      wrapper === "nohup" ||
+      wrapper === "time"
+    ) {
       safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
       index += 1;
-      direct = false;
       while (index < words.length && words[index]?.startsWith("-")) {
         if (words[index] === "-p") safe = false;
         // `time -f FORMAT` / `time -o FILE` take a value argument; consume it so
@@ -249,16 +433,68 @@ function executableContext(words: readonly string[]): ExecutableContext {
             words[index] === "-o" ||
             words[index] === "--output")
         ) {
+          if (words[index + 1] === undefined) {
+            unclassifiable = true;
+            break;
+          }
           index += 1;
         }
         index += 1;
       }
+      // A bare `time`/`command`/`nohup` names no command at all.
+      if (unclassifiable || words[index] === undefined) {
+        unclassifiable = true;
+      }
+      continue;
+    }
+    // Delegating wrappers hide the real command behind a fixed-arity option
+    // grammar. Strip them so the nested command is classified, and fail closed
+    // (stay anchored) whenever the grammar is not provable.
+    if (
+      wrapper === "timeout" ||
+      wrapper === "nice" ||
+      wrapper === "stdbuf" ||
+      wrapper === "unbuffer"
+    ) {
+      if (!isTrustedExecutableToken(wrapperToken, wrapper)) {
+        unclassifiable = true;
+        break;
+      }
+      let next = delegatingWrapperOptionCount(wrapper, words, index + 1);
+      if (next === undefined) {
+        unclassifiable = true;
+        break;
+      }
+      // `timeout` takes a bare DURATION as its first operand.
+      if (wrapper === "timeout") {
+        const duration = words[next];
+        if (duration === undefined || !TIMEOUT_DURATION.test(duration)) {
+          unclassifiable = true;
+          break;
+        }
+        next += 1;
+      }
+      const commandToken = words[next];
+      if (commandToken === undefined || commandToken.startsWith("-")) {
+        unclassifiable = true;
+        break;
+      }
+      // GNU `nice` accepts a bare `+N`/`-N` adjustment operand. Consume it so
+      // the adjustment is never read as the executable.
+      if (wrapper === "nice" && /^[+-]\d+$/.test(commandToken)) {
+        const following = words[next + 1];
+        if (following === undefined || following.startsWith("-")) {
+          unclassifiable = true;
+          break;
+        }
+        next += 1;
+      }
+      index = next;
       continue;
     }
     if (wrapper === "env") {
       safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
       index += 1;
-      direct = false;
       while (index < words.length) {
         const token = words[index] ?? "";
         const name = assignmentName(token);
@@ -293,43 +529,70 @@ function executableContext(words: readonly string[]): ExecutableContext {
           index += token === "-C" || token === "--chdir" ? 2 : 1;
           continue;
         }
+        // An unrecognized `env` option may take a value (`-S string`,
+        // `-P path`). Its value would otherwise be read as the executable, so
+        // the segment cannot claim a provable argv.
         if (token.startsWith("-")) {
           safe = false;
-          index += 1;
-          continue;
+          unclassifiable = true;
+          break;
         }
         break;
       }
       continue;
     }
-    if (wrapper !== "sudo") break;
-    safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
-    index += 1;
-    direct = false;
-    while (index < words.length) {
-      const token = words[index] ?? "";
-      if (token === "-u" || token === "-g" || token === "-h" || token === "-p") {
-        index += 2;
-        continue;
+    if (wrapper === "sudo") {
+      safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
+      index += 1;
+      while (index < words.length) {
+        const token = words[index] ?? "";
+        if (token === "-u" || token === "-g" || token === "-h" || token === "-p") {
+          if (words[index + 1] === undefined) {
+            unclassifiable = true;
+            break;
+          }
+          index += 2;
+          continue;
+        }
+        if (token === "-C" || token === "--chdir" || token.startsWith("--chdir=")) {
+          safe = false;
+          if (token.startsWith("--chdir=")) {
+            index += 1;
+            continue;
+          }
+          if (words[index + 1] === undefined) {
+            unclassifiable = true;
+            break;
+          }
+          index += 2;
+          continue;
+        }
+        if (new Set(["-n", "-S", "-H", "-k", "-K", "-b"]).has(token)) {
+          index += 1;
+          continue;
+        }
+        // Unknown `sudo` options include value-taking ones (`-D dir` chdir,
+        // `-R dir` chroot, `-T timeout`). Without a complete grammar their
+        // value would be read as the executable.
+        if (token.startsWith("-")) {
+          safe = false;
+          unclassifiable = true;
+          break;
+        }
+        break;
       }
-      if (token === "-C" || token === "--chdir" || token.startsWith("--chdir=")) {
-        safe = false;
-        index += token === "-C" || token === "--chdir" ? 2 : 1;
-        continue;
-      }
-      if (new Set(["-n", "-S", "-H", "-k", "-K", "-b"]).has(token)) {
-        index += 1;
-        continue;
-      }
-      if (token.startsWith("-")) {
-        safe = false;
-        index += 1;
-        continue;
-      }
-      break;
+      continue;
     }
+    // `su` / `doas` change identity and may carry an inline command
+    // (`su root -c 'rm -rf x'`, `doas rm -rf x`). Their option grammar differs
+    // per platform, so the wrapper stays anchored and the segment is marked
+    // unclassifiable rather than guessing where the real command starts.
+    if (wrapper === "su" || wrapper === "doas") {
+      unclassifiable = true;
+    }
+    break;
   }
-  return { index, safe, direct };
+  return { index, safe, unclassifiable };
 }
 
 function isTrustedExecutableToken(token: string, executable: string): boolean {
@@ -566,7 +829,13 @@ function reExecutesString(
 }
 
 function parseCommandSegment(source: string): CommandSegment {
-  const words = shellWords(source);
+  const lexed = shellWords(source);
+  // Redirections are shell syntax: `>out rm -f x` runs `rm`, it does not run a
+  // program named `>out`. Strip the leading operator/target pairs before the
+  // command word is read, keeping assignments so the Git context check in
+  // `executableContext` still sees them.
+  const leading = stripLeadingSyntax(lexed.words);
+  const words = leading.words;
   // Reserved words are structural only in command position, which the char
   // segmenter already isolated: it splits on `;`/`&`/`|`/newline, so the
   // keyword is leading. Bash treats one behind an assignment or wrapper
@@ -579,6 +848,9 @@ function parseCommandSegment(source: string): CommandSegment {
   const context = executableContext(words.slice(start));
   const index = start + context.index;
   const executableToken = words[index] ?? "";
+  // A simple command with no command word runs nothing provable: `>out` is a
+  // redirection with no target, `FOO=1` is an assignment with no command.
+  const nameless = executableToken === "";
   const executable = basename(executableToken).toLowerCase();
   const args = words.slice(index + 1);
   const syntax = scanShellSyntax(source);
@@ -587,20 +859,29 @@ function parseCommandSegment(source: string): CommandSegment {
   );
   const nestedShell = shellExecutables.has(executable) && commandIndex >= 0;
   const reExec = reExecutesString(executable, args, nestedShell);
+  // A Git invocation can be told to run another program — a shell alias, a
+  // pager, a `bisect run` payload — without any of those words naming it.
+  const nestedGitProgram = executable === "git" && gitExecutesNestedProgram(words, args);
   return {
     source,
     executableToken,
     executable,
     executableTrusted: context.safe && isTrustedExecutableToken(executableToken, executable),
-    directExecutable: context.direct,
     args,
     hasRedirect: syntax.hasActiveRedirect,
     hasSubstitution: syntax.hasExecutableSubstitution,
     nestedShell,
     // Static argv equals runtime argv only when nothing can rewrite the word
-    // list: no dynamic executable, no re-interpreted string, no substitution,
-    // no heredoc body, and no unreduced brace group.
+    // list: the lexing completed, no dynamic executable, no re-interpreted
+    // string, no nested Git program, no substitution, no heredoc body, no
+    // unreduced brace group, and no wrapper whose argument grammar could not be
+    // reduced to the real command.
     decomposable:
+      lexed.error === undefined &&
+      !leading.incomplete &&
+      !nameless &&
+      !context.unclassifiable &&
+      !nestedGitProgram &&
       !isDynamicExecutableToken(executableToken) &&
       !reExec &&
       !syntax.hasExecutableSubstitution &&
@@ -800,6 +1081,140 @@ const unsafeGitGlobalValueOptions = new Set([
   "--work-tree",
 ]);
 const recognizedGitSubcommands = new Set([...gitNetworkSubcommands, "config", "submodule"]);
+
+/**
+ * Config keys whose value is a program Git will run directly. A shell alias is
+ * matched by prefix, since `alias.<anything>` is invoked as a command.
+ *
+ * `core.hooksPath` is deliberately absent: it names a directory Git searches
+ * for hook files rather than a program it execs, and gating ordinary mutations
+ * on it is a locked contract (`tests/risk-policy.test.ts:825-840`). The
+ * residual path — write an executable hook, then point Git at its directory —
+ * depends on writing a runnable file first, which the static layer does not
+ * police either.
+ */
+const gitExecutableConfigKeys = new Set([
+  "core.pager",
+  "core.editor",
+  "core.sshcommand",
+  "core.gitproxy",
+  "core.askpass",
+  "core.fsmonitor",
+  "sequence.editor",
+  "credential.helper",
+  "diff.external",
+  // Git config keys are matched lowercased, so this entry is too.
+  "interactive.difffilter",
+  "merge.tool",
+  "gpg.program",
+  "uploadpack.packobjectshook",
+  "receivepack.packobjectshook",
+]);
+
+/** Per-driver config keys whose value is a command Git execs. */
+const gitExecutableConfigSuffixes = [".clean", ".smudge", ".process", ".command"];
+
+/** `GIT_*` overrides that substitute an executable Git will run. */
+const gitExecutableEnvNames = new Set([
+  "GIT_ASKPASS",
+  "GIT_EDITOR",
+  "GIT_EXEC_PATH",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_PAGER",
+  "GIT_SEQUENCE_EDITOR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+]);
+
+/** Subcommands that only run a command in one of their sub-forms. */
+const gitCommandRunningSubcommands = new Map([
+  ["bisect", new Set(["run"])],
+  ["hook", new Set(["run"])],
+  // Every `filter-branch` form rewrites history through a shell command.
+  ["filter-branch", undefined],
+]);
+
+function gitConfigKeyIsExecutable(key: string): boolean {
+  const normalized = key.trim().toLowerCase();
+  if (gitExecutableConfigKeys.has(normalized)) return true;
+  if (normalized.startsWith("alias.")) return true;
+  return gitExecutableConfigSuffixes.some((suffix) => normalized.endsWith(suffix));
+}
+
+/**
+ * Whether this Git invocation can run a program the static words never name.
+ *
+ * Codex's `is_dangerous_command` has no Git arm at all (removed in `fc073c9`),
+ * so a shell alias or a `bisect run` payload reaches the sandbox with no nested
+ * inspection. Once Git has been told to execute something, the segment's argv
+ * describes the wrapper rather than the program, so it cannot be proven
+ * decomposable.
+ */
+function gitExecutesNestedProgram(words: readonly string[], args: readonly string[]): boolean {
+  for (const word of words) {
+    const name = assignmentName(word);
+    if (name === undefined) continue;
+    if (gitExecutableEnvNames.has(name.toUpperCase())) return true;
+    // `GIT_CONFIG_PARAMETERS` and the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+    // `GIT_CONFIG_VALUE_n` triple can set any config key, including an alias.
+    if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(name.toUpperCase())) return true;
+  }
+  let subcommand: string | undefined;
+  let subcommandIndex = -1;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] ?? "";
+    // `--exec-path`/`GIT_EXEC_PATH` put a directory on Git's search path for
+    // `git-<subcommand>` dispatch, so any later subcommand may be that program.
+    if (token === "--exec-path") return true;
+    if (token.startsWith("--exec-path=")) return true;
+    if (token === "-c" || token === "--config-env") {
+      const value = args[index + 1];
+      if (value === undefined || gitConfigKeyIsExecutable(value.split("=", 1)[0] ?? ""))
+        return true;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      if (gitConfigKeyIsExecutable(token.slice(2).split("=", 1)[0] ?? "")) return true;
+      continue;
+    }
+    if (token.startsWith("--config-env=")) {
+      if (gitConfigKeyIsExecutable(token.slice("--config-env=".length).split("=", 1)[0] ?? "")) {
+        return true;
+      }
+      continue;
+    }
+    // Every remaining value-taking global option consumes the next word. If
+    // that value were read as the subcommand, `git -C /tmp bisect run CMD`
+    // would hide both the real subcommand and its payload.
+    if (unsafeGitGlobalValueOptions.has(token)) {
+      if (args[index + 1] === undefined) return true;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-") && token.includes("=")) continue;
+    if (!token.startsWith("-")) {
+      subcommand = token.toLowerCase();
+      subcommandIndex = index;
+      break;
+    }
+  }
+  if (subcommand === undefined) return false;
+  if (subcommand === "config") {
+    // `git config alias.x '!cmd'` persists an executable entry point. It runs
+    // on some later Git invocation, not this one, but the write is what makes
+    // the next call dangerous.
+    return args.some((arg) => gitConfigKeyIsExecutable(arg.split("=", 1)[0] ?? ""));
+  }
+  if (!gitCommandRunningSubcommands.has(subcommand)) {
+    return subcommand === "submodule" && args.some((arg) => arg === "foreach" || arg === "--exec");
+  }
+  const requiredSubcommand = gitCommandRunningSubcommands.get(subcommand);
+  if (requiredSubcommand === undefined) return true;
+  // The dangerous form follows the subcommand: `git bisect run CMD`.
+  const form = args[subcommandIndex + 1]?.toLowerCase();
+  return form !== undefined && requiredSubcommand.has(form);
+}
 
 interface GitInvocation {
   segment: CommandSegment;
@@ -1143,14 +1558,6 @@ function invocationUsesNetwork(segment: CommandSegment): boolean {
   return false;
 }
 
-export function shellCommandUsesImplicitGitNetwork(command: string): boolean {
-  return analyzeShellGitNetwork(command).usesImplicitNetwork;
-}
-
-export function shellCommandUsesDirectImplicitGitPush(command: string): boolean {
-  return analyzeShellGitNetwork(command).directImplicitPurpose === "push";
-}
-
 export function extractShellNetworkHosts(command: string): string[] {
   const gitNetwork = analyzeShellGitNetwork(command);
   const hosts = new Set<string>(gitNetwork.explicitHosts);
@@ -1293,19 +1700,237 @@ export function deletionTargets(segment: CommandSegment): string[] {
   return targets;
 }
 
+/**
+ * Commands that act on process state rather than on files or arguments. SRT
+ * confines the filesystem and the network but cannot observe Unix signals, so
+ * a process-control command stays reviewable even though its argv is fully
+ * determined.
+ *
+ * fx classifies the same primitive as `process_or_system`
+ * (`command_effect.zig:894-906`). `killall` is the macOS/BSD spelling of
+ * `pkill` and is not in fx's list; it is included here because leaving it next
+ * to a gated `pkill` would be incoherent.
+ */
+const processControlExecutables = new Set(["kill", "pkill", "killall"]);
+
+/**
+ * `kill` invocations that only report: `-l` lists signal names, `--version`
+ * and `--help` print and exit. None of them signal a process. Any other
+ * argument form is treated as process control, so a mixed invocation such as
+ * `kill -l -9 1` still reviews.
+ */
+const processControlReportFlags = new Set(["-l", "--list", "-L", "--table", "--version", "--help"]);
+
+function invocationControlsProcesses(segment: CommandSegment): boolean {
+  if (!processControlExecutables.has(segment.executable)) return false;
+  if (segment.executable !== "kill") return true;
+  // A bare `kill` names no process; it is left to the shell to reject.
+  if (segment.args.length === 0) return false;
+  return !segment.args.every((arg) => processControlReportFlags.has(arg));
+}
+
+/**
+ * Global options that take a value across the CLIs below, so the word after one
+ * is an option value rather than the subcommand.
+ */
+const cliGlobalValueFlags = new Set([
+  "-n",
+  "--namespace",
+  "-c",
+  "--context",
+  "--project",
+  "--profile",
+  "-p",
+  "--region",
+  "-g",
+  "--group",
+  "--cluster",
+  "-u",
+  "--user",
+  "-t",
+  "--tenant",
+]);
+
+/**
+ * The leading operands that are neither flags nor the value of a value-taking
+ * flag. Verb depth varies by tool — `kubectl exec` puts it first, `aws s3 rm`
+ * and `gh pr merge` second, `gcloud compute instances delete` third — so the
+ * first three positions are compared against the tool's verb set.
+ */
+function leadingOperands(args: readonly string[], valueFlags: ReadonlySet<string>): string[] {
+  const operands: string[] = [];
+  for (let index = 0; index < args.length && operands.length < 3; index += 1) {
+    const token = args[index] ?? "";
+    if (valueFlags.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    operands.push(token.toLowerCase());
+  }
+  return operands;
+}
+
+/**
+ * CLI verbs are sometimes compound (`terminate-instances`, `delete-bucket`),
+ * so a `verb-` prefix counts as the verb. An exact-only match would let those
+ * through, while the prefixes used here (`get-`, `list-`, `describe-`) are not
+ * themselves mutation verbs.
+ */
+function matchesMutationVerb(operand: string, verbs: ReadonlySet<string>): boolean {
+  if (verbs.has(operand)) return true;
+  const dash = operand.indexOf("-");
+  return dash > 0 && verbs.has(operand.slice(0, dash));
+}
+
+/** Subcommands that mutate remote state through a control-plane API. */
+const cliMutationVerbs = new Map<string, ReadonlySet<string>>([
+  [
+    "kubectl",
+    new Set([
+      "annotate",
+      "apply",
+      "attach",
+      "autoscale",
+      "cordon",
+      "cp",
+      "create",
+      "debug",
+      "delete",
+      "drain",
+      "edit",
+      "exec",
+      "expose",
+      "label",
+      "patch",
+      "port-forward",
+      "replace",
+      "rollout",
+      "run",
+      "scale",
+      "set",
+      "taint",
+    ]),
+  ],
+  [
+    "aws",
+    new Set([
+      "attach",
+      "authorize",
+      "cancel",
+      "copy",
+      "create",
+      "delete",
+      "deploy",
+      "deregister",
+      "detach",
+      "disable",
+      "disassociate",
+      "enable",
+      "import",
+      "install",
+      "invoke",
+      "modify",
+      "publish",
+      "put",
+      "reboot",
+      "reinstall",
+      "register",
+      "release",
+      "remove",
+      "replicate",
+      "reset",
+      "restore",
+      "revoke",
+      "rm",
+      "run",
+      "start",
+      "stop",
+      "sync",
+      "terminate",
+      "unassociate",
+      "unregister",
+      "update",
+    ]),
+  ],
+  [
+    "gcloud",
+    new Set([
+      "add-iam-policy-binding",
+      "create",
+      "delete",
+      "deploy",
+      "destroy",
+      "remove-iam-policy-binding",
+      "set-iam-policy",
+      "start",
+      "stop",
+      "update",
+    ]),
+  ],
+  ["az", new Set(["create", "delete", "destroy", "remove", "start", "stop", "update"])],
+  ["helm", new Set(["install", "rollback", "uninstall", "upgrade"])],
+  [
+    "gh",
+    new Set([
+      "cancel",
+      "close",
+      "create",
+      "delete",
+      "deploy",
+      "merge",
+      "publish",
+      "reopen",
+      "rerun",
+      "sync",
+    ]),
+  ],
+  ["npm", new Set(["deprecate", "dist-tag", "owner", "publish", "unpublish"])],
+  ["pnpm", new Set(["deprecate", "owner", "publish", "unpublish"])],
+  ["yarn", new Set(["deprecate", "owner", "publish", "unpublish"])],
+  ["cargo", new Set(["owner", "publish", "yank"])],
+  ["twine", new Set(["upload"])],
+  ["poetry", new Set(["publish"])],
+  ["doctl", new Set(["create", "delete", "rename", "update"])],
+]);
+
+/**
+ * Tools whose first operand is a noun rather than a verb, so only the second
+ * operand may be read as the verb. `gh run list` is read-only even though
+ * `run` is a mutation verb elsewhere; every other tool is scanned across the
+ * first three, because `kubectl exec`, `aws s3 rm`, and
+ * `gcloud compute instances delete` place the verb at different depths.
+ */
+const cliNounLedCommands = new Set(["gh"]);
+
+/** `terraform`/`tofu` take their verb as the first operand. */
+const terraformMutationSubcommands = new Set([
+  "apply",
+  "destroy",
+  "force-unlock",
+  "import",
+  "refresh",
+  "taint",
+  "untaint",
+]);
+
+/** CLIs whose bare invocation already deploys or mutates external state. */
+const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
+
 function invocationHasExternalSideEffect(segment: CommandSegment): boolean {
-  const args = segment.args.map((arg) => arg.toLowerCase());
-  if (segment.executable === "kubectl") {
-    return args.some((arg) =>
-      new Set(["apply", "create", "delete", "edit", "patch", "replace", "scale", "set"]).has(arg),
-    );
-  }
   if (segment.executable === "terraform" || segment.executable === "tofu") {
-    return args.some((arg) =>
-      new Set(["apply", "destroy", "import", "refresh", "taint", "untaint"]).has(arg),
-    );
+    return terraformMutationSubcommands.has(segment.args[0]?.toLowerCase() ?? "");
   }
-  return new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]).has(segment.executable);
+  if (wholeInvocationIsExternal.has(segment.executable)) {
+    // These CLIs deploy by default, so the invocation as a whole is external.
+    // A version or help query still only prints.
+    return !hasTerminalInfoFlag(segment.args);
+  }
+  const verbs = cliMutationVerbs.get(segment.executable);
+  if (verbs === undefined) return false;
+  const operands = leadingOperands(segment.args, cliGlobalValueFlags);
+  const candidates = cliNounLedCommands.has(segment.executable) ? operands.slice(1) : operands;
+  return candidates.some((operand) => matchesMutationVerb(operand, verbs));
 }
 
 export function classifyRisk(
@@ -1337,13 +1962,18 @@ export function classifyRisk(
     )
   )
     return "HARD";
-  // Tier 2 — proven safe: static argv equals runtime argv for the whole
+  // Tier 2 — proven side-effecting: the argv is fully determined, but what it
+  // does is not confined by the filesystem or network policy (Unix signals).
+  // This is a review, not a block, matching fx `approval_required(
+  // process_or_system)`.
+  if (segments.some(invocationControlsProcesses)) return "REVIEW";
+  // Tier 3 — proven safe: static argv equals runtime argv for the whole
   // command, so nothing is left to prove. An *unknown* executable is still
   // this tier; only a rewritable argv is not.
   const decomposable =
     !scanShellSyntax(command).hasExecutableSubstitution &&
     segments.every((segment) => segment.decomposable);
-  // Tier 3 — unclassifiable: a dynamic executable word, a re-interpreted
+  // Tier 4 — unclassifiable: a dynamic executable word, a re-interpreted
   // string or stdin program, a substitution, a heredoc, or a brace group. The
   // static word list is not the argv that runs, so fail closed into review
   // instead of guessing.
