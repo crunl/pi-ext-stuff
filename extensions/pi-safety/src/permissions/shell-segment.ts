@@ -5,10 +5,10 @@
  */
 import { basename } from "node:path";
 
-import { assignmentName } from "./dangerous-commands.ts";
-import { gitExecutesNestedProgram } from "./git-network.ts";
+import { gitExecutesNestedProgram } from "./git-exec-entries.ts";
 import type { CommandSegment } from "./rules.ts";
 import {
+  assignmentName,
   scanShellSyntax,
   shellWords,
   splitShellSegments,

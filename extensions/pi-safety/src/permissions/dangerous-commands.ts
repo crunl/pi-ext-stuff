@@ -4,6 +4,7 @@
  * recursive checks through `sudo`/`env` wrappers and `trap` actions.
  * Everything else is left to the sandbox boundary (see stage 3 path checks).
  */
+import { assignmentName } from "./shell-lexer.ts";
 
 const MAX_DANGEROUS_WRAPPER_DEPTH = 8;
 
@@ -16,10 +17,6 @@ function rmArgsIncludeForce(args: string[]): boolean {
     if (flags !== undefined && !flags.startsWith("-") && flags.includes("f")) return true;
   }
   return false;
-}
-
-export function assignmentName(token: string): string | undefined {
-  return /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
 }
 
 function dangerousEnv(words: string[], depth: number): boolean {

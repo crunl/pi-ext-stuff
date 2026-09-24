@@ -3,7 +3,11 @@
  * recognition, and lexical-defect detection. Produces words and raw-text
  * syntax facts; it makes no claim about what a command does.
  */
-import { assignmentName } from "./dangerous-commands.ts";
+
+/** The shell variable name in a `NAME=value` word, if it has that shape. */
+export function assignmentName(token: string): string | undefined {
+  return /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token)?.[1];
+}
 
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = [];
