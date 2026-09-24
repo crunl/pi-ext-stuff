@@ -164,6 +164,22 @@ noun-led (`cargo owner add`) at the same time, so no single scan is correct.
 The false positive is on a read-only ownership query and is left in the
 fail-closed direction.
 
+**Interpreter startup environment is not modelled.** `BASH_ENV=evil.sh bash -c
+true` runs the file before the command, and `NODE_OPTIONS=--require=preload.cjs
+node main.cjs` preloads a module; both are LOW and both execute. This is a
+vector class rather than a gap: `BASH_ENV`, `ENV`, `NODE_OPTIONS`, `RUBYOPT`,
+`PERL5OPT`, `PYTHONSTARTUP` and whatever each runtime adds next are the same
+shape, so closing it means the same allowlist-versus-blocklist problem that the
+Git config key check had. It is recorded as open rather than half-closed.
+
+**Argument expansion can produce a dangerous flag.** `FORCE=-f rm "$FORCE"
+victim` is LOW and the file is force-deleted. This is the argument-position
+counterpart of the command-word expansion that is gated, and it is *not* closed:
+the sound rule would be "any unexpanded word in an argument of a deletion
+command", which also flags `rm "$FILE"` — an ordinary and safe invocation. The
+cost is a product decision about how often a quoted variable path should
+prompt, not a correctness question, so it is left to whoever owns that tradeoff.
+
 **Over-blocking was measured, not assumed.** Of 42 ordinary read-only
 control-plane and package commands under an approved network lease, 1 is not
 LOW (`cargo owner list`). An earlier revision of the same measurement was 6 of

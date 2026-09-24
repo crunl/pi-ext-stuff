@@ -259,6 +259,8 @@ function executableContext(words: readonly string[]): ExecutableContext {
       wrapper === "command" ||
       wrapper === "builtin" ||
       wrapper === "nohup" ||
+      wrapper === "setsid" ||
+      wrapper === "exec" ||
       wrapper === "time"
     ) {
       safe = safe && isTrustedExecutableToken(wrapperToken, wrapper);
@@ -282,7 +284,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
         }
         index += 1;
       }
-      // A bare `time`/`command`/`nohup` names no command at all.
+      // A bare `time`/`command`/`nohup`/`setsid`/`exec` names no command at all.
       if (unclassifiable || words[index] === undefined) {
         unclassifiable = true;
       }
@@ -634,7 +636,11 @@ function reExecutesString(
   const subcommand = args.find((arg) => !arg.startsWith("-"));
   if (subcommand !== undefined && inlineProgramSubcommands.get(executable) === subcommand)
     return true;
-  if (moduleExecutionRuntimes.has(executable) && args.includes("-m")) return true;
+  // Both the separated and the attached spelling: `python3 -m pip` and
+  // `python3 -mpip` run the same module, and only matching the bare flag let
+  // `python3 -mfoo main.py` through.
+  if (moduleExecutionRuntimes.has(executable) && args.some((arg) => arg.startsWith("-m")))
+    return true;
   return (
     hasInlineProgramArgument(args) ||
     (scriptOperand(executable, args) === undefined && !hasTerminalInfoFlag(args))

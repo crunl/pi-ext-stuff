@@ -453,6 +453,18 @@ describe("narrow static risk contract", () => {
     // `__main__`, whose contents are not in argv.
     ["python3 -m pip install requests", "REVIEW"],
     ["python3 -m pytest", "REVIEW"],
+    // The attached spelling runs the same module.
+    ["python3 -mfoo main.py", "REVIEW"],
+    // `exec` and `setsid` are delegating wrappers like `nohup`; both were
+    // missing, so the nested command was never inspected. Verified by
+    // execution: `exec rm -f victim` removed the file.
+    ["exec rm -f /tmp/victim", "HARD"],
+    ["setsid rm -f /tmp/victim", "HARD"],
+    ["exec kill -9 1", "REVIEW"],
+    // A `GIT_CONFIG_*` variable points Git at a config file this argv never
+    // names, and that file can define an alias.
+    ["GIT_CONFIG_GLOBAL=/tmp/gcfg git name", "REVIEW"],
+    ["GIT_CONFIG_SYSTEM=/tmp/gcfg git name", "REVIEW"],
     // A global option ahead of the subcommand used to hide it: the scan read
     // the option's value as the subcommand, so `--prefix /tmp` was compared
     // against the verb table and `install` was never seen.

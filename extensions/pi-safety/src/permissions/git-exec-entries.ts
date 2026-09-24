@@ -84,6 +84,25 @@ const gitScalarConfigSegments = new Set([
   "version",
 ]);
 
+/**
+ * `GIT_CONFIG_*` variables that redirect where Git reads configuration, so a
+ * file this invocation never names can define an alias. Verified: with a preset
+ * alias, `GIT_CONFIG_GLOBAL=<file> git name` executed the alias and the
+ * classifier said LOW.
+ *
+ * `GIT_DIR` and `GIT_COMMON_DIR` are deliberately absent. They relocate the
+ * repository rather than naming a config file, so the config read is that
+ * repository's own — and gating ordinary mutations on it is a locked contract
+ * (`tests/risk-policy.test.ts:904-912`). They still reach
+ * `invalidatesExecutableTrust`, which marks the executable untrusted for the
+ * remote analysis; they just do not make the segment unprovable.
+ */
+const gitConfigSourceEnvNames = new Set([
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_NOSYSTEM",
+]);
+
 /** `git config` options that consume the following word as their value. */
 const gitConfigValueOptions = new Set(["--file", "-f", "--blob", "--default"]);
 
@@ -189,10 +208,11 @@ export function gitExecutesNestedProgram(
   for (const word of words) {
     const name = assignmentName(word);
     if (name === undefined) continue;
-    if (gitExecutableEnvNames.has(name.toUpperCase())) return true;
+    const upper = name.toUpperCase();
+    if (gitExecutableEnvNames.has(upper) || gitConfigSourceEnvNames.has(upper)) return true;
     // `GIT_CONFIG_PARAMETERS` and the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
     // `GIT_CONFIG_VALUE_n` triple can set any config key, including an alias.
-    if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(name.toUpperCase())) return true;
+    if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(upper)) return true;
   }
   let subcommand: string | undefined;
   let subcommandIndex = -1;
