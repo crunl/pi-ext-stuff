@@ -115,7 +115,23 @@ interface ExecutableContext {
   unclassifiable: boolean;
 }
 
-function isUnsafeGitContextVariable(name: string): boolean {
+/**
+ * Whether setting or unsetting this variable makes the resolved executable
+ * untrustworthy, so the segment is no longer provably decomposable.
+ *
+ * The set is `PATH` plus the whole `GIT_` namespace. `PATH` is the obvious
+ * case: reassigning it redirects command lookup to a program these words never
+ * name. `GIT_` is admitted wholesale rather than member by member — the
+ * namespace covers program-substituting variables such as `GIT_EXEC_PATH` and
+ * `GIT_SSH_COMMAND`, but it also covers inert ones like `GIT_TRACE`. Admitting
+ * the namespace costs a review on `GIT_TRACE=1 git status`; enumerating it
+ * would need a list that a new Git release can invalidate, and the cost of
+ * missing one is a fail-open.
+ *
+ * The result reaches Git as the `executableTrusted` flag, which
+ * `git-network.ts` reads when deciding whether a remote may be contacted.
+ */
+function invalidatesExecutableTrust(name: string): boolean {
   return name === "PATH" || name.startsWith("GIT_");
 }
 
@@ -220,7 +236,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
   while (index < words.length) {
     const name = assignmentName(words[index] ?? "");
     if (!name) break;
-    if (isUnsafeGitContextVariable(name)) safe = false;
+    if (invalidatesExecutableTrust(name)) safe = false;
     index += 1;
   }
   while (index < words.length) {
@@ -311,7 +327,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
         const token = words[index] ?? "";
         const name = assignmentName(token);
         if (name) {
-          if (isUnsafeGitContextVariable(name)) safe = false;
+          if (invalidatesExecutableTrust(name)) safe = false;
           index += 1;
           continue;
         }
@@ -321,12 +337,12 @@ function executableContext(words: readonly string[]): ExecutableContext {
         }
         if (token === "-u" || token === "--unset") {
           const unsetName = words[index + 1];
-          if (!unsetName || isUnsafeGitContextVariable(unsetName)) safe = false;
+          if (!unsetName || invalidatesExecutableTrust(unsetName)) safe = false;
           index += 2;
           continue;
         }
         if (token.startsWith("--unset=")) {
-          if (isUnsafeGitContextVariable(token.slice("--unset=".length))) safe = false;
+          if (invalidatesExecutableTrust(token.slice("--unset=".length))) safe = false;
           index += 1;
           continue;
         }

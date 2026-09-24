@@ -113,9 +113,14 @@ const unsafeGitGlobalValueOptions = new Set([
 
 const recognizedGitSubcommands = new Set([...gitNetworkSubcommands, "config", "submodule"]);
 
+/**
+ * A `git` invocation with its subcommand and payload separated from Git's
+ * global options. Only `git` is modelled here: `gh` is a different tool with
+ * its own network and mutation semantics, handled in `shell-network.ts` and
+ * `command-effects.ts`.
+ */
 interface GitInvocation {
   segment: CommandSegment;
-  kind: "git" | "gh";
   subcommand?: string;
   arguments: string[];
   globalOptionsSafe: boolean;
@@ -167,25 +172,13 @@ function parseGitSubcommand(args: readonly string[]): {
 }
 
 export function parseGitInvocation(segment: CommandSegment): GitInvocation | undefined {
-  if (segment.executable !== "git" && segment.executable !== "gh") return undefined;
-  if (segment.executable === "gh") {
-    const positional = segment.args.filter((argument) => !argument.startsWith("-"));
-    return {
-      segment,
-      kind: "gh",
-      subcommand: positional[0]?.toLowerCase(),
-      arguments: positional.slice(1),
-      globalOptionsSafe: true,
-      trusted: segment.executableTrusted,
-    };
-  }
+  if (segment.executable !== "git") return undefined;
   const parsed = parseGitSubcommand(segment.args);
   const subcommand =
     parsed.index === undefined ? undefined : segment.args[parsed.index]?.toLowerCase();
   const commandArguments = parsed.index === undefined ? [] : segment.args.slice(parsed.index + 1);
   return {
     segment,
-    kind: "git",
     subcommand,
     arguments: commandArguments,
     globalOptionsSafe: parsed.safe,
@@ -201,7 +194,7 @@ function parsedGitInvocations(command: string): GitInvocation[] {
 }
 
 export function gitInvocationUsesNetwork(invocation: GitInvocation): boolean {
-  if (invocation.kind !== "git" || !invocation.subcommand) return false;
+  if (!invocation.subcommand) return false;
   return (
     gitNetworkSubcommands.has(invocation.subcommand) ||
     (invocation.subcommand === "submodule" &&
