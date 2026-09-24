@@ -21,9 +21,8 @@
 // PI_TOOL_SPILL_DIR (default ~/.pi/agent/tool-spill).
 
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const num = (raw: string | undefined, fallback: number): number => {
 	const n = Number(raw);
@@ -33,22 +32,26 @@ const num = (raw: string | undefined, fallback: number): number => {
 const TURN_BUDGET = num(process.env.PI_TOOL_TURN_BUDGET, 60_000); // chars a turn may add via tool results
 const MIN_KEEP = num(process.env.PI_TOOL_MIN_KEEP, 4_000); // never shrink a result below this
 const HEAD_RATIO = 0.6; // of the kept prefix/suffix split
-const SPILL_DIR =
-	process.env.PI_TOOL_SPILL_DIR ?? join(homedir(), ".pi", "agent", "tool-spill");
-const LOG_FILE = join(
-	homedir(),
-	".pi",
-	"agent",
-	"logs",
-	"tool-result-budget.jsonl",
-);
+const SPILL_DIR = process.env.PI_TOOL_SPILL_DIR ?? join(getAgentDir(), "tool-spill");
+const LOG_FILE = join(getAgentDir(), "logs", "tool-result-budget.jsonl");
+
+// Standing discipline for the model, injected as its own system-prompt section.
+// Generated from the same constants as the clipping logic below, so env
+// overrides (PI_TOOL_TURN_BUDGET / PI_TOOL_MIN_KEEP / PI_TOOL_SPILL_DIR)
+// can never desync the prompt from the behaviour.
+const DISCIPLINE =
+	`Tool results are budgeted: at most ${TURN_BUDGET} chars per turn may enter context via tool results; ` +
+	`a single result under ${MIN_KEEP} chars is never shrunk. ` +
+	`Over-budget output is saved in full to a spill file under ${SPILL_DIR} and replaced in context with head + tail + a pointer banner naming the file. ` +
+	`When you need the omitted middle, read the spill file in slices (read <path> offset=... limit=...) or search it (grep -n "pattern" <path>); ` +
+	`do not blindly re-run the full command to recover it, and do not draw conclusions from the omitted middle.`;
 
 let spentThisTurn = 0;
 let turnSeq = 0;
 
 const log = (row: Record<string, unknown>): void => {
 	try {
-		mkdirSync(join(homedir(), ".pi", "agent", "logs"), { recursive: true });
+		mkdirSync(join(getAgentDir(), "logs"), { recursive: true });
 		appendFileSync(LOG_FILE, `${JSON.stringify(row)}\n`);
 	} catch {
 		// logging is best-effort
@@ -105,6 +108,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_start", () => {
 		spentThisTurn = 0;
 		turnSeq += 1;
+	});
+
+	pi.on("before_agent_start", (event) => {
+		event.systemPromptOptions.sections.tool_result_budget = DISCIPLINE;
 	});
 
 	pi.on("tool_result", (event) => {
