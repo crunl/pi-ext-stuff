@@ -556,6 +556,16 @@ describe("narrow static risk contract", () => {
     // `script.py` as argv[1], so the program is named and the invocation is
     // LOW; treating the quoted `>` as a redirect would find no script at all.
     ["python3 '>out' script.py", "LOW"],
+    // A single quote is literal inside double quotes. Treating it as opening a
+    // single-quoted region swallowed the rest of the input, so the substitution
+    // gate behind it reported nothing and this auto-approved LOW.
+    ['echo "it\'s" `rm -rf /`', "REVIEW"],
+    ['echo "a\'b" `rm -rf /`', "REVIEW"],
+    // The mirror case was already right: a double quote is literal inside single
+    // quotes, and both substitution forms stay live inside double quotes. The
+    // nested `rm -rf /` is analysed as a forced deletion, so these are HARD.
+    ['echo "x" $(rm -rf /)', "HARD"],
+    ["echo 'x' $(rm -rf /)", "HARD"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

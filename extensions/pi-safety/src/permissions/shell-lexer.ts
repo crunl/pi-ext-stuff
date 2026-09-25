@@ -62,12 +62,13 @@ export interface ShellWords {
 }
 
 /**
- * A redirection operator, optionally prefixed by a file descriptor. In the
- * shell grammar the target is part of the same word when it is attached
- * (`>out`, `2>err`, `2>&1`) and a separate word when it is not (`> out`).
- * Neither form is ever the command word.
+ * A redirection operator, matched at the character where the shell starts one.
+ * Any file-descriptor digits are already in the word being built, so this must
+ * not also accept a leading `\d*`: the alternative would be unreachable at the
+ * only call site, and a documented capability nothing exercises is one a reader
+ * will assume has been tested.
  */
-export const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
+export const REDIRECT_OPERATOR = /^(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
 
 export function shellWords(source: string): ShellWords {
   const words: string[] = [];
@@ -208,7 +209,12 @@ export function scanShellSyntax(source: string): ShellSyntax {
       if (character === "'") quote = undefined;
       continue;
     }
-    if (character === "'") {
+    // A single quote is literal inside a double-quoted string. Opening a
+    // single-quoted region here regardless would swallow the rest of the input,
+    // including the closing `"`, and report no substitution, no redirect and no
+    // control operator behind it: `echo "it's" `+"`rm -rf /`"+` reached Tier 3's
+    // substitution gate as satisfied and auto-approved LOW.
+    if (character === "'" && quote === undefined) {
       quote = "'";
       continue;
     }
