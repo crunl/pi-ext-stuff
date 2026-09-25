@@ -656,7 +656,7 @@ describe("Risk policy gate", () => {
     ["covered.example", true],
     ["uncovered.example", false],
   ])(
-    "surfaces an implicit Git remote so an escalated push cannot review as a bare action: %s",
+    "refuses to escalate an implicit Git push whose destination cannot be bound: %s",
     async (remoteHost, coveredByConfig) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
       await createGitDirectory(
@@ -666,6 +666,11 @@ describe("Risk policy gate", () => {
       const next = config();
       if (coveredByConfig) next.sandbox.network.allowedDomains = [remoteHost];
 
+      // An escalated action runs outside the sandbox and so outside the
+      // per-connection authorizer. A remote read from repository metadata is in
+      // neither the command text nor the call fingerprint, so the destination
+      // can be neither bound nor enforced, whether or not the config parser
+      // happened to recover a host.
       const decision = await evaluateRiskRequest(
         "bash",
         {
@@ -677,19 +682,43 @@ describe("Risk policy gate", () => {
         next,
       );
 
-      // The remote is not in the command text, so it has to reach admission as
-      // a capability. The Engine's escalation guard then refuses the action,
-      // because an escalated lease cannot enforce a network capability.
-      expect(decision).toMatchObject({ action: "prompt", risk: "HARD" });
-      expect(decision).toMatchObject({ networkHosts: [remoteHost] });
-      expect(decision).toMatchObject({ executionMode: "escalated" });
-      expect(admissionPlanFromRiskDecision(decision)).toMatchObject({
-        kind: "review",
-        review: "capability",
-        requested: [{ kind: "network", host: remoteHost }],
-      });
+      expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+      expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
     },
   );
+
+  it("keeps a mandatory rule review mandatory for an implicit Git push", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://covered.example/owner/repo.git\n',
+    );
+    const next = config();
+    next.sandbox.network.allowedDomains = ["covered.example"];
+    next.rules = [{ action: "ask", tool: "bash", pattern: "git push*" }];
+
+    // The destination is already covered by the baseline lease, so it is not a
+    // capability that needs reviewing. The rule still does. The admission has
+    // to stay an `action` review, because `forcedManualReview` keys off that
+    // shape: turning it into a `capability` review would let the Engine filter
+    // the covered host out and skip the review the rule demanded.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git push origin main" },
+      cwd,
+      next,
+    );
+
+    expect(decision).toMatchObject({
+      action: "prompt",
+      reason: "Approval required by permissions rule",
+    });
+    expect(admissionPlanFromRiskDecision(decision)).toMatchObject({
+      kind: "review",
+      review: "action",
+    });
+    expect(decision).not.toHaveProperty("networkHosts");
+  });
 
   it("leaves a sandboxed implicit Git push on the connection boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
@@ -708,6 +737,32 @@ describe("Risk policy gate", () => {
     );
     expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
     expect(decision).not.toHaveProperty("networkHosts");
+  });
+
+  it("does not refuse escalation for a Git remote named in the command", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    // The config names a different remote entirely. Only the operand the
+    // command actually names may decide whether the action is escalatable.
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://other.example/owner/repo.git\n',
+    );
+
+    // The destination is stated by the frozen command, so it is inside the
+    // call fingerprint the grant binds and visible in the review packet. The
+    // refusal exists for destinations that are in neither, so it must not fire.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      {
+        command: "git push https://named.example/owner/repo.git main",
+        sandbox_permissions: "require_escalated",
+        justification: "the destination is in the command text",
+      },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "prompt", executionMode: "escalated" });
+    expect(decision).not.toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
   });
 
   it("does not invent a capability for a Git remote named in the command", async () => {

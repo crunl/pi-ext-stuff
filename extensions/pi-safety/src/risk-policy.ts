@@ -272,17 +272,35 @@ export async function evaluateRiskRequest(
   }
   const usesImplicitGitNetwork =
     request.operation === "execute" && Boolean(gitNetwork?.usesImplicitNetwork);
+  // An escalated action runs on the bare local backend, outside the sandbox and
+  // therefore outside the per-connection authorizer that checks the real host.
+  // If the destination came from repository metadata it is in none of the places
+  // that could bind it: not the command text the reviewer reads, not the Engine's
+  // call fingerprint, and not the one-shot grant — and Git re-reads it at
+  // execution. There is no enforcement point left, so the destination cannot be
+  // proven and the action is refused rather than approved as if it were bound.
+  //
+  // This deliberately does not try to model Git's remote resolution to decide
+  // whether the destination happens to be known. `readRepositoryRemoteHosts` is a
+  // single-file parser: it follows no `include`/`includeIf`, no
+  // `config.worktree`, no `url.*.insteadOf`, and no environment relocation, so a
+  // parse that yields a host is not proof and a parse that yields none is not
+  // proof either. Blocking on the fact that metadata was consulted is both
+  // smaller and more complete than binding a host we cannot trust to be the one
+  // Git will use. A remote named in the command is unaffected: it is stated by
+  // the frozen input, and `usesImplicitNetwork` does not cover it.
+  if (escalationRequested && usesImplicitGitNetwork) {
+    return {
+      action: "block",
+      risk: "HARD",
+      reason:
+        "Command escalation cannot bind an implicit Git remote destination, and an escalated Bash action has no connection boundary that could enforce it",
+    };
+  }
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
     return { action: "block", risk: "HARD", reason: gitMetadata.reason };
   }
-  // Hosts the command does not name. A Git remote lives in mutable repository
-  // metadata, so it is not derivable from the frozen action: absent from the
-  // command text the reviewer reads, absent from the Engine's call fingerprint,
-  // and re-read by Git at execution time. They are carried separately from
-  // `request.networkTargets` because those targets also mix in hosts the
-  // command *does* name, and a named host is already bound by the frozen input.
-  let implicitGitHosts: string[] = [];
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
     const remoteHosts = await readRepositoryRemoteHosts(
       gitMetadata.configPath,
@@ -291,7 +309,6 @@ export async function evaluateRiskRequest(
     if (!remoteHosts.ok) {
       return { action: "block", risk: "HARD", reason: remoteHosts.reason };
     }
-    implicitGitHosts = remoteHosts.hosts;
     request.networkTargets = [
       ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
     ];
@@ -453,15 +470,6 @@ export async function evaluateRiskRequest(
         actionReview: risk !== "LOW" && filesystemWriteRoots.length === 0 && !escalationRequested,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
-      // An implicit remote is a capability the action would need, and it is the
-      // only network fact here that the frozen command does not already state.
-      // Surfacing it lets the Engine's existing escalation guard reject an
-      // action whose destination cannot be bound, instead of letting the request
-      // reach review as a bare `action` with an empty capability list. For a
-      // sandboxed action the host is covered by the baseline lease and enforced
-      // again at the connection boundary, so this changes nothing unless the
-      // destination is genuinely uncovered.
-      ...(implicitGitHosts.length > 0 ? { networkHosts: implicitGitHosts } : {}),
       justification: escalation.requested
         ? escalation.justification
         : additionalWriteRoots.justification,
