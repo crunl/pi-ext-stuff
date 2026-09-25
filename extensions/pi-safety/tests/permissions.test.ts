@@ -535,6 +535,15 @@ describe("narrow static risk contract", () => {
     // The subcommand search steps over the redirection instead of stopping on
     // it, so this is recognised as the network push it is.
     ["git push>log origin main", "HARD"],
+    ["git -- 2>log push origin main", "HARD"],
+    // A bare operator's target is a filename. `git > push origin main` writes to
+    // a file called `push` and then runs `git origin main`; the word `push` is
+    // not a subcommand, so this is not the network operation it resembles.
+    ["git > push origin main", "LOW"],
+    // The terminal flag is terminal wherever it lands in the effective argv.
+    // The redirect is syntax, not an argument, so it does not displace it.
+    ["curl 2>/dev/null --version", "LOW"],
+    ["curl >out --help", "LOW"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

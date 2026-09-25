@@ -4,7 +4,7 @@
  */
 import { parseGitRemoteTarget } from "../network-host.ts";
 import type { CommandSegment } from "./rules.ts";
-import { BARE_REDIRECT_OPERATOR, REDIRECT_OPERATOR, scanShellSyntax } from "./shell-lexer.ts";
+import { scanShellSyntax } from "./shell-lexer.ts";
 import { parseCommandSegments } from "./shell-segment.ts";
 
 const gitNetworkSubcommands = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
@@ -172,27 +172,8 @@ interface GitInvocation {
   trusted: boolean;
 }
 
-/**
- * How many words at `index` are redirection rather than command words. A
- * redirection is syntax the shell consumes before Git ever sees an argv, so the
- * subcommand search has to step over it: `git>log push origin` puts `>log`
- * where a subcommand would be, and a bare operator's target is the following
- * word, which is not a subcommand either. An attached target is already part of
- * the operator's own word.
- */
-function redirectionWordWidth(args: readonly string[], index: number): number {
-  const token = args[index] ?? "";
-  if (!REDIRECT_OPERATOR.test(token)) return 0;
-  return BARE_REDIRECT_OPERATOR.test(token) && index + 1 < args.length ? 2 : 1;
-}
-
 function relevantGitSubcommandIndex(args: readonly string[], start: number): number | undefined {
   for (let index = start; index < args.length; index += 1) {
-    const width = redirectionWordWidth(args, index);
-    if (width > 0) {
-      index += width - 1;
-      continue;
-    }
     if (recognizedGitSubcommands.has((args[index] ?? "").toLowerCase())) return index;
   }
   return undefined;
@@ -205,11 +186,6 @@ function parseGitSubcommand(args: readonly string[]): {
   let index = 0;
   let safe = true;
   while (index < args.length) {
-    const width = redirectionWordWidth(args, index);
-    if (width > 0) {
-      index += width;
-      continue;
-    }
     const token = args[index] ?? "";
     if (token === "--") {
       const candidate = args[index + 1];

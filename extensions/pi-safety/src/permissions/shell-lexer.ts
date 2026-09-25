@@ -57,6 +57,8 @@ export type ShellLexError = "unbalanced-quote" | "trailing-escape" | "nul-byte";
 export interface ShellWords {
   words: string[];
   error?: ShellLexError;
+  /** A bare redirect operator never received the target word it requires. */
+  incomplete?: true;
 }
 
 /**
@@ -66,6 +68,9 @@ export interface ShellWords {
  * Neither form is ever the command word.
  */
 export const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
+
+/** A redirection operator with no attached target, so its target is the next word. */
+export const BARE_REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)$/;
 
 export function shellWords(source: string): ShellWords {
   const words: string[] = [];
@@ -81,8 +86,20 @@ export function shellWords(source: string): ShellWords {
   // executable table, so both the implicit-Git-remote refusal and the forced
   // deletion gate were skipped by a single `>`.
   let inRedirect = false;
+  // A bare operator's target is the word after it, and that word is a filename,
+  // not an argument: in `git > push origin` the shell writes to a file called
+  // `push`. The next completed word is therefore dropped rather than emitted.
+  let dropRedirectTarget = false;
   const flush = (): void => {
-    if (tokenStarted) words.push(current);
+    if (tokenStarted) {
+      if (dropRedirectTarget) {
+        dropRedirectTarget = false;
+      } else if (inRedirect) {
+        if (BARE_REDIRECT_OPERATOR.test(current)) dropRedirectTarget = true;
+      } else {
+        words.push(current);
+      }
+    }
     current = "";
     tokenStarted = false;
     inRedirect = false;
@@ -149,52 +166,12 @@ export function shellWords(source: string): ShellWords {
   }
   if (escaped) error ??= "trailing-escape";
   if (quote !== undefined) error ??= "unbalanced-quote";
+  // A bare operator still open at end of input never received its target, so the
+  // word list is an incomplete picture of the command.
+  const incomplete = inRedirect && BARE_REDIRECT_OPERATOR.test(current);
   flush();
-  return error === undefined ? { words } : { words, error };
-}
-
-/** A redirection operator with no attached target, so its target is the next word. */
-export const BARE_REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)$/;
-
-export interface LeadingSyntax {
-  words: string[];
-  /** A redirect operator appeared without the target word it requires. */
-  incomplete: boolean;
-}
-
-/**
- * Drop the leading assignments and redirections that precede the command word
- * in a simple command. `executableContext` already reduces assignments, but a
- * redirect such as `>out rm -f x` would otherwise be read as the executable and
- * hide the real command.
- */
-export function stripLeadingSyntax(words: readonly string[]): LeadingSyntax {
-  const remaining: string[] = [];
-  let index = 0;
-  let incomplete = false;
-  while (index < words.length) {
-    const word = words[index] ?? "";
-    if (assignmentName(word) !== undefined) {
-      remaining.push(word);
-      index += 1;
-      continue;
-    }
-    if (BARE_REDIRECT_OPERATOR.test(word)) {
-      if (index + 1 >= words.length) {
-        incomplete = true;
-        break;
-      }
-      index += 2;
-      continue;
-    }
-    if (REDIRECT_OPERATOR.test(word)) {
-      index += 1;
-      continue;
-    }
-    break;
-  }
-  remaining.push(...words.slice(index));
-  return { words: remaining, incomplete };
+  if (error === undefined) return incomplete ? { words, incomplete } : { words };
+  return incomplete ? { words, error, incomplete } : { words, error };
 }
 
 export interface ShellSyntax {

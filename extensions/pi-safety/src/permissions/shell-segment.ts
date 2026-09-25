@@ -7,13 +7,7 @@ import { basename } from "node:path";
 
 import { gitExecutesNestedProgram } from "./git-exec-entries.ts";
 import type { CommandSegment } from "./rules.ts";
-import {
-  assignmentName,
-  scanShellSyntax,
-  shellWords,
-  splitShellSegments,
-  stripLeadingSyntax,
-} from "./shell-lexer.ts";
+import { assignmentName, scanShellSyntax, shellWords, splitShellSegments } from "./shell-lexer.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 
@@ -666,13 +660,13 @@ function reExecutesString(
 }
 
 function parseCommandSegment(source: string): CommandSegment {
+  // Redirections are shell syntax, not words: `>out rm -f x` runs `rm`, and the
+  // lexer has already dropped the operator and its target, so the word list here
+  // is the argv the command actually receives. Nothing downstream has to know
+  // that a redirect existed — `hasRedirect` and `hasHereDocument` come from a
+  // separate scan of the raw text.
   const lexed = shellWords(source);
-  // Redirections are shell syntax: `>out rm -f x` runs `rm`, it does not run a
-  // program named `>out`. Strip the leading operator/target pairs before the
-  // command word is read, keeping assignments so the Git context check in
-  // `executableContext` still sees them.
-  const leading = stripLeadingSyntax(lexed.words);
-  const words = leading.words;
+  const words = lexed.words;
   // Reserved words are structural only in command position, which the char
   // segmenter already isolated: it splits on `;`/`&`/`|`/newline, so the
   // keyword is leading. Bash treats one behind an assignment or wrapper
@@ -713,7 +707,7 @@ function parseCommandSegment(source: string): CommandSegment {
     // reduced to the real command.
     decomposable:
       lexed.error === undefined &&
-      !leading.incomplete &&
+      !lexed.incomplete &&
       !nameless &&
       !context.unclassifiable &&
       !nestedGitProgram &&

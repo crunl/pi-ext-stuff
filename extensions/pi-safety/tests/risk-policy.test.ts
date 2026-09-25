@@ -748,6 +748,10 @@ describe("Risk policy gate", () => {
     "git >log push origin main",
     "git 2>log push origin main",
     "git push>log origin main",
+    "git -- 2>log push origin main",
+    "git -- > log push origin main",
+    "sh -c 'git push origin main' >log",
+    "bash -c >log 'git push origin main'",
   ])("sees through %s and still refuses the implicit remote", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(
