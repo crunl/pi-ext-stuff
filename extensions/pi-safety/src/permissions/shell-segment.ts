@@ -601,6 +601,24 @@ export function hasTerminalInfoFlag(args: readonly string[]): boolean {
 }
 
 /**
+ * Index of the option that carries a shell's inline program, or -1 when it has
+ * none.
+ *
+ * POSIX option names are case-sensitive and `-C` is not `-c`: `-C` is noclobber
+ * and takes no value, `-c` is what takes the program. Matching case-insensitively
+ * resolved `bash -C -c 'rm -rf build'` to the first hit, took the literal `-c` as
+ * the program, and left the body unexamined — so one added flag turned a forced
+ * deletion from HARD into an auto-approved LOW.
+ *
+ * `c` need not end the group, because it takes a value: `bash -cex` runs `ex`.
+ * Both the executable parse and the nested-segment expansion read the program
+ * through this one function so the two cannot disagree about where it is.
+ */
+export function inlineProgramOptionIndex(args: readonly string[]): number {
+  return args.findIndex((arg) => arg === "--command" || /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
+}
+
+/**
  * Whether a segment re-interprets a string or stdin as the program, so its
  * static argv is not the argv that runs. Shell `-c STRING` bodies are expanded
  * into their own segments by parseCommandSegments and therefore count as
@@ -673,9 +691,7 @@ function parseCommandSegment(source: string): CommandSegment {
   const executable = basename(executableToken).toLowerCase();
   const args = words.slice(index + 1);
   const syntax = scanShellSyntax(source);
-  const commandIndex = args.findIndex(
-    (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
-  );
+  const commandIndex = inlineProgramOptionIndex(args);
   const nestedShell = shellExecutables.has(executable) && commandIndex >= 0;
   const reExec = reExecutesString(executable, args, nestedShell);
   // A Git invocation can be told to run another program — a shell alias, a
@@ -713,9 +729,7 @@ export function parseCommandSegments(command: string): CommandSegment[] {
   const segments = splitShellSegments(command).map(parseCommandSegment);
   const nested = segments.flatMap((segment) => {
     if (!shellExecutables.has(segment.executable)) return [];
-    const commandIndex = segment.args.findIndex(
-      (arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg),
-    );
+    const commandIndex = inlineProgramOptionIndex(segment.args);
     const nestedCommand = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
     if (!nestedCommand) return [];
     // The body is shell code, so a substitution or heredoc in it is live even

@@ -744,6 +744,10 @@ describe("Risk policy gate", () => {
     "git status; git remote update",
     "sh -c 'git push origin main'",
     "git status | git push origin main",
+    "git>log push origin main",
+    "git >log push origin main",
+    "git 2>log push origin main",
+    "git push>log origin main",
   ])("sees through %s and still refuses the implicit remote", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(
@@ -753,7 +757,9 @@ describe("Risk policy gate", () => {
 
     // The refusal is only worth anything if the analysis survives composition.
     // A segment that hides the Git call would hand the reviewer a packet with
-    // no destination in it, which is the defect this closes.
+    // no destination in it, which is the defect this closes. A redirection
+    // operator is one such segment: read as word text it made the executable
+    // `git>log`, which is in no executable table.
     const decision = await evaluateRiskRequest(
       "bash",
       { command, sandbox_permissions: "require_escalated", justification: "probe" },

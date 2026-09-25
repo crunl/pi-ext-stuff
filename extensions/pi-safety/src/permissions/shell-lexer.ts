@@ -59,6 +59,14 @@ export interface ShellWords {
   error?: ShellLexError;
 }
 
+/**
+ * A redirection operator, optionally prefixed by a file descriptor. In the
+ * shell grammar the target is part of the same word when it is attached
+ * (`>out`, `2>err`, `2>&1`) and a separate word when it is not (`> out`).
+ * Neither form is ever the command word.
+ */
+export const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
+
 export function shellWords(source: string): ShellWords {
   const words: string[] = [];
   let current = "";
@@ -66,10 +74,18 @@ export function shellWords(source: string): ShellWords {
   let quote: "'" | '"' | undefined;
   let escaped = false;
   let error: ShellLexError | undefined;
+  // A redirection operator is its own token wherever it appears unquoted, not
+  // only at the start of a word: the shell reads `git>log push` as the command
+  // `git` redirecting stdout to `log`, with `push` as an argument. Treating the
+  // operator as word text made the executable `git>log`, which is in no
+  // executable table, so both the implicit-Git-remote refusal and the forced
+  // deletion gate were skipped by a single `>`.
+  let inRedirect = false;
   const flush = (): void => {
     if (tokenStarted) words.push(current);
     current = "";
     tokenStarted = false;
+    inRedirect = false;
   };
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index] as string;
@@ -115,6 +131,19 @@ export function shellWords(source: string): ShellWords {
       flush();
       continue;
     }
+    if (!inRedirect && (character === "<" || character === ">")) {
+      // Digits already in the word are this operator's file descriptor and stay
+      // with it; anything else is the command or argument the shell redirects,
+      // so it ends here. A bare descriptor with no operator is ordinary text,
+      // which is why `git2>log` stays the command `git2`.
+      if (!tokenStarted || !/^\d+$/.test(current)) flush();
+      const operator = REDIRECT_OPERATOR.exec(source.slice(index))?.[0] ?? character;
+      current += operator;
+      tokenStarted = true;
+      inRedirect = true;
+      index += operator.length - 1;
+      continue;
+    }
     current += character;
     tokenStarted = true;
   }
@@ -123,14 +152,6 @@ export function shellWords(source: string): ShellWords {
   flush();
   return error === undefined ? { words } : { words, error };
 }
-
-/**
- * A redirection operator, optionally prefixed by a file descriptor. In the
- * shell grammar the target is part of the same word when it is attached
- * (`>out`, `2>err`, `2>&1`) and a separate word when it is not (`> out`).
- * Neither form is ever the command word.
- */
-export const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
 
 /** A redirection operator with no attached target, so its target is the next word. */
 export const BARE_REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)$/;

