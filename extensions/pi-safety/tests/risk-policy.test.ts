@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
+import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
 import {
   evaluateHostFirstRulesOnly,
   evaluateHostRiskRequest,
@@ -648,6 +649,82 @@ describe("Risk policy gate", () => {
       config(),
     );
     expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).not.toHaveProperty("networkHosts");
+  });
+
+  it.each([
+    ["covered.example", true],
+    ["uncovered.example", false],
+  ])(
+    "surfaces an implicit Git remote so an escalated push cannot review as a bare action: %s",
+    async (remoteHost, coveredByConfig) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      await createGitDirectory(
+        join(cwd, ".git"),
+        `[remote "origin"]\n\turl = https://${remoteHost}/owner/repo.git\n`,
+      );
+      const next = config();
+      if (coveredByConfig) next.sandbox.network.allowedDomains = [remoteHost];
+
+      const decision = await evaluateRiskRequest(
+        "bash",
+        {
+          command: "git push origin main",
+          sandbox_permissions: "require_escalated",
+          justification: "bind the destination before leaving the sandbox",
+        },
+        cwd,
+        next,
+      );
+
+      // The remote is not in the command text, so it has to reach admission as
+      // a capability. The Engine's escalation guard then refuses the action,
+      // because an escalated lease cannot enforce a network capability.
+      expect(decision).toMatchObject({ action: "prompt", risk: "HARD" });
+      expect(decision).toMatchObject({ networkHosts: [remoteHost] });
+      expect(decision).toMatchObject({ executionMode: "escalated" });
+      expect(admissionPlanFromRiskDecision(decision)).toMatchObject({
+        kind: "review",
+        review: "capability",
+        requested: [{ kind: "network", host: remoteHost }],
+      });
+    },
+  );
+
+  it("leaves a sandboxed implicit Git push on the connection boundary", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://sandboxed.example/owner/repo.git\n',
+    );
+
+    // Sandboxed actions are enforced per connection, so the destination does not
+    // need to become a reviewed capability and the allow decision is unchanged.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git push origin main" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).not.toHaveProperty("networkHosts");
+  });
+
+  it("does not invent a capability for a Git remote named in the command", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://named.example/owner/repo.git\n',
+    );
+
+    // An explicit remote is already stated by the frozen command, so it is
+    // bound by the call fingerprint and needs no separate capability.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git push https://named.example/owner/repo.git main" },
+      cwd,
+      config(),
+    );
     expect(decision).not.toHaveProperty("networkHosts");
   });
 

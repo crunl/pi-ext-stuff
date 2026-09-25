@@ -276,6 +276,13 @@ export async function evaluateRiskRequest(
   if (gitMetadata && !gitMetadata.ok) {
     return { action: "block", risk: "HARD", reason: gitMetadata.reason };
   }
+  // Hosts the command does not name. A Git remote lives in mutable repository
+  // metadata, so it is not derivable from the frozen action: absent from the
+  // command text the reviewer reads, absent from the Engine's call fingerprint,
+  // and re-read by Git at execution time. They are carried separately from
+  // `request.networkTargets` because those targets also mix in hosts the
+  // command *does* name, and a named host is already bound by the frozen input.
+  let implicitGitHosts: string[] = [];
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
     const remoteHosts = await readRepositoryRemoteHosts(
       gitMetadata.configPath,
@@ -284,6 +291,7 @@ export async function evaluateRiskRequest(
     if (!remoteHosts.ok) {
       return { action: "block", risk: "HARD", reason: remoteHosts.reason };
     }
+    implicitGitHosts = remoteHosts.hosts;
     request.networkTargets = [
       ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
     ];
@@ -445,6 +453,15 @@ export async function evaluateRiskRequest(
         actionReview: risk !== "LOW" && filesystemWriteRoots.length === 0 && !escalationRequested,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
+      // An implicit remote is a capability the action would need, and it is the
+      // only network fact here that the frozen command does not already state.
+      // Surfacing it lets the Engine's existing escalation guard reject an
+      // action whose destination cannot be bound, instead of letting the request
+      // reach review as a bare `action` with an empty capability list. For a
+      // sandboxed action the host is covered by the baseline lease and enforced
+      // again at the connection boundary, so this changes nothing unless the
+      // destination is genuinely uncovered.
+      ...(implicitGitHosts.length > 0 ? { networkHosts: implicitGitHosts } : {}),
       justification: escalation.requested
         ? escalation.justification
         : additionalWriteRoots.justification,
