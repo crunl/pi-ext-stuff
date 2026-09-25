@@ -535,9 +535,11 @@ function hasGroupingWord(words: readonly string[]): boolean {
  *
  * Redirection is not among the skip reasons. The lexer drops operators and their
  * targets, so an unquoted `sh < script` never reaches here. A *quoted* one can:
- * `python '>out' script.py` passes a file called `>out` as an ordinary argument
- * and the script is `script.py`, so treating a leading `>` as a redirect would
- * skip the wrong word.
+ * in `python '>out' script.py` the first positional operand is a file called
+ * `>out` and that is the script Python runs, with `script.py` as `sys.argv[1]`.
+ * It is a defined operand and therefore a fixed argv, which is what this
+ * function is for; skipping the next word would instead report no script at all
+ * and send an ordinary command to review.
  */
 function scriptOperand(executable: string, args: readonly string[]): string | undefined {
   let skipNext = false;

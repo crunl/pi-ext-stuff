@@ -552,7 +552,9 @@ describe("narrow static risk contract", () => {
     ["rm >'|' -rf /", "HARD"],
     ["rm >\\> -rf /", "HARD"],
     // A quoted operand that starts with a redirect character is an ordinary
-    // argument, not a redirect, so the script after it is still found.
+    // argument. `python '>out' script.py` runs the file `>out` with
+    // `script.py` as argv[1], so the program is named and the invocation is
+    // LOW; treating the quoted `>` as a redirect would find no script at all.
     ["python3 '>out' script.py", "LOW"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
