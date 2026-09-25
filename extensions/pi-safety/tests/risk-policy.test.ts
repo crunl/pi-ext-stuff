@@ -739,6 +739,53 @@ describe("Risk policy gate", () => {
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
+  it.each([
+    "git status && git push origin main",
+    "git status; git remote update",
+    "sh -c 'git push origin main'",
+    "git status | git push origin main",
+  ])("sees through %s and still refuses the implicit remote", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
+    );
+
+    // The refusal is only worth anything if the analysis survives composition.
+    // A segment that hides the Git call would hand the reviewer a packet with
+    // no destination in it, which is the defect this closes.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command, sandbox_permissions: "require_escalated", justification: "probe" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+  });
+
+  it("refuses an escalated implicit push behind an unsafe Git global option", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
+    );
+
+    // `-C` relocates the repository, so the config that decides the destination
+    // is not the one this inspection read. The analysis refuses the invocation
+    // outright rather than reasoning about a repository it cannot see.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      {
+        command: "git -C /tmp/other push origin main",
+        sandbox_permissions: "require_escalated",
+        justification: "probe",
+      },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+  });
+
   it("does not refuse escalation for a Git remote named in the command", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     // The config names a different remote entirely. Only the operand the
@@ -748,9 +795,14 @@ describe("Risk policy gate", () => {
       '[remote "origin"]\n\turl = https://other.example/owner/repo.git\n',
     );
 
-    // The destination is stated by the frozen command, so it is inside the
-    // call fingerprint the grant binds and visible in the review packet. The
-    // refusal exists for destinations that are in neither, so it must not fire.
+    // Scope of the refusal, not a claim that an explicit remote is fully bound.
+    // The destination is stated by the frozen command, so it is inside the call
+    // fingerprint the grant binds and visible in the review packet, and this
+    // rule does not fire on it. It does not follow that the action is safe:
+    // `url.<base>.insteadOf` in repository config can rewrite a command-named
+    // URL to a host the command never mentions, and modelling that rewrite is
+    // outside this rule and unproven here. Treat an escalated Git action as
+    // reviewed on its exact text, not as destination-enforced.
     const decision = await evaluateRiskRequest(
       "bash",
       {
@@ -758,6 +810,63 @@ describe("Risk policy gate", () => {
         sandbox_permissions: "require_escalated",
         justification: "the destination is in the command text",
       },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "prompt", executionMode: "escalated" });
+  });
+
+  it.each([
+    ["git remote update", "every configured remote"],
+    ["git remote update origin", "one named remote"],
+    ["git remote show origin", "a query for the remote's own refs"],
+    ["git remote show", "every configured remote"],
+    ["git remote set-head --auto origin", "the remote's own HEAD"],
+  ])("refuses to escalate %s, which contacts %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
+    );
+
+    // These are the same defect as an implicit push: a bare remote name
+    // resolved through repository metadata, on a backend with no per-connection
+    // authorizer. Leaving them out would make the refusal claim false.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command, sandbox_permissions: "require_escalated", justification: "probe" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+    expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
+  });
+
+  it.each([
+    "git remote show -n origin",
+    "git remote show --no-query origin",
+    "git remote -v",
+    "git remote get-url origin",
+    "git remote set-url origin https://x.example/r.git",
+    "git remote add upstream https://x.example/r.git",
+    "git remote remove upstream",
+    "git remote prune origin",
+    "git config --get remote.origin.url",
+  ])("still escalates the local-only Git action %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
+    );
+
+    // These never leave the machine, so there is no destination to bind and
+    // nothing for the refusal to protect. `git remote set-url` in particular is
+    // the documented escalated Git mutation, and it is also how a later push
+    // gets its destination changed; refusing it would remove the capability
+    // without closing anything, since the push itself is refused.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command, sandbox_permissions: "require_escalated", justification: "local mutation" },
       cwd,
       config(),
     );

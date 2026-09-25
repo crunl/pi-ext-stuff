@@ -111,7 +111,52 @@ const unsafeGitGlobalValueOptions = new Set([
   "--work-tree",
 ]);
 
-const recognizedGitSubcommands = new Set([...gitNetworkSubcommands, "config", "submodule"]);
+const recognizedGitSubcommands = new Set([
+  ...gitNetworkSubcommands,
+  "config",
+  "remote",
+  "submodule",
+]);
+
+/**
+ * `git remote` is mixed: most of its actions are local config edits, but three
+ * contact the remote and therefore resolve a bare remote name to a destination
+ * that lives in repository metadata rather than in the command text.
+ *
+ * Returns the named remotes for such an action, `null` when the action covers
+ * every remote, and `undefined` when the action never leaves the machine. The
+ * distinction matters for the same reason it does for `push`: a bare operand is
+ * a config lookup, while `set-url`'s operand is config text the user is
+ * replacing, not one being resolved.
+ */
+function gitRemoteNetworkOperands(invocation: GitInvocation): string[] | null | undefined {
+  if (invocation.subcommand !== "remote") return undefined;
+  const actionIndex = invocation.arguments.findIndex((argument) => !argument.startsWith("-"));
+  if (actionIndex < 0) return undefined;
+  const action = (invocation.arguments[actionIndex] ?? "").toLowerCase();
+  const operands = invocation.arguments.slice(actionIndex + 1).filter((argument) => {
+    return !argument.startsWith("-");
+  });
+  if (action === "update") return operands.length > 0 ? operands : null;
+  if (action === "show") {
+    // `-n` / `--no-query` answers from the local remote-tracking refs.
+    return invocation.arguments.some((argument) => argument === "-n" || argument === "--no-query")
+      ? undefined
+      : operands.length > 0
+        ? operands
+        : null;
+  }
+  if (action === "set-head") {
+    // Without `--auto` the head is taken from the operand; with it, from the
+    // remote's own HEAD.
+    return invocation.arguments.some((argument) => argument === "-a" || argument === "--auto")
+      ? operands.length > 0
+        ? operands
+        : null
+      : undefined;
+  }
+  return undefined;
+}
 
 /**
  * A `git` invocation with its subcommand and payload separated from Git's
@@ -198,7 +243,8 @@ export function gitInvocationUsesNetwork(invocation: GitInvocation): boolean {
   return (
     gitNetworkSubcommands.has(invocation.subcommand) ||
     (invocation.subcommand === "submodule" &&
-      invocation.arguments.some((argument) => argument === "add" || argument === "update"))
+      invocation.arguments.some((argument) => argument === "add" || argument === "update")) ||
+    gitRemoteNetworkOperands(invocation) !== undefined
   );
 }
 
@@ -296,6 +342,15 @@ function parsedGitRemotes(invocation: GitInvocation): ParsedGitRemote[] {
       return [{ kind: "implicit", purpose }];
     }
     return [parseGitSubmoduleAddRemote(invocation.arguments.slice(actionIndex + 1), purpose)];
+  }
+  if (subcommand === "remote") {
+    const operands = gitRemoteNetworkOperands(invocation);
+    // `undefined` means this action never leaves the machine; `null` means it
+    // covers every configured remote, which is still one implicit destination.
+    if (operands === undefined) return [];
+    return operands === null
+      ? [{ kind: "implicit", purpose }]
+      : operands.map((operand) => classifyGitRemoteOperand(operand, purpose));
   }
 
   const grammar = gitRemoteOptionGrammar.get(subcommand);

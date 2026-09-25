@@ -289,12 +289,17 @@ export async function evaluateRiskRequest(
   // smaller and more complete than binding a host we cannot trust to be the one
   // Git will use. A remote named in the command is unaffected: it is stated by
   // the frozen input, and `usesImplicitNetwork` does not cover it.
+  //
+  // A bare operand is deliberately read as a remote name, so `git clone foo` is
+  // refused too when `foo` happens to be a local directory. The conservative
+  // reading is the right one for a security gate, `./foo` disambiguates, and no
+  // local path that reads as a path is affected.
   if (escalationRequested && usesImplicitGitNetwork) {
     return {
       action: "block",
       risk: "HARD",
       reason:
-        "Command escalation cannot bind an implicit Git remote destination, and an escalated Bash action has no connection boundary that could enforce it",
+        "Command escalation cannot bind an implicit Git remote destination, and an escalated Bash action has no connection boundary that could enforce it. Run the command sandboxed so each connection is authorised, or name the remote URL in the command.",
     };
   }
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
