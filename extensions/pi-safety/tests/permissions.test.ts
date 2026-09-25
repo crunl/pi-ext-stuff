@@ -544,6 +544,16 @@ describe("narrow static risk contract", () => {
     // The redirect is syntax, not an argument, so it does not displace it.
     ["curl 2>/dev/null --version", "LOW"],
     ["curl >out --help", "LOW"],
+    // A quoted redirect target is a target, not a bare operator followed by an
+    // argument. Quotes are stripped before words are tested, so `>'>'` has the
+    // shape of the `>>` operator; re-matching the pattern here swallowed the
+    // next real argument and made these LOW.
+    ["rm >'>' -rf /", "HARD"],
+    ["rm >'|' -rf /", "HARD"],
+    ["rm >\\> -rf /", "HARD"],
+    // A quoted operand that starts with a redirect character is an ordinary
+    // argument, not a redirect, so the script after it is still found.
+    ["python3 '>out' script.py", "LOW"],
   ] as const)("classifies sandboxed Bash %s as %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });

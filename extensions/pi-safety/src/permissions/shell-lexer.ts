@@ -69,9 +69,6 @@ export interface ShellWords {
  */
 export const REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)/;
 
-/** A redirection operator with no attached target, so its target is the next word. */
-export const BARE_REDIRECT_OPERATOR = /^\d*(?:<<<|<<|>>|<>|>&|<&|>\||<|>)$/;
-
 export function shellWords(source: string): ShellWords {
   const words: string[] = [];
   let current = "";
@@ -86,16 +83,24 @@ export function shellWords(source: string): ShellWords {
   // executable table, so both the implicit-Git-remote refusal and the forced
   // deletion gate were skipped by a single `>`.
   let inRedirect = false;
+  // The word as it stood the moment the operator was recognised, with its file
+  // descriptor if it had one. "Bare" means nothing was appended after that, and
+  // that has to be decided by comparison rather than by re-matching the operator
+  // pattern: `shellWords` strips quotes, so the attached target of `>'>'` leaves
+  // `current` as `>>`, which the bare pattern accepts. Testing that way dropped
+  // the next real argument, and `rm >'>' -rf /` lost its `-rf`.
+  let redirectOperatorWord = "";
   // A bare operator's target is the word after it, and that word is a filename,
   // not an argument: in `git > push origin` the shell writes to a file called
   // `push`. The next completed word is therefore dropped rather than emitted.
   let dropRedirectTarget = false;
+  const bareRedirect = (): boolean => current === redirectOperatorWord;
   const flush = (): void => {
     if (tokenStarted) {
       if (dropRedirectTarget) {
         dropRedirectTarget = false;
       } else if (inRedirect) {
-        if (BARE_REDIRECT_OPERATOR.test(current)) dropRedirectTarget = true;
+        if (bareRedirect()) dropRedirectTarget = true;
       } else {
         words.push(current);
       }
@@ -156,6 +161,7 @@ export function shellWords(source: string): ShellWords {
       if (!tokenStarted || !/^\d+$/.test(current)) flush();
       const operator = REDIRECT_OPERATOR.exec(source.slice(index))?.[0] ?? character;
       current += operator;
+      redirectOperatorWord = current;
       tokenStarted = true;
       inRedirect = true;
       index += operator.length - 1;
@@ -168,7 +174,7 @@ export function shellWords(source: string): ShellWords {
   if (quote !== undefined) error ??= "unbalanced-quote";
   // A bare operator still open at end of input never received its target, so the
   // word list is an incomplete picture of the command.
-  const incomplete = inRedirect && BARE_REDIRECT_OPERATOR.test(current);
+  const incomplete = inRedirect && bareRedirect();
   flush();
   if (error === undefined) return incomplete ? { words, incomplete } : { words };
   return incomplete ? { words, error, incomplete } : { words, error };

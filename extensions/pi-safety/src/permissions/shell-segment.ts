@@ -528,13 +528,16 @@ function hasGroupingWord(words: readonly string[]): boolean {
 
 /**
  * First non-flag operand: the script file an interpreter would run, if any.
- * Three kinds of word are not that operand. Redirect words leak into the word
- * list (`sh < script`, `sh <<< 'code'`), and the word after one is a filename
- * or here-string. A word after a value-taking option is that option's value
- * (`bash -o pipefail`, `python -X utf8`). A runtime's leading mode word
- * selects what runs (`deno run`). A bare `-` is the stdin sentinel (`deno run
- * -`, `python -`): the program arrives on a pipe, so no word here names it and
- * the caller must fail closed.
+ * A word after a value-taking option is that option's value (`bash -o pipefail`,
+ * `python -X utf8`). A runtime's leading mode word selects what runs (`deno
+ * run`). A bare `-` is the stdin sentinel (`deno run -`, `python -`): the program
+ * arrives on a pipe, so no word here names it and the caller must fail closed.
+ *
+ * Redirection is not among the skip reasons. The lexer drops operators and their
+ * targets, so an unquoted `sh < script` never reaches here. A *quoted* one can:
+ * `python '>out' script.py` passes a file called `>out` as an ordinary argument
+ * and the script is `script.py`, so treating a leading `>` as a redirect would
+ * skip the wrong word.
  */
 function scriptOperand(executable: string, args: readonly string[]): string | undefined {
   let skipNext = false;
@@ -550,7 +553,7 @@ function scriptOperand(executable: string, args: readonly string[]): string | un
     if (shellExecutables.has(executable) && /^-[^-]+$/.test(arg) && arg.includes("s")) {
       return undefined;
     }
-    if (arg.startsWith("<") || arg.startsWith(">") || optionValueFlags.has(arg)) {
+    if (optionValueFlags.has(arg)) {
       skipNext = true;
       continue;
     }
