@@ -82,7 +82,7 @@ function reviewAdmission(
 ): AdmissionPlan {
   return {
     kind: "review",
-    risk: "REVIEW",
+    risk: "NeedsApproval",
     requested,
     review: "capability",
     reason: "The operation needs a capability outside the baseline lease.",
@@ -191,7 +191,7 @@ describe("ApproveForMeEngine public seam", () => {
         admission: {
           kind: "review",
           requested: [{ kind: "network-all" }],
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           reason: "review action",
           review: "action",
         },
@@ -671,7 +671,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(executor, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           requested: [],
           review: "action",
           reason: "Command requires escalated sandbox permissions",
@@ -1052,7 +1052,7 @@ describe("ApproveForMeEngine public seam", () => {
         call(execute, {
           admission: {
             kind: "review",
-            risk: "REVIEW",
+            risk: "NeedsApproval",
             requested: writeOutsidePreview(),
             review: "capability",
             reason: "The operation needs an output path.",
@@ -1096,7 +1096,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(executor, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "action",
           reason: "Confirm the action itself.",
           summary: "A no-capability action",
@@ -1127,7 +1127,7 @@ describe("ApproveForMeEngine public seam", () => {
   it("passes residual stamps into Guardian review input", async () => {
     const { engine, review } = createEngine(async (request) => {
       expect(request.source).toBe("preview");
-      expect(request.residuals).toEqual(["rule_ask", "risk_not_low"]);
+      expect(request.residuals).toEqual(["rule_ask", "risk_not_skip"]);
       return { kind: "approve", rationale: "stamped review" };
     });
     const turn = engine.beginTurn(snapshot());
@@ -1136,11 +1136,11 @@ describe("ApproveForMeEngine public seam", () => {
       call(execute, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "action",
           reason: "Approval required by permissions rule",
           summary: "npm test",
-          residuals: ["rule_ask", "risk_not_low"],
+          residuals: ["rule_ask", "risk_not_skip"],
         },
       }),
     );
@@ -1161,7 +1161,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(execute, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "action",
           reason: "Approval required",
           summary: "npm test",
@@ -1185,7 +1185,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(execute, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "action",
           reason: "Approval required",
           summary: "npm test",
@@ -1212,7 +1212,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(execute, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "action",
           reason: "Approval required",
           summary: "npm test",
@@ -1243,7 +1243,7 @@ describe("ApproveForMeEngine public seam", () => {
       call(execute, {
         admission: {
           kind: "review",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           review: "capability",
           reason: "covered",
           summary: "write",
@@ -1852,7 +1852,7 @@ describe("ApproveForMeEngine public seam", () => {
     };
     const originalAdmission: AdmissionPlan = {
       kind: "review",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       requested: [],
       review: "action",
       reason: "Command requires escalated sandbox permissions",
@@ -1886,7 +1886,7 @@ describe("ApproveForMeEngine public seam", () => {
             },
             admission: {
               kind: "review",
-              risk: "REVIEW",
+              risk: "NeedsApproval",
               requested: [],
               review: "action",
               reason: "Command requires escalated sandbox permissions",
@@ -2075,7 +2075,7 @@ describe("ApproveForMeEngine public seam", () => {
             },
             admission: {
               kind: "review",
-              risk: "REVIEW",
+              risk: "NeedsApproval",
               requested: writeOutsidePreview(),
               review: "capability",
               reason: "The operation needs an output path.",
@@ -2330,7 +2330,7 @@ describe("ApproveForMeEngine public seam", () => {
           {
             admission: {
               kind: "review",
-              risk: "REVIEW",
+              risk: "NeedsApproval",
               requested: writeOutsidePreview(),
               review: "action",
               reason: "Confirm this covered action.",
@@ -2696,7 +2696,7 @@ describe("ApproveForMeEngine public seam", () => {
     ];
     const mutableAdmission: Extract<AdmissionPlan, { kind: "review" }> = {
       kind: "review",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       requested: mutableRequested,
       review: "capability",
       reason: "The operation needs a capability outside the baseline lease.",

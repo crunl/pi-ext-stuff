@@ -174,7 +174,7 @@ describe("GuardianReviewSessionManager", () => {
       epoch,
       rawEntries: raw,
       action: { tool: "bash", command: "ls" },
-      permissionContext: { risk: "REVIEW" },
+      permissionContext: { risk: "NeedsApproval" },
     });
 
     it("falls back to Full on first open and commits cursor", () => {

@@ -8,7 +8,20 @@ interface Waiter {
   onAbort?: () => void;
 }
 
-export class SandboxExecutionCoordinator {
+/**
+ * Read-write lease guarding sandbox lifecycle mutation against in-flight
+ * execution. Not a process or fault coordinator: `src/sandbox/srt-coordinator.ts`
+ * owns the SRT lease, host draining, and persistent fault state. This queue only
+ * keeps a config activation / mode reset / session-shutdown drain from landing
+ * underneath a running sandboxed tool call.
+ *
+ * Caller contract: a `runShared` body may observe lifecycle state but never
+ * mutate it, and every fact it depends on must be rechecked *after* the lease is
+ * acquired. A shared lease is never upgraded into a mutable activation. Because a
+ * `runShared` body blocks activation for as long as it holds the lease, the
+ * exclusive side is deliberately lifecycle-scoped rather than request-scoped.
+ */
+export class SandboxLifecycleLease {
   private activeReaders = 0;
   private writerActive = false;
   private readonly queue: Waiter[] = [];

@@ -61,312 +61,74 @@ export function invocationControlsProcesses(segment: CommandSegment): boolean {
 export type ExternalEffect = "proved" | "refuted" | "unknown";
 
 /**
- * Global options that take a value across the CLIs below, so the word after one
- * is an option value rather than the subcommand. A flag that is *not* here and
- * appears before the verb makes the grammar unprovable, so this table is a
- * usability budget as much as a safety table: every entry added is a class of
- * read-only command that stays auto-approvable.
+ * Remote-effect verdict for one invocation.
+ *
+ * There is no per-CLI grammar here on purpose. The reference implementations
+ * have none: a search for `kubectl`, `gh`, `aws`, `gcloud`, `vercel`,
+ * `netlify` or `terraform` in the pinned Codex shell-command crate returns zero
+ * files, and its only dangerous-command rules are forced `rm` and an
+ * exceeded-wrapper-depth bound. fx matches, and its `ApprovalReason` treats an
+ * unrecognised command as `unknown_command` rather than reading intent out of a
+ * verb list.
+ *
+ * A verb denylist cannot supply what this function is for anyway. It can show
+ * that `delete` is dangerous; it cannot show that `pr edit` is, and the omission
+ * is invisible — `gh pr edit`, `gh issue comment` and `gh api -X POST` all
+ * auto-approved while `gh pr merge` was blocked, which is a worse answer than
+ * no answer because it reads as coverage. The shared option table failed in the
+ * other direction: `-p` is boolean in kubectl and `-w` is boolean in pnpm, so one
+ * entry consumed the verb as an option value and `kubectl -p delete pod demo`
+ * reported no mutation at all.
+ *
+ * So the boundary is the one both references use. What a command does to a
+ * remote API is the reviewer's judgement — Guardian here, the model reviewer in
+ * both references — and the boundary that is actually enforced is the network
+ * lease: an invocation that needs the network and does not have it is blocked
+ * before this is consulted, and the per-connection authorizer checks the real
+ * host. `--version`/`--help` stay the one case this layer can settle, because a
+ * leading one prints and exits and therefore cannot reach a remote API.
  */
-const cliGlobalValueFlags = new Set([
-  "-n",
-  "--namespace",
-  "-c",
-  "--context",
-  "--project",
-  "--profile",
-  "-p",
-  "--region",
-  "-g",
-  "--group",
-  "--cluster",
-  "-u",
-  "--user",
-  "-t",
-  "--tenant",
-  // The second tier: value-taking options common enough on read-only queries
-  // that leaving them out would push ordinary inspection into review.
-  "--repo",
-  "-R",
-  "--format",
-  "--output",
-  "-o",
-  "--query",
-  "--jq",
-  "--filter",
-  "--fields",
-  "--limit",
-  "--page",
-  "--per-page",
-  "--state",
-  "--sort",
-  "--search",
-  "--assignee",
-  "--author",
-  "--label",
-  "--milestone",
-  "--since",
-  "--until",
-  "--chdir",
-  "--prefix",
-  "--workspace",
-  "-w",
-  "--template",
-  "--params",
-  "--values",
-  "--set",
-  "--values-file",
-  // Resource selectors, which are values on the mutation forms these tools are
-  // gated for (`aws ec2 terminate-instances --instance-ids i-1`).
-  "--instance-ids",
-  "--ids",
-  "--name",
-  "--names",
-  "--zone",
-  "--location",
-  "--resource-group",
-  "--subscription",
-]);
 
 /**
- * The operand positions at which a verb may appear, or `undefined` when the
- * option grammar makes the positions unprovable.
+ * Tools whose bare invocation already runs actions. `npm` with no subcommand
+ * installs; `yarn` with no subcommand installs; the others resolve to an install
+ * or a run. There is no verb to read, so a verb scan finds nothing and reports
+ * no mutation, which is why this is listed rather than derived.
  *
- * There is no fixed verb depth to scan to. `kubectl exec` puts the verb first,
- * `aws s3 rm` second, `gcloud compute instances delete` third, and
- * `gcloud compute instance-groups managed delete` fourth, so the scan
- * collects every operand rather than a window — a window silently drops the
- * deepest forms, which is the fail-open this replaces.
- *
- * The cost of no window is that an option *value* can be mistaken for an
- * operand. That is only a problem for tools whose verb sits at a known
- * position, which is why `collect` caps those separately: `terraform` reads
- * one operand, so `-out apply` in `terraform plan -out apply` contributes
- * nothing instead of being read as the verb `apply`.
- *
- * An option outside `valueFlags` is the real ambiguity: it may consume the
- * next word, shifting every later operand one position left. Guessing is not
- * sound — with two such options there are four readings, and enumerating them
- * does not generalise. The scan gives up instead, but only while the shift
- * could still hide the verb. Once any operand has been read, skipping the
- * option without its value leaves every later operand in the list one place
- * to the right, and the verb is still in there: a shift can only introduce a
- * spurious candidate, never remove a real one. That is why the threshold is
- * one operand rather than a full window — `kubectl get pods --all-namespaces`
- * has long since named its verb, and the flag after it cannot move it.
- *
- * `nounLed` tools put a noun first, so that position is dropped before the
- * result is read as a verb.
+ * Four entries, and they are the four the reference implementation lists for the
+ * same reason at `command_effect.zig:147-170`, where a bare npm/bun/pnpm/yarn
+ * gets no static answer and goes to the reviewer. This is that rule, not a
+ * per-tool grammar.
  */
-function verbOperands(
-  args: readonly string[],
-  valueFlags: ReadonlySet<string>,
-  nounLed: boolean,
-  collect: number,
-): string[] | undefined {
-  const operands: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index] ?? "";
-    if (operands.length >= collect) break;
-    if (token === "--") {
-      // Everything after the separator is positional by definition. Nothing
-      // there can be an option value, so the verb can no longer move and the
-      // ambiguity that would otherwise abort the scan does not apply.
-      operands.push(...args.slice(index + 1).map((rest) => rest.toLowerCase()));
-      break;
-    }
-    if (valueFlags.has(token)) {
-      index += 1;
-      continue;
-    }
-    if (token.startsWith("-")) {
-      // `--opt=value` is self-contained: the value is in the same word, so it
-      // cannot shift anything and needs no entry in the table.
-      if (token.includes("=")) continue;
-      if (operands.length === 0) return undefined;
-      continue;
-    }
-    operands.push(token.toLowerCase());
-  }
-  return nounLed ? operands.slice(1) : operands;
-}
+const bareInvocationRunsActions = new Set(["bun", "npm", "pnpm", "yarn"]);
 
 /**
- * CLI verbs are sometimes compound (`terminate-instances`, `delete-bucket`),
- * so a `verb-` prefix counts as the verb. An exact-only match would let those
- * through, while the prefixes used here (`get-`, `list-`, `describe-`) are not
- * themselves mutation verbs.
+ * Whether this invocation's remote effect is unprovable, so a reviewer decides.
+ *
+ * There is no per-CLI grammar here, and that is deliberate. A search for
+ * `kubectl`, `gh`, `aws`, `gcloud`, `vercel`, `netlify` or `terraform` in the
+ * pinned Codex shell-command crate returns zero files, and its only
+ * dangerous-command rules are forced `rm` and an exceeded wrapper-depth bound;
+ * fx matches and treats an unrecognised command as `unknown_command` rather than
+ * reading intent out of a verb list. A verb denylist could not have supplied
+ * this function anyway. It can show `delete` is dangerous; it cannot show
+ * `pr edit` is, and the omission is invisible — `gh pr edit` and
+ * `gh api -X POST` auto-approved while `gh pr merge` was blocked, which reads as
+ * coverage without being any. The shared option table failed the other way:
+ * `-p` is boolean in kubectl and `-w` is boolean in pnpm, so one entry swallowed
+ * the verb as an option value and `kubectl -p delete pod demo` reported no
+ * mutation at all.
+ *
+ * So the boundary is the one both references use. What a command does to a
+ * remote API is the reviewer's judgement, and the boundary that is actually
+ * enforced is the network lease: an invocation needing the network without it is
+ * blocked before this is consulted, and the per-connection authorizer checks the
+ * real host.
  */
-function matchesMutationVerb(operand: string, verbs: ReadonlySet<string>): boolean {
-  if (verbs.has(operand)) return true;
-  const dash = operand.indexOf("-");
-  return dash > 0 && verbs.has(operand.slice(0, dash));
-}
-
-/** Subcommands that mutate remote state through a control-plane API. */
-const cliMutationVerbs = new Map<string, ReadonlySet<string>>([
-  [
-    "kubectl",
-    new Set([
-      "annotate",
-      "apply",
-      "attach",
-      "autoscale",
-      "cordon",
-      "cp",
-      "create",
-      "debug",
-      "delete",
-      "drain",
-      "edit",
-      "exec",
-      "expose",
-      "label",
-      "patch",
-      "port-forward",
-      "replace",
-      "rollout",
-      "run",
-      "scale",
-      "set",
-      "taint",
-    ]),
-  ],
-  [
-    "aws",
-    new Set([
-      "attach",
-      "authorize",
-      "cancel",
-      "copy",
-      "create",
-      "delete",
-      "deploy",
-      "deregister",
-      "detach",
-      "disable",
-      "disassociate",
-      "enable",
-      "import",
-      "install",
-      "invoke",
-      "modify",
-      "publish",
-      "put",
-      "reboot",
-      "reinstall",
-      "register",
-      "release",
-      "remove",
-      "replicate",
-      "reset",
-      "restore",
-      "revoke",
-      "rm",
-      "run",
-      "start",
-      "stop",
-      "sync",
-      "terminate",
-      "unassociate",
-      "unregister",
-      "update",
-    ]),
-  ],
-  [
-    "gcloud",
-    new Set([
-      "add-iam-policy-binding",
-      "create",
-      "delete",
-      "deploy",
-      "destroy",
-      "remove-iam-policy-binding",
-      "set-iam-policy",
-      "start",
-      "stop",
-      "update",
-    ]),
-  ],
-  ["az", new Set(["create", "delete", "destroy", "remove", "start", "stop", "update"])],
-  ["helm", new Set(["install", "rollback", "uninstall", "upgrade"])],
-  [
-    "gh",
-    new Set([
-      "cancel",
-      "close",
-      "create",
-      "delete",
-      "deploy",
-      "merge",
-      "publish",
-      "reopen",
-      "rerun",
-      "sync",
-    ]),
-  ],
-  ["npm", new Set(["deprecate", "dist-tag", "owner", "publish", "unpublish"])],
-  ["pnpm", new Set(["deprecate", "owner", "publish", "unpublish"])],
-  ["yarn", new Set(["deprecate", "owner", "publish", "unpublish"])],
-  ["cargo", new Set(["owner", "publish", "yank"])],
-  ["twine", new Set(["upload"])],
-  ["poetry", new Set(["publish"])],
-  ["doctl", new Set(["create", "delete", "rename", "update"])],
-]);
-
-/**
- * Tools whose first operand is a noun rather than a verb, so only the second
- * operand may be read as the verb. `gh run list` is read-only even though
- * `run` is a mutation verb elsewhere; every other tool is scanned across the
- * first three, because `kubectl exec`, `aws s3 rm`, and
- * `gcloud compute instances delete` place the verb at different depths.
- */
-const cliNounLedCommands = new Set(["gh"]);
-
-/**
- * `terraform`/`tofu` mutating subcommands. They are reached through the shared
- * operand scan rather than `args[0]`, so a global option ahead of the verb
- * (`--chdir DIR`, `-var NAME=VALUE`) cannot hide it.
- */
-const terraformMutationSubcommands = new Set([
-  "apply",
-  "destroy",
-  "force-unlock",
-  "import",
-  "refresh",
-  "taint",
-  "untaint",
-]);
-
-/** CLIs whose bare invocation already deploys or mutates external state. */
-const wholeInvocationIsExternal = new Set(["vercel", "netlify", "wrangler", "flyctl", "heroku"]);
-
-export function invocationHasExternalSideEffect(segment: CommandSegment): ExternalEffect {
-  // `--version` and `--help` print and exit — but only in the first argument
-  // position, which is the only place nothing can consume them as a value.
-  // `gh pr create --title --help --body x` passes `--help` to `--title` and
-  // creates the pull request; `kubectl --as --help delete pod x` passes it to
-  // `--as` and deletes the pod. `hasTerminalInfoFlag` encodes that rule and is
-  // shared with the interpreter analysis so the two cannot drift apart.
-  if (hasTerminalInfoFlag(segment.args)) return "refuted";
-  if (wholeInvocationIsExternal.has(segment.executable)) {
-    // These CLIs deploy by default, so the invocation as a whole is external.
-    return "proved";
-  }
-  // `terraform`/`tofu` put global options before a verb that is always the
-  // first operand, so one operand settles it. Every other tool is verb-led at a
-  // depth that varies by subcommand, so all operands are collected and the verb
-  // is looked for at any of them.
-  const terraform = segment.executable === "terraform" || segment.executable === "tofu";
-  const verbs = terraform ? terraformMutationSubcommands : cliMutationVerbs.get(segment.executable);
-  if (verbs === undefined) return "refuted";
-  const nounLed = cliNounLedCommands.has(segment.executable);
-  const operands = verbOperands(
-    segment.args,
-    cliGlobalValueFlags,
-    nounLed,
-    terraform ? 1 : Number.POSITIVE_INFINITY,
-  );
-  // An option grammar this table cannot read is not evidence of safety.
-  if (operands === undefined) return "unknown";
-  return operands.some((operand) => matchesMutationVerb(operand, verbs)) ? "proved" : "refuted";
+export function invocationRemoteEffectUnclassified(segment: CommandSegment): boolean {
+  // `--version`/`--help` print and exit, but only in the first argument position
+  // — the only place no earlier option can consume one as a value, so
+  // `gh pr create --title --help --body x` still creates the pull request.
+  if (hasTerminalInfoFlag(segment.args)) return false;
+  return bareInvocationRunsActions.has(segment.executable) && segment.args.length === 0;
 }

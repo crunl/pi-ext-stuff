@@ -1,8 +1,9 @@
 import { parse } from "node:path";
 import { Type } from "typebox";
 import type { SafetyConfig } from "./config.ts";
-import { createFilesystemPolicy, hasGlobSyntax, resolvePolicyPath } from "./filesystem-policy.ts";
+import { createFilesystemPolicy, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { hasGlobSyntax } from "./policy-primitives.ts";
 import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import { isRecord } from "./unknown-value.ts";
 

@@ -222,15 +222,24 @@ export function scanShellSyntax(source: string): ShellSyntax {
       quote = quote === '"' ? undefined : '"';
       continue;
     }
-    const isBashAlternateCommandSubstitution =
-      character === "$" &&
-      source[index + 1] === "{" &&
-      (/\s/.test(source[index + 2] ?? "") || source[index + 2] === "|");
-    if (
-      character === "`" ||
-      (character === "$" && source[index + 1] === "(") ||
-      isBashAlternateCommandSubstitution
-    ) {
+    // Any `$` or backtick outside a single-quoted region expands, and an expanded
+    // word is whatever the variable holds — so the static argv is not the argv that
+    // runs. This used to require a *command* substitution (`` ` ``, `$(`, `${ `),
+    // which missed every parameter expansion: `git commit "${FLAG:--S}" -m x`
+    // reached Tier 3 and auto-approved, and the flag it injects is chosen at
+    // runtime.
+    //
+    // fx takes the same shape for the same reason, one step wider: any of
+    // ``$ ` * ? [ ~`` outside single quotes is a dynamic shell
+    // (`command_effect.zig:386-394`). Globs are not adopted here — a path glob is
+    // expanded by the caller's shell into filenames, which is a different claim
+    // from a variable substituting an arbitrary value, and `rm -f build/*` is
+    // ordinary work. The `$` case is adopted because there is no reading of
+    // `${…}` under which the static layer knows the resulting word.
+    //
+    // Single-quoted regions returned above, so a literal `$` inside quotes is not
+    // reached here; an escaped `\$` was consumed by the `escaped` branch.
+    if (character === "`" || character === "$") {
       hasExecutableSubstitution = true;
     }
     if (quote === undefined && (character === "<" || character === ">")) {

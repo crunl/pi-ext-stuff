@@ -1,10 +1,11 @@
-import { effectiveNetworkAuthority, type SafetyConfig } from "./config.ts";
+import type { SafetyConfig } from "./config.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
 import { type ResidualSignal, residualsForPrompt } from "./permissions/residual.ts";
 import {
+  type ApprovalDisposition,
   analyzeShellGitNetwork,
   classifyRisk,
   deletionExecutables,
@@ -12,17 +13,17 @@ import {
   isPublicNetworkHost,
   normalizeToolCall,
   parseCommandSegments,
-  type Risk,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
+import { effectiveNetworkAuthority } from "./policy-primitives.ts";
 import { requestedEscalation, resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export type RiskDecision =
-  | { action: "allow"; risk: Risk; reason: string }
+  | { action: "allow"; risk: ApprovalDisposition; reason: string }
   | {
       action: "prompt";
-      risk: Risk;
+      risk: ApprovalDisposition;
       reason: string;
       summary: string;
       networkHosts?: string[];
@@ -32,7 +33,7 @@ export type RiskDecision =
       executionMode?: "escalated";
       residuals?: ResidualSignal[];
     }
-  | { action: "block"; risk: Risk; reason: string };
+  | { action: "block"; risk: ApprovalDisposition; reason: string };
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -110,7 +111,7 @@ async function evaluateRequestPermissions(
   if (!isSupportedPermissionRequestShape(input)) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason:
         "request_permissions supports turn-scoped network.hosts OR network_access:true, and filesystem.write lists",
     };
@@ -130,7 +131,7 @@ async function evaluateRequestPermissions(
     protectedWritePaths,
   );
   if (!normalized.ok) {
-    return { action: "block", risk: "HARD", reason: normalized.reason };
+    return { action: "block", risk: "Forbidden", reason: normalized.reason };
   }
   if (
     network.network_access !== true &&
@@ -139,14 +140,14 @@ async function evaluateRequestPermissions(
   ) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: "request_permissions requires at least one permission",
     };
   }
   return {
     action: "prompt",
-    risk: "REVIEW",
-    reason: "REVIEW operation",
+    risk: "NeedsApproval",
+    reason: "Needs review",
     summary:
       network.network_access === true
         ? "Whole-network outbound authority (subject to hard destination and private-target policy), current turn only"
@@ -156,7 +157,7 @@ async function evaluateRequestPermissions(
       networkUncovered:
         network.network_access === true || normalized.amendment.networkHosts.length > 0,
       writeUncovered: normalized.amendment.writeRoots.length > 0,
-      risk: "REVIEW",
+      risk: "NeedsApproval",
     }),
     ...(network.network_access === true ? { networkAll: true as const } : {}),
     ...(normalized.amendment.networkHosts.length > 0
@@ -218,11 +219,11 @@ export async function evaluateHostRiskRequest(
 ): Promise<RiskDecision> {
   const denial = evaluateHostFirstRulesOnly(tool, input, cwd, config);
   if (denial) {
-    return { action: "block", risk: "HARD", reason: denial.reason };
+    return { action: "block", risk: "Forbidden", reason: denial.reason };
   }
   return {
     action: "allow",
-    risk: "LOW",
+    risk: "Skip",
     reason: "Host tool policy",
   };
 }
@@ -246,12 +247,12 @@ export async function evaluateRiskRequest(
   const command = typeof input.command === "string" ? input.command : undefined;
   const escalation = requestedEscalation(input);
   if ("error" in escalation) {
-    return { action: "block", risk: "HARD", reason: escalation.error };
+    return { action: "block", risk: "Forbidden", reason: escalation.error };
   }
   if (escalation.requested && (tool.toLowerCase() !== "bash" || command === undefined)) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: "Command escalation is supported only for Bash executions",
     };
   }
@@ -266,7 +267,7 @@ export async function evaluateRiskRequest(
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: `Unsafe Git network invocation: ${gitNetwork.unsafeReason}`,
     };
   }
@@ -297,14 +298,32 @@ export async function evaluateRiskRequest(
   if (escalationRequested && usesImplicitGitNetwork) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason:
         "Command escalation cannot bind an implicit Git remote destination, and an escalated Bash action has no connection boundary that could enforce it. Run the command sandboxed so each connection is authorised, or name the remote URL in the command.",
     };
   }
+  // The program here is known to be Git; what is unproven is its option grammar
+  // or its wrapper. `git -C DIR` and `git --git-dir DIR` only relocate the target
+  // and say so in the argv, while `git -c KEY=VALUE` can install a hook directory
+  // or an alias that the same invocation then runs. A human can settle both by
+  // reading the command, so this is a review rather than a refusal, and it matches
+  // the `env -C DIR` precedent, which reached review for the same relocation.
+  //
+  // The verdict is carried down to the shared prompt branch instead of returning
+  // here, so the summary and residual set are the same ones every other review
+  // gets. It is deliberately evaluated *after* the escalation refusal above: `-C`
+  // also makes the config that decides an implicit destination unreadable, and on
+  // an escalated action there is no connection boundary left to enforce it, so
+  // that case stays final rather than becoming a review escalation cannot honour.
+  // Scoped to execute for the same reason the two checks above are: a `write` or
+  // `read` input that happens to carry a `command` field was being sent to review
+  // by this flag, while `classifyRisk` treats those operations as `Skip`.
+  const unprovenGitReason =
+    request.operation === "execute" ? gitNetwork?.unprovenReason : undefined;
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
-    return { action: "block", risk: "HARD", reason: gitMetadata.reason };
+    return { action: "block", risk: "Forbidden", reason: gitMetadata.reason };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
     const remoteHosts = await readRepositoryRemoteHosts(
@@ -312,7 +331,7 @@ export async function evaluateRiskRequest(
       gitNetwork?.directImplicitPurpose === "push" ? "push" : "fetch",
     );
     if (!remoteHosts.ok) {
-      return { action: "block", risk: "HARD", reason: remoteHosts.reason };
+      return { action: "block", risk: "Forbidden", reason: remoteHosts.reason };
     }
     request.networkTargets = [
       ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
@@ -325,12 +344,12 @@ export async function evaluateRiskRequest(
     protectedWritePaths ? [...protectedWritePaths] : defaultProtectedWritePaths(cwd),
   );
   if (!additionalWriteRoots.ok) {
-    return { action: "block", risk: "HARD", reason: additionalWriteRoots.reason };
+    return { action: "block", risk: "Forbidden", reason: additionalWriteRoots.reason };
   }
   const filesystemWriteRoots = [...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
   if (rule?.action === "deny") {
-    return { action: "block", risk: "HARD", reason: "Denied by permissions rule" };
+    return { action: "block", risk: "Forbidden", reason: "Denied by permissions rule" };
   }
   if (request.operation === "external") {
     // Product scope 2026-09-19: owned tools do not produce operation=external;
@@ -340,19 +359,19 @@ export async function evaluateRiskRequest(
     if (rule?.action === "ask") {
       return {
         action: "prompt",
-        risk: "REVIEW",
+        risk: "NeedsApproval",
         reason: "Approval required by permissions rule",
         summary: summarize(tool, input),
         residuals: residualsForPrompt({
           ruleAsk: true,
           hostAdmissionReview: true,
-          risk: "REVIEW",
+          risk: "NeedsApproval",
         }),
       };
     }
     return {
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
       reason: rule?.action === "allow" ? "Allowed by permissions rule" : "Host tool policy",
     };
   }
@@ -364,7 +383,7 @@ export async function evaluateRiskRequest(
   if (request.networkTargets?.some((host) => !isPublicNetworkHost(host)) && !sandboxedBashNetwork) {
     return {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: "Private or special-use network target is blocked",
     };
   }
@@ -393,10 +412,10 @@ export async function evaluateRiskRequest(
     filesystem.protectedWritePaths,
     filesystem.allowWrite,
   );
-  if (filesystemWriteRoots.length > 0 && risk === "LOW") risk = "REVIEW";
+  if (filesystemWriteRoots.length > 0 && risk === "Skip") risk = "NeedsApproval";
 
   const allowWrite = [...filesystem.allowWrite];
-  if (risk === "LOW" && request.operation === "execute" && command !== undefined) {
+  if (risk === "Skip" && request.operation === "execute" && command !== undefined) {
     const segments = request.commandSegments ?? parseCommandSegments(command);
     for (const segment of segments) {
       if (!deletionExecutables.has(segment.executable)) continue;
@@ -415,11 +434,11 @@ export async function evaluateRiskRequest(
         // reviewed with its exact denial. Static policy only catches hard
         // protected-path carve-outs before execution.
         if (!decision.allowed && decision.reason !== "write path is outside allowed roots") {
-          risk = "REVIEW";
+          risk = "NeedsApproval";
           break;
         }
       }
-      if (risk !== "LOW") {
+      if (risk !== "Skip") {
         break;
       }
     }
@@ -438,17 +457,17 @@ export async function evaluateRiskRequest(
       });
       if (decision.allowed) continue;
       if (decision.reason === "write path is outside allowed roots") {
-        risk = risk === "HARD" ? "HARD" : "REVIEW";
+        risk = risk === "Forbidden" ? "Forbidden" : "NeedsApproval";
         writeOutsideRoots = true;
         continue;
       }
-      return { action: "block", risk: "HARD", reason: decision.reason };
+      return { action: "block", risk: "Forbidden", reason: decision.reason };
     }
   }
 
   if (
     rule?.action === "allow" &&
-    risk !== "HARD" &&
+    risk !== "Forbidden" &&
     filesystemWriteRoots.length === 0 &&
     !escalationRequested
   ) {
@@ -456,23 +475,39 @@ export async function evaluateRiskRequest(
   }
 
   const promptedByRule = rule?.action === "ask";
-  const wouldPrompt = promptedByRule || risk !== "LOW" || escalationRequested;
+  // An unproven Git context can only *raise* the disposition, never lower it.
+  // Overwriting it unconditionally turned a proven-dangerous `Forbidden` into a
+  // `NeedsApproval` review for the same command: `git -C /x status; rm -rf /tmp/victim`
+  // reported `Forbidden` before and `NeedsApproval` after, so the Guardian was
+  // handed a weaker static risk for a command tier 1 had already proved, and the
+  // `static_risk` metric stopped counting those. `Forbidden` is the one value
+  // that survives, and the tier-1 reason is kept so the cause is not hidden.
+  const unprovenGitElevates = unprovenGitReason !== undefined && risk === "Skip";
+  const reportedRisk = unprovenGitElevates ? "NeedsApproval" : risk;
+  const wouldPrompt =
+    promptedByRule || risk !== "Skip" || escalationRequested || unprovenGitElevates;
   if (wouldPrompt) {
     return {
       action: "prompt",
-      risk,
+      risk: reportedRisk,
       reason: escalationRequested
         ? "Command requires escalated sandbox permissions"
         : promptedByRule
           ? "Approval required by permissions rule"
-          : `${risk} operation`,
+          : unprovenGitElevates
+            ? `Unproven Git invocation: ${unprovenGitReason}`
+            : `${risk} operation`,
       summary: summarize(tool, input),
+      // Derived from the reported disposition, not the pre-elevation one, so a
+      // consumer reading `risk` and one reading `residual_signals` cannot disagree
+      // about the same decision.
       residuals: residualsForPrompt({
         ruleAsk: promptedByRule,
         escalation: escalationRequested,
-        risk,
+        risk: reportedRisk,
         writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
-        actionReview: risk !== "LOW" && filesystemWriteRoots.length === 0 && !escalationRequested,
+        actionReview:
+          reportedRisk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
       justification: escalation.requested

@@ -5,6 +5,17 @@
 > This note remains authoritative for **owned** P0 residual fail-closed design;
 > host `authorizeHostTool` / `evaluateHostRiskRequest` ask→prompt claims below
 > are historical only.
+>
+> **Vocabulary superseded 2026-09-25:** the disposition enum was renamed from
+> `Risk = "LOW" | "REVIEW" | "HARD"` to `ApprovalDisposition = "Skip" |
+> "NeedsApproval" | "Forbidden"`, and the residual tag `risk_not_low` became
+> `risk_not_skip`. Every `LOW` / `HARD` / `risk_not_low` below is a faithful
+> record of this date and is left unedited on purpose — see
+> `2026-09-25-disposition-vocabulary-alignment.md`. The **code blocks** in
+> particular are not current: do not copy `!== "LOW"` from this note, the
+> predicate is now `!== "Skip"`. The skip / no-skip split in §3.1–3.2 and the
+> R1–R18 residual taxonomy below are unchanged and still accurate; only the
+> disposition *values* were renamed.
 
 ## Scope
 

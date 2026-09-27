@@ -5,7 +5,11 @@
  */
 import { basename } from "node:path";
 
-import { gitExecutesNestedProgram } from "./git-exec-entries.ts";
+import {
+  gitConfigSourceEnvNames,
+  gitExecutableEnvNames,
+  gitExecutesNestedProgram,
+} from "./git-exec-entries.ts";
 import type { CommandSegment } from "./rules.ts";
 import { assignmentName, scanShellSyntax, shellWords, splitShellSegments } from "./shell-lexer.ts";
 
@@ -113,7 +117,20 @@ const subcommandRuntimes = new Set(["deno"]);
 
 interface ExecutableContext {
   index: number;
+  /**
+   * No `identity`-impacting assignment and no untrusted wrapper token, so the
+   * program these words name is the program that runs.
+   */
   safe: boolean;
+  /**
+   * Something about the surroundings is unproven — a `context`-impacting
+   * variable, or a wrapper whose argument grammar could not be reduced — while
+   * the program itself is still identified. This is a review, not a refusal, and
+   * it is kept apart from `safe` so that "we cannot prove which binary this is"
+   * and "we cannot prove what this binary's surroundings are" do not share one
+   * verdict.
+   */
+  contextUntrusted: boolean;
   /**
    * An identity-changing prefix was present but its argument grammar was not
    * fully reduced to the real command. The static word list then describes the
@@ -123,23 +140,50 @@ interface ExecutableContext {
 }
 
 /**
- * Whether setting or unsetting this variable makes the resolved executable
- * untrustworthy, so the segment is no longer provably decomposable.
+ * How setting or unsetting this variable affects trust in the resolved program.
  *
- * The set is `PATH` plus the whole `GIT_` namespace. `PATH` is the obvious
- * case: reassigning it redirects command lookup to a program these words never
- * name. `GIT_` is admitted wholesale rather than member by member — the
- * namespace covers program-substituting variables such as `GIT_EXEC_PATH` and
- * `GIT_SSH_COMMAND`, but it also covers inert ones like `GIT_TRACE`. Admitting
- * the namespace costs a review on `GIT_TRACE=1 git status`; enumerating it
- * would need a list that a new Git release can invalidate, and the cost of
- * missing one is a fail-open.
+ * `identity` means the variable decides *which binary runs*, so a segment that
+ * carries one cannot be cleared at all. `context` means the program is still the
+ * one these words name, but something about its surroundings is unproven, so a
+ * human should look. The distinction is not cosmetic: it is the difference
+ * between refusing and reviewing, and collapsing it produced two opposite faults
+ * from one rule — `GIT_TRACE=1 git status` was refused for a variable that
+ * changes nothing, while `PATH=/tmp git -c alias.x='!cmd' push` was only
+ * reviewed for a binary that cannot be identified at all.
  *
- * The result reaches Git as the `executableTrusted` flag, which
- * `git-network.ts` reads when deciding whether a remote may be contacted.
+ * `PATH` is `identity` by definition: reassigning it redirects lookup to a
+ * program these words never name. For `GIT_` the two members are separated using
+ * the sets `git-exec-entries.ts` already maintains for the same question, so the
+ * two layers cannot disagree about which variables substitute a program.
+ * `GIT_TRACE`, `GIT_OPTIONAL_LOCKS`, `GIT_AUTHOR_*` and the rest are `context`.
+ *
+ * A `GIT_*` variable outside both sets is `context`, which is the safe direction
+ * for a variable a future release might add: a miss costs a review rather than an
+ * unearned approval. It does not mean `context` is costless — `classifyRisk`
+ * reads `executableContextUntrusted` as tier 4, so `GIT_TRACE=1 git status` is a
+ * review and not an approval. That is deliberate and it is the older, narrower
+ * rule: any `GIT_*` assignment means Git may read configuration this layer has
+ * not seen. The split here is about which verdict a miss earns, not about whether
+ * it is seen at all. `GIT_AUTHOR_NAME=x git commit` was `Skip` before the `GIT_`
+ * namespace was examined for executable substitution at all; it is a review now.
  */
-function invalidatesExecutableTrust(name: string): boolean {
-  return name === "PATH" || name.startsWith("GIT_");
+type ExecutableTrustImpact = "identity" | "context";
+
+function executableTrustImpact(name: string): ExecutableTrustImpact | undefined {
+  if (name === "PATH") return "identity";
+  // Git honours the generic editor and pager variables when no `GIT_`-prefixed
+  // one is set: `GIT_EDITOR` falls back to `VISUAL` and then `EDITOR`, and
+  // `core.pager` falls back to `GIT_PAGER` and then `PAGER`. Both name a program
+  // Git runs, so both are `identity` — `EDITOR=/tmp/evil git commit` was
+  // auto-approved because only the `GIT_` prefix was examined.
+  if (name === "EDITOR" || name === "VISUAL" || name === "PAGER") return "identity";
+  if (!name.startsWith("GIT_")) return undefined;
+  const upper = name.toUpperCase();
+  if (gitExecutableEnvNames.has(upper) || gitConfigSourceEnvNames.has(upper)) return "identity";
+  // The same dynamic spellings `gitExecutesNestedProgram` treats as
+  // config-bearing: any key, including an alias, can arrive this way.
+  if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(upper)) return "identity";
+  return "context";
 }
 
 /** `timeout` duration: decimal with at most one non-trailing dot, optional s/m/h/d. */
@@ -239,11 +283,37 @@ function delegatingWrapperOptionCount(
 function executableContext(words: readonly string[]): ExecutableContext {
   let index = 0;
   let safe = true;
+  let contextUntrusted = false;
   let unclassifiable = false;
+  /**
+   * `env` clears a variable with `-u NAME` / `--unset=NAME` as well as setting
+   * one, so unsetting `PATH` redirects lookup exactly as setting it does. The
+   * caller's `safe` flag covers the setting form; this records the unset form so
+   * it lands on the same verdict.
+   */
+  const applyImpact = (name: string): void => {
+    const impact = executableTrustImpact(name);
+    if (impact === "identity") safe = false;
+    else if (impact === "context") contextUntrusted = true;
+  };
+  /**
+   * A delegating wrapper only hides the real command behind its own option
+   * grammar. When that grammar cannot be reduced, the words name the wrapper and
+   * not the program it runs, so the program is unidentified — a refusal, not the
+   * review that `contextUntrusted` carries. `env -C DIR cmd` is the case: `env`
+   * is found at a trusted path and `-C` is a directory, yet where the delegated
+   * command begins is not established, so the program behind it is not either.
+   * Recording this as `unclassifiable` alone left `executableTrusted` true and
+   * the refusal never fired.
+   */
+  const markUnreduced = (): void => {
+    unclassifiable = true;
+    safe = false;
+  };
   while (index < words.length) {
     const name = assignmentName(words[index] ?? "");
     if (!name) break;
-    if (invalidatesExecutableTrust(name)) safe = false;
+    applyImpact(name);
     index += 1;
   }
   while (index < words.length) {
@@ -294,12 +364,12 @@ function executableContext(words: readonly string[]): ExecutableContext {
       wrapper === "unbuffer"
     ) {
       if (!isTrustedExecutableToken(wrapperToken, wrapper)) {
-        unclassifiable = true;
+        markUnreduced();
         break;
       }
       let next = delegatingWrapperOptionCount(wrapper, words, index + 1);
       if (next === undefined) {
-        unclassifiable = true;
+        markUnreduced();
         break;
       }
       // `timeout` takes a bare DURATION as its first operand.
@@ -336,7 +406,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
         const token = words[index] ?? "";
         const name = assignmentName(token);
         if (name) {
-          if (invalidatesExecutableTrust(name)) safe = false;
+          applyImpact(name);
           index += 1;
           continue;
         }
@@ -346,12 +416,13 @@ function executableContext(words: readonly string[]): ExecutableContext {
         }
         if (token === "-u" || token === "--unset") {
           const unsetName = words[index + 1];
-          if (!unsetName || invalidatesExecutableTrust(unsetName)) safe = false;
+          if (!unsetName) safe = false;
+          else applyImpact(unsetName);
           index += 2;
           continue;
         }
         if (token.startsWith("--unset=")) {
-          if (invalidatesExecutableTrust(token.slice("--unset=".length))) safe = false;
+          applyImpact(token.slice("--unset=".length));
           index += 1;
           continue;
         }
@@ -362,7 +433,23 @@ function executableContext(words: readonly string[]): ExecutableContext {
           token === "-i" ||
           token === "--ignore-environment"
         ) {
-          safe = false;
+          // `env` stays anchored here: the words after an option whose arity is
+          // not established do not provably begin with the delegated command, so
+          // the program behind `env` is unidentified rather than merely
+          // unproven. `env -C DIR git add x` is refused, which is what the
+          // working-directory relocation has always been worth.
+          markUnreduced();
+          // `--chdir` moves the working directory the wrapped command runs in,
+          // so any path this segment's operands name is relative to a root the
+          // caller never saw. Deletion targets and write roots are checked
+          // against the outer cwd, which makes the check provable for the wrong
+          // tree. The reference implementation does not parse `--chdir` either;
+          // it sends the whole `env` invocation to review. That is the shape
+          // available here, so the segment stops claiming a fixed argv instead
+          // of a new option grammar being invented for one flag.
+          if (token === "-C" || token === "--chdir" || token.startsWith("--chdir=")) {
+            unclassifiable = true;
+          }
           index += token === "-C" || token === "--chdir" ? 2 : 1;
           continue;
         }
@@ -429,7 +516,7 @@ function executableContext(words: readonly string[]): ExecutableContext {
     }
     break;
   }
-  return { index, safe, unclassifiable };
+  return { index, safe, contextUntrusted, unclassifiable };
 }
 
 function isTrustedExecutableToken(token: string, executable: string): boolean {
@@ -701,6 +788,12 @@ function parseCommandSegment(source: string): CommandSegment {
     executableToken,
     executable,
     executableTrusted: context.safe && isTrustedExecutableToken(executableToken, executable),
+    // Deliberately not derived from `executableTrusted`. A segment can name an
+    // identified program and still carry unproven surroundings, and a segment
+    // whose program is unidentified is refused regardless of what else is true —
+    // folding the two together let an untrusted binary buy a lighter verdict by
+    // adding an argument that made it non-decomposable.
+    executableContextUntrusted: context.contextUntrusted,
     args,
     hasRedirect: syntax.hasActiveRedirect,
     hasSubstitution: syntax.hasExecutableSubstitution,
@@ -738,9 +831,107 @@ export function parseCommandSegments(command: string): CommandSegment[] {
     const body = scanShellSyntax(nestedCommand);
     const bodyRewritesArgv = body.hasExecutableSubstitution || body.hasHereDocument;
     const inner = parseCommandSegments(nestedCommand);
-    return bodyRewritesArgv
-      ? inner.map((nestedSegment) => ({ ...nestedSegment, decomposable: false }))
-      : inner;
+    // The body inherits the host segment's environment, and the inner parse
+    // starts from a fresh `executableContext`, so it cannot see what the outer
+    // words established. That made the trust gate a single wrapper away:
+    // `env PATH=/tmp /bin/bash -c 'git push origin main'` marked the inner `git`
+    // trusted and auto-approved it, because the only segment that had seen
+    // `PATH=/tmp` was the shell. An untrusted host is inherited whole — its
+    // program cannot be identified, and nothing it runs is identified either.
+    //
+    // `GIT_DIR` is the case that needs care: it is a `context` impact, so the
+    // host stays trusted and the body inherits only that. Inheriting trust here
+    // would be wrong — the body runs in a different repository, and reading it
+    // as trusted would let the relocation decide nothing. Inheriting the
+    // unproven marker is what makes the body's own `git push` a review.
+    const inherit = (nestedSegment: CommandSegment): CommandSegment =>
+      segment.executableTrusted
+        ? segment.executableContextUntrusted
+          ? { ...nestedSegment, executableContextUntrusted: true }
+          : nestedSegment
+        : { ...nestedSegment, executableTrusted: false, executableContextUntrusted: true };
+    return inner.map((nestedSegment) => {
+      const inherited = inherit(nestedSegment);
+      return bodyRewritesArgv ? { ...inherited, decomposable: false } : inherited;
+    });
   });
   return [...segments, ...nested];
+}
+
+/**
+ * Commands that publish shell state every later segment of the same command
+ * line sees.
+ *
+ * Two kinds, because they are the same defect by different means. A variable
+ * setter hands a later segment a value its argv never named. A directory
+ * changer hands it a root: `cd /tmp; git push origin main` runs in a different
+ * repository, with a different config, a different `core.hooksPath` and a
+ * different implicit remote — and the implicit-remote lookup reads repository
+ * metadata from the `cwd` this request arrived with, not from `/tmp`. The
+ * destination that gets bound is then the wrong repository's.
+ *
+ * `cd` is the case the references leave open, and they leave it open in opposite
+ * ways. fx refuses every `;`-joined command as `unsupported_shell`
+ * (`command_effect.zig:392`), which closes the relocation by refusing all
+ * composition. Codex parses `cd` and accumulates the new root
+ * (`parse_command.rs:1472`, `cd_target` + `join_paths`), but that feeds
+ * `ParsedCommand` for event reporting and tool registration — its authorization
+ * path reads raw tokens through `is_dangerous_command` and never sees it. This
+ * package deliberately supports composition (`git add README.md;` auto-runs), so
+ * refusing `;` is not available either. The rule is already here for variable
+ * setters; a directory changer belongs in it.
+ *
+ * The exemption is a no-op relocation, not a general one. `cd .` and
+ * `cd <the request's own cwd>` provably reach the directory the request already
+ * named, and a read-only probe written as `cd <cwd> && git status` is ordinary
+ * work. The comparison is literal on purpose: `cd /a/b/../c` against `/a/c`
+ * compares unequal and is treated as a relocation, which is the direction that
+ * cannot fail open. Symlinks are not resolved, so a path that merely looks like
+ * the cwd counts as a relocation rather than being waved through.
+ */
+const shellDirectoryChangers = new Set(["cd", "pushd", "popd"]);
+
+const shellStateSetters = new Set(["declare", "export", "local", "readonly", "typeset"]);
+
+function isNoOpRelocation(segment: CommandSegment, requestCwd: string | undefined): boolean {
+  if (requestCwd === undefined) return false;
+  const [target] = segment.args;
+  if (target === undefined) return false;
+  if (target === ".") return true;
+  return stripTrailingSlash(target) === stripTrailingSlash(requestCwd);
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.length > 1 && value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+/**
+ * Whether one segment of a compound command can change what a later one does.
+ *
+ * `GIT_EDITOR='rm -f x' git commit` is caught by the assignment check on the
+ * segment that carries it, but `export GIT_EDITOR='rm -f x'; git commit` puts
+ * the assignment in its own segment, and the `git commit` segment is then
+ * analysed as though nothing had been set. The editor program is named by the
+ * environment rather than by argv, so the static argv is not the argv that
+ * runs. `cd` reaches the same conclusion by handing over a root instead of a
+ * value.
+ *
+ * Tracking the value across segments would mean modelling shell state, which is
+ * a different model from the one this layer uses. The reference implementation
+ * does not model it either: it routes a compound command carrying an assignment
+ * to `unsupported_shell`. This is that rule, expressed over segments we already
+ * have — a compound command that publishes state is not decomposable, and the
+ * reviewer decides.
+ */
+export function shellStateCrossesSegments(
+  segments: readonly CommandSegment[],
+  requestCwd?: string,
+): boolean {
+  if (segments.length < 2) return false;
+  return segments.some((segment) => {
+    if (segment.executable === "") return true;
+    if (shellStateSetters.has(segment.executable)) return true;
+    if (!shellDirectoryChangers.has(segment.executable)) return false;
+    return !isNoOpRelocation(segment, requestCwd);
+  });
 }

@@ -1,19 +1,19 @@
 import { isAbsolute, join, resolve } from "node:path";
 import type { SafetyConfig } from "./config.ts";
 import {
-  effectiveNetworkAuthority,
-  fingerprintValue,
-  type NetworkAccess,
-  validateNetworkAccess,
-  validateNetworkPolicy,
-} from "./config.ts";
-import {
   createFilesystemPolicy,
   expandSymlinkAliases,
-  hasGlobSyntax,
   resolveSandboxDenyPattern,
 } from "./filesystem-policy.ts";
 import { isNetworkPatternCoveredBy } from "./network-domain-pattern.ts";
+import {
+  effectiveNetworkAuthority,
+  fingerprintValue,
+  hasGlobSyntax,
+  type NetworkAccess,
+  validateNetworkAccess,
+  validateNetworkPolicy,
+} from "./policy-primitives.ts";
 
 /** An attempt's required network enforcement, not an authorization ledger. */
 export type ExecutionNetwork =

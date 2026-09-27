@@ -51,7 +51,7 @@ function hostAction(
     kind: "host",
     risk: {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The test action requires review.",
       summary: "test action",
     },

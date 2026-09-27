@@ -121,7 +121,7 @@ describe("admissionPlanFromRiskDecision", () => {
   it("maps allow to an allow plan", () => {
     const decision: RiskDecision = {
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Low-risk operation",
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({ kind: "allow" });
@@ -130,7 +130,7 @@ describe("admissionPlanFromRiskDecision", () => {
   it("maps block to a deny plan and preserves the reason", () => {
     const decision: RiskDecision = {
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: "Protected path",
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
@@ -142,12 +142,12 @@ describe("admissionPlanFromRiskDecision", () => {
   it("maps requested network and filesystem capabilities to a capability review", () => {
     const decision: RiskDecision = {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "Outside the baseline",
       summary: "npm test",
       networkHosts: ["registry.npmjs.org"],
       filesystemWriteRoots: ["/workspace/generated"],
-      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_low"],
+      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_skip"],
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
@@ -156,35 +156,35 @@ describe("admissionPlanFromRiskDecision", () => {
         { kind: "filesystem", operation: "write", path: "/workspace/generated" },
       ],
       review: "capability",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "Outside the baseline",
       summary: "npm test",
-      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_low"],
+      residuals: ["network_uncovered", "write_root_uncovered", "risk_not_skip"],
     });
   });
 
   it("maps a prompt without capabilities to an action review", () => {
     const decision: RiskDecision = {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The action needs review",
       summary: "custom tool",
-      residuals: ["risk_not_low"],
+      residuals: ["risk_not_skip"],
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
       review: "action",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The action needs review",
       summary: "custom tool",
-      residuals: ["risk_not_low"],
+      residuals: ["risk_not_skip"],
     });
   });
 
   it("maps an escalated Bash review without pretending the sandbox enforces it", () => {
     const decision: RiskDecision = {
       action: "prompt",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Command requires escalated sandbox permissions",
       summary: "git add README.md && git commit -m update",
       executionMode: "escalated",
@@ -194,7 +194,7 @@ describe("admissionPlanFromRiskDecision", () => {
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "review",
       review: "action",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Command requires escalated sandbox permissions",
       summary: "git add README.md && git commit -m update",
       executionMode: "escalated",
@@ -206,7 +206,7 @@ describe("admissionPlanFromRiskDecision", () => {
   it("still emits review and stamps other_explicit_review when prompt residuals are missing", () => {
     const decision: RiskDecision = {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The action needs review",
       summary: "unstamped prompt",
     };
@@ -276,7 +276,7 @@ describe("createPiGuardianAdapter", () => {
     await adapter.review(
       reviewInput({
         requested,
-        risk: "HARD",
+        risk: "Forbidden",
         baseline: { mode: "sandboxed", policy: baselinePolicy },
         effective: { mode: "sandboxed", policy: effectivePolicy },
         reason: "Needs the generated output directory",
@@ -295,7 +295,7 @@ describe("createPiGuardianAdapter", () => {
       requestedNetworkTargets: [{ host: "turn.example", port: 8443, protocol: "https" }],
       allowedNetworkHosts: ["example.com", "turn.example"],
       deniedNetworkHosts: ["localhost"],
-      staticRisk: "HARD",
+      staticRisk: "Forbidden",
       staticReason: "Needs the generated output directory",
     });
     expect(request?.untrustedAction.toolCallId).toBe("call-1");
@@ -517,8 +517,8 @@ describe("createPiGuardianAdapter", () => {
 
     const decision = await adapter.review(
       reviewInput({
-        risk: "REVIEW",
-        residuals: ["rule_ask", "risk_not_low"],
+        risk: "NeedsApproval",
+        residuals: ["rule_ask", "risk_not_skip"],
         source: "preview",
       }),
     );
@@ -526,9 +526,9 @@ describe("createPiGuardianAdapter", () => {
     expect(decision.kind).toBe("approve");
     expect(decision).toMatchObject({
       metrics: {
-        staticRisk: "REVIEW",
+        staticRisk: "NeedsApproval",
         reviewSource: "preview",
-        residualSignals: ["rule_ask", "risk_not_low"],
+        residualSignals: ["rule_ask", "risk_not_skip"],
       },
     });
   });

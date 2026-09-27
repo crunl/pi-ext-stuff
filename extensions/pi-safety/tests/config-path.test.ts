@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, fingerprintConfig, loadSafetyConfig } from "../src/config.ts";
-import { defaultProtectedWritePaths, defaultSafetyConfigPath } from "../src/filesystem-policy.ts";
+import { defaultProtectedWritePaths } from "../src/filesystem-policy.ts";
+import { defaultSafetyConfigPath } from "../src/policy-primitives.ts";
 
 const tempDirs: string[] = [];
 

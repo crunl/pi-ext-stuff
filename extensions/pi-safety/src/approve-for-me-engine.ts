@@ -1,14 +1,17 @@
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
-import { effectiveNetworkAuthority, fingerprintValue } from "./config.ts";
-import { hasGlobSyntax } from "./filesystem-policy.ts";
 import {
   isExactLocalNetworkAllowed,
   matchesNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, isValidNetworkPort, normalizeNetworkHost } from "./network-host.ts";
-import { isPathWithin } from "./permissions/paths.ts";
 import { normalizeResidualSignals, type ResidualSignal } from "./permissions/residual.ts";
+import {
+  effectiveNetworkAuthority,
+  fingerprintValue,
+  hasGlobSyntax,
+  isPathWithin,
+} from "./policy-primitives.ts";
 import { MAX_JUSTIFICATION_LENGTH, MAX_PATH_LENGTH } from "./request-limits.ts";
 import {
   type NativeFileOperationFailure,
@@ -23,7 +26,7 @@ export type { ResidualSignal } from "./permissions/residual.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
-export type AdmissionRisk = "LOW" | "REVIEW" | "HARD";
+export type AdmissionRisk = "Skip" | "NeedsApproval" | "Forbidden";
 export type CommandExecutionMode = "escalated";
 
 /** Ownership says which external execution Adapter is authoritative. */
@@ -73,6 +76,20 @@ export type AdmissionPlan =
  * may load it asynchronously before beginTurn, but cannot replace its policy
  * or identity while a call is in flight.
  */
+/**
+ * Immutable, host-derived facts required before a Bash escalation review.
+ *
+ * Declared here rather than at the producer because this is the interface the
+ * Engine consumes; `escalation-policy.ts` imports it from here. This shape was
+ * an inline `{eligible, reason}` in six places across this file and
+ * `pi-safety.ts`, three of them inside two structurally identical copies of the
+ * turn-snapshot interface.
+ */
+export interface EscalationEligibility {
+  eligible: boolean;
+  reason: string;
+}
+
 export interface TurnSnapshot {
   sessionId: string;
   turnId: string | number;
@@ -81,11 +98,7 @@ export interface TurnSnapshot {
   configFingerprint: string;
   baseSandboxPolicy?: SandboxPolicy;
   sandboxReady?: boolean;
-  /** Immutable, host-derived facts required before a Bash escalation review. */
-  escalationEligibility?: {
-    eligible: boolean;
-    reason: string;
-  };
+  escalationEligibility?: EscalationEligibility;
   transcript?: readonly unknown[];
 }
 
@@ -399,7 +412,7 @@ export interface ApproveForMeEngine<ReviewContext = undefined> {
     mode: ApproveForMeMode;
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: { eligible: boolean; reason: string };
+    escalationEligibility?: EscalationEligibility;
   }): boolean;
   invalidate(reason: string): void;
   listDenials(): readonly DenialNotice[];
@@ -738,7 +751,7 @@ function normalizeAdmission(
   }
   if (
     (raw.review !== "capability" && raw.review !== "action") ||
-    (raw.risk !== "LOW" && raw.risk !== "REVIEW" && raw.risk !== "HARD") ||
+    (raw.risk !== "Skip" && raw.risk !== "NeedsApproval" && raw.risk !== "Forbidden") ||
     typeof raw.reason !== "string" ||
     raw.reason.trim().length === 0 ||
     (raw.summary !== undefined && typeof raw.summary !== "string")
@@ -1701,9 +1714,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         source: "inline",
         requested: [delta],
         effective,
-        risk: "REVIEW",
+        risk: "NeedsApproval",
         summary: `${request.call.tool} native preparation recovery`,
-        residuals: ["native_recovery", "write_root_uncovered", "risk_not_low"],
+        residuals: ["native_recovery", "write_root_uncovered", "risk_not_skip"],
         reason: `Review re-entering the original complete ${request.call.tool} action once, not a proven sandbox denial. Observed ${failure.operation} access failure before any content write. Additional write root: ${JSON.stringify(root)}${mkdir ? " (immediate-parent subtree scope, not mkdir-only)" : " (original file write root)"}. Re-entry rereads current content and repeats native preparation; partial directory effects may already exist.\n${evidence}`,
       },
     );
@@ -2106,7 +2119,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         {
           source: amendmentSource,
           requested: amendmentRequests,
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           reason: amendmentReason,
           summary: amendmentSummary,
           residuals:
@@ -2122,7 +2135,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           rationale: decision.rationale,
           requested: amendmentRequests,
           admissionRequested: amendment.requests,
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           summary: amendmentReason,
         });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
@@ -2522,7 +2535,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     mode: ApproveForMeMode;
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: { eligible: boolean; reason: string };
+    escalationEligibility?: EscalationEligibility;
   }): boolean => {
     if (!active || !isCurrent(active)) return false;
     active.snapshot.mode = patch.mode;

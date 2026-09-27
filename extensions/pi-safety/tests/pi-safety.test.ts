@@ -49,7 +49,7 @@ function reviewedInvocation(
     kind: "host",
     risk: {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The test action requires review.",
       summary: "test action",
     },
@@ -126,7 +126,7 @@ describe("PiSafetyRuntime facade", () => {
         kind: "host",
         risk: {
           action: "prompt",
-          risk: "REVIEW",
+          risk: "NeedsApproval",
           reason: "The host action requires review.",
           summary: "send mail",
         },
@@ -168,7 +168,7 @@ describe("PiSafetyRuntime facade", () => {
       kind: "sandbox",
       risk: {
         action: "prompt",
-        risk: "REVIEW",
+        risk: "NeedsApproval",
         reason: "The action requires review.",
         summary: "canonical action",
       },

@@ -19,7 +19,19 @@ export interface CommandSegment {
   /** Raw executable token before basename normalization. */
   executableToken: string;
   executable: string;
+  /**
+   * The resolved program is the one these words name: no `identity`-impacting
+   * variable, no untrusted wrapper token. False means the program cannot be
+   * identified at all.
+   */
   executableTrusted: boolean;
+  /**
+   * The program is identified, but its surroundings are not fully proven — a
+   * variable that changes context without changing the binary, or a wrapper
+   * whose argument grammar could not be reduced. This is a review, and it is
+   * independent of `executableTrusted` in both directions.
+   */
+  executableContextUntrusted: boolean;
   args: string[];
   hasRedirect: boolean;
   hasSubstitution: boolean;

@@ -406,7 +406,7 @@ describe("Pi facade native preparation recovery", () => {
         cwd: "/workspace",
       }),
       kind: "sandbox",
-      risk: { action: "allow", risk: "LOW", reason: "test" },
+      risk: { action: "allow", risk: "Skip", reason: "test" },
       runtimeDenialPolicy: "review-and-retry",
       reviewContext: undefined,
       execute: async () => (++executions === 1 ? failed() : { kind: "completed", value: "ok" }),

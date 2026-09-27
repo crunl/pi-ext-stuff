@@ -108,7 +108,7 @@ const DIAGNOSTIC_REQUEST = (cwd: string): AutoReviewRequest => ({
     requestedNetworkTargets: [],
     allowedNetworkHosts: [],
     deniedNetworkHosts: ["*"],
-    staticRisk: "REVIEW",
+    staticRisk: "NeedsApproval",
     staticReason: "Guardian runtime diagnostic",
   },
 });

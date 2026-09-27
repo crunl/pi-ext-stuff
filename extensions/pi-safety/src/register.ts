@@ -25,7 +25,10 @@ import {
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../pi-core/standalone.ts";
-import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
+import {
+  type EscalationEligibility,
+  matchesNetworkDomainPattern,
+} from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   captureExitCode,
@@ -36,10 +39,7 @@ import {
   runtimeDenialFromEvidence,
 } from "./bash-outcome.ts";
 import {
-  ConfigError,
-  effectiveNetworkAuthority,
   fingerprintConfig,
-  fingerprintValue,
   type LoadedSafetyConfig,
   loadSafetyConfig,
   type SafetyConfig,
@@ -50,22 +50,23 @@ import {
   type DelegationEnvelope,
   intersectSandboxPolicy,
   isNetworkCovered,
-  isWriteCovered,
   resolveChildEnvelope,
 } from "./delegation.ts";
 import {
+  checkDelegateSpawn,
+  checkDelegationNetwork,
+  checkDelegationWrite,
+  checkRequestedCapabilities,
+  type DelegationScope,
+} from "./delegation-policy.ts";
+import { escalationEligibility as escalationPolicy } from "./escalation-policy.ts";
+import {
   defaultProtectedWritePaths,
   expandSymlinkAliases,
-  hasGlobSyntax,
   resolvePolicyPath,
 } from "./filesystem-policy.ts";
 import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
-import {
-  buildGuardianMetricsRecord,
-  mapActionTag,
-  mapFailureReason,
-  mapTerminalStatus,
-} from "./guardian/metrics.ts";
+import { guardianMetricsRecordFromEvent } from "./guardian/metrics.ts";
 import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
@@ -98,6 +99,12 @@ import {
   type PiTurnSnapshot,
 } from "./pi-safety.ts";
 import {
+  ConfigError,
+  effectiveNetworkAuthority,
+  fingerprintValue,
+  hasGlobSyntax,
+} from "./policy-primitives.ts";
+import {
   guardianTranscriptEntryFromMessage,
   nextMode,
   normalizeEscalatedBashTimeout,
@@ -122,7 +129,7 @@ import {
   createSandboxedFileOperations,
   type SandboxedFileOperationOptions,
 } from "./sandbox.ts";
-import { SandboxExecutionCoordinator } from "./sandbox-coordinator.ts";
+import { SandboxLifecycleLease } from "./sandbox-lifecycle-lease.ts";
 import {
   createSandboxRuntimeConfig,
   describeExecutionNetwork,
@@ -158,7 +165,7 @@ export interface RegisterExtensionOptions {
   bashToolFactory?: typeof createBashTool;
   /** Builds the operations used for unrestricted/escalated leases. Default: pi's local shell backend. */
   localBashOperations?: () => BashOperations;
-  sandboxCoordinator?: Pick<SandboxExecutionCoordinator, "runShared" | "runExclusive">;
+  sandboxLifecycleLease?: Pick<SandboxLifecycleLease, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
   guardianPolicySource?: GuardianPolicySource;
@@ -213,7 +220,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const baseBash = bashToolFactory(process.cwd());
   const baseWrite = createWriteTool(process.cwd());
   const baseEdit = createEditTool(process.cwd());
-  const sandboxCoordinator = options.sandboxCoordinator ?? new SandboxExecutionCoordinator();
+  const sandboxLifecycleLease = options.sandboxLifecycleLease ?? new SandboxLifecycleLease();
   const managedRiskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
@@ -236,57 +243,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (phase !== "runtime") return { kind: "allow" };
         if (!loaded || !modeRuntime)
           return { kind: "deny", reason: "Permission context unavailable" };
-        for (const request of requested) {
-          const violation =
-            request.kind === "filesystem" && request.operation === "write"
-              ? checkDelegationWrite(request.path, modeRuntime.mode, loaded.config)
-              : request.kind === "network"
-                ? checkDelegationNetwork(request.host, modeRuntime.mode, loaded.config)
-                : undefined;
-          if (violation) return { kind: "deny", reason: violation };
-        }
-        return { kind: "allow" };
+        const violation = checkRequestedCapabilities(
+          requested,
+          modeRuntime.mode,
+          loaded.config,
+          delegationScope(),
+        );
+        return violation ? { kind: "deny", reason: violation } : { kind: "allow" };
       },
     },
     reviewEventSink: (event) => {
       pi.events.emit("pi-safety:review", event);
       // Best-effort local metrics sink. Never throws into the authorization path.
-      if (event.status !== "reviewing" && event.metrics) {
-        const record = buildGuardianMetricsRecord({
-          reviewId: event.reviewId,
-          terminalStatus: mapTerminalStatus(event.status),
-          failureReason: mapFailureReason(
-            event.metrics.failureKind as Parameters<typeof mapFailureReason>[0],
-          ),
-          action: mapActionTag(event.call.tool),
-          ownership: event.ownership,
-          sessionKind: event.metrics.sessionKind ?? "trunk_new",
-          hadPriorReviewContext: event.metrics.hadPriorReviewContext ?? false,
-          ...(event.metrics.riskLevel === undefined ? {} : { riskLevel: event.metrics.riskLevel }),
-          ...(event.metrics.userAuthorization === undefined
-            ? {}
-            : { userAuthorization: event.metrics.userAuthorization }),
-          ...(event.metrics.outcome === undefined ? {} : { outcome: event.metrics.outcome }),
-          ...(event.metrics.guardianModel === undefined
-            ? {}
-            : { guardianModel: event.metrics.guardianModel }),
-          ...(event.metrics.guardianReasoningEffort === undefined
-            ? {}
-            : { guardianReasoningEffort: event.metrics.guardianReasoningEffort }),
-          ...(event.metrics.staticRisk === undefined
-            ? {}
-            : { staticRisk: event.metrics.staticRisk }),
-          ...(event.metrics.reviewSource === undefined
-            ? {}
-            : { reviewSource: event.metrics.reviewSource }),
-          ...(event.metrics.residualSignals === undefined
-            ? {}
-            : { residualSignals: event.metrics.residualSignals }),
-          durationMs: event.metrics.durationMs,
-          ...(event.metrics.tokenUsage === undefined
-            ? {}
-            : { tokenUsage: event.metrics.tokenUsage }),
-        });
+      const record = guardianMetricsRecordFromEvent(event);
+      if (record) {
         void (async () => {
           try {
             const { appendFile } = await import("node:fs/promises");
@@ -351,41 +321,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
+  // The rules live in `escalation-policy.ts`; this is the wiring that supplies
+  // the two live facts they need. Eligibility itself is pure and unit-tested.
   const escalationEligibility = (
     snapshot: Pick<
       PermissionExecutionSnapshot,
       "mode" | "config" | "sandboxReady" | "baseSandboxConfig"
     >,
-    baseSandboxConfig = snapshot.baseSandboxConfig,
-  ): { eligible: boolean; reason: string } => {
-    if (snapshot.mode !== "auto") {
-      return { eligible: false, reason: "Command escalation is unavailable outside auto mode" };
-    }
-    if (!snapshot.sandboxReady || baseSandboxConfig === undefined || !sandboxManagerHealthy()) {
-      return {
-        eligible: false,
-        reason: "Sandbox executor is unavailable or poisoned",
-      };
-    }
-    // Codex parity: only denied reads make unsandboxed execution illegal.
-    // denyWrite / deniedDomains are dropped on a Codex-style bypass as well.
-    if (snapshot.config.sandbox.filesystem.denyRead.length > 0) {
-      return {
-        eligible: false,
-        reason: "Command escalation cannot preserve configured denyRead rules",
-      };
-    }
-    if (session.activeDelegationCeiling()) {
-      return {
-        eligible: false,
-        reason: "Command escalation is outside the active delegation envelope",
-      };
-    }
-    return {
-      eligible: true,
-      reason: "Sandbox is healthy and neither denyRead nor a delegation ceiling apply",
-    };
-  };
+    baseSandboxPolicy?: SandboxPolicy,
+  ): EscalationEligibility =>
+    escalationPolicy(snapshot, {
+      sandboxHealthy: sandboxManagerHealthy(),
+      delegationCeilingActive: session.activeDelegationCeiling() !== undefined,
+      baseSandboxPolicy,
+    });
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
     ctx.ui.setStatus("pi-safety", modeRuntime?.statusLabel ?? "Approve for me");
@@ -511,63 +460,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    */
   const DELEGATED_TOOL_NAMES = new Set(["subagent"]);
 
-  /** Remaining delegation levels below the current (possibly nested) turn. */
-  const delegationRemainingDepth = (config: SafetyConfig): number => {
-    const ceiling = session.activeDelegationCeiling();
-    if (ceiling?.maxDepth !== undefined) return ceiling.maxDepth;
-    return config.delegation.maxDepth - (session.getTurnDepth() - 1);
-  };
-
-  const checkDelegateSpawn = (
-    tool: string,
-    config: SafetyConfig,
-  ): { blocked: true; reason: string } | { blocked: false } => {
-    if (!DELEGATED_TOOL_NAMES.has(tool)) return { blocked: false };
-    if (!session.activeDelegationAllowsReDelegate()) {
-      return {
-        blocked: true,
-        reason:
-          "Re-delegation is disabled by the active delegation envelope: this subagent may not spawn its own subagents.",
-      };
-    }
-    if (delegationRemainingDepth(config) <= 0) {
-      return {
-        blocked: true,
-        reason: `Delegation depth limit reached (max ${config.delegation.maxDepth} nested subagent levels): refusing to spawn a deeper subagent.`,
-      };
-    }
-    return { blocked: false };
-  };
-
-  const checkDelegationWrite = (
-    absolutePath: string,
-    mode: ExecutablePermissionMode,
-    config: SafetyConfig,
-  ): string | undefined => {
-    if (mode === "yolo" || !config.delegation.enabled) return undefined;
-    const ceiling = session.activeDelegationCeiling();
-    if (!ceiling || isWriteCovered(absolutePath, ceiling)) return undefined;
-    const roots = ceiling.writeRoots.length === 0 ? "(none)" : ceiling.writeRoots.join(", ");
-    return (
-      `Write to ${absolutePath} is outside the delegation envelope for this subagent ` +
-      `(allowed roots: ${roots}).`
-    );
-  };
-
-  const checkDelegationNetwork = (
-    host: string,
-    mode: ExecutablePermissionMode,
-    _config: SafetyConfig,
-  ): string | undefined => {
-    if (mode === "yolo") return undefined;
-    const ceiling = session.activeDelegationCeiling();
-    if (!ceiling || isNetworkCovered(host, ceiling)) return undefined;
-    const hosts = ceiling.networkHosts.length === 0 ? "(none)" : ceiling.networkHosts.join(", ");
-    return (
-      `Network access to ${host} is outside the delegation envelope for this subagent ` +
-      `(allowed hosts: ${hosts}).`
-    );
-  };
+  // The three live facts the delegation rules need. The rules themselves are in
+  // `delegation-policy.ts`; this is the only place that knows how to read them,
+  // so a change to what "the current scope" means has exactly one home.
+  const delegationScope = (): DelegationScope => ({
+    ceiling: session.activeDelegationCeiling(),
+    turnDepth: session.getTurnDepth(),
+    allowsReDelegate: session.activeDelegationAllowsReDelegate(),
+  });
 
   type NestedPermissionTurnResult = "opened" | "blocked" | "saturated" | "stale";
 
@@ -749,7 +649,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const generation = session.getGeneration();
     // A proxy callback cannot tighten a raw/helper profile already installed at
     // spawn. Hold off new execution, then wait for real backend quiescence.
-    return sandboxCoordinator.runExclusive(async () => {
+    return sandboxLifecycleLease.runExclusive(async () => {
       try {
         if (!sandboxManager.waitForIdle)
           throw new Error("Backend cannot drain unmediated networking before delegation");
@@ -1098,7 +998,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // exclusive activation/reset. Recheck all facts only after acquiring it;
     // never upgrade a shared lease into a mutable activation.
     if (!force && !candidateOverride && targetMode !== "yolo") {
-      const cached = await sandboxCoordinator.runShared(async () => {
+      const cached = await sandboxLifecycleLease.runShared(async () => {
         assertActivationCurrent(expectedGeneration);
         if (configFailure) throw configFailure;
         if (
@@ -1122,7 +1022,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
     return targetMode === "yolo"
       ? activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration)
-      : sandboxCoordinator.runExclusive(() =>
+      : sandboxLifecycleLease.runExclusive(() =>
           activateConfigUnlocked(ctx, force, targetMode, candidateOverride, expectedGeneration),
         );
   };
@@ -1553,7 +1453,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
     // Product delegation spawn gate (not foreign tool governance).
     if (executionContext.config.delegation.enabled && DELEGATED_TOOL_NAMES.has(event.toolName)) {
-      const spawn = checkDelegateSpawn(event.toolName, executionContext.config);
+      const spawn = checkDelegateSpawn(executionContext.config, delegationScope());
       if (spawn.blocked) {
         return {
           block: true,
@@ -1668,17 +1568,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           resolvePolicyPath(root, canonicalCwd),
           executionSnapshot.mode,
           executionContext.config,
+          delegationScope(),
         );
         if (violation) {
           throw policyDeniedError(violation);
         }
       }
       for (const host of risk.networkHosts ?? []) {
-        const violation = checkDelegationNetwork(
-          host,
-          executionSnapshot.mode,
-          executionContext.config,
-        );
+        const violation = checkDelegationNetwork(host, executionSnapshot.mode, delegationScope());
         if (violation) {
           throw policyDeniedError(violation);
         }
@@ -1800,7 +1697,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           });
           return {
             kind: "completed",
-            value: await sandboxCoordinator.runShared(() => {
+            value: await sandboxLifecycleLease.runShared(() => {
               assertUnmediatedExecutionCurrent(policy, executionSnapshot);
               return sandboxedBash.execute(
                 call.id,
@@ -1855,8 +1752,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       target,
       executionSnapshot.mode,
       executionContext.config,
+      delegationScope(),
     );
-    if (envelopeViolation) return { action: "block", risk: "HARD", reason: envelopeViolation };
+    if (envelopeViolation) return { action: "block", risk: "Forbidden", reason: envelopeViolation };
     if (decision.action !== "prompt") return decision;
     const requested = decision.filesystemWriteRoots ?? [];
     if (requested.some((path) => resolvePolicyPath(path, canonicalCwd) === target)) {
@@ -1974,7 +1872,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }
           return {
             kind: "completed",
-            value: await sandboxCoordinator.runShared(() => {
+            value: await sandboxLifecycleLease.runShared(() => {
               assertUnmediatedExecutionCurrent(policy, executionSnapshot);
               // A queued retry must still obey the live ceiling, including its new parent root.
               for (const root of policy.filesystem.allowWrite) {
@@ -1984,6 +1882,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                   root,
                   executionSnapshot.mode,
                   executionContext.config,
+                  delegationScope(),
                 );
                 if (violation) throw new Error(violation);
               }
@@ -2198,17 +2097,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           resolvePolicyPath(root, canonicalCwd),
           executionSnapshot.mode,
           executionContext.config,
+          delegationScope(),
         );
         if (violation) {
           throw policyDeniedError(violation);
         }
       }
       for (const host of decision.networkHosts ?? []) {
-        const violation = checkDelegationNetwork(
-          host,
-          executionSnapshot.mode,
-          executionContext.config,
-        );
+        const violation = checkDelegationNetwork(host, executionSnapshot.mode, delegationScope());
         if (violation) {
           throw policyDeniedError(violation);
         }
@@ -2383,7 +2279,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.resetTurn();
     guardianInvalidationAfterModeChange = false;
     invalidatePermissionContext("session shutdown");
-    await sandboxCoordinator.runExclusive(async () => {
+    await sandboxLifecycleLease.runExclusive(async () => {
       sandboxState = { kind: "pending" };
       await sandboxManager.reset();
     });

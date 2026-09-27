@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { defaultSafetyConfigPath } from "../filesystem-policy.ts";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 
 export interface PathPolicy {
   cwd: string;
@@ -18,17 +18,6 @@ export type PathDecision =
 
 function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? resolve(homedir(), value.slice(2)) : value;
-}
-
-export function isPathWithin(path: string, root: string): boolean {
-  const remainder = relative(root, path);
-  // `relative` returns an absolute path when the two paths share no root —
-  // different Windows drives (`C:\a` vs `D:\b`). That remainder is not a
-  // descendant, so it must fail closed rather than read as "inside".
-  return (
-    remainder === "" ||
-    (!isAbsolute(remainder) && remainder !== ".." && !remainder.startsWith(`..${sep}`))
-  );
 }
 
 /** Resolve existing path components while preserving the missing suffix. */

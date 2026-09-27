@@ -5,7 +5,7 @@ import {
   matchesNetworkDomainPattern,
   normalizeNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
-import { isPathWithin } from "./permissions/paths.ts";
+import { isPathWithin } from "./policy-primitives.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 /**

@@ -14,6 +14,7 @@ import {
   type ExecutionAttempt as EngineExecutionAttempt,
   type PermissionAmendment as EnginePermissionAmendment,
   type RuntimeOutcome as EngineRuntimeOutcome,
+  type EscalationEligibility,
   type ExecutionOutcome,
   type GuardianAdapter,
   type Invocation,
@@ -25,6 +26,7 @@ import {
   type ReviewEvent,
   type RuntimeDenialPolicy,
   type TurnHandle,
+  type TurnSnapshot,
 } from "./approve-for-me-engine.ts";
 import { ensureNonEmptyResiduals } from "./permissions/residual.ts";
 import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
@@ -45,20 +47,16 @@ export interface PiPermissionRequest {
   reason?: string;
 }
 
-export interface PiTurnSnapshot {
-  sessionId: string;
-  turnId: string | number;
-  mode: "auto" | "yolo";
-  cwd: string;
-  configFingerprint: string;
-  baseSandboxPolicy?: SandboxPolicy;
-  sandboxReady?: boolean;
-  escalationEligibility?: {
-    eligible: boolean;
-    reason: string;
-  };
-  transcript?: readonly unknown[];
-}
+/**
+ * The host-facing name for the Engine's turn snapshot. This used to be a
+ * field-for-field re-declaration of `TurnSnapshot`, including an inline
+ * `mode: "auto" | "yolo"` that had to be kept in step with the engine's
+ * `ApproveForMeMode` alias by hand. The two were related only by structural
+ * typing at `this.engine.beginTurn(snapshot)`, with no assertion anywhere, so a
+ * drift would have surfaced as a compile error in one place rather than as a
+ * named contract.
+ */
+export type PiTurnSnapshot = TurnSnapshot;
 
 export interface PiActionCall<Input = unknown> {
   readonly id: string;
@@ -245,7 +243,7 @@ export interface PiSafety<ReviewContext = undefined> {
     mode: "auto" | "yolo";
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: { eligible: boolean; reason: string };
+    escalationEligibility?: EscalationEligibility;
   }): boolean;
   inspect(): PermissionStateView | undefined;
   /**
@@ -380,7 +378,7 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
     mode: "auto" | "yolo";
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: { eligible: boolean; reason: string };
+    escalationEligibility?: EscalationEligibility;
   }): boolean {
     let refreshed = false;
     for (const level of this.nestedLevels) {

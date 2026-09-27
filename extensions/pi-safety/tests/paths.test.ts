@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isPathWithin } from "../src/permissions/paths.ts";
+import { isPathWithin } from "../src/policy-primitives.ts";
 
 // The shared path-safety predicate is the single throat for isPathAllowed,
 // delegation envelopes, writeRisk, and the Engine's lease coverage. Lock the

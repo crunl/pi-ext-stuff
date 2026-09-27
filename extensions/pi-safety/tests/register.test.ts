@@ -18,7 +18,7 @@ import type {
   SandboxManagerLike,
   SandboxPolicy,
 } from "../src/sandbox.ts";
-import { SandboxExecutionCoordinator } from "../src/sandbox-coordinator.ts";
+import { SandboxLifecycleLease } from "../src/sandbox-lifecycle-lease.ts";
 
 type RiskOverride = (
   tool: string,
@@ -128,8 +128,8 @@ interface Harness {
     reset: ReturnType<typeof vi.fn>;
   };
   bashToolFactory: ReturnType<typeof vi.fn>;
-  executionCoordinator: SandboxExecutionCoordinator;
-  sandboxCoordinator: {
+  lifecycleLease: SandboxLifecycleLease;
+  sandboxLifecycleLease: {
     runShared: ReturnType<typeof vi.fn>;
     runExclusive: ReturnType<typeof vi.fn>;
   };
@@ -175,7 +175,7 @@ function denied(rationale = "Denied by the test Guardian."): AutoReviewResult {
 }
 
 function lowRisk(): RiskDecision {
-  return { action: "allow", risk: "LOW", reason: "LOW test operation" };
+  return { action: "allow", risk: "Skip", reason: "LOW test operation" };
 }
 
 function promptRisk(
@@ -183,7 +183,7 @@ function promptRisk(
 ): RiskDecision {
   return {
     action: "prompt",
-    risk: "REVIEW",
+    risk: "NeedsApproval",
     reason: "REVIEW test operation",
     summary: "test operation",
     ...overrides,
@@ -191,7 +191,7 @@ function promptRisk(
 }
 
 function blockRisk(reason = "HARD test policy"): RiskDecision {
-  return { action: "block", risk: "HARD", reason };
+  return { action: "block", risk: "Forbidden", reason };
 }
 
 function shellQuote(value: string): string {
@@ -297,10 +297,10 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     readFailureDiagnostics: vi.fn(async () => options.sandboxDiagnostics),
   };
 
-  const executionCoordinator = new SandboxExecutionCoordinator();
+  const lifecycleLease = new SandboxLifecycleLease();
   const runShared = vi.fn(async <T>(operation: () => Promise<T>) => operation());
   const runExclusive = vi.fn(async <T>(operation: () => Promise<T>) => operation());
-  const sandboxCoordinator = { runShared, runExclusive };
+  const sandboxLifecycleLease = { runShared, runExclusive };
 
   const bareBashExecute = vi.fn(async (..._args: unknown[]) => ({
     content: [],
@@ -474,10 +474,10 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
             exitCode: options.localExitCode === undefined ? 0 : options.localExitCode,
           }),
         }),
-    sandboxCoordinator:
+    sandboxLifecycleLease:
       options.useRealPermissionRuntime || options.useRealCoordinator
-        ? executionCoordinator
-        : (sandboxCoordinator as never),
+        ? lifecycleLease
+        : (sandboxLifecycleLease as never),
     autoReviewer,
     riskEvaluator: options.useRealPermissionRuntime ? undefined : (riskEvaluator as never),
     networkBoundary,
@@ -498,8 +498,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     autoReviewer,
     sandboxManager,
     bashToolFactory,
-    sandboxCoordinator,
-    executionCoordinator,
+    sandboxLifecycleLease,
+    lifecycleLease,
     emit,
     bareBashExecute,
     sandboxBashExecute,
@@ -691,6 +691,125 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(1);
     const reviewerContext = app.reviewContexts[0] as Record<string, unknown>;
     expect(reviewerContext).not.toHaveProperty("parentInstructions");
+  });
+
+  // ── ordering constraints the adapter's shape depends on ────────────────
+  //
+  // The three tests below pin behaviour that no type carries and that the
+  // adapter's internal structure silently depends on. They exist so that
+  // thinning this file cannot quietly change what the reviewer is shown, which
+  // mode is authoritative, or what the status line publishes.
+
+  // `currentRawGuardianTranscript` (register.ts:716-723) has a write side
+  // effect: when both transcript sources are non-empty it bumps the Delta
+  // cursor and discards the fallback. It is reached twice per reviewed action —
+  // once through the snapshot at :1234 and once for `rawTranscript` at :1250 —
+  // and the second read is what pairs the epoch with the entries it describes.
+  //
+  // What the reviewer actually reads is `rawTranscript`, not `transcript`:
+  // `buildAutoReviewRequest` computes `rawEntries = rawTranscript ?? transcript`
+  // (auto-review-request.ts:153) and bounds that. The pre-activation `transcript`
+  // is only a fallback, so if `rawTranscript` ever stopped being passed the
+  // reviewer would silently fall back to a stale pre-activation snapshot with no
+  // error raised anywhere. That is the fragility this pins.
+  //
+  // The epoch's absolute value is not the invariant — a session reset already
+  // bumps it once (`resetBranchPermissionContext`, register.ts:358). Switching
+  // sources adds exactly one more, so the assertion is on the delta.
+  it("feeds the reviewer the post-activation raw log and invalidates the Delta cursor once on a source switch", async () => {
+    const readEpochFor = async (fill: { input?: boolean; message?: boolean }) => {
+      const app = await makeHarness({ risk: () => promptRisk() });
+      await startSession(app);
+      await startAgent(app);
+      // Two different host events feed two different logs: `input` → fallback,
+      // `message_end` → the real one (register.ts:2286, 2297).
+      if (fill.input === true) {
+        await invoke(app, "input", {
+          type: "input",
+          source: "interactive",
+          text: "typed by hand",
+        });
+      }
+      if (fill.message === true) {
+        await invoke(app, "message_end", {
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "from the model" }] },
+        });
+      }
+      await executeBash(app, `cursor-${String(fill.input)}-${String(fill.message)}`, "printf hi");
+      const request = app.reviewInputs[0] as {
+        untrustedTranscript: { content: string }[];
+        transcriptMeta?: { epoch: number; rawEntries: { content: string }[] };
+      };
+      return {
+        epoch: request.transcriptMeta?.epoch ?? -1,
+        untrusted: request.untrustedTranscript.map((entry) => entry.content),
+        raw: request.transcriptMeta?.rawEntries.map((entry) => entry.content),
+      };
+    };
+
+    const neither = await readEpochFor({});
+    const oneSource = await readEpochFor({ message: true });
+    const bothSources = await readEpochFor({ input: true, message: true });
+
+    // The epoch is always present, even with an empty log.
+    expect(neither.epoch).toBeGreaterThanOrEqual(0);
+    // A single source is not a switch, so the cursor is untouched.
+    expect(oneSource.epoch).toBe(neither.epoch);
+    // Both sources non-empty at capture time is a switch: exactly one more bump.
+    expect(bothSources.epoch).toBe(neither.epoch + 1);
+
+    // On a switch the fallback is discarded, so the reviewer sees only what the
+    // model actually said — and the epoch describes those same entries.
+    expect(bothSources.untrusted).toEqual(["from the model"]);
+    expect(bothSources.raw).toEqual(["from the model"]);
+    expect(oneSource.untrusted).toEqual(["from the model"]);
+  });
+
+  // The yolo skip of the static layer is the adapter's job — `evaluateRiskRequest`
+  // takes no `mode` — and it is currently expressed three different ways, one of
+  // which does not skip at all. `bash` is already pinned above (:1880). This
+  // pins the remaining asymmetry as *current* behaviour, so making the three
+  // paths agree becomes a deliberate change with a failing test rather than a
+  // silent one. If the intent is for yolo to mean "no static policy anywhere",
+  // this test is what has to be edited, and editing it should be a product call.
+  it("still enforces static policy on request_permissions in yolo, unlike bash", async () => {
+    const app = await makeHarness({ risk: () => blockRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+
+    // bash: the static layer is not consulted at all under yolo.
+    await executeBash(app, "yolo-bash", "printf yolo");
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
+
+    // request_permissions: it is consulted unconditionally (register.ts:1738)
+    // and its `block` verdict still refuses (register.ts:2077).
+    await expect(executeRequestPermissions(app, "yolo-perm", "example.com")).rejects.toMatchObject({
+      code: "policy-denied",
+    });
+    expect(app.riskEvaluator).toHaveBeenCalled();
+  });
+
+  // `pi-safety:mode` is the structured status contract for statusline consumers
+  // and had no assertion anywhere. The comment at register.ts:342-344 tells
+  // consumers to key off `mode`/`severity` and never the label, so the label is
+  // deliberately not pinned here.
+  it("publishes the structured mode event for status consumers", async () => {
+    const app = await makeHarness();
+    await startSession(app);
+    await startAgent(app);
+
+    const modeEvents = app.emit.mock.calls.filter(([name]) => name === "pi-safety:mode") as [
+      string,
+      { mode: string; severity: string },
+    ][];
+    expect(modeEvents.length).toBeGreaterThan(0);
+    for (const [, payload] of modeEvents) {
+      expect(payload.mode).toBe("auto");
+      expect(["warning", "error", "info"]).toContain(payload.severity);
+    }
   });
 
   it("reports sandbox activation failure without mislabeling it as a config error", async () => {
@@ -1926,7 +2045,7 @@ describe("Permission mode registration", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const writer = app.executionCoordinator.runExclusive(async () => {
+    const writer = app.lifecycleLease.runExclusive(async () => {
       entered();
       await gate;
     });
@@ -2314,13 +2433,13 @@ describe("Permission mode registration", () => {
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const reader = app.executionCoordinator.runShared(async () => {
+      const reader = app.lifecycleLease.runShared(async () => {
         entered();
         await gate;
       });
       await entry;
       let writerRan = false;
-      const writer = app.executionCoordinator.runExclusive(async () => {
+      const writer = app.lifecycleLease.runExclusive(async () => {
         writerRan = true;
         if (mutation === "generation") await invoke(app, "session_before_tree");
         if (mutation === "fault") app.sandboxManager.isHealthy.mockReturnValue(false);
@@ -2454,8 +2573,8 @@ describe("Permission mode registration", () => {
       await startAgent(app);
       let reviewed = false;
       const launchEntries: boolean[] = [];
-      const shared = app.executionCoordinator.runShared.bind(app.executionCoordinator);
-      vi.spyOn(app.executionCoordinator, "runShared").mockImplementation((operation, signal) =>
+      const shared = app.lifecycleLease.runShared.bind(app.lifecycleLease);
+      vi.spyOn(app.lifecycleLease, "runShared").mockImplementation((operation, signal) =>
         shared(async () => {
           launchEntries.push(reviewed);
           return operation();
@@ -2704,7 +2823,7 @@ describe("Permission mode registration", () => {
     const writerGate = new Promise<void>((resolve) => {
       releaseWriter = resolve;
     });
-    const writer = app.executionCoordinator.runExclusive(async () => {
+    const writer = app.lifecycleLease.runExclusive(async () => {
       enterWriter();
       await writerGate;
     });

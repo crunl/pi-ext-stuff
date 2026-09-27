@@ -5,9 +5,13 @@ import {
   type SandboxRuntimeConfig,
   SandboxManager as SrtManager,
 } from "@anthropic-ai/sandbox-runtime";
-import { effectiveNetworkAuthority, validateNetworkPolicy } from "../config.ts";
-import { expandSymlinkAliases, hasGlobSyntax } from "../filesystem-policy.ts";
+import { expandSymlinkAliases } from "../filesystem-policy.ts";
 import { normalizeNetworkHost } from "../network-host.ts";
+import {
+  effectiveNetworkAuthority,
+  hasGlobSyntax,
+  validateNetworkPolicy,
+} from "../policy-primitives.ts";
 import {
   type ExecutionNetwork,
   projectExecutionNetwork,

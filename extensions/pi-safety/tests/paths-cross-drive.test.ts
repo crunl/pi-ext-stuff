@@ -16,7 +16,7 @@ vi.mock("node:path", async (importOriginal) => {
   };
 });
 
-import { isPathWithin } from "../src/permissions/paths.ts";
+import { isPathWithin } from "../src/policy-primitives.ts";
 
 describe("isPathWithin under win32 path semantics", () => {
   it("fails closed when the two paths share no root (different drives)", () => {

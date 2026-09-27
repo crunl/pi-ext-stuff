@@ -79,7 +79,7 @@ export interface GuardianPermissionContext {
     | "pending-connection-only"
     | "exact-action-only";
   networkWarning?: string;
-  staticRisk?: "LOW" | "REVIEW" | "HARD";
+  staticRisk?: "Skip" | "NeedsApproval" | "Forbidden";
   staticReason?: string;
   justification?: string;
 }

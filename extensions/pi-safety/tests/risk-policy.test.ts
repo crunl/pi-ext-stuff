@@ -143,7 +143,7 @@ describe("Permission request own-property shape", () => {
   });
 });
 
-describe("Risk policy gate", () => {
+describe("ApprovalDisposition policy gate", () => {
   it("host-first B: empty rules never block; only deny does; ask is ignored", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-host-"));
 
@@ -155,7 +155,7 @@ describe("Risk policy gate", () => {
     ] as const) {
       await expect(evaluateHostRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
       expect(evaluateHostFirstRulesOnly(tool, input, cwd, config())).toBeUndefined();
     }
@@ -168,7 +168,7 @@ describe("Risk policy gate", () => {
     ).toBeUndefined();
     await expect(
       evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
 
     const denyRules = config({
       rules: [{ action: "deny", tool: "read", pattern: "*/Library/*" }],
@@ -188,7 +188,7 @@ describe("Risk policy gate", () => {
         cwd,
         denyRules,
       ),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("allows ordinary workspace reads and writes", async () => {
@@ -196,13 +196,13 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("read", { path: "README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest("write", { path: "notes.txt", content: "hello" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest("write", { path: ".pi/permissions.json", content: "{}" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("allows routine host tools, including MCP-style direct tool names", async () => {
@@ -211,7 +211,7 @@ describe("Risk policy gate", () => {
     for (const tool of ["context7_resolve-library-id", "exa_web_search_exa", "tinyfish_search"]) {
       await expect(
         evaluateRiskRequest(tool, { query: "public docs" }, cwd, config()),
-      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+      ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     }
   });
 
@@ -223,7 +223,7 @@ describe("Risk policy gate", () => {
         packageRoot,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("does not add sensitive-file restrictions beyond Codex workspace-write", async () => {
@@ -232,11 +232,11 @@ describe("Risk policy gate", () => {
     for (const path of [".env", "nested/.env", "nested/.env.local", "nested/deploy.key"]) {
       await expect(evaluateRiskRequest("read", { path }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
       await expect(
         evaluateRiskRequest("write", { path, content: "secret" }, cwd, config()),
-      ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+      ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     }
   });
 
@@ -264,7 +264,7 @@ describe("Risk policy gate", () => {
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     },
   );
@@ -279,10 +279,10 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest("write", { path: "notes.txt", content: "x" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest(
         "write",
@@ -290,7 +290,7 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest(
         "request_permissions",
@@ -309,10 +309,10 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("write", { path: "/var/tmp/out.txt", content: "x" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
   });
 
   it("reviews a forced rm hidden behind control-flow keywords (Codex parity)", async () => {
@@ -332,7 +332,7 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "prompt",
-        risk: "HARD",
+        risk: "Forbidden",
       });
     }
   });
@@ -349,7 +349,7 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "prompt",
-        risk: "REVIEW",
+        risk: "NeedsApproval",
       });
     }
   });
@@ -372,7 +372,7 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -395,7 +395,7 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -448,27 +448,65 @@ describe("Risk policy gate", () => {
     // not the script operand either.
     "deno run -",
     "python -",
-    // `--help` is `--as`'s value, so the invocation reaches `delete` — but the
-    // option grammar cannot be read, which is a review rather than a proof.
-    "kubectl --as --help delete pod demo",
+    // A variable in argv position decides the argv at runtime. The executable
+    // being known does not make the words known, and the substituted word is
+    // where a flag lives: `git commit "${FLAG:--S}"` decides between a plain
+    // commit and a GPG-signing one without naming either. Single quotes are the
+    // exemption, not the rule — see the decomposable table below, where
+    // `cat '$(pwd)'` and `awk '{ print $1 }'` still auto-run.
+    "ls $DIR",
+    "ls ${DIR:-/tmp}",
   ])("reviews unclassifiable Bash command %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
+    });
+  });
+
+  // Parameter expansion decides the argv at runtime, and the substituted word is
+  // where a flag lives. The executable being known does not make the words known:
+  // `git commit "${FLAG:--S}" -m x` names git perfectly and chooses between a
+  // plain commit and a GPG-signing one without naming either. fx sends any `$`
+  // outside single quotes to review for the same reason
+  // (`command_effect.zig:386`); an expanded word is whatever the variable holds,
+  // so Tier 3's assertion that nothing is left to prove does not hold.
+  //
+  // These need a repository: `git fetch` is a network subcommand, so without one
+  // the implicit-remote rule refuses it first and the substitution never gets
+  // tested. That is a different rule producing a stricter verdict, not a
+  // contradiction.
+  it.each([
+    'git commit "${FLAG:--S}" -m update',
+    'git diff "${OPT:---ext-diff}"',
+    'git fetch "$REMOTE"',
+  ])("sends a Git invocation with an expanded argument to review in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "NeedsApproval",
     });
   });
 
   // A dynamic *argument* is not a dynamic command: the executable is still the
-  // one we read, so plain words, redirects, and parameter expansion stay LOW.
+  // one we read, so plain words and redirects stay LOW.
+  //
+  // The single-quoted forms are the control, and they stay: `'$(pwd)'` and
+  // `'{ print $1 }'` cannot expand at all, so a `$` inside single quotes is
+  // literal and the argv is still fixed.
   it.each([
     "echo hello",
-    "ls $DIR",
     "ls > out.log",
     "cat README.md > copy.txt",
     "cat README.md | wc -l",
     "cat '$(pwd)'",
+    // The positive control for the rule above: a `$` inside single quotes is
+    // literal, so the argv is fixed and the command stays auto-approvable. The
+    // same character unquoted (`ls $DIR`) is in the review table.
+    "git commit -m 'costs $5'",
     "bash script.sh",
     "bash -x script.sh",
     "python script.py",
@@ -490,7 +528,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -499,7 +537,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: 'rm -rf /tmp/x; echo "$(pwd)"' }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
   });
 
   // A trap action that is itself a proven-dangerous command stays HARD: the
@@ -510,54 +548,51 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "trap 'rm -rf /' EXIT" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
   });
 
   // External side effects are not exempted by the sandbox's network approval:
-  // the sandbox guards the connection boundary, not the API semantics of the
-  // call, so `terraform apply` / `kubectl delete` stay HARD on the sandboxed
-  // Bash path (fail closed) instead of dropping to the old dangerous-only LOW.
+  // Remote API semantics are the reviewer's judgement, and the boundary that is
+  // actually enforced is the network lease. A search for these tools in the
+  // pinned Codex shell-command crate returns zero files, and its only
+  // dangerous-command rules are forced `rm` and an exceeded wrapper-depth bound;
+  // fx matches. This used to assert HARD from a verb denylist, which could not
+  // support the claim: `gh pr edit` and `gh api -X POST` auto-approved while
+  // `gh pr merge` was blocked, so the table read as coverage without being any.
+  //
+  // The cases below are the ones that table used to block. They are LOW now, and
+  // the guarantee is unchanged in the only place that matters: the sandbox
+  // refuses the connection. An invocation that needs the network without an
+  // approved lease is still HARD before this classifier is consulted, and the
+  // per-connection authorizer checks the real host when one is attempted.
   it.each([
     "terraform apply -auto-approve",
     "tofu destroy -auto-approve",
+    "terraform --chdir /tmp apply -auto-approve",
     "kubectl delete deployment production",
-    "vercel --prod",
-    // A network grant authorizes the connection, not what the API call does.
-    // These tools were previously invisible to the static classifier, so they
-    // reached the sandbox as LOW and only met the connection boundary.
+    "kubectl exec pod -- rm -rf /tmp/x",
+    "gh pr merge 12",
+    "gh pr create --title --help --body x",
     "aws s3 rm s3://bucket/key",
     "aws ec2 terminate-instances --instance-ids i-1",
     "gcloud compute instances delete vm",
+    "gcloud compute instance-groups managed delete group",
     "az vm delete --name vm",
     "helm uninstall release",
-    "gh pr merge 12",
     "npm publish",
     "cargo yank crate",
-    "kubectl exec pod -- ls",
-    // A global option ahead of the verb used to hide it: the scan read the
-    // option's value as the verb, so `--chdir /tmp` looked like a harmless
-    // subcommand and the real `apply`/`delete` was never compared.
-    "terraform --chdir /tmp apply -auto-approve",
-    "gcloud --format json compute instances delete vm",
-    // The verb sits one position deeper than the old window, so it was never
-    // compared against the verb table at all.
-    "gcloud compute instance-groups managed delete group",
-    // `--` ends option parsing, so the payload after it is read as operands
-    // rather than making the grammar unprovable.
-    "kubectl exec pod -- rm -rf /tmp/x",
-    // Under an approved network lease the only thing that can make this HARD
-    // is the verb: `--help` is `--title`'s value, so the invocation creates the
-    // pull request rather than printing help.
-    "gh pr create --title --help --body x",
-  ])("keeps an external side effect HARD inside the sandbox: %s", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
+    "vercel --prod",
+  ])(
+    "leaves remote API semantics to the reviewer and the network boundary: %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
-    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "HARD",
-    });
-  });
-
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "Skip",
+      });
+    },
+  );
   it.each([
     "aws s3 ls s3://bucket",
     "gcloud compute instances list",
@@ -586,7 +621,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -611,7 +646,7 @@ describe("Risk policy gate", () => {
     for (const [command] of cases) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -630,7 +665,7 @@ describe("Risk policy gate", () => {
     );
     expect(decision).toMatchObject({
       action: "prompt",
-      risk: "LOW",
+      risk: "Skip",
     });
     expect(decision).not.toHaveProperty("networkHosts");
   });
@@ -648,7 +683,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -682,7 +717,7 @@ describe("Risk policy gate", () => {
         next,
       );
 
-      expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+      expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
       expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
     },
   );
@@ -735,7 +770,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -770,7 +805,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("refuses an escalated implicit push behind an unsafe Git global option", async () => {
@@ -793,7 +828,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("does not refuse escalation for a Git remote named in the command", async () => {
@@ -848,7 +883,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "block", risk: "HARD" });
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
     expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
   });
 
@@ -922,7 +957,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -942,7 +977,7 @@ describe("Risk policy gate", () => {
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     },
   );
@@ -959,7 +994,7 @@ describe("Risk policy gate", () => {
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     },
   );
@@ -974,7 +1009,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -984,7 +1019,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git fetch ext::/tmp/network-helper" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it.each([
@@ -998,7 +1033,7 @@ describe("Risk policy gate", () => {
       await createGitDirectory(join(cwd, ".git"));
 
       const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
-      expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+      expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
       expect(decision).not.toHaveProperty("networkHosts");
     },
   );
@@ -1013,7 +1048,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -1022,7 +1057,7 @@ describe("Risk policy gate", () => {
     await createGitDirectory(join(cwd, ".git"));
     await expect(
       evaluateRiskRequest("bash", { command: "git push ../local.git HEAD:main" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("fails closed when a Git remote option cannot be parsed reliably", async () => {
@@ -1038,7 +1073,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: expect.stringContaining("Git network"),
     });
   });
@@ -1061,7 +1096,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -1078,7 +1113,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -1096,7 +1131,7 @@ describe("Risk policy gate", () => {
     );
     expect(decision).toMatchObject({
       action: "prompt",
-      risk: "LOW",
+      risk: "Skip",
     });
     expect(decision).not.toHaveProperty("networkHosts");
   });
@@ -1109,7 +1144,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
     const ghDecision = await evaluateRiskRequest(
       "bash",
@@ -1117,7 +1152,7 @@ describe("Risk policy gate", () => {
       cwd,
       config(),
     );
-    expect(ghDecision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(ghDecision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(ghDecision).not.toHaveProperty("networkHosts");
     for (const command of [
       "git commit -m 'document input > output'",
@@ -1130,44 +1165,333 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
 
+  // These were previously one table asserting `Skip` for all six, which merged
+  // two unrelated threat classes. A config key that installs a program
+  // (`core.hooksPath` names a directory of hook executables, not a setting) is
+  // code execution; a relocation (`-C`, `--git-dir`) is visible in the argv and
+  // executable only in the repository it selects. Bundling them protected the
+  // first class along with the second, and the allowlist entry for
+  // `core.hooksPath` also outlived the filesystem defence it cited: the sandbox
+  // policy hard-denies `<gitdir>/hooks` for the roots `git-metadata.ts`
+  // discovers, but `hooksPath` moves the search outside `$GIT_DIR/hooks`, so
+  // `/tmp/hooks` was covered by neither layer.
+  //
+  // An unrecognised global option sits in the second class for the same reason:
+  // it does not install anything, and git rejects it outright.
   it.each([
+    // Installs a program the same invocation then runs.
+    "git -c core.hooksPath=/tmp/hooks commit -am update",
+    "git --config-env=core.hooksPath=HOOKS commit -am update",
+    "git -c alias.probe=!touch /tmp/p commit -am update",
+    // Relocates the target, and says so.
     "git -C child commit -am update",
     "git --git-dir ../repo.git commit -am update",
     "git --work-tree ../tree commit -am update",
-    "git -c core.hooksPath=/tmp/hooks commit -am update",
-    "git --config-env=core.hooksPath=HOOKS commit -am update",
+    // Unrecognised grammar is not evidence of harmlessness.
     "git --unknown-global commit -am update",
-  ])("does not gate ordinary Git mutations on global-option parsing in %s", async (command) => {
+  ])("sends an unproven Git global option to review in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "NeedsApproval",
+    });
+  });
+
+  // The counter-test for the same judgment: a provable setting stays provable.
+  // Without this the `-c` handling could be made strict by refusing everything,
+  // which would pass the table above for the wrong reason. `core.editor` is
+  // deliberately absent — it names a program Git launches for an interactive
+  // commit, so it belongs in the table above, not here.
+  it.each([
+    "git -c user.name=Ada commit -am update",
+    "git -c core.autocrlf=input commit -am update",
+    "git -c core.abbrev=12 commit -am update",
+  ])("still auto-approves a provable scalar config key in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
   it.each([
-    "./git commit -am update",
-    "/tmp/git commit -am update",
-    "./gh pr checkout 123",
-    "PATH=/tmp git commit -am update",
-    "env PATH=/tmp git commit -am update",
-    "GIT_DIR=/tmp/repo.git git add README.md",
-    "env GIT_WORK_TREE=/tmp/tree git add README.md",
+    // `env -C DIR` moves the working directory the wrapped command runs in, so
+    // `README.md` is resolved against a root this request never named and the
+    // write-root check runs against the wrong tree. The reference implementation
+    // does not parse `--chdir` either; it sends the whole `env` invocation to
+    // review. This is that case, and it is the one wrapper option in this table
+    // that is not a plain assignment or an identity test.
+    //
+    // It is refused rather than reviewed, which is a change from the original
+    // intent recorded here. `env` stays anchored when its option grammar cannot
+    // be reduced, so the words after `-C` do not provably begin with the
+    // delegated command and the program behind `env` is unidentified — the same
+    // verdict as any other unidentifiable program. The original "send the whole
+    // `env` invocation to review" was written before program identity was
+    // separated from the surroundings it runs in; that separation is what makes
+    // a review and a refusal different questions here.
     "env -C /tmp git add README.md",
-  ])("does not gate ordinary Git mutations on executable identity in %s", async (command) => {
+    "env --chdir=/tmp git add README.md",
+  ])("refuses to auto-approve a working-directory change in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "block",
+      risk: "Forbidden",
+    });
+  });
+
+  // This was one table asserting `Skip` for all seven, which asserted the
+  // fail-open directly: `executableTrusted` was computed and then read only
+  // inside `parsedGitRemotes`, behind its `gitInvocationUsesNetwork` early
+  // return, so it could only ever affect a subcommand already classified as
+  // reaching a remote. `PATH=/tmp git status` was therefore indistinguishable
+  // from `git status`. The tables below hold the `git commit` / `git add`
+  // spellings that still auto-approve, so each refusal is attributable to
+  // program identity rather than to the subcommand.
+  it.each([
+    "./git commit -am update",
+    "/tmp/git commit -am update",
+    "PATH=/tmp git commit -am update",
+    "env PATH=/tmp git commit -am update",
+  ])(
+    "refuses to auto-approve a Git mutation whose program cannot be identified in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "block",
+        risk: "Forbidden",
+      });
+    },
+  );
+
+  // `GIT_DIR` / `GIT_WORK_TREE` relocate the repository rather than naming a
+  // program, so they are separated from the table above. The relocated
+  // repository's own `<gitdir>/hooks` does fall outside the roots
+  // `git-metadata.ts` discovers from cwd, so the filesystem hard-deny does not
+  // cover it — but the words still name Git, and a human reading the command can
+  // see the relocation. An earlier version refused these, which put an inert
+  // `GIT_` variable in the same class as `PATH=/tmp git commit` and cost the
+  // ordinary `GIT_AUTHOR_NAME=… git commit` its review.
+  it.each([
+    "GIT_DIR=/tmp/repo.git git add README.md",
+    "env GIT_WORK_TREE=/tmp/tree git add README.md",
+  ])("sends a Git mutation that only relocates the repository to review in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "NeedsApproval",
+    });
+  });
+
+  // The counter-test for the split, and the boundary it draws. `identity` decides
+  // refusal, `context` decides review, and no `GIT_*` variable reaches `Skip` —
+  // any of them means Git may read configuration this layer has not seen, which is
+  // the pre-existing rule and is unchanged here. What the split changed is that
+  // `GIT_TRACE=1 git status` no longer escalates all the way to a refusal, so the
+  // tier is pinned in both directions.
+  it.each([
+    ["git status", "allow", "Skip"],
+    ["GIT_TRACE=1 git status", "prompt", "NeedsApproval"],
+    ["GIT_OPTIONAL_LOCKS=0 git status", "prompt", "NeedsApproval"],
+    ["GIT_AUTHOR_NAME=Ada git commit -am update", "prompt", "NeedsApproval"],
+  ])("keeps %s at the tier its environment impact earns", async (command, action, risk) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action,
+      risk,
+    });
+  });
+
+  // A `cd` between segments relocates everything after it. `git push` then runs
+  // in a repository whose config, `core.hooksPath` and implicit remote are not
+  // the ones this inspection read — the implicit-remote lookup uses the `cwd` the
+  // request arrived with. `git -C DIR` is already refused on the same reasoning;
+  // an ordinary `cd` was not, which made the documented form the easy one.
+  it.each([
+    "cd /tmp; git push origin main",
+    "cd /tmp && git push origin main",
+    "pushd /tmp; git status",
+    "cd ../other && git commit -am update",
+  ])("sends a relocated compound Git command to review in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "NeedsApproval",
+    });
+  });
+
+  // The exemption, which is what keeps a read-only probe written against the
+  // request's own directory ordinary. Both forms provably reach the directory the
+  // request already named, so there is no relocation to reason about.
+  it.each([".", "SELF_CWD"])(
+    "still auto-approves a probe that cd's to the request's own directory (%s)",
+    async (target) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+      const command = `cd ${target === "SELF_CWD" ? cwd : target} && git status --short && git log --oneline -1`;
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "Skip",
+      });
+    },
+  );
+
+  // A lone `cd` moves a shell this request does not keep, so it is not state
+  // crossing into a later segment and stays ordinary.
+  it("still auto-approves a cd with nothing after it", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "cd /tmp" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
+  });
+
+  // Program identity has to survive the wrapper that hosts the command. The inner
+  // parse starts from a fresh executable context, so before this rule the only
+  // segment that had seen `PATH=/tmp` was the shell — and the whole gate was one
+  // `bash -c` away from not existing.
+  // `PATH` decides which binary runs, so an untrusted host is inherited whole and
+  // the refusal is final.
+  it("inherits an untrusted host's program identity into a nested shell body in env PATH=/tmp /bin/bash -c 'git push origin main'", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        { command: "env PATH=/tmp /bin/bash -c 'git push origin main'" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
+  });
+
+  // `GIT_DIR` does not change which binary runs, so the body keeps a trusted
+  // program and inherits only the unproven surroundings. The relocation is
+  // visible in the words and a human settles it.
+  it("inherits only the unproven surroundings for a relocating host in env GIT_DIR=/tmp/other.git /bin/bash -c 'git push origin main'", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        { command: "env GIT_DIR=/tmp/other.git /bin/bash -c 'git push origin main'" },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+  });
+
+  // A `remote.<name>.url` is not an inert setting: `ext::…` selects the external
+  // remote-helper transport, which runs a program. Verified against real git at
+  // this pin — the marker file was created while the classifier said `Skip`.
+  // `parseGitRemoteTarget` rejects the same spelling when it appears as an
+  // operand, and a config override never reaches that parser at all.
+  it.each([
+    "git -c remote.evil.url='ext::touch /tmp/pi-safety-marker' ls-remote evil",
+    "git -c remote.evil.url='ext::touch /tmp/pi-safety-marker' commit -am x",
+    "git -cuser.evil.url='ext::touch /tmp/pi-safety-marker' ls-remote evil",
+  ])("refuses a config override that installs a remote helper in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command }, cwd, config()),
+    ).resolves.not.toMatchObject({ action: "allow" });
+  });
+
+  // A `-c` whose value has no `=` is a form git itself rejects. A spelling the
+  // parser cannot read is not a spelling it can clear.
+  it.each(["git -c user.name push origin main", "git --config-env user.name push origin main"])(
+    "sends a malformed config assignment to review in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "NeedsApproval",
+      });
+    },
+  );
+
+  // A proven-dangerous segment keeps its disposition when an unrelated Git part
+  // of the same command is unproven. The elevation is one-way: an unproven
+  // context may raise `Skip` to a review, never lower a `Forbidden`.
+  it("keeps a proven-dangerous disposition when an unproven Git context is also present", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    const control = await evaluateRiskRequest(
+      "bash",
+      { command: "git status; rm -rf /tmp/pi-safety-victim" },
+      cwd,
+      config(),
+    );
+    const withUnproven = await evaluateRiskRequest(
+      "bash",
+      { command: "git -C /x status; rm -rf /tmp/pi-safety-victim" },
+      cwd,
+      config(),
+    );
+
+    expect(control).toMatchObject({ action: "prompt", risk: "Forbidden" });
+    expect(withUnproven).toMatchObject({ action: "prompt", risk: "Forbidden" });
+  });
+
+  // `git --version` and friends take no value, relocate nothing and run nothing,
+  // so they belong with the other provably safe global options. They were sent to
+  // review for being unrecognised, which made the spelling decide: `git version`
+  // auto-approved while `git --version` did not.
+  it.each(["git --version", "git --help", "git -h", "git --no-pager --version"])(
+    "still auto-approves an informational git option in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      await createGitDirectory(join(cwd, ".git"));
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "Skip",
+      });
+    },
+  );
+
+  // Known gap, deliberately kept as a failing-by-omission marker rather than
+  // deleted: `executableTrusted` is a Git-only mechanism, so an arbitrary
+  // program reached by explicit path — here a fake `gh` — gets no identity
+  // check at all and is auto-approved on the strength of its basename. Closing
+  // this means deciding program identity for every executable, not just Git,
+  // which is a larger design question than this fix takes on.
+  it("KNOWN GAP: auto-approves an arbitrary program reached by path in ./gh pr checkout 123", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "./gh pr checkout 123" }, cwd, config()),
+    ).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -1186,7 +1510,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -1197,7 +1521,7 @@ describe("Risk policy gate", () => {
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     },
   );
@@ -1211,7 +1535,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "git init" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -1222,7 +1546,7 @@ describe("Risk policy gate", () => {
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     },
   );
@@ -1232,7 +1556,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it.each([
@@ -1248,7 +1572,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -1266,7 +1590,7 @@ describe("Risk policy gate", () => {
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
     });
   });
 
@@ -1276,7 +1600,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("leaves Git metadata symlinks to the ordinary sandbox", async () => {
@@ -1285,7 +1609,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("leaves external Git metadata pointers to the ordinary sandbox", async () => {
@@ -1299,7 +1623,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("does not add metadata roots for an invalid linked-worktree pointer", async () => {
@@ -1313,7 +1637,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("does not add metadata roots for an invalid back-pointer", async () => {
@@ -1324,7 +1648,7 @@ describe("Risk policy gate", () => {
 
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("does not grant per-worktree or common Git metadata roots", async () => {
@@ -1344,7 +1668,7 @@ describe("Risk policy gate", () => {
     await writeFile(join(worktreeGit, "gitdir"), `${join(cwd, ".git")}\n`);
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("does not grant a submodule Git metadata root", async () => {
@@ -1357,7 +1681,7 @@ describe("Risk policy gate", () => {
     await writeFile(join(cwd, ".git"), `gitdir: ${gitDirectory}\n`);
     await expect(
       evaluateRiskRequest("bash", { command: "git add README.md" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("defers private shell network targets to the sandbox boundary", async () => {
@@ -1370,7 +1694,7 @@ describe("Risk policy gate", () => {
       config(),
     );
 
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("keeps private shell targets statically blocked when the sandbox is disabled", async () => {
@@ -1386,7 +1710,7 @@ describe("Risk policy gate", () => {
       evaluateRiskRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, configured),
     ).resolves.toMatchObject({
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: expect.stringContaining("Private"),
     });
   });
@@ -1401,7 +1725,7 @@ describe("Risk policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("WebFetch", { url }, cwd, config())).resolves.toMatchObject({
         action: "block",
-        risk: "HARD",
+        risk: "Forbidden",
         reason: expect.stringContaining("Private"),
       });
     }
@@ -1429,7 +1753,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       filesystemWriteRoots: [canonicalOutputRoot],
     });
   });
@@ -1566,7 +1890,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
     });
   });
 
@@ -1597,7 +1921,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Allowed by permissions rule",
     });
   });
@@ -1627,8 +1951,8 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "HARD",
-      reason: "HARD operation",
+      risk: "Forbidden",
+      reason: "Forbidden operation",
     });
     const decision = await evaluateRiskRequest(
       "bash",
@@ -1695,7 +2019,7 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
     await expect(
       evaluateRiskRequest(
         "bash",
@@ -1705,7 +2029,7 @@ describe("Risk policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "block",
-      risk: "HARD",
+      risk: "Forbidden",
       reason: expect.stringContaining("justification"),
     });
     await expect(
@@ -1720,7 +2044,7 @@ describe("Risk policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("applies deny, ask, and allow rules without bypassing hard policy", async () => {
@@ -1744,7 +2068,7 @@ describe("Risk policy gate", () => {
     ).resolves.toMatchObject({ action: "allow" });
     await expect(
       evaluateRiskRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, configured),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("keeps private targets out of sandboxed Bash pre-admission capability requests", async () => {
@@ -1758,7 +2082,7 @@ describe("Risk policy gate", () => {
       configured,
     );
 
-    expect(decision).toMatchObject({ action: "prompt", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "prompt", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
@@ -1793,7 +2117,7 @@ describe("deletion sandbox boundary (stage 3)", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -1808,7 +2132,7 @@ describe("deletion sandbox boundary (stage 3)", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -1817,17 +2141,17 @@ describe("deletion sandbox boundary (stage 3)", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm .git/HEAD" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm .env" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("reviews forced rm even when its target stays inside the workspace", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
   });
 });
 
@@ -1846,7 +2170,7 @@ describe("request_permissions amendment decisions", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       networkHosts: ["api.example.com"],
     });
   });
@@ -1860,10 +2184,10 @@ describe("request_permissions amendment decisions", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
     await expect(
       evaluateRiskRequest("request_permissions", { permissions: {} }, cwd, config()),
-    ).resolves.toMatchObject({ action: "block", risk: "HARD" });
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("does not honor an allow-rule bypass for request_permissions", async () => {
@@ -1892,7 +2216,7 @@ describe("custom/MCP tool approvals (codex-aligned)", () => {
     ] as const) {
       await expect(evaluateRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
         action: "allow",
-        risk: "LOW",
+        risk: "Skip",
       });
     }
   });
@@ -1902,18 +2226,18 @@ describe("custom/MCP tool approvals (codex-aligned)", () => {
     const exact = config({ rules: [{ action: "ask", tool: "gitee__create_issue" }] });
     await expect(
       evaluateRiskRequest("gitee__create_issue", { title: "x" }, cwd, exact),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     await expect(
       evaluateRiskRequest("gitee__create_pr", { title: "y" }, cwd, exact),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
 
     const globbed = config({ rules: [{ action: "ask", tool: "mcp__*" }] });
     await expect(
       evaluateRiskRequest("mcp__github__get_issue", { owner: "a" }, cwd, globbed),
-    ).resolves.toMatchObject({ action: "prompt", risk: "REVIEW" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     await expect(
       evaluateRiskRequest("gitee__create_issue", { title: "x" }, cwd, globbed),
-    ).resolves.toMatchObject({ action: "allow", risk: "LOW" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   it("keeps exact-name rules for built-in tools intact", async () => {
@@ -1986,7 +2310,7 @@ describe("RiskDecision residual stamps", () => {
   it("keeps sandboxed non-dangerous bash allow/LOW without residuals", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-allow-"));
     const decision = await evaluateRiskRequest("bash", { command: "npm test" }, cwd, config());
-    expect(decision).toMatchObject({ action: "allow", risk: "LOW" });
+    expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("residuals");
   });
 
@@ -2003,19 +2327,19 @@ describe("RiskDecision residual stamps", () => {
     );
     expect(decision).toMatchObject({
       action: "allow",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Allowed by permissions rule",
     });
     expect(decision).not.toHaveProperty("residuals");
   });
 
-  it("stamps risk_not_low on dangerous/HARD prompts", async () => {
+  it("stamps risk_not_skip on dangerous/HARD prompts", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-hard-"));
     const decision = await evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config());
     expect(decision).toMatchObject({
       action: "prompt",
-      risk: "HARD",
-      residuals: expect.arrayContaining(["risk_not_low"]),
+      risk: "Forbidden",
+      residuals: expect.arrayContaining(["risk_not_skip"]),
     });
   });
 });

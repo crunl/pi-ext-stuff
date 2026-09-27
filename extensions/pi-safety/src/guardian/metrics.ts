@@ -1,3 +1,4 @@
+import type { ReviewEvent } from "../approve-for-me-engine.ts";
 import type { AutoReviewerFailureKind } from "./errors.ts";
 
 /** Codex-aligned terminal_status vocabulary. */
@@ -91,6 +92,63 @@ export function mapFailureReason(kind: AutoReviewerFailureKind | undefined): Gua
       return "session_error";
     default:
       return "none";
+  }
+}
+
+/**
+ * Project a terminal review event into a metrics record, or `undefined` when the
+ * event carries nothing to record.
+ *
+ * This was inlined in the host adapter as 23 lines of conditional spreads. Those
+ * spreads were noise: the input type has no `exactOptionalPropertyTypes`, and
+ * `buildGuardianMetricsRecord` defaults every optional with `?? "none"`, so
+ * `{riskLevel: undefined}` and `{}` are indistinguishable to it. The one field
+ * where omission is real is `residual_signals`, the only optional member of
+ * `GuardianMetricsRecord`, and the builder already omits it when empty.
+ *
+ * `failureKind` arrives as an arbitrary `string`, because it crosses a process
+ * seam from the reviewer. Narrowing it here rather than at the call site means
+ * the `default: return "none"` branch that absorbs an unrecognised value is the
+ * one being relied on, and `tests/guardian-metrics.test.ts` asserts it directly
+ * instead of it being an untested accident.
+ */
+export function guardianMetricsRecordFromEvent(
+  event: ReviewEvent,
+): GuardianMetricsRecord | undefined {
+  if (event.status === "reviewing" || !event.metrics) return undefined;
+  const metrics = event.metrics;
+  return buildGuardianMetricsRecord({
+    reviewId: event.reviewId,
+    terminalStatus: mapTerminalStatus(event.status),
+    failureReason: mapFailureReason(narrowFailureKind(metrics.failureKind)),
+    action: mapActionTag(event.call.tool),
+    ownership: event.ownership,
+    sessionKind: metrics.sessionKind ?? "trunk_new",
+    hadPriorReviewContext: metrics.hadPriorReviewContext ?? false,
+    riskLevel: metrics.riskLevel,
+    userAuthorization: metrics.userAuthorization,
+    outcome: metrics.outcome,
+    guardianModel: metrics.guardianModel,
+    guardianReasoningEffort: metrics.guardianReasoningEffort,
+    staticRisk: metrics.staticRisk,
+    reviewSource: metrics.reviewSource,
+    residualSignals: metrics.residualSignals,
+    durationMs: metrics.durationMs,
+    tokenUsage: metrics.tokenUsage,
+  });
+}
+
+/** The reviewer's `failureKind` is untrusted; anything unrecognised is "none". */
+function narrowFailureKind(value: string | undefined): AutoReviewerFailureKind | undefined {
+  switch (value) {
+    case "timeout":
+    case "cancelled":
+    case "parse":
+    case "provider":
+    case "unavailable":
+      return value;
+    default:
+      return undefined;
   }
 }
 

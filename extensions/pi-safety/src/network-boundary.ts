@@ -1,13 +1,12 @@
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
-
-import { fingerprintValue } from "./config.ts";
 import {
   isLoopbackAddress,
   isPublicNetworkHost,
   isValidNetworkPort,
   normalizeNetworkHost,
 } from "./network-host.ts";
+import { fingerprintValue } from "./policy-primitives.ts";
 import type { SandboxNetworkEndpoint } from "./sandbox-policy.ts";
 
 /** Codex's network runtime gives DNS resolution a two-second budget. */

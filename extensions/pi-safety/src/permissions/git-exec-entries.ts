@@ -28,18 +28,19 @@ import { assignmentName } from "./shell-lexer.ts";
  * cannot denote a program, so an unlisted key is unproven instead of allowed.
  *
  * Matching on the last segment rather than the whole key is what keeps the
- * list short: `remote.origin.url` and `core.url` are both safe because the
- * segment is `url`, while `remote.origin.uploadpack` is not because the
- * segment is `uploadpack`. No program-valued key ends in one of these names.
- * The one exception is a namespace whose tail is author-chosen rather than
- * fixed — `alias.<name>` above — which is why those are excluded first.
+ * list short: `remote.origin.pushInsteadOf` is not safe because the segment is
+ * `pushinsteadof`, while a namespace whose tail is author-chosen is excluded
+ * first. No program-valued key ends in one of these names.
  *
- * `core.hooksPath` is deliberately safe here (`hooksPath` is not a program
- * name): it names a directory Git searches for hook files rather than a program
- * it execs, and gating ordinary mutations on it is a locked contract
- * (`tests/risk-policy.test.ts:825-840`). The residual path — write an
- * executable hook, then point Git at its directory — depends on writing a
- * runnable file first, which the static layer does not police either.
+ * `url` was on this list and was wrong. The claim was that a URL cannot denote a
+ * program, which is true of the string but not of what Git does with it: a
+ * `remote.<name>.url` of `ext::…` selects the external-remote-helper transport,
+ * which runs a program. Verified with real git at this pin —
+ * `git -c remote.evil.url='ext::touch /tmp/marker' ls-remote evil` created the
+ * marker while the static layer reported `Skip`. `parseGitRemoteTarget` already
+ * rejects the `scheme::` spelling when it appears as an operand
+ * (`network-host.ts`), and a config override never reaches that parser at all.
+ * A destination spelling is therefore not inert, and the key is no longer scalar.
  */
 const gitScalarConfigSegments = new Set([
   "abbrev",
@@ -62,7 +63,6 @@ const gitScalarConfigSegments = new Set([
   "default",
   "forcesignannotated",
   "gpgsign",
-  "hookspath",
   "ignorecase",
   "logallrefupdates",
   "name",
@@ -79,7 +79,6 @@ const gitScalarConfigSegments = new Set([
   "status",
   "tagopt",
   "ui",
-  "url",
   "usehttppath",
   "version",
 ]);
@@ -90,14 +89,18 @@ const gitScalarConfigSegments = new Set([
  * alias, `GIT_CONFIG_GLOBAL=<file> git name` executed the alias and the
  * classifier said LOW.
  *
- * `GIT_DIR` and `GIT_COMMON_DIR` are deliberately absent. They relocate the
- * repository rather than naming a config file, so the config read is that
- * repository's own — and gating ordinary mutations on it is a locked contract
- * (`tests/risk-policy.test.ts:904-912`). They still reach
- * `invalidatesExecutableTrust`, which marks the executable untrusted for the
- * remote analysis; they just do not make the segment unprovable.
+ * `GIT_DIR` and `GIT_COMMON_DIR` are deliberately absent here, and that is a
+ * different decision from the one this set makes. They relocate the repository
+ * rather than naming a config file, so they do not make the segment
+ * *unprovable* — the words are readable and the relocation is stated. They are
+ * still refused, through `invalidatesExecutableTrust` in `shell-segment`, because
+ * the relocated repository's own `<gitdir>/hooks` falls outside the roots
+ * `git-metadata.ts` discovers from cwd, so the filesystem hard-deny does not
+ * cover it. An earlier version of this comment claimed gating on them was a
+ * locked contract and cited `tests/risk-policy.test.ts:904-912`, which is a
+ * private-pushurl test and never covered `GIT_DIR`.
  */
-const gitConfigSourceEnvNames = new Set([
+export const gitConfigSourceEnvNames = new Set([
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_SYSTEM",
   "GIT_CONFIG_NOSYSTEM",
@@ -145,6 +148,13 @@ const gitArbitraryTailConfigPrefixes = ["alias.", "pager."];
  * Whether a `-c KEY=VALUE` / config-subcommand key is a plain setting. Anything
  * not recognised is treated as a possible program, which is the safe direction:
  * an unlisted key costs a review, a missed program key costs an auto-approval.
+ *
+ * This answers one question — can the value make Git run a program — and it is
+ * deliberately NOT reused as the network gate's notion of a safe option. An
+ * earlier version exported it for `parseGitSubcommand`'s `globalOptionsSafe`,
+ * which was a mistake twice over: it let `remote.<name>.url` through as provable
+ * (see the `url` note above), and `globalOptionsSafe` also governs whether a
+ * destination can be bound, which is a stricter question than code execution.
  */
 function gitConfigKeyIsScalar(key: string): boolean {
   const normalized = key.trim().toLowerCase();
@@ -160,7 +170,7 @@ function unprovenGitConfigKey(key: string): boolean {
 }
 
 /** `GIT_*` overrides that substitute an executable Git will run. */
-const gitExecutableEnvNames = new Set([
+export const gitExecutableEnvNames = new Set([
   "GIT_ASKPASS",
   "GIT_EDITOR",
   "GIT_EXEC_PATH",
@@ -177,6 +187,8 @@ const gitCommandRunningSubcommands = new Map<string, ReadonlySet<string> | undef
   ["hook", new Set(["run"])],
   // Every `filter-branch` form rewrites history through a shell command.
   ["filter-branch", undefined],
+  // `--exec CMD` runs CMD after every rebased commit.
+  ["rebase", new Set(["--exec"])],
 ]);
 
 /**
@@ -213,6 +225,16 @@ export function gitExecutesNestedProgram(
     // `GIT_CONFIG_PARAMETERS` and the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
     // `GIT_CONFIG_VALUE_n` triple can set any config key, including an alias.
     if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(upper)) return true;
+  }
+  // `EDITOR` / `VISUAL` / `PAGER` are the fallbacks Git consults when the
+  // `GIT_`-prefixed variable is unset, and each names a program Git runs: the
+  // editor for an interactive commit, the pager for `--paginate`. They were
+  // outside this check entirely, so `EDITOR=/tmp/evil git commit` decomposed as
+  // if nothing had been substituted. Same reasoning as `GIT_EDITOR` above, and
+  // the same sets the environment split in `shell-segment` now consults.
+  for (const word of words) {
+    const name = assignmentName(word);
+    if (name === "EDITOR" || name === "VISUAL" || name === "PAGER") return true;
   }
   let subcommand: string | undefined;
   let subcommandIndex = -1;

@@ -2,14 +2,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ConfigError } from "../src/config.ts";
 import {
   DEFAULT_CONFIG,
-  effectiveNetworkAuthority,
   fingerprintConfig,
   loadSafetyConfig,
   validateSafetyConfig,
 } from "../src/config.ts";
+import type { ConfigError } from "../src/policy-primitives.ts";
+import { effectiveNetworkAuthority } from "../src/policy-primitives.ts";
 
 async function withConfigRoots(
   run: (paths: { root: string; cwd: string; agentDir: string }) => Promise<void>,

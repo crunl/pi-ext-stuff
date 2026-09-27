@@ -86,7 +86,19 @@ const gitRemoteOptionGrammar = new Map<string, GitRemoteOptionGrammar>([
   ],
 ]);
 
+/**
+ * Global options that cannot relocate the repository, name a program, or change
+ * what a command does. `--version`, `--help` and `-h` are here for the ordinary
+ * reason that `git --version` is the most harmless Git invocation there is, and
+ * leaving them out made the spelling decide: `git version` auto-approved while
+ * `git --version` needed review, which is not a distinction any reader could
+ * derive from the commands. They take no value, so there is no value word for an
+ * unknown option to be mistaken for.
+ */
 const safeGitGlobalOptions = new Set([
+  "--version",
+  "--help",
+  "-h",
   "--no-pager",
   "--paginate",
   "-p",
@@ -197,15 +209,42 @@ function parseGitSubcommand(args: readonly string[]): {
       continue;
     }
     const optionName = token.split("=", 1)[0] ?? token;
-    if (
-      unsafeGitGlobalValueOptions.has(optionName) ||
-      token.startsWith("-c") ||
-      token.startsWith("-C")
-    ) {
+    // `-c KEY=VALUE` and `--config-env KEY=ENVNAME` set any config key, so on
+    // this path they are unconditionally unsafe. They are deliberately NOT
+    // judged by `gitConfigKeyIsScalar`, which answers a different question: that
+    // one asks whether the value can make Git run a program, while this flag also
+    // decides whether a remote destination can be bound. A key can be inert for
+    // code execution and still redirect the destination —
+    // `remote.<name>.url=ext::cmd` does both. Routing this through the
+    // code-execution allowlist made `git -c remote.evil.url=… ls-remote evil`
+    // auto-approve, and the two layers were never actually in conflict: this one
+    // governed only when the subcommand reached a remote, where it over-refused
+    // even a key the other layer had proved inert (`git -c user.name=Ada push`
+    // was Forbidden while `git -c user.name=Ada commit` was auto-approved).
+    //
+    // A malformed spelling is unsafe too: git rejects a `-c` whose value has no
+    // `=`, and a form the parser cannot read is not a form it can clear.
+    if (token === "-c" || token === "--config-env") {
+      const value = args[index + 1];
+      if (value === undefined || !value.includes("=")) safe = false;
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      if (!token.slice(2).includes("=")) safe = false;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--config-env=")) {
+      const assignment = token.slice("--config-env=".length);
+      const envName = assignment.split("=", 2)[1];
+      if (envName === undefined || envName === "") safe = false;
+      index += 1;
+      continue;
+    }
+    if (unsafeGitGlobalValueOptions.has(optionName) || token.startsWith("-C")) {
       safe = false;
-      const hasAttachedValue =
-        token.includes("=") ||
-        (token.length > 2 && (token.startsWith("-c") || token.startsWith("-C")));
+      const hasAttachedValue = token.includes("=") || (token.length > 2 && token.startsWith("-C"));
       index += hasAttachedValue ? 1 : 2;
       continue;
     }
@@ -252,15 +291,30 @@ function remotePurpose(invocation: GitInvocation): GitRemotePurpose {
   return invocation.subcommand === "push" ? "push" : "fetch";
 }
 
+/**
+ * Only a spelling that cannot be a remote name proves the operand is a local
+ * path. A bare word may contain `/` and still be a configured remote — `git
+ * remote add team/origin …` is ordinary, and `git push team/origin` is how it is
+ * used. Reading any slash as a path turned that into `local`, which skipped the
+ * implicit-remote refusal and the metadata read behind it, so an escalated push
+ * reached the bare backend with a destination nothing had bound.
+ *
+ * `sub/dir` is also a valid relative path, and the two are genuinely ambiguous.
+ * The ambiguity is resolved toward the remote, because that is the side on which
+ * the destination has to be proved rather than assumed; `./sub/dir` says which
+ * one it is.
+ */
 function classifyGitRemoteOperand(operand: string, purpose: GitRemotePurpose): ParsedGitRemote {
-  const explicit =
+  const looksLikePath =
     operand.startsWith("/") ||
     operand.startsWith("./") ||
     operand.startsWith("../") ||
-    operand.startsWith("~/") ||
-    operand.includes("/") ||
-    operand.includes(":");
-  if (!explicit) return { kind: "implicit", purpose };
+    operand.startsWith("~/");
+  // `:` separates the host in both URL and scp spellings, and a remote name
+  // cannot contain one: Git builds `refs/remotes/<name>/…` from it, and `:` is
+  // illegal in a ref name. So a colon is a sound "this is not a bare name"
+  // signal where a slash is not.
+  if (!looksLikePath && !operand.includes(":")) return { kind: "implicit", purpose };
   const target = parseGitRemoteTarget(operand);
   if (target.kind === "host") return { kind: "host", purpose, host: target.host };
   if (target.kind === "local") return { kind: "local", purpose };
@@ -323,15 +377,52 @@ function parseGitSubmoduleAddRemote(
   return { kind: "unsafe", purpose, reason: "missing Git submodule remote operand" };
 }
 
+/**
+ * What can be concluded about the Git program and its option grammar, before
+ * any question is asked about remotes.
+ *
+ * These two verdicts used to be guards inside `parsedGitRemotes`, placed after
+ * its `gitInvocationUsesNetwork` early return. That made them reachable only for
+ * a subcommand already classified as reaching a remote, so `PATH=/tmp git status`
+ * proved nothing about the program it named and still produced no remotes —
+ * indistinguishable from a trusted executable. They are computed separately here
+ * because the context verdict and the network classification are independent
+ * questions, and answering the first by returning early from the second made
+ * `git -C DIR push` stop looking like an implicit push at all, which is the one
+ * case the escalation guard exists to refuse.
+ *
+ * `unsafe` means the program cannot be identified, so nothing in the words can
+ * be trusted and a reviewer has nothing to read. `unproven` means the program is
+ * Git but its surroundings are not fully established, which a human can settle by
+ * reading the command.
+ *
+ * The two are decided from `trusted` and `executableContextUntrusted`, which are
+ * independent. An earlier version used `segment.decomposable` to tell them apart,
+ * which is not the same question: `decomposable` records whether the static argv
+ * equals the runtime argv, so a malicious untrusted Git could buy the lighter
+ * verdict simply by carrying an argument that made it non-decomposable —
+ * `PATH=/tmp git -c alias.x='!cmd' push` was reviewed while `/tmp/git push` was
+ * refused. It also sent the two faults in opposite directions, refusing
+ * `GIT_TRACE=1 git status` for a variable that changes nothing.
+ */
+function gitContextVerdict(
+  invocation: GitInvocation,
+): { kind: "unsafe" | "unproven"; reason: string } | undefined {
+  if (!invocation.trusted) {
+    return { kind: "unsafe", reason: "untrusted Git executable or wrapper context" };
+  }
+  if (invocation.segment.executableContextUntrusted) {
+    return { kind: "unproven", reason: "unproven Git invocation environment" };
+  }
+  if (!invocation.globalOptionsSafe) {
+    return { kind: "unproven", reason: "unproven Git global option" };
+  }
+  return undefined;
+}
+
 function parsedGitRemotes(invocation: GitInvocation): ParsedGitRemote[] {
   if (!gitInvocationUsesNetwork(invocation)) return [];
   const purpose = remotePurpose(invocation);
-  if (!invocation.trusted) {
-    return [{ kind: "unsafe", purpose, reason: "untrusted Git executable or wrapper context" }];
-  }
-  if (!invocation.globalOptionsSafe) {
-    return [{ kind: "unsafe", purpose, reason: "unsafe Git global option" }];
-  }
   const subcommand = invocation.subcommand ?? "";
   if (subcommand === "submodule") {
     const actionIndex = invocation.arguments.findIndex(
@@ -437,15 +528,26 @@ export interface ShellGitNetworkAnalysis {
   usesImplicitNetwork: boolean;
   directImplicitPurpose?: GitRemotePurpose;
   explicitHosts: string[];
+  /** The program named by the command could not be identified. Refused outright. */
   unsafeReason?: string;
+  /** The program is Git, but its option grammar is not fully proven. Sent to review. */
+  unprovenReason?: string;
 }
 
 export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis {
   const segments = parseCommandSegments(command);
   const syntax = scanShellSyntax(command);
-  const remotes = parsedGitInvocations(command).flatMap((invocation) => {
+  const invocations = parsedGitInvocations(command);
+  const remotes = invocations.flatMap((invocation) => {
     return parsedGitRemotes(invocation).map((remote) => ({ invocation, remote }));
   });
+  // An unidentifiable program outranks an unproven grammar wherever both appear.
+  const verdicts = invocations
+    .map((invocation) => gitContextVerdict(invocation))
+    .filter((verdict) => verdict !== undefined);
+  const contextVerdict =
+    verdicts.find((verdict) => verdict.kind === "unsafe") ??
+    verdicts.find((verdict) => verdict.kind === "unproven");
   const unsafeReason = remotes.find(({ remote }) => remote.kind === "unsafe")?.remote;
   const direct = remotes.length === 1 ? remotes[0] : undefined;
   const directImplicitPurpose =
@@ -462,5 +564,10 @@ export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis
     ...(directImplicitPurpose ? { directImplicitPurpose } : {}),
     explicitHosts: remotes.flatMap(({ remote }) => (remote.kind === "host" ? [remote.host] : [])),
     ...(unsafeReason?.kind === "unsafe" ? { unsafeReason: unsafeReason.reason } : {}),
+    ...(contextVerdict?.kind === "unsafe"
+      ? { unsafeReason: contextVerdict.reason }
+      : contextVerdict?.kind === "unproven"
+        ? { unprovenReason: contextVerdict.reason }
+        : {}),
   };
 }

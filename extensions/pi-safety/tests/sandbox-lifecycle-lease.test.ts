@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SandboxExecutionCoordinator } from "../src/sandbox-coordinator.ts";
+import { SandboxLifecycleLease } from "../src/sandbox-lifecycle-lease.ts";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -9,18 +9,18 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
-describe("SandboxExecutionCoordinator", () => {
+describe("SandboxLifecycleLease", () => {
   it("allows shared executions to overlap", async () => {
-    const coordinator = new SandboxExecutionCoordinator();
+    const lease = new SandboxLifecycleLease();
     const firstStarted = deferred();
     const secondStarted = deferred();
     const release = deferred();
 
-    const first = coordinator.runShared(async () => {
+    const first = lease.runShared(async () => {
       firstStarted.resolve();
       await release.promise;
     });
-    const second = coordinator.runShared(async () => {
+    const second = lease.runShared(async () => {
       secondStarted.resolve();
       await release.promise;
     });
@@ -31,22 +31,22 @@ describe("SandboxExecutionCoordinator", () => {
   });
 
   it("gives an exclusive mutation priority over later shared executions", async () => {
-    const coordinator = new SandboxExecutionCoordinator();
+    const lease = new SandboxLifecycleLease();
     const releaseFirst = deferred();
     const writerStarted = deferred();
     const releaseWriter = deferred();
     const order: string[] = [];
 
-    const first = coordinator.runShared(async () => {
+    const first = lease.runShared(async () => {
       order.push("first");
       await releaseFirst.promise;
     });
-    const writer = coordinator.runExclusive(async () => {
+    const writer = lease.runExclusive(async () => {
       order.push("writer");
       writerStarted.resolve();
       await releaseWriter.promise;
     });
-    const second = coordinator.runShared(async () => {
+    const second = lease.runShared(async () => {
       order.push("second");
     });
 
@@ -61,19 +61,19 @@ describe("SandboxExecutionCoordinator", () => {
   });
 
   it("removes a cancelled waiter without blocking the queue", async () => {
-    const coordinator = new SandboxExecutionCoordinator();
+    const lease = new SandboxLifecycleLease();
     const releaseWriter = deferred();
     const writerStarted = deferred();
     const controller = new AbortController();
 
-    const writer = coordinator.runExclusive(async () => {
+    const writer = lease.runExclusive(async () => {
       writerStarted.resolve();
       await releaseWriter.promise;
     });
     await writerStarted.promise;
 
-    const cancelled = coordinator.runShared(async () => "cancelled", controller.signal);
-    const next = coordinator.runShared(async () => "next");
+    const cancelled = lease.runShared(async () => "cancelled", controller.signal);
+    const next = lease.runShared(async () => "next");
     controller.abort();
 
     await expect(cancelled).rejects.toThrow("aborted");

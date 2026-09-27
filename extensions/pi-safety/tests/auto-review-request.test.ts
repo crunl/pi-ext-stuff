@@ -146,8 +146,8 @@ describe("auto review request", () => {
       } as any,
       {
         action: "prompt",
-        risk: "REVIEW",
-        reason: "REVIEW operation",
+        risk: "NeedsApproval",
+        reason: "Needs review",
         summary: "npm test",
       },
       "/workspace",
@@ -202,8 +202,8 @@ describe("auto review request", () => {
       { toolName: "bash", toolCallId: "bounded", input: { command: "npm test" } } as any,
       {
         action: "prompt",
-        risk: "REVIEW",
-        reason: "REVIEW operation",
+        risk: "NeedsApproval",
+        reason: "Needs review",
         summary: "npm test",
       },
       "/workspace",
@@ -239,7 +239,7 @@ describe("auto review request", () => {
         toolCallId: "glue-call",
         input: { command: "ls" },
       } as any,
-      { action: "prompt", risk: "LOW", reason: "read", summary: "ls" },
+      { action: "prompt", risk: "Skip", reason: "read", summary: "ls" },
       "/workspace",
       {
         sandboxProfile: "workspace-write",
@@ -272,7 +272,7 @@ describe("auto review request", () => {
       } as any,
       {
         action: "prompt",
-        risk: "HARD",
+        risk: "Forbidden",
         reason: "Remote mutation",
         summary: "git push origin main",
       },

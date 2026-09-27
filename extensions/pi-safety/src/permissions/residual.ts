@@ -2,7 +2,7 @@
 export const RESIDUAL_SIGNALS = [
   "rule_ask",
   "rule_deny",
-  "risk_not_low",
+  "risk_not_skip",
   "escalation",
   "write_root_uncovered",
   "network_uncovered",
@@ -40,7 +40,7 @@ export function residualsForPrompt(input: {
   ruleAsk?: boolean;
   ruleDeny?: boolean;
   escalation?: boolean;
-  risk: "LOW" | "REVIEW" | "HARD";
+  risk: "Skip" | "NeedsApproval" | "Forbidden";
   writeUncovered?: boolean;
   networkUncovered?: boolean;
   permissionAmendment?: boolean;
@@ -58,7 +58,7 @@ export function residualsForPrompt(input: {
   if (input.actionReview) residuals.push("action_review");
   if (input.hostAdmissionReview) residuals.push("host_admission_review");
   if (input.capabilityUncovered) residuals.push("capability_uncovered");
-  if (input.risk !== "LOW") residuals.push("risk_not_low");
+  if (input.risk !== "Skip") residuals.push("risk_not_skip");
   return ensureNonEmptyResiduals(residuals);
 }
 

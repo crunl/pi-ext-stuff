@@ -1,7 +1,8 @@
-import { expandSymlinkAliases, hasGlobSyntax, resolvePolicyPath } from "./filesystem-policy.ts";
+import { expandSymlinkAliases, resolvePolicyPath } from "./filesystem-policy.ts";
 import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
 import { isPublicNetworkHost, normalizeNetworkHost } from "./network-host.ts";
 import { isPathAllowed } from "./permissions/paths.ts";
+import { hasGlobSyntax } from "./policy-primitives.ts";
 import { MAX_PATH_LENGTH } from "./request-limits.ts";
 
 export interface PermissionAmendment {

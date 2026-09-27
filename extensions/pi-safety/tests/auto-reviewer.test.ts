@@ -6,8 +6,8 @@ import {
   AUTO_REVIEW_SYSTEM_PROMPT,
 } from "../src/auto-review-request.ts";
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
-import { fingerprintValue } from "../src/config.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
+import { fingerprintValue } from "../src/policy-primitives.ts";
 import { createGuardianEvidenceScope, type SandboxPolicy } from "../src/sandbox.ts";
 
 const request = {
@@ -27,8 +27,8 @@ const request = {
     requestedNetworkTargets: [],
     allowedNetworkHosts: [],
     deniedNetworkHosts: [],
-    staticRisk: "REVIEW",
-    staticReason: "REVIEW operation",
+    staticRisk: "NeedsApproval",
+    staticReason: "Needs review",
   },
   untrustedTranscript: [{ role: "user", content: "run the tests" }],
 } as any;
@@ -244,7 +244,7 @@ describe("PiAutoReviewer", () => {
     const reviewContext = complete.mock.calls[0]?.[1] as any;
     expect(reviewContext.systemPrompt).toContain("# Evidence Handling");
     expect(reviewContext.systemPrompt).toContain("# User Authorization Scoring");
-    expect(reviewContext.systemPrompt).toContain("# Base Risk Taxonomy");
+    expect(reviewContext.systemPrompt).toContain("# Base ApprovalDisposition Taxonomy");
     expect(reviewContext.systemPrompt).toContain("# Outcome Policy");
     expect(reviewContext.systemPrompt).toContain(
       '"user_authorization": "unknown" | "low" | "medium" | "high"',
@@ -256,7 +256,7 @@ describe("PiAutoReviewer", () => {
     const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
     const reviewer = new PiAutoReviewer(complete as any);
     const trustedPolicy = [
-      "## Tenant Risk Taxonomy and Allow/Deny Rules",
+      "## Tenant ApprovalDisposition Taxonomy and Allow/Deny Rules",
       "- Deny every shell command that writes outside `/workspace/tenant`.",
     ].join("\n");
 

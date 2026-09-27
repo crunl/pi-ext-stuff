@@ -26,7 +26,7 @@ describe("residual closed union", () => {
         "network_uncovered",
         "other_explicit_review",
         "permission_amendment",
-        "risk_not_low",
+        "risk_not_skip",
         "rule_ask",
         "rule_deny",
         "write_root_uncovered",
@@ -35,6 +35,24 @@ describe("residual closed union", () => {
     for (const signal of RESIDUAL_SIGNALS) expect(isResidualSignal(signal)).toBe(true);
     expect(isResidualSignal("skip_because_empty")).toBe(false);
     expect(isResidualSignal(1)).toBe(false);
+  });
+
+  // `risk_not_<x>` is the one signal that names a disposition value rather than a
+  // cause, and it is therefore the one that can silently outlive a rename: the
+  // tag is a hand-written literal while the value it negates comes from
+  // `ApprovalDisposition`. When `LOW` became `Skip` the tag kept saying `low`
+  // and the metrics stream reported a disposition that no longer existed. These
+  // two assertions tie the tag to the value again — the second one fails to
+  // compile if the vocabulary moves, which is the point.
+  it("names the current auto-approve disposition in the negated risk signal", () => {
+    const negated = RESIDUAL_SIGNALS.filter((signal) => signal.startsWith("risk_not_"));
+    expect(negated).toEqual(["risk_not_skip"]);
+  });
+
+  it("produces the negated risk signal from the value it names", () => {
+    expect(residualsForPrompt({ risk: "Skip" })).not.toContain("risk_not_skip");
+    expect(residualsForPrompt({ risk: "NeedsApproval" })).toContain("risk_not_skip");
+    expect(residualsForPrompt({ risk: "Forbidden" })).toContain("risk_not_skip");
   });
 });
 
@@ -52,19 +70,19 @@ describe("residual helpers", () => {
   });
 
   it("stamps the most specific prompt facts known", () => {
-    expect(residualsForPrompt({ ruleAsk: true, risk: "LOW" })).toEqual(["rule_ask"]);
-    expect(residualsForPrompt({ escalation: true, risk: "LOW" })).toEqual(["escalation"]);
-    expect(residualsForPrompt({ risk: "REVIEW" })).toEqual(["risk_not_low"]);
+    expect(residualsForPrompt({ ruleAsk: true, risk: "Skip" })).toEqual(["rule_ask"]);
+    expect(residualsForPrompt({ escalation: true, risk: "Skip" })).toEqual(["escalation"]);
+    expect(residualsForPrompt({ risk: "NeedsApproval" })).toEqual(["risk_not_skip"]);
     expect(
       residualsForPrompt({
         permissionAmendment: true,
         networkUncovered: true,
-        risk: "REVIEW",
+        risk: "NeedsApproval",
       }),
-    ).toEqual(["permission_amendment", "network_uncovered", "risk_not_low"]);
-    expect(residualsForPrompt({ writeUncovered: true, risk: "REVIEW" })).toEqual([
+    ).toEqual(["permission_amendment", "network_uncovered", "risk_not_skip"]);
+    expect(residualsForPrompt({ writeUncovered: true, risk: "NeedsApproval" })).toEqual([
       "write_root_uncovered",
-      "risk_not_low",
+      "risk_not_skip",
     ]);
   });
 
@@ -93,14 +111,14 @@ describe("residual helpers", () => {
 
 describe("admission residual fail-closed projection", () => {
   it("allow has empty/absent residuals", () => {
-    const allow: RiskDecision = { action: "allow", risk: "LOW", reason: "Low-risk operation" };
+    const allow: RiskDecision = { action: "allow", risk: "Skip", reason: "Low-risk operation" };
     expect(admissionPlanFromRiskDecision(allow)).toEqual({ kind: "allow" });
   });
 
   it("passes stamped prompt residuals through the admission projection", () => {
     const prompt: RiskDecision = {
       action: "prompt",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Approval required by permissions rule",
       summary: "npm test",
       residuals: ["rule_ask"],
@@ -108,7 +126,7 @@ describe("admission residual fail-closed projection", () => {
     expect(admissionPlanFromRiskDecision(prompt)).toEqual({
       kind: "review",
       review: "action",
-      risk: "LOW",
+      risk: "Skip",
       reason: "Approval required by permissions rule",
       summary: "npm test",
       residuals: ["rule_ask"],
@@ -118,7 +136,7 @@ describe("admission residual fail-closed projection", () => {
   it("never turns a missing-residuals review into allow", () => {
     const unstamped: RiskDecision = {
       action: "prompt",
-      risk: "REVIEW",
+      risk: "NeedsApproval",
       reason: "The action needs review",
       summary: "custom tool",
     };

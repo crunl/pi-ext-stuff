@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SafetyConfig } from "./config.ts";
+import { defaultAgentDir, defaultSafetyConfigPath } from "./policy-primitives.ts";
 
 export interface ResolvedFilesystemPolicy {
   allowWrite: string[];
@@ -44,21 +45,6 @@ export function resolveSandboxDenyPattern(pattern: string, cwd: string): string 
     return resolvePolicyPath(pattern, cwd);
   }
   return resolve(cwd, pattern.includes("/") ? pattern : `**/${pattern}`);
-}
-
-export function hasGlobSyntax(value: string): boolean {
-  return value.includes("*") || value.includes("?") || value.includes("[") || value.includes("]");
-}
-
-function defaultAgentDir(): string {
-  const fromEnv = process.env.PI_CODING_AGENT_DIR;
-  if (fromEnv && fromEnv.length > 0) return resolve(fromEnv);
-  return resolve(homedir(), ".pi", "agent");
-}
-
-/** Canonical user-config path: agentDir root, decoupled from install layout. */
-export function defaultSafetyConfigPath(agentDir = defaultAgentDir()): string {
-  return resolve(agentDir, "safety.json");
 }
 
 export function defaultProtectedWritePaths(cwd: string, agentDir = defaultAgentDir()): string[] {

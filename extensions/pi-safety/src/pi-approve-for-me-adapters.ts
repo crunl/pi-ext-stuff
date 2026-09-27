@@ -20,7 +20,6 @@ import {
   AutoReviewerFailure,
   type TrustedAutoReviewerContext,
 } from "./auto-reviewer.ts";
-import { fingerprintValue } from "./config.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import {
   ensureNonEmptyResiduals,
@@ -28,6 +27,7 @@ import {
   type ResidualSignal,
   residualSignalsForReviewSource,
 } from "./permissions/residual.ts";
+import { fingerprintValue } from "./policy-primitives.ts";
 import type { RiskDecision } from "./risk-policy.ts";
 import {
   createGuardianEvidencePolicyCeiling,
@@ -273,7 +273,7 @@ function promptDecisionFromEngine(
   const residuals = residualsForEngineReview(input);
   return {
     action: "prompt",
-    risk: input.risk ?? "REVIEW",
+    risk: input.risk ?? "NeedsApproval",
     reason: input.reason ?? "Permission review requested",
     summary: input.summary ?? input.call.tool,
     residuals,

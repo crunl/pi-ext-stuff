@@ -1,104 +1,16 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
-import { defaultSafetyConfigPath, hasGlobSyntax } from "./filesystem-policy.ts";
-import { networkPatternHasLocalException } from "./network-domain-pattern.ts";
 import { isValidNetworkCidr } from "./network-host.ts";
+import {
+  ConfigError,
+  defaultSafetyConfigPath,
+  fingerprintValue,
+  hasGlobSyntax,
+  type NetworkAccess,
+  validateNetworkAccess,
+  validateNetworkPolicy,
+} from "./policy-primitives.ts";
 import { isRecord } from "./unknown-value.ts";
-
-export type NetworkAccess =
-  | { readonly kind: "inline-proxy" }
-  | { readonly kind: "explicit"; readonly transport: "proxy" | "direct" };
-
-/** Only supported request paths are accepted; presence never downgrades to legacy. */
-export function validateNetworkAccess(input: unknown): NetworkAccess {
-  if (isRecord(input)) {
-    const keys = Object.keys(input);
-    if (input.kind === "inline-proxy" && keys.length === 1 && keys[0] === "kind") {
-      return { kind: "inline-proxy" };
-    }
-    if (
-      input.kind === "explicit" &&
-      (input.transport === "proxy" || input.transport === "direct") &&
-      keys.length === 2 &&
-      keys.includes("kind") &&
-      keys.includes("transport")
-    ) {
-      return { kind: "explicit", transport: input.transport };
-    }
-  }
-  throw new ConfigError(
-    "sandbox.network.access must be inline-proxy or explicit with transport proxy or direct",
-  );
-}
-
-/** Codex `network_access` analogue: whole TCP network including private/loopback/bind. */
-export type EffectiveNetworkAuthority = {
-  wholeNetwork: boolean;
-  privateTargets: boolean;
-  localBinding: boolean;
-};
-
-/**
- * Derive effective network authority. Explicit false on a fine axis wins over
- * `network_access`; undefined falls back to `network_access`. Never materialize
- * back into the policy fields (fingerprint, delegation, status views).
- */
-export function effectiveNetworkAuthority(network: {
-  network_access?: boolean;
-  allowPrivateTargets?: boolean;
-  allowLocalBinding?: boolean;
-}): EffectiveNetworkAuthority {
-  const wholeNetwork = network.network_access === true;
-  return {
-    wholeNetwork,
-    privateTargets: network.allowPrivateTargets ?? wholeNetwork,
-    localBinding: network.allowLocalBinding ?? wholeNetwork,
-  };
-}
-
-/** Shared structural eligibility for configuration, Engine plans and backend mapping. */
-export function validateNetworkPolicy(network: {
-  access?: NetworkAccess;
-  network_access?: boolean;
-  allowPrivateTargets?: boolean;
-  macosTls?: "strict" | "system";
-  allowLocalBinding?: boolean;
-  allowedDomains: readonly string[];
-  deniedDomains: readonly string[];
-  delegated?: true;
-}): void {
-  const authority = effectiveNetworkAuthority(network);
-  const direct = network.access?.kind === "explicit" && network.access.transport === "direct";
-  if (direct) {
-    if (!authority.privateTargets && !authority.localBinding)
-      throw new ConfigError(
-        "Direct requires unrestricted private/special outbound eligibility (network_access or allowPrivateTargets)",
-      );
-    if (network.allowedDomains.length || network.deniedDomains.length || network.delegated)
-      throw new ConfigError("Direct cannot enforce domain constraints or delegation");
-    if (network.macosTls === "system") throw new ConfigError("Direct/system TLS is unsupported");
-  }
-  if (network.access?.kind === "explicit" && authority.localBinding && !authority.wholeNetwork) {
-    throw new ConfigError(
-      "sandbox.network.allowLocalBinding is incompatible with grant-dependent explicit access",
-    );
-  }
-  if (network.macosTls === "system") {
-    if (process.platform !== "darwin") throw new ConfigError("System TLS requires macOS");
-    const localException = network.allowedDomains.some(networkPatternHasLocalException);
-    if (
-      network.deniedDomains.length ||
-      network.delegated ||
-      authority.localBinding ||
-      localException
-    ) {
-      throw new ConfigError(
-        "System TLS helper egress conflicts with destination denies, delegated confinement or native local exceptions",
-      );
-    }
-  }
-}
 
 export interface SafetyConfig {
   version: 1;
@@ -205,13 +117,6 @@ export type SafetyConfigOverlay = {
     networkHosts?: string[];
   };
 };
-
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConfigError";
-  }
-}
 
 export const DEFAULT_CONFIG: SafetyConfig = {
   version: 1,
@@ -691,35 +596,6 @@ export async function loadSafetyConfig(agentDir: string): Promise<LoadedSafetyCo
     };
   }
   return { config: cloneConfig(DEFAULT_CONFIG), source: "default" };
-}
-
-/** JSON-compatible value: the domain stableValue normalizes into for hashing. */
-type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
-
-function stableValue(value: unknown): JsonValue {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, stableValue(value[key])]),
-    );
-  }
-  // Non-container leaves pass through; JSON.stringify drops what JSON cannot
-  // represent (undefined/functions) exactly as it did before typing.
-  return value as JsonValue;
-}
-
-export function fingerprintValue(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(stableValue(value)))
-    .digest("hex");
 }
 
 export function fingerprintConfig(config: SafetyConfig): string {

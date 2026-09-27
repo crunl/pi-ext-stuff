@@ -23,12 +23,12 @@ import {
   truncateLine,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { fingerprintValue } from "./config.ts";
 import {
   createGuardianWorkerClient,
   type GuardianWorkerClientOptions,
   GuardianWorkerInfrastructureError,
 } from "./guardian-worker-client.ts";
+import { fingerprintValue } from "./policy-primitives.ts";
 import {
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
