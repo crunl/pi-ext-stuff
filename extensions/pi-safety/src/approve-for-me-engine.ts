@@ -427,12 +427,48 @@ interface TurnState {
   turnNetworkAll: boolean;
   readonly turnWriteRoots: string[];
   readonly grants: Map<string, GrantRecord>;
+  readonly approvals: Map<string, ApprovalCacheEntry>;
   closed: boolean;
 }
 
 interface GrantRecord {
   readonly callFingerprint: string;
   readonly requested: readonly CapabilityRequest[];
+}
+
+/**
+ * A Guardian approval remembered for the rest of this turn only. The key is
+ * the call identity without call id (same command re-issued); the entry pins
+ * the approved scope and the policy it was approved under, so any drift
+ * misses instead of authorizing. Dies with the TurnState — never persisted,
+ * never inherited by nested turns (those get a fresh Engine), never read for
+ * escalated, unrestricted, or manual-retry paths.
+ */
+interface ApprovalCacheEntry {
+  readonly requestedFingerprint: string;
+  readonly basePolicyFingerprint: string;
+  /**
+   * Capability-grant review and action-exercise review are different
+   * questions even for the same command and scope: an approved scope must
+   * never satisfy a pending action review. Partitioned, never merged.
+   */
+  readonly reviewKind: string;
+  /**
+   * What the Guardian actually decided on: risk tier, reason, summary, and
+   * residual signals. A realpath flip or a reclassification that leaves the
+   * command and scope identical still misses. The live host transcript is
+   * deliberately NOT here — the Engine never sees it (the adapter builds
+   * reviewContext from host state), so transcript growth cannot be keyed
+   * engine-side; the first verdict is reused within the turn.
+   */
+  readonly evidenceFingerprint: string;
+}
+
+interface ApprovalCacheEvidence {
+  readonly risk: AdmissionRisk | undefined;
+  readonly reason: string | undefined;
+  readonly summary: string | undefined;
+  readonly residuals: readonly ResidualSignal[] | undefined;
 }
 
 interface RetryRecord {
@@ -1152,6 +1188,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const wasActive = active === state;
     state.closed = true;
     state.grants.clear();
+    state.approvals.clear();
     if (wasActive) abortAttempts(reason);
     inFlightAttempts.clear();
     state.turnNetworkHosts.clear();
@@ -1442,6 +1479,82 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return undefined;
     }
     return grant;
+  };
+
+  /**
+   * Turn-scoped approval cache. A Guardian approve + completed execution
+   * remembers the exact call identity (without call id) so the identical
+   * action skips re-review later in the SAME turn. Every drift — scope,
+   * policy, mode, generation, ownership, source — misses instead of
+   * authorizing. Enforcement (policyCheck, grant spend, live ceilings at
+   * execution) still runs on hits; only the Guardian round-trip is skipped.
+   */
+  const readApprovalCache = (
+    state: TurnState,
+    request: Invocation<unknown, ReviewContext>,
+    source: ReviewRequest["source"],
+    requested: readonly CapabilityRequest[],
+    reviewKind: string,
+    evidence: ApprovalCacheEvidence,
+    elevated: boolean,
+  ): { kind: "approve"; rationale: string } | undefined => {
+    if (source !== "preview") return undefined;
+    if (request.ownership !== "sandbox-owned") return undefined;
+    if (state.snapshot.mode !== "auto") return undefined;
+    if (elevated) return undefined;
+    if (circuitOpen) return undefined;
+    if (!isCurrent(state)) return undefined;
+    // Fingerprinting must never throw out of the execution path: an
+    // unhashable input misses instead of rejecting the invocation.
+    let key: string;
+    let requestedFingerprint: string;
+    let basePolicyFingerprint: string;
+    let evidenceFingerprint: string;
+    try {
+      key = invocationFingerprint(state, request.call, request.ownership, false);
+      requestedFingerprint = fingerprintValue(requested);
+      basePolicyFingerprint = fingerprintValue(state.snapshot.baseSandboxPolicy ?? null);
+      evidenceFingerprint = fingerprintValue(evidence);
+    } catch {
+      return undefined;
+    }
+    const entry = state.approvals.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.reviewKind !== reviewKind) return undefined;
+    if (entry.requestedFingerprint !== requestedFingerprint) return undefined;
+    if (entry.basePolicyFingerprint !== basePolicyFingerprint) return undefined;
+    if (entry.evidenceFingerprint !== evidenceFingerprint) return undefined;
+    return { kind: "approve", rationale: "Approved earlier in this turn for the identical action" };
+  };
+
+  const writeApprovalCache = (
+    state: TurnState,
+    request: Invocation<unknown, ReviewContext>,
+    source: ReviewRequest["source"],
+    requested: readonly CapabilityRequest[],
+    reviewKind: string,
+    evidence: ApprovalCacheEvidence,
+    elevated: boolean,
+  ): void => {
+    if (source !== "preview") return;
+    if (request.ownership !== "sandbox-owned") return;
+    if (state.snapshot.mode !== "auto") return;
+    if (elevated) return;
+    if (!isCurrent(state)) return;
+    let key: string;
+    let entry: ApprovalCacheEntry;
+    try {
+      key = invocationFingerprint(state, request.call, request.ownership, false);
+      entry = {
+        requestedFingerprint: fingerprintValue(requested),
+        basePolicyFingerprint: fingerprintValue(state.snapshot.baseSandboxPolicy ?? null),
+        reviewKind,
+        evidenceFingerprint: fingerprintValue(evidence),
+      };
+    } catch {
+      return;
+    }
+    state.approvals.set(key, entry);
   };
 
   const denyAttempt = (
@@ -2151,6 +2264,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
             appendUnique(state.turnWriteRoots, [item.path]);
           }
         }
+        // Turn-lease widening voids remembered approvals: later executions run
+        // under a wider lease than the cached verdict was approved under.
+        state.approvals.clear();
         return amended;
       }
       if (amended.kind === "capability-denied") {
@@ -2238,11 +2354,27 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
       if (policy.kind === "error") return blocked({ code: "policy-error", reason: policy.reason });
       if (policy.kind === "deny") return blocked({ code: "policy-denied", reason: policy.reason });
-      const decision = await runReview(
+      // Turn-scoped approval cache: an identical action approved earlier in
+      // this turn skips the Guardian round-trip. Hard gates above (admission,
+      // policyCheck) and enforcement below (grant spend, live ceilings at
+      // execution) still run; deny/timeout/failed never write entries.
+      const cachedApproval = readApprovalCache(
         state,
         request as Invocation<unknown, ReviewContext>,
-        baseline,
+        reviewSource,
+        reviewRequested,
+        admission.kind === "review" ? admission.review : "none",
         {
+          risk: reviewRisk,
+          reason: reviewReason,
+          summary: reviewSummary,
+          residuals: admission.kind === "review" ? admission.residuals : undefined,
+        },
+        effectiveLeaseOverride !== undefined || approvalOverride !== undefined,
+      );
+      const decision =
+        cachedApproval ??
+        (await runReview(state, request as Invocation<unknown, ReviewContext>, baseline, {
           source: reviewSource,
           requested: reviewRequested,
           risk: reviewRisk,
@@ -2258,8 +2390,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
             admission.residuals.length > 0
               ? admission.residuals
               : undefined,
-        },
-      );
+        }));
       if ("code" in decision) return blocked(decision);
       if (decision.kind === "deny") {
         const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
@@ -2297,7 +2428,25 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       );
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
-      if (result.kind === "completed") return result;
+      if (result.kind === "completed") {
+        // Only approve + completed execution is remembered. Deny, timeout,
+        // failure, and cancellation never reach here, so they never write.
+        writeApprovalCache(
+          state,
+          request as Invocation<unknown, ReviewContext>,
+          reviewSource,
+          reviewRequested,
+          admission.kind === "review" ? admission.review : "none",
+          {
+            risk: reviewRisk,
+            reason: reviewReason,
+            summary: reviewSummary,
+            residuals: admission.kind === "review" ? admission.residuals : undefined,
+          },
+          effectiveLeaseOverride !== undefined || approvalOverride !== undefined,
+        );
+        return result;
+      }
       // The spent static grant is not persisted as a turn-wide permission.
       // The first attempt's exact lease is retained only so a trusted native
       // file adapter can request the one fresh reviewed retry when needed.
@@ -2521,6 +2670,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       turnNetworkAll: false,
       turnWriteRoots: [],
       grants: new Map<string, GrantRecord>(),
+      approvals: new Map<string, ApprovalCacheEntry>(),
       closed: false,
     };
     active = state;
@@ -2538,6 +2688,11 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     escalationEligibility?: EscalationEligibility;
   }): boolean => {
     if (!active || !isCurrent(active)) return false;
+    const modeChanged = active.snapshot.mode !== patch.mode;
+    const policyChanged =
+      patch.baseSandboxPolicy !== undefined &&
+      fingerprintValue(active.snapshot.baseSandboxPolicy ?? null) !==
+        fingerprintValue(patch.baseSandboxPolicy);
     active.snapshot.mode = patch.mode;
     if (patch.sandboxReady !== undefined) {
       active.snapshot.sandboxReady = patch.sandboxReady;
@@ -2551,6 +2706,9 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         reason: patch.escalationEligibility.reason,
       };
     }
+    // Mode or base-policy drift voids remembered approvals: a hit must never
+    // survive the context it was approved under.
+    if (modeChanged || policyChanged) active.approvals.clear();
     return true;
   };
 
