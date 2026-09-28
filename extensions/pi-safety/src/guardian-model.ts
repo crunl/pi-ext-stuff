@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AutoReviewerContext } from "./auto-review-request.ts";
+import { parseReviewerModel } from "./config.ts";
 import { AutoReviewerFailure } from "./guardian/errors.ts";
 
 export interface GuardianModelSelection {
@@ -50,9 +51,16 @@ export async function resolveGuardianModel(
 ): Promise<GuardianModelSelection> {
   if (!context.reviewer) return verifyActiveModel(context, "active");
 
+  // `reviewer.model` is one merged reference; `find` takes the two parts
+  // separately. Validation happens at config load, so an unparseable value
+  // here means the context was built without going through it — fall back
+  // rather than guess, which is the same outcome as an unknown model.
+  const reference = parseReviewerModel(context.reviewer.model);
+  if (reference === undefined) return verifyActiveModel(context, "active-fallback");
+
   let preferred: Model<Api> | undefined;
   try {
-    preferred = context.modelRegistry.find(context.reviewer.provider, context.reviewer.model);
+    preferred = context.modelRegistry.find(reference.provider, reference.model);
   } catch {
     return verifyActiveModel(context, "active-fallback");
   }

@@ -212,8 +212,7 @@ describe("PiAutoReviewer", () => {
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
-          provider: "openai-codex",
-          model: "reviewer",
+          model: "openai-codex/reviewer",
           reasoningEffort: "medium",
         },
       }),
@@ -694,8 +693,7 @@ describe("PiAutoReviewer", () => {
         } as any,
         activeModel,
         reviewer: {
-          provider: "missing",
-          model: "guardian",
+          model: "missing/guardian",
           reasoningEffort: "medium",
         },
       }),
@@ -719,8 +717,7 @@ describe("PiAutoReviewer", () => {
         modelRegistry: { find: () => undefined } as any,
         activeModel: undefined,
         reviewer: {
-          provider: "missing",
-          model: "missing",
+          model: "missing/missing",
           reasoningEffort: "medium",
         },
       }),
@@ -866,8 +863,7 @@ describe("PiAutoReviewer", () => {
         modelRegistry,
         activeModel: { provider: "openai", id: "main" } as any,
         reviewer: {
-          provider: "deepseek",
-          model: "reasoner",
+          model: "deepseek/reasoner",
           reasoningEffort: "medium",
         },
       },
@@ -901,8 +897,7 @@ describe("PiAutoReviewer", () => {
         modelRegistry,
         activeModel,
         reviewer: {
-          provider: "deepseek",
-          model: "reasoner",
+          model: "deepseek/reasoner",
           reasoningEffort: "medium",
         },
       }),
@@ -932,8 +927,7 @@ describe("PiAutoReviewer", () => {
       } as any,
       activeModel: { provider: "openai", id: "main" } as any,
       reviewer: {
-        provider: "openai",
-        model: "main",
+        model: "openai/main",
         reasoningEffort: "medium",
       },
     });
@@ -963,8 +957,7 @@ describe("PiAutoReviewer", () => {
         modelRegistry,
         activeModel: model,
         reviewer: {
-          provider: "openai",
-          model: "main",
+          model: "openai/main",
           reasoningEffort: "medium",
         },
       }),

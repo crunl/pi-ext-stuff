@@ -41,8 +41,7 @@ const autoReviewerContext = {
     getApiKeyAndHeaders: vi.fn(),
   },
   reviewer: {
-    provider: "volcengine",
-    model: "doubao-seed-2-1-turbo-260628",
+    model: "volcengine/doubao-seed-2-1-turbo-260628",
     reasoningEffort: "low",
   },
   guardianSession: {

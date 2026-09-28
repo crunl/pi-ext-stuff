@@ -1282,7 +1282,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const preferred = executionContext.config.reviewer;
           const noticeKey = fingerprintValue({
             configFingerprint,
-            preferredProvider: preferred?.provider,
             preferredModel: preferred?.model,
             activeProvider: guardian.provider,
             activeModel: guardian.model,
@@ -1293,8 +1292,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               ctx.ui.notify(
                 renderPermissionNotice({
                   kind: "reviewer-fallback",
-                  preferredProvider: preferred?.provider ?? "configured",
-                  preferredModel: preferred?.model ?? "reviewer",
+                  preferredModel: preferred?.model ?? "configured reviewer",
                   activeProvider: guardian.provider,
                   activeModel: guardian.model,
                 }),
@@ -2686,15 +2684,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               reviewer: activeReviewer
                 ? {
                     kind: "active",
-                    provider: activeReviewer.provider,
-                    model: activeReviewer.model,
+                    reference: `${activeReviewer.provider}/${activeReviewer.model}`,
                   }
                 : config.reviewer
-                  ? {
-                      kind: "preference",
-                      provider: config.reviewer.provider,
-                      model: config.reviewer.model,
-                    }
+                  ? { kind: "preference", reference: config.reviewer.model }
                   : undefined,
               autoReviewAvailable: !runtime.autoState.paused,
               ruleCount: config.rules.length,

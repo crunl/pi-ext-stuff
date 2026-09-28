@@ -33,7 +33,7 @@ export type PermissionNotice =
     }
   | {
       kind: "reviewer-fallback";
-      preferredProvider: string;
+      /** The configured `provider/model` reference, verbatim. */
       preferredModel: string;
       activeProvider: string;
       activeModel: string;
@@ -56,8 +56,8 @@ export interface PermissionSummary {
   sandbox: string;
   reviewer?: {
     kind: "preference" | "active";
-    provider: string;
-    model: string;
+    /** Full `provider/model` string, for both kinds. */
+    reference: string;
   };
   autoReviewAvailable: boolean;
   ruleCount: number;
@@ -199,7 +199,7 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
     case "review-circuit-interrupted":
       return `Automatic approval review rejected too many approval requests for this turn (${notice.consecutiveDenials} consecutive, ${notice.recentDenials} in the last ${notice.windowSize} reviews); interrupting the turn.`;
     case "reviewer-fallback":
-      return `Configured reviewer ${notice.preferredProvider}/${notice.preferredModel} is unavailable. Auto-review will use ${notice.activeProvider}/${notice.activeModel}.`;
+      return `Configured reviewer ${notice.preferredModel} is unavailable. Auto-review will use ${notice.activeProvider}/${notice.activeModel}.`;
     case "approve-requires-mode":
       return "/approve is available only with Approve for me.";
     case "approve-requires-ui":
@@ -224,7 +224,7 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
 export function renderPermissionSummary(summary: PermissionSummary): string {
   if (summary.mode === "yolo") return "Bypass permissions · sandbox off · approvals off";
   const reviewer = summary.reviewer
-    ? `${summary.reviewer.kind === "active" ? "active reviewer" : "reviewer preference"}: ${summary.reviewer.provider}/${summary.reviewer.model}`
+    ? `${summary.reviewer.kind === "active" ? "active reviewer" : "reviewer preference"}: ${summary.reviewer.reference}`
     : "reviewer preference: current session model";
   const autoReview = summary.autoReviewAvailable
     ? "Auto-review available"

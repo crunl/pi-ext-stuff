@@ -6,6 +6,7 @@ import {
   DEFAULT_CONFIG,
   fingerprintConfig,
   loadSafetyConfig,
+  parseReviewerModel,
   validateSafetyConfig,
 } from "../src/config.ts";
 import type { ConfigError } from "../src/policy-primitives.ts";
@@ -391,7 +392,7 @@ describe("permissions config", () => {
     );
     expect(() =>
       validateSafetyConfig({
-        reviewer: { provider: "openai", model: "x", reasoningEffort: "low", unknownReviewer: true },
+        reviewer: { model: "openai/x", reasoningEffort: "low", unknownReviewer: true },
       }),
     ).toThrow(/reviewer\.unknownReviewer/);
     expect(() =>
@@ -440,8 +441,7 @@ describe("permissions config", () => {
       expect(() =>
         validateSafetyConfig({
           reviewer: {
-            provider: "openai-codex",
-            model: "gpt-5.6-sol-fast",
+            model: "openai-codex/gpt-5.6-sol-fast",
             reasoningEffort: "medium",
             [field]: field === "timeoutMs" ? 60_000 : 3,
           },
@@ -449,6 +449,42 @@ describe("permissions config", () => {
       ).toThrow(new RegExp(`reviewer\\.${field}.*remove`, "i"));
     },
   );
+
+  it.each([
+    ["magpie/group/approval", { provider: "magpie", model: "group/approval" }],
+    ["a/b/c", { provider: "a", model: "b/c" }],
+    ["openai-codex/gpt-5.6-sol-fast", { provider: "openai-codex", model: "gpt-5.6-sol-fast" }],
+  ])("splits the reviewer reference %j on the first slash", (reference, expected) => {
+    expect(parseReviewerModel(reference)).toEqual(expected);
+    expect(
+      validateSafetyConfig({ reviewer: { model: reference, reasoningEffort: "low" } }).reviewer
+        ?.model,
+    ).toBe(reference);
+  });
+
+  it.each(["gpt-4o", "/model", "magpie/", "/", "", " magpie/foo ", "magpie/ foo"])(
+    "rejects a reviewer reference that is not provider/model: %j",
+    (reference) => {
+      expect(parseReviewerModel(reference)).toBeUndefined();
+      expect(() =>
+        validateSafetyConfig({ reviewer: { model: reference, reasoningEffort: "low" } }),
+      ).toThrow('reviewer.model must be "provider/model"');
+    },
+  );
+
+  it("rejects the pre-merge reviewer {provider, model} shape", () => {
+    expect(() =>
+      validateSafetyConfig({
+        reviewer: { provider: "x", model: "x/y", reasoningEffort: "low" },
+      }),
+    ).toThrow(/reviewer\.provider/);
+  });
+
+  it("rejects a non-string reviewer model", () => {
+    expect(() =>
+      validateSafetyConfig({ reviewer: { model: 123, reasoningEffort: "low" } }),
+    ).toThrow("reviewer.model must be a string");
+  });
 
   it("reports the exact path for invalid JSON", async () => {
     await withConfigRoots(async ({ agentDir }) => {

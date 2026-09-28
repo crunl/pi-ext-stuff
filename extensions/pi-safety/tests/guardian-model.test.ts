@@ -5,16 +5,16 @@ import { resolveGuardianModel } from "../src/guardian-model.ts";
 const preferredModel = { provider: "deepseek", id: "reasoner" } as any;
 const activeModel = { provider: "openai", id: "main" } as any;
 const configuredReviewer = {
-  provider: "deepseek",
-  model: "reasoner",
+  model: "deepseek/reasoner",
   reasoningEffort: "medium",
 } as const;
 
 describe("resolveGuardianModel", () => {
   it("selects a configured Guardian with usable Pi auth", async () => {
+    const find = vi.fn(() => preferredModel);
     const selected = await resolveGuardianModel({
       modelRegistry: {
-        find: () => preferredModel,
+        find,
         getApiKeyAndHeaders: async () => ({ ok: true }),
       },
       activeModel,
@@ -25,12 +25,14 @@ describe("resolveGuardianModel", () => {
       model: preferredModel,
       source: "configured",
     });
+    expect(find).toHaveBeenCalledWith("deepseek", "reasoner");
   });
 
   it("falls back to the active model when the configured Guardian is missing", async () => {
+    const find = vi.fn(() => undefined);
     const selected = await resolveGuardianModel({
       modelRegistry: {
-        find: () => undefined,
+        find,
         getApiKeyAndHeaders: async () => ({ ok: true }),
       },
       activeModel,
@@ -42,6 +44,23 @@ describe("resolveGuardianModel", () => {
       source: "active-fallback",
       fallbackNotice: "configured-reviewer-unavailable",
     });
+    expect(find).toHaveBeenCalledWith("deepseek", "reasoner");
+  });
+
+  it("anchors the split to the first slash, keeping slashes in the model id", async () => {
+    const slashyModel = { provider: "openrouter", id: "stealth/space-bunny-alpha" } as any;
+    const find = vi.fn(() => slashyModel);
+    const selected = await resolveGuardianModel({
+      modelRegistry: {
+        find,
+        getApiKeyAndHeaders: async () => ({ ok: true }),
+      },
+      activeModel,
+      reviewer: { model: "openrouter/stealth/space-bunny-alpha", reasoningEffort: "medium" },
+    });
+
+    expect(selected).toMatchObject({ model: slashyModel, source: "configured" });
+    expect(find).toHaveBeenCalledWith("openrouter", "stealth/space-bunny-alpha");
   });
 
   it("falls back when configured Guardian auth is unavailable", async () => {
@@ -124,6 +143,27 @@ describe("resolveGuardianModel", () => {
       source: "active-fallback",
       fallbackNotice: "configured-reviewer-unavailable",
     });
+  });
+
+  it("falls back when a context bypasses config validation with a slashless reviewer model", async () => {
+    const find = vi.fn(() => preferredModel);
+    const selected = await resolveGuardianModel({
+      modelRegistry: {
+        find,
+        getApiKeyAndHeaders: async () => ({ ok: true }),
+      },
+      activeModel,
+      // Config load rejects this shape; a context built without it must fail
+      // over to the active model rather than guess a provider.
+      reviewer: { model: "reasoner", reasoningEffort: "medium" },
+    });
+
+    expect(selected).toMatchObject({
+      model: activeModel,
+      source: "active-fallback",
+      fallbackNotice: "configured-reviewer-unavailable",
+    });
+    expect(find).not.toHaveBeenCalled();
   });
 
   it("uses the active model directly when no Guardian is configured", async () => {

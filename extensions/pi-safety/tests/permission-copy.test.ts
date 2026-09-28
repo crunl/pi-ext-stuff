@@ -158,8 +158,7 @@ describe("permission copy", () => {
         sandbox: "workspace-write sandbox",
         reviewer: {
           kind: "preference",
-          provider: "google",
-          model: "gemini-3.5-flash-lite",
+          reference: "google/gemini-3.5-flash-lite",
         },
         autoReviewAvailable: true,
         ruleCount: 2,

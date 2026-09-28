@@ -15,7 +15,11 @@ import { isRecord } from "./unknown-value.ts";
 export interface SafetyConfig {
   version: 1;
   reviewer?: {
-    provider: string;
+    /**
+     * Merged `provider/model` reference, e.g. `magpie/group/approval`. Stored
+     * verbatim; it is split only where a `Model<Api>` is actually needed, so
+     * there is exactly one place that knows the rule.
+     */
     model: string;
     reasoningEffort: "minimal" | "low" | "medium" | "high";
   };
@@ -157,6 +161,39 @@ const efforts = new Set<NonNullable<SafetyConfig["reviewer"]>["reasoningEffort"]
   "high",
 ]);
 const actions = new Set<SafetyConfig["rules"][number]["action"]>(["allow", "ask", "deny"]);
+
+/** A `reviewer.model` reference resolved into the two parts `find()` takes. */
+export interface ReviewerModelRef {
+  provider: string;
+  model: string;
+}
+
+/**
+ * Split a merged `provider/model` reference, or return `undefined` when the
+ * string cannot be one.
+ *
+ * The split is anchored to the FIRST slash and everything after it belongs to
+ * the model, because model ids carry slashes of their own
+ * (`openrouter/stealth/space-bunny-alpha`); splitting on the last one, or
+ * rejecting ids that contain a slash, would corrupt them.
+ *
+ * Unlike the pinned host, which accepts this split only when the prefix is a
+ * registered provider and otherwise searches bare ids, this is strict: the
+ * reference must name a provider, or it is not a reference. A config file is a
+ * declarative contract, and guessing which of two readings was meant would
+ * silently review with a different model than the one written. A bare id is
+ * still expressible — write it with its provider, as `openrouter/stealth/…`.
+ */
+export function parseReviewerModel(reference: string): ReviewerModelRef | undefined {
+  // Whitespace is never part of a provider or model name, and trimming here
+  // would let a paste with a stray space pick a different model than intended.
+  if (/\s/.test(reference)) return undefined;
+  const slash = reference.indexOf("/");
+  if (slash <= 0) return undefined;
+  const model = reference.slice(slash + 1);
+  if (model.length === 0) return undefined;
+  return { provider: reference.slice(0, slash), model };
+}
 
 function expectString(value: unknown, path: string): string {
   if (typeof value !== "string") throw new ConfigError(`${path} must be a string`);
@@ -300,14 +337,17 @@ function parseOverlay(input: unknown): SafetyConfigOverlay {
         `reviewer.${removedKey} is fixed by the Auto-review policy; remove it from config`,
       );
     }
-    rejectUnknownKeys(reviewer, ["provider", "model", "reasoningEffort"], "reviewer");
+    rejectUnknownKeys(reviewer, ["model", "reasoningEffort"], "reviewer");
     const reasoningEffort = expectString(reviewer.reasoningEffort, "reviewer.reasoningEffort");
     if (!efforts.has(reasoningEffort as NonNullable<SafetyConfig["reviewer"]>["reasoningEffort"])) {
       throw new ConfigError("reviewer.reasoningEffort is invalid");
     }
+    const model = expectString(reviewer.model, "reviewer.model");
+    if (parseReviewerModel(model) === undefined) {
+      throw new ConfigError('reviewer.model must be "provider/model"');
+    }
     overlay.reviewer = {
-      provider: expectString(reviewer.provider, "reviewer.provider"),
-      model: expectString(reviewer.model, "reviewer.model"),
+      model,
       reasoningEffort: reasoningEffort as NonNullable<SafetyConfig["reviewer"]>["reasoningEffort"],
     };
   }

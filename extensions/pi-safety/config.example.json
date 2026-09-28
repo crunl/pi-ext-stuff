@@ -1,8 +1,7 @@
 {
   "version": 1,
   "reviewer": {
-    "provider": "openai-codex",
-    "model": "gpt-5.6",
+    "model": "openai-codex/gpt-5.6",
     "reasoningEffort": "low"
   },
   "sandbox": {
