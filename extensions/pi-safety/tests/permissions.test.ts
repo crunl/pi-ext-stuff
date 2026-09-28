@@ -600,6 +600,35 @@ describe("narrow static risk contract", () => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
 
+  // Sibling table for the known-cwd fold (`cd-normalize.ts`): `normalizeToolCall`
+  // resolves the segments against `cwd` before `classifyRisk` reads them, so a
+  // leading literal `cd` is decided entirely at this seam. The two no-op rows
+  // (`cd .`, `cd /work/repo`) were `Skip` before the fold; the `/tmp` and
+  // relative-`repo` rows were `NeedsApproval` and are `Skip` now. The rows after
+  // them pin what must stay out of the fold. `/work/repo` is the request cwd, so
+  // `cd .` / `cd /work/repo` are the no-op spellings.
+  it.each([
+    ["cd . && ls", "Skip"],
+    ["cd /work/repo && pwd", "Skip"],
+    ["cd /tmp && cat README.md", "Skip"],
+    ["cd repo && head -5 README.md", "Skip"],
+    ["cd .. && cat README.md", "NeedsApproval"],
+    ["cd a/../b && cat README.md", "NeedsApproval"],
+    ["cd - && cat README.md", "NeedsApproval"],
+    ["cd a b && cat README.md", "NeedsApproval"],
+    ['cd "$DIR" && cat README.md', "NeedsApproval"],
+    ["cd ~ && cat README.md", "NeedsApproval"],
+    ["cd /tmp/* && cat README.md", "NeedsApproval"],
+    ["cd /tmp && git status", "NeedsApproval"],
+    ["cd /tmp && export FOO=1 && printenv FOO", "NeedsApproval"],
+    ["cd /tmp && node -e 'console.log(1)'", "NeedsApproval"],
+    ["cd /tmp && npm test", "NeedsApproval"],
+    ["cd /tmp && rm -rf x", "Forbidden"],
+    ["cd /tmp && rmdir x", "NeedsApproval"],
+  ] as const)("folds a known-cwd cd in sandboxed Bash %s to %s", (command, expected) => {
+    expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
+  });
+
   it.each(['echo "$(rm -rf build)"', "echo `rm -rf build`"])(
     "requires review for executable shell substitution in %s",
     (command) => {

@@ -1367,6 +1367,155 @@ describe("ApprovalDisposition policy gate", () => {
     ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
+  // The known-cwd fold (`cd-normalize.ts`). A leading literal `cd` followed
+  // only by literal, read-only commands is statically decidable: the effective
+  // directory is computable from data the analyser already holds, so the
+  // segment chain no longer crosses segments and the command auto-approves.
+  // The target is resolved lexically, never with `realpath`, so it does not have
+  // to exist on disk — the last case pins that.
+  it("folds an absolute cd into a tmpdir followed by a relative read", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
+
+    for (const rest of ["head -5 README.md", "cat README.md"]) {
+      await expect(
+        evaluateRiskRequest("bash", { command: `cd ${target} && ${rest}` }, cwd, config()),
+      ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
+    }
+  });
+
+  it("folds a relative single-name cd followed by a relative read", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "cd repo && head -5 README.md" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
+  });
+
+  it("folds a no-op cd chain (cd . / cd <request cwd>) followed by a read", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    for (const command of ["cd . && ls", `cd ${cwd} && ls`]) {
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "Skip",
+      });
+    }
+  });
+
+  it("folds a literal cd target that was never created on disk", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    const target = join(tmpdir(), "pi-safety-cd-never-created", "repo");
+
+    await expect(
+      evaluateRiskRequest("bash", { command: `cd ${target} && cat x` }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
+  });
+
+  // Everything the fold cannot prove stays a review. A VCS command after `cd` is
+  // the sharpest case: implicit remotes are read from the request cwd, so a
+  // folded cd would bind the wrong repository.
+  it("does not fold a literal cd followed by a VCS command", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
+
+    for (const command of [`cd ${target} && git status`, `cd ${target} && git log --oneline -1`]) {
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "prompt",
+        risk: "NeedsApproval",
+      });
+    }
+  });
+
+  it.each([
+    ["cd $DIR && cat x"],
+    ['cd "$DIR" && cat x'],
+    ["cd ~ && cat x"],
+    ["cd /tmp/pi-safety-target/* && cat x"],
+    ["cd .. && cat x"],
+    ["cd a/../b && cat x"],
+    ["cd - && cat x"],
+    ["cd -- && cat x"],
+    ["cd a b && cat x"],
+    ["cd /tmp && export FOO=1 && echo $FOO"],
+    ["cd /tmp && node -e 'console.log(1)'"],
+    ['cd /tmp && bash -c "cd /etc && cat passwd"'],
+  ])("does not fold a cd whose relocation is not provable in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "prompt",
+      risk: "NeedsApproval",
+    });
+  });
+
+  // Package runners and string interpreters read state the relocation
+  // invalidates (a manifest, a lifecycle script, an inline program), so they are
+  // context-dependent and block the fold too.
+  it.each([
+    ["npm test"],
+    ["npx cowsay"],
+    ["pnpm test"],
+    ["yarn test"],
+    ["make"],
+    ["just x"],
+    ["task x"],
+    ["direnv allow"],
+    ["eval x"],
+    ["source x"],
+  ])("does not fold a cd followed by context-dependent %s", async (rest) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: `cd /tmp && ${rest}` }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+  });
+
+  // A deletion executable after `cd` must not be folded even when it looks
+  // harmless: the fold refuses that segment, the relocation stays visible, and
+  // the chain is reviewed. A forced `rm` is caught by tier 1 and stays
+  // Forbidden; the unforced deletion executables are reviewed, not blocked —
+  // the invariant being pinned here is "not folded into Skip".
+  it("keeps a forced rm after a literal cd Forbidden", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: `cd ${target} && rm -rf x` }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+  });
+
+  it.each(["rmdir x", "shred x", "unlink x", "truncate -s 0 x"])(
+    "does not fold a deletion executable after a literal cd in %s",
+    async (rest) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+      const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
+
+      await expect(
+        evaluateRiskRequest("bash", { command: `cd ${target} && ${rest}` }, cwd, config()),
+      ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    },
+  );
+
+  // Only a single leading `cd` folds. A contiguous chain would be consumed by
+  // the leading-cd loop before `shellStateCrossesSegments` could observe the
+  // second changer, so the rest of the line would be decided under a directory
+  // change that is still live.
+  it("does not fold a second cd in cd <a> && cd <b> && cat x", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    const first = await mkdtemp(join(tmpdir(), "pi-safety-cd-a-"));
+    const second = await mkdtemp(join(tmpdir(), "pi-safety-cd-b-"));
+
+    await expect(
+      evaluateRiskRequest(
+        "bash",
+        { command: `cd ${first} && cd ${second} && cat x` },
+        cwd,
+        config(),
+      ),
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+  });
+
   // Program identity has to survive the wrapper that hosts the command. The inner
   // parse starts from a fresh executable context, so before this rule the only
   // segment that had seen `PATH=/tmp` was the shell — and the whole gate was one

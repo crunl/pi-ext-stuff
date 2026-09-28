@@ -23,6 +23,7 @@ import { resolve } from "node:path";
 import { resolvePolicyPath } from "../filesystem-policy.ts";
 import { isPublicNetworkHost } from "../network-host.ts";
 import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
+import { normalizedSegmentsFor } from "./cd-normalize.ts";
 import {
   invocationControlsProcesses,
   invocationRemoteEffectUnclassified,
@@ -106,7 +107,8 @@ export function normalizeToolCall(
     input,
     cwd: resolve(cwd),
     resolvedPaths: extractedPaths(input, cwd),
-    commandSegments: command ? parseCommandSegments(command) : undefined,
+    commandSegments:
+      command === undefined ? undefined : normalizedSegmentsFor(command, resolve(cwd)),
     networkTargets: command ? extractShellNetworkHosts(command) : extractNetworkTargets(input),
   };
 }
@@ -207,7 +209,7 @@ export function classifyRisk(
   if (request.operation === "read") return "Skip";
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
   if (!command) return "NeedsApproval";
-  const segments = request.commandSegments ?? parseCommandSegments(command);
+  const segments = request.commandSegments ?? normalizedSegmentsFor(command, request.cwd);
   // Tier 1 — proven dangerous (forced rm, non-exempt network, external side
   // effect) is never downgraded to a review.
   if (!networkApproved && request.networkTargets?.length) return "Forbidden";
