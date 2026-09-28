@@ -1,3 +1,10 @@
+/**
+ * Programs whose arguments name things to remove. Lives here rather than in
+ * `risk.ts` so `cd-normalize.ts` can consult the same list without importing
+ * its own consumer: the three modules form no cycle through this one.
+ */
+export const deletionExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
+
 export interface PermissionRule {
   action: "allow" | "ask" | "deny";
   tool: string;

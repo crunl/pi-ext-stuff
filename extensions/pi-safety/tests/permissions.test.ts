@@ -10,7 +10,12 @@ import {
   isPublicNetworkHost,
   normalizeToolCall,
 } from "../src/permissions/risk.ts";
-import { matchRules, type PermissionRequest } from "../src/permissions/rules.ts";
+import {
+  deletionExecutables,
+  matchRules,
+  type PermissionRequest,
+} from "../src/permissions/rules.ts";
+import { shellDirectoryChangers, shellStateSetters } from "../src/permissions/shell-segment.ts";
 import { defaultSafetyConfigPath } from "../src/policy-primitives.ts";
 
 const temporaryDirectories: string[] = [];
@@ -678,4 +683,44 @@ describe("narrow static risk contract", () => {
       expect(isPublicNetworkHost(host)).toBe(false);
     },
   );
+});
+
+describe("cd normalization admission lists", () => {
+  // Deliberately hardcoded rather than generated from the production sets.
+  // A list generated from the set it is meant to guard cannot fail when that
+  // set loses a member — the case just stops being generated. These lists
+  // decide whether a leading `cd` is folded away, and folding away a `cd` also
+  // folds away the evidence that the directory changed, so a member missing
+  // from one of them is a Skip, not an extra review. The floor is therefore
+  // stated here independently, and the second test pins that the sets still
+  // cover it.
+  const deletionFloor = ["rm", "rmdir", "unlink", "shred", "truncate"];
+  const stateSetterFloor = ["declare", "export", "local", "readonly", "typeset"];
+  const directoryChangerFloor = ["pushd", "popd"];
+
+  it.each(deletionFloor)("does not fold a cd before the deletion executable %s", (executable) => {
+    const next = executable === "truncate" ? "-s 0 victim" : "victim";
+    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} ${next}`))).not.toBe(
+      "Skip",
+    );
+  });
+
+  it.each(stateSetterFloor)("does not fold a cd before the state setter %s", (executable) => {
+    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} NAME=1`))).not.toBe("Skip");
+  });
+
+  it.each(directoryChangerFloor)(
+    "does not fold a cd before the second directory changer %s",
+    (executable) => {
+      expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} /other`))).not.toBe(
+        "Skip",
+      );
+    },
+  );
+
+  it("keeps every guarded executable in the sets the folder actually reads", () => {
+    for (const name of deletionFloor) expect(deletionExecutables.has(name)).toBe(true);
+    for (const name of stateSetterFloor) expect(shellStateSetters.has(name)).toBe(true);
+    for (const name of directoryChangerFloor) expect(shellDirectoryChangers.has(name)).toBe(true);
+  });
 });

@@ -889,9 +889,9 @@ export function parseCommandSegments(command: string): CommandSegment[] {
  * cannot fail open. Symlinks are not resolved, so a path that merely looks like
  * the cwd counts as a relocation rather than being waved through.
  */
-const shellDirectoryChangers = new Set(["cd", "pushd", "popd"]);
+export const shellDirectoryChangers = new Set(["cd", "pushd", "popd"]);
 
-const shellStateSetters = new Set(["declare", "export", "local", "readonly", "typeset"]);
+export const shellStateSetters = new Set(["declare", "export", "local", "readonly", "typeset"]);
 
 function isNoOpRelocation(segment: CommandSegment, requestCwd: string | undefined): boolean {
   if (requestCwd === undefined) return false;

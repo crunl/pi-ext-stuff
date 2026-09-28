@@ -30,6 +30,7 @@ import {
 } from "./command-effects.ts";
 import { isDangerousWords } from "./dangerous-commands.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
+import { deletionExecutables } from "./rules.ts";
 import { scanShellSyntax } from "./shell-lexer.ts";
 import { extractShellNetworkHosts, invocationUsesNetwork } from "./shell-network.ts";
 import { parseCommandSegments, shellStateCrossesSegments } from "./shell-segment.ts";
@@ -173,7 +174,7 @@ function isDangerousSegment(segment: CommandSegment, depth = 0): boolean {
 }
 
 /** Deletion commands whose targets are checked against the sandbox write roots. */
-export const deletionExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
+export { deletionExecutables };
 
 /**
  * Positional targets of a deletion command, honoring `--` (everything after
