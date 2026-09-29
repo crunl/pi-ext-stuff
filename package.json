@@ -1,0 +1,31 @@
+{
+  "name": "@crunl/pi-suite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opinionated personal core powerpack for the Pi coding agent: TUI presentation, safety sandbox, and statusline.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "workspaces": [
+    "packages/*",
+    "extensions/*"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-safety/index.ts",
+      "./extensions/pi-core/index.ts",
+      "./extensions/statusline/index.ts",
+      "./extensions/tool-result-budget/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run --workspaces --if-present check",
+    "test": "npm run --workspaces --if-present test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*"
+  }
+}

@@ -322,7 +322,7 @@ describe("layer boundaries named by the import-graph review", () => {
   it("host packages enter only through the adapter and the reviewer", async () => {
     const codingAgent = new Set<string>();
     const piAi = new Set<string>();
-    const piCore = new Set<string>();
+    const sharedPresentation = new Set<string>();
     for (const file of await collectTs("src")) {
       const name = file.replace(/\\/g, "/");
       for (const edge of await valueEdges(file)) {
@@ -333,13 +333,15 @@ describe("layer boundaries named by the import-graph review", () => {
         ) {
           piAi.add(name);
         }
-        if (edge.target === "../../pi-core/standalone.ts") piCore.add(name);
+        if (edge.target === "../../../packages/shared-tool-presentation/src/index.ts") {
+          sharedPresentation.add(name);
+        }
       }
     }
     // Scope is per package: pi-ai/compat has its own single sanctioned importer.
     expect([...codingAgent].sort()).toEqual(["src/guardian-tools.ts", "src/register.ts"]);
     expect([...piAi].sort()).toEqual(["src/auto-reviewer.ts"]);
-    expect([...piCore].sort()).toEqual(["src/register.ts"]);
+    expect([...sharedPresentation].sort()).toEqual(["src/register.ts"]);
   });
 
   it("the isolated worker imports no TypeScript and ships its limits pair", async () => {

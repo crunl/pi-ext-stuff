@@ -23,8 +23,8 @@ so there is **no build step**.
 pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 ```
 
-Requires [`pi-core`](../pi-core) (shared presentation surface); see
-[Relationship](#relationship) below.
+Consumes presentation helpers from `packages/shared-tool-presentation`
+(shared Codex tool rendering surface).
 
 ## Config / commands
 
@@ -40,8 +40,8 @@ workspace-write profile and empty `rules`.
 
 ## Relationship
 
-Imports presentation helpers from `pi-core/standalone.ts` only — never the
-reverse. Emits `pi-safety:mode` (also `:review`, `:delegation`) on the event
+Imports presentation helpers from `packages/shared-tool-presentation` only.
+Emits `pi-safety:mode` (also `:review`, `:delegation`) on the event
 bus, which `statusline` listens to.
 
 ## Development

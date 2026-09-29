@@ -24,7 +24,7 @@ import {
   codexEditToolSpec,
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
-} from "../../pi-core/standalone.ts";
+} from "../../../packages/shared-tool-presentation/src/index.ts";
 import {
   type EscalationEligibility,
   matchesNetworkDomainPattern,
