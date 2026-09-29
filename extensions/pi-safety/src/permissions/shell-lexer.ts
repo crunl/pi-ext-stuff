@@ -204,6 +204,93 @@ export interface ShellSyntax {
 
 const MAX_LIVE_SUBSTITUTIONS = 8;
 
+interface HeredocSpec {
+  delimiter: string;
+  stripTabs: boolean;
+}
+
+/**
+ * Peek at a `<<` (at `start`, both angle brackets known-unquoted) for an
+ * INERT heredoc: a quoted (`<<'X'`, `<<"X"`) or escaped (`<<\X`) delimiter
+ * means the body is literal text — the shell never re-reads it as code.
+ * Returns undefined for here-strings, unquoted delimiters (their bodies DO
+ * expand — left exactly as active as today), empty delimiters, and any shape
+ * not understood: every undefined is today's behavior, which is the
+ * fail-closed direction. Whitespace between `<<` and the delimiter is not
+ * accepted even though bash allows it — refusing keeps today's flags, and it
+ * is what keeps `cat < <(cmd)` from being misread as a heredoc whose
+ * process substitution the scanner then declared inert.
+ */
+function inertHeredocAt(source: string, start: number): HeredocSpec | undefined {
+  let position = start + 2;
+  if (source[position] === "<") return undefined; // here-string: one word, expands
+  while (source[position] >= "0" && source[position] <= "9") position += 1; // fd number
+  const stripTabs = source[position] === "-";
+  if (stripTabs) position += 1;
+  while (source[position] >= "0" && source[position] <= "9") position += 1;
+  const quote = source[position];
+  let delimiter: string;
+  if (quote === "'") {
+    const end = source.indexOf("'", position + 1);
+    if (end === -1) return undefined;
+    delimiter = source.slice(position + 1, end);
+  } else if (quote === '"') {
+    let text = "";
+    let escaped = false;
+    let positionAfterQuote = position + 1;
+    for (; positionAfterQuote < source.length; positionAfterQuote += 1) {
+      const character = source[positionAfterQuote];
+      if (escaped) {
+        text += character;
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        break;
+      } else {
+        text += character;
+      }
+    }
+    if (positionAfterQuote >= source.length) return undefined;
+    delimiter = text;
+  } else if (quote === "\\") {
+    let text = "";
+    position += 1;
+    while (position < source.length && !/\s/.test(source[position] as string)) {
+      text += source[position];
+      position += 1;
+    }
+    delimiter = text;
+  } else {
+    return undefined; // unquoted delimiter: the body expands, stays active
+  }
+  if (delimiter === "") return undefined;
+  return { delimiter, stripTabs };
+}
+
+/**
+ * Consume an inert body from the newline that opens it: the body and its
+ * delimiter line carry no flags, so the scan resumes at the start of the
+ * line after the delimiter. An unterminated body runs to the end of the
+ * source — the input is incomplete, and the caller's other checks already
+ * refuse it.
+ */
+function consumeHeredocBody(source: string, newlineIndex: number, spec: HeredocSpec): number {
+  let lineStart = newlineIndex + 1;
+  while (lineStart < source.length) {
+    const nextNewline = source.indexOf("\n", lineStart);
+    const lineEnd = nextNewline === -1 ? source.length : nextNewline;
+    let line = source.slice(lineStart, lineEnd);
+    if (spec.stripTabs) line = line.replace(/^\t+/, "");
+    if (line === spec.delimiter) {
+      return lineEnd === source.length ? source.length : lineEnd + 1;
+    }
+    if (nextNewline === -1) return source.length;
+    lineStart = nextNewline + 1;
+  }
+  return source.length;
+}
+
 /**
  * Match a `$(…)` body from just after the opening paren: parentheses count
  * only when unquoted, quotes and escapes track the inner shell's own rules.
@@ -281,6 +368,9 @@ export function scanShellSyntax(source: string): ShellSyntax {
   let hasActiveControl = false;
   let hasHereDocument = false;
   const liveSubstitutions: string[] = [];
+  // Quoted-delimiter heredocs detected on the current line; each body starts
+  // at the next newline, in order, the way the shell assigns them.
+  const pendingHeredocs: HeredocSpec[] = [];
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (escaped) {
@@ -351,6 +441,25 @@ export function scanShellSyntax(source: string): ShellSyntax {
     // the argv we parsed.
     if (quote === undefined && character === "<" && source[index + 1] === "<") {
       hasHereDocument = true;
+      const inert = inertHeredocAt(source, index);
+      if (inert !== undefined) pendingHeredocs.push(inert);
+    }
+    // The newline that opens a pending heredoc body is a real line
+    // terminator, so its own flag stays; the body lines it opens are literal
+    // text and raise nothing. Consume through the delimiter line — and
+    // through any further pending body that starts on the line right after,
+    // the way the shell queues them.
+    if (character === "\n" && pendingHeredocs.length > 0 && quote === undefined) {
+      hasActiveControl = true;
+      let newline = index;
+      let next = source.length;
+      while (pendingHeredocs.length > 0) {
+        next = consumeHeredocBody(source, newline, pendingHeredocs.shift() as HeredocSpec);
+        if (next >= source.length) break;
+        newline = next - 1; // the newline terminating this delimiter line
+      }
+      index = next - 1; // the loop's step lands on `next`
+      continue;
     }
     if (
       quote === undefined &&

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { classifyRisk, normalizeToolCall, parseCommandSegments } from "../src/permissions/risk.ts";
+import {
+  classifyRisk,
+  classifyRiskWithCause,
+  normalizeToolCall,
+  parseCommandSegments,
+} from "../src/permissions/risk.ts";
 import { scanShellSyntax } from "../src/permissions/shell-lexer.ts";
 
 describe("live substitution extraction", () => {
@@ -105,5 +110,70 @@ describe("live substitution extraction", () => {
         "NeedsApproval",
       );
     }
+  });
+});
+
+describe("inert heredoc bodies", () => {
+  it("reads a quoted-delimiter body as literal text, not shell code", () => {
+    for (const opener of ["<<'EOF'", '<<"EOF"', "<<\\EOF"]) {
+      const syntax = scanShellSyntax(`cat ${opener}\n$(date) ; more\nEOF`);
+      expect(syntax.hasExecutableSubstitution, opener).toBe(false);
+      expect(syntax.liveSubstitutions, opener).toEqual([]);
+      // The mechanism marker stays — it is how the fold names the heredoc —
+      // and the newline that ends the command line is a real control
+      // character. Only the body's own content raises nothing.
+      expect(syntax.hasHereDocument, opener).toBe(true);
+      expect(syntax.hasActiveControl, opener).toBe(true);
+    }
+  });
+
+  it("keeps an unquoted-delimiter body live, because bash expands it", () => {
+    const syntax = scanShellSyntax("cat <<EOF\n$(date)\nEOF");
+    expect(syntax.hasExecutableSubstitution).toBe(true);
+    expect(syntax.liveSubstitutions).toEqual(["date"]);
+  });
+
+  it("delimits the body by a line equal to the delimiter", () => {
+    // `EOFx` is data, so the substitution below it is still inside the body.
+    expect(scanShellSyntax("cat <<'EOF'\nEOFx\n$(date)\nEOF").liveSubstitutions).toEqual([]);
+    // What follows the redirect on its own line is a live command line.
+    expect(scanShellSyntax("cat <<'EOF' | $(date)\nEOF").liveSubstitutions).toEqual(["date"]);
+    // Two heredocs on one line queue their bodies on consecutive lines.
+    expect(scanShellSyntax("cat <<'A' <<'B'\nx\nA\n$(date)\nB").liveSubstitutions).toEqual([]);
+  });
+
+  it("does not invent heredocs where bash sees none", () => {
+    // Process substitution with a spaced redirect: not `<<`, and declaring
+    // the `(…)` an inert body would be a fail-open.
+    expect(scanShellSyntax("cat < <(echo hi)").hasHereDocument).toBe(false);
+    // A `<<` inside double quotes is literal text.
+    expect(scanShellSyntax(`echo "a <<'b'\nc\nEOF"`).hasHereDocument).toBe(false);
+    // A here-string feeds one expanding word, not a body: its substitution
+    // stays live, exactly as the shell expands it.
+    expect(scanShellSyntax('wc <<< "$(date)"').liveSubstitutions).toEqual(["date"]);
+  });
+
+  it("names the heredoc as the failed proof, not a substitution", () => {
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<'EOF'\n$(date)\nEOF" }, "/work/repo"),
+      true,
+    );
+    expect(review).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
+  });
+
+  it("still inspects an unquoted body, because the shell runs it", () => {
+    expect(
+      classifyRisk(normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /)\nEOF" }, "/w/r")),
+    ).toBe("Forbidden");
+  });
+
+  it("routes a nested side-effecting body through tier 2", () => {
+    // The inner `pkill` becomes an ordinary segment, so the process-control
+    // review catches it even though the outer `echo` is harmless.
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "echo $(pkill x)" }, "/work/repo"),
+      true,
+    );
+    expect(review).toEqual({ disposition: "NeedsApproval", cause: "process_control" });
   });
 });
