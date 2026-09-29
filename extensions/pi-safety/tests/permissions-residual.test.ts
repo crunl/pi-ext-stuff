@@ -203,4 +203,21 @@ describe("admission residual fail-closed projection", () => {
     expect(plan.kind).toBe("review");
     expect(plan).toMatchObject({ residuals: ["other_explicit_review"] });
   });
+
+  it("passes cause co-stamps through the admission projection as ordinary residuals", () => {
+    // A cause signal is an observation, not an authority: the projection
+    // forwards it exactly like any other residual, and the Engine's closed
+    // set accepts it — neither routing nor any grant reads it.
+    const prompt: RiskDecision = {
+      action: "prompt",
+      risk: "NeedsApproval",
+      reason: "echo operation",
+      summary: 'echo "$(date)"',
+      residuals: ["action_review", "substitution_unproven", "risk_not_skip"],
+    };
+    expect(admissionPlanFromRiskDecision(prompt)).toMatchObject({
+      kind: "review",
+      residuals: ["action_review", "substitution_unproven", "risk_not_skip"],
+    });
+  });
 });

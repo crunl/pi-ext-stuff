@@ -415,7 +415,6 @@ describe("ApprovalDisposition policy gate", () => {
     "sh < script.sh",
     "sh <<< 'rm -rf /'",
     "$(echo rm) -rf /",
-    'echo "$(rm -rf /)"',
     "function f { rm -rf /; }; f",
     "echo / | xargs rm -rf",
     "find . -exec rm -rf {} +",
@@ -2516,5 +2515,24 @@ describe("RiskDecision residual stamps", () => {
         residuals: ["action_review", cause, "risk_not_skip"],
       });
     }
+  });
+
+  it("names the substitution a dangerous command hid in", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-subst-reason-"));
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: 'echo "$(rm -rf /)"' },
+      cwd,
+      config(),
+    );
+    // The reason is evidence about the action itself (it travels into the
+    // Guardian packet), not a process label like a review cause — which is
+    // why this is allowed to change a packet where P0-1 changes only metrics.
+    expect(decision).toMatchObject({
+      action: "prompt",
+      risk: "Forbidden",
+      reason: "Dangerous command inside shell substitution: rm -rf /",
+      residuals: ["action_review", "risk_not_skip"],
+    });
   });
 });

@@ -833,19 +833,21 @@ function parseCommandSegment(source: string): CommandSegment {
 }
 
 export function parseCommandSegments(command: string): CommandSegment[] {
+  return parseSegmentsAtDepth(command, 0);
+}
+
+/**
+ * Substitution bodies nest; expansion stops at the same depth bound the
+ * dangerous-wrapper walk uses (`MAX_DANGEROUS_WRAPPER_DEPTH` in
+ * dangerous-commands.ts). A command that hides its argv under more than
+ * eight substitutions has already failed every decomposable gate on the way
+ * down; the cap only bounds work, never a trust decision.
+ */
+const MAX_SUBSTITUTION_NESTING = 8;
+
+function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] {
   const segments = splitShellSegments(command).map(parseCommandSegment);
   const nested = segments.flatMap((segment) => {
-    if (!shellExecutables.has(segment.executable)) return [];
-    const commandIndex = inlineProgramOptionIndex(segment.args);
-    const nestedCommand = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
-    if (!nestedCommand) return [];
-    // The body is shell code, so a substitution or heredoc in it is live even
-    // when outer quoting made it inert for the parent shell: `bash -c 'cat
-    // $(pwd)'` runs the substitution. The char segmenter drops the `(`, so the
-    // body text itself is what proves the inner argv is not static.
-    const body = scanShellSyntax(nestedCommand);
-    const bodyRewritesArgv = body.hasExecutableSubstitution || body.hasHereDocument;
-    const inner = parseCommandSegments(nestedCommand);
     // The body inherits the host segment's environment, and the inner parse
     // starts from a fresh `executableContext`, so it cannot see what the outer
     // words established. That made the trust gate a single wrapper away:
@@ -859,28 +861,62 @@ export function parseCommandSegments(command: string): CommandSegment[] {
     // would be wrong — the body runs in a different repository, and reading it
     // as trusted would let the relocation decide nothing. Inheriting the
     // unproven marker is what makes the body's own `git push` a review.
+    //
+    // This inheritance is deliberately shared by both body sources below: a
+    // substitution body runs in the segment's environment exactly as a
+    // `shell -c` body runs in the shell's.
     const inherit = (nestedSegment: CommandSegment): CommandSegment =>
       segment.executableTrusted
         ? segment.executableContextUntrusted
           ? { ...nestedSegment, executableContextUntrusted: true }
           : nestedSegment
         : { ...nestedSegment, executableTrusted: false, executableContextUntrusted: true };
-    return inner.map((nestedSegment) => {
-      const inherited = inherit(nestedSegment);
-      return bodyRewritesArgv
-        ? {
-            ...inherited,
-            decomposable: false,
-            // The host body re-runs a program string, so even a well-formed
-            // inner argv is not the argv the outer command started with. Keep
-            // the inner segment's own cause when it has one; otherwise name
-            // the body mechanism that forced this.
-            unprovenCause:
-              inherited.unprovenCause ??
-              (body.hasExecutableSubstitution ? "substitution_unproven" : "heredoc_unproven"),
-          }
-        : inherited;
-    });
+    // The body is shell code, so a substitution or heredoc in it is live even
+    // when outer quoting made it inert for the parent shell: `bash -c 'cat
+    // $(pwd)'` runs the substitution. The char segmenter drops the `(`, so the
+    // body text itself is what proves the inner argv is not static — and the
+    // body's own words are what make its dangerous argv a plain segment that
+    // tier 1 can see, whether it came from a `-c` argument or from a live
+    // `$(…)` that the splitter only ever shredded by accident.
+    const expandBody = (
+      body: string,
+      nestedFrom: "shell_body" | "substitution",
+    ): CommandSegment[] => {
+      const syntax = scanShellSyntax(body);
+      const bodyRewritesArgv = syntax.hasExecutableSubstitution || syntax.hasHereDocument;
+      return parseSegmentsAtDepth(body, depth + 1).map((nestedSegment) => {
+        const inherited = { ...inherit(nestedSegment), nestedFrom };
+        return bodyRewritesArgv
+          ? {
+              ...inherited,
+              decomposable: false,
+              // The host body re-runs a program string, so even a well-formed
+              // inner argv is not the argv the outer command started with. Keep
+              // the inner segment's own cause when it has one; otherwise name
+              // the body mechanism that forced this.
+              unprovenCause:
+                inherited.unprovenCause ??
+                (syntax.hasExecutableSubstitution ? "substitution_unproven" : "heredoc_unproven"),
+            }
+          : inherited;
+      });
+    };
+    const results: CommandSegment[] = [];
+    const commandIndex = shellExecutables.has(segment.executable)
+      ? inlineProgramOptionIndex(segment.args)
+      : -1;
+    const shellBody = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
+    if (shellBody !== undefined && shellBody !== "")
+      results.push(...expandBody(shellBody, "shell_body"));
+    // Substitution bodies go unexpanded only below the nesting bound: the
+    // words there still set every boolean on their own segment's scan, so the
+    // command still fails closed; just the extra inspection stops.
+    if (depth < MAX_SUBSTITUTION_NESTING) {
+      for (const body of scanShellSyntax(segment.source).liveSubstitutions) {
+        results.push(...expandBody(body, "substitution"));
+      }
+    }
+    return results;
   });
   return [...segments, ...nested];
 }

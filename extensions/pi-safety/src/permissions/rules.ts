@@ -67,6 +67,14 @@ export interface CommandSegment {
    */
   decomposable: boolean;
   /**
+   * The construct whose body this segment was parsed from, when it was not a
+   * segment of the command line itself: a `shell -c` body, or the text
+   * inside a live `$(…)`. Provenance is a label for reporting —
+   * `isDangerousSegment` reaches nested segments the same way either way —
+   * and it lets the review reason say *where* a dangerous argv surfaced.
+   */
+  nestedFrom?: "shell_body" | "substitution";
+  /**
    * The first failed clause of the `decomposable` conjunction, recorded at the
    * fold itself so no consumer has to re-derive it and drift from it. Absent
    * exactly when `decomposable` is true. Observational: it co-stamps the

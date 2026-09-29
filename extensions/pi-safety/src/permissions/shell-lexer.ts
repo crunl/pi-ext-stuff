@@ -186,6 +186,91 @@ export interface ShellSyntax {
   hasActiveRedirect: boolean;
   hasActiveControl: boolean;
   hasHereDocument: boolean;
+  /**
+   * The body text of every live `$(…)` or backtick substitution this scan
+   * saw live — outside single quotes and unescaped. This is the only place
+   * the quoting state exists: the segmenter's `shellWords` output is
+   * byte-identical for `'$(pwd)'`, `"$(pwd)"` and `$(pwd)`, so whether a
+   * substitution is live or inert can only be decided here, on the raw
+   * source. Consumers parse the bodies; they add no verdict of their own.
+   * An unclosed or unpairable substitution yields no body — the booleans
+   * already fail the command closed, and a parser must never be fed
+   * half-matched text. Count is capped (precedent:
+   * `MAX_DANGEROUS_WRAPPER_DEPTH`); the cap only limits how many bodies are
+   * reported, never the booleans.
+   */
+  liveSubstitutions: string[];
+}
+
+const MAX_LIVE_SUBSTITUTIONS = 8;
+
+/**
+ * Match a `$(…)` body from just after the opening paren: parentheses count
+ * only when unquoted, quotes and escapes track the inner shell's own rules.
+ * Returns undefined when the paren never closes — fail closed to "no body",
+ * never a guess.
+ */
+function matchParenSubstitution(source: string, start: number): string | undefined {
+  let depth = 1;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') quote = undefined;
+      continue;
+    }
+    if (character === "'") {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      quote = '"';
+      continue;
+    }
+    if (character === "(") depth += 1;
+    else if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Match a backtick body: the next unescaped backtick closes it. POSIX gives
+ * no nesting without `\`` escaping, so quoting inside a body gets no special
+ * treatment — a body can end up truncated relative to a pathological quoting
+ * nest, which is safe in the only direction that matters: the outer booleans
+ * still see the raw text, and a consumer parses at most a prefix.
+ */
+function matchBacktickSubstitution(source: string, start: number): string | undefined {
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "`") return source.slice(start, index);
+  }
+  return undefined;
 }
 
 export function scanShellSyntax(source: string): ShellSyntax {
@@ -195,6 +280,7 @@ export function scanShellSyntax(source: string): ShellSyntax {
   let hasActiveRedirect = false;
   let hasActiveControl = false;
   let hasHereDocument = false;
+  const liveSubstitutions: string[] = [];
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (escaped) {
@@ -241,6 +327,21 @@ export function scanShellSyntax(source: string): ShellSyntax {
     // reached here; an escaped `\$` was consumed by the `escaped` branch.
     if (character === "`" || character === "$") {
       hasExecutableSubstitution = true;
+      // Reaching here means the substitution is live: single-quoted regions
+      // returned above, and `\$` was consumed by the `escaped` branch. The
+      // main scan deliberately does not skip the body — the flags keep their
+      // exact pre-extraction meaning — and the body is instead handed to the
+      // parser, which recurses through the same trust inheritance as a
+      // `shell -c` body.
+      if (liveSubstitutions.length < MAX_LIVE_SUBSTITUTIONS) {
+        const body =
+          character === "`"
+            ? matchBacktickSubstitution(source, index + 1)
+            : source[index + 1] === "("
+              ? matchParenSubstitution(source, index + 2)
+              : undefined;
+        if (body !== undefined) liveSubstitutions.push(body);
+      }
     }
     if (quote === undefined && (character === "<" || character === ">")) {
       hasActiveRedirect = true;
@@ -263,5 +364,11 @@ export function scanShellSyntax(source: string): ShellSyntax {
       hasActiveControl = true;
     }
   }
-  return { hasExecutableSubstitution, hasActiveRedirect, hasActiveControl, hasHereDocument };
+  return {
+    hasExecutableSubstitution,
+    hasActiveRedirect,
+    hasActiveControl,
+    hasHereDocument,
+    liveSubstitutions,
+  };
 }

@@ -88,6 +88,12 @@ export interface RiskClassification {
   disposition: ApprovalDisposition;
   /** Present exactly when the disposition is a static review (NeedsApproval). */
   cause?: ReviewCause;
+  /**
+   * The argv of a segment proven dangerous from inside a live `$(…)` body.
+   * This is evidence about the action itself — unlike a review cause, which
+   * is a process label — so it may enter the review packet as the reason.
+   */
+  dangerousSubstitution?: string;
 }
 
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
@@ -277,8 +283,15 @@ export function classifyRiskWithCause(
       (segment) =>
         isDangerousSegment(segment) || (!networkApproved && invocationUsesNetwork(segment)),
     )
-  )
-    return { disposition: "Forbidden" };
+  ) {
+    const substituted = segments.find(
+      (segment) => segment.nestedFrom === "substitution" && isDangerousSegment(segment),
+    );
+    return {
+      disposition: "Forbidden",
+      ...(substituted ? { dangerousSubstitution: substituted.source } : {}),
+    };
+  }
   // Tier 2 — proven side-effecting: the argv is fully determined, but what it
   // does is not confined by the filesystem or network policy (Unix signals).
   // This is a review, not a block, matching fx `approval_required(

@@ -577,9 +577,12 @@ describe("narrow static risk contract", () => {
     ["python3 '>out' script.py", "Skip"],
     // A single quote is literal inside double quotes. Treating it as opening a
     // single-quoted region swallowed the rest of the input, so the substitution
-    // gate behind it reported nothing and this auto-approved LOW.
-    ['echo "it\'s" `rm -rf /`', "NeedsApproval"],
-    ['echo "a\'b" `rm -rf /`', "NeedsApproval"],
+    // gate behind it reported nothing and this auto-approved LOW. Once the gate
+    // was fixed the body still only reached review — the quoted twins now reach
+    // the same tier-1 inspection as the unquoted form below, so the body's
+    // forced deletion is a block, not a guess.
+    ['echo "it\'s" `rm -rf /`', "Forbidden"],
+    ['echo "a\'b" `rm -rf /`', "Forbidden"],
     // The mirror case was already right: a double quote is literal inside single
     // quotes, and both substitution forms stay live inside double quotes. The
     // nested `rm -rf /` is analysed as a forced deletion, so these are HARD.
@@ -636,11 +639,13 @@ describe("narrow static risk contract", () => {
   });
 
   it.each(['echo "$(rm -rf build)"', "echo `rm -rf build`"])(
-    "requires review for executable shell substitution in %s",
+    "blocks a dangerous command inside live shell substitution in %s",
     (command) => {
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(
-        "NeedsApproval",
-      );
+      // The body is shell code the parent will run, so its forced deletion is
+      // inspected by the same tier-1 check as a top-level `rm -rf build`.
+      // Descent proves danger, never safety: the quoted form is a block here,
+      // not a Skip.
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("Forbidden");
     },
   );
 

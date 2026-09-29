@@ -502,7 +502,12 @@ export async function evaluateRiskRequest(
           ? "Approval required by permissions rule"
           : unprovenGitElevates
             ? `Unproven Git invocation: ${unprovenGitReason}`
-            : `${risk} operation`,
+            : // Unlike a review cause — a process label that only rides the
+              // metrics — this names where the dangerous argv itself was found,
+              // so it belongs in the review packet the Guardian reads.
+              classification.dangerousSubstitution !== undefined
+              ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
+              : `${risk} operation`,
       summary: summarize(tool, input),
       // Derived from the reported disposition, not the pre-elevation one, so a
       // consumer reading `risk` and one reading `residual_signals` cannot disagree
