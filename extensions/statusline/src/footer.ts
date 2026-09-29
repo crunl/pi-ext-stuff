@@ -7,7 +7,7 @@
  * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
  * Gutters follow settings.outputPad (read live from settings.json), so
- * footer lines up with chat messages without a sibling pi-core dependency.
+ * footer lines up with chat messages without any sibling dependency.
  *
  * Model/effort live here when SHOW_MODEL_ON_BORDER is false.
  */
@@ -42,7 +42,6 @@ interface FooterTheme {
 
 export interface FooterOptions {
 	getModelInfo?: () => ModelStatusInfo | undefined;
-	onTheme?: (theme: FooterTheme) => void;
 	onRequestRender?: (requestRender: () => void) => void;
 }
 
@@ -50,17 +49,10 @@ export function installFooter(
 	ctx: ExtensionContext,
 	options: FooterOptions = {},
 ): void {
-	const { getModelInfo, onTheme, onRequestRender } = options;
+	const { getModelInfo, onRequestRender } = options;
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
-		try {
-			// SAFETY: theme is the live TUI theme object, which exposes getFgAnsi
-			// at runtime; the static EditorTheme type just doesn't declare it.
-			onTheme?.(theme as unknown as FooterTheme);
-		} catch {
-			// theme without getFgAnsi: badge falls back to inverse video
-		}
 		onRequestRender?.(() => queueMicrotask(() => tui.requestRender()));
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 
@@ -68,13 +60,6 @@ export function installFooter(
 			dispose: unsubBranch,
 			invalidate() {},
 			render(width: number): string[] {
-				try {
-					// SAFETY: same live-theme invariant as above; re-read every render
-					// so hot theme switches refresh badge colors without reinstall.
-					onTheme?.(theme as unknown as FooterTheme);
-				} catch {
-					// theme without getFgAnsi: badge falls back to inverse video
-				}
 
 				// ---- left: powerline model | effort | folder | branch ----
 				const pwd = formatCwd(

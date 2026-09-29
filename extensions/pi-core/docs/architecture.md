@@ -8,7 +8,7 @@ layout or cross-extension contract changes.
 | File | Role |
 | --- | --- |
 | `index.ts` | Package entry (`package.json` `pi.extensions`). Loads the register graph. |
-| `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-safety, statusline) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
+| `standalone.ts` | **Side-effect-free** cross-extension surface. Other extensions (pi-safety) must import from here — never from `src/**` deep paths and never from `index.ts` (that pulls the register graph into their jiti instance and can double-register). |
 | `src/register.ts` | Pure orchestration facade: calls every `register*` once, in order. |
 | `src/tui/*` | All rendering and UI state. Modules are named by concern; pure factories use `create*`, host patches use `apply*`/`install*`, extension hooks use `register*`. |
 
@@ -24,7 +24,7 @@ layout or cross-extension contract changes.
 
 Exports (no side effects on import):
 
-- `applyAutocompleteAbove` — statusline
+- `applyAutocompleteAbove` — preserved in `standalone.ts` for compatibility
 - `withCodexToolPresentation` — pi-safety; decorates a complete tool definition while preserving its execution and metadata
 - `createEditDiffBox` — pi-safety
 - `createCodexToolRendering` — pi-safety
@@ -104,8 +104,8 @@ Adding an export here is the only supported way to widen the contract.
   public `TUI.mode`, `children`, `showOverlay`, and the regular renderer's
   `captureRenderState()`; fullscreen autocomplete uses the bottom dock while
   fullscreen selectors retain Pi's native inline layout. The active panel and
-  selector anchor use shared symbols so statusline's isolated jiti copy can
-  replace the editor without leaking an overlay.
+  selector anchor use shared symbols so any peer extension's isolated jiti copy can
+  wrap or replace the editor without leaking an overlay.
 - `token-rate.ts` (pure tracker) / `working-token-rate.ts` (indicator adapter):
   the rate is shown as part of the footer working line
   (`setWorkingMessage`, `⠋ Working  50 tok/s`), cleared at `agent_end`; while

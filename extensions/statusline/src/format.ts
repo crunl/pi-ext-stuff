@@ -42,12 +42,17 @@ export function alignLine(
 	return { line: left, rightFits: false };
 }
 
-/** Shorten a cwd for display: replace home dir with ~. */
+/**
+ * Shorten a cwd for display: only the leaf folder name (e.g.
+ * `~/workspace/tsnjs/pi-ext-stuff` → `pi-ext-stuff`). The home directory
+ * itself stays `~` so the root case is not shown as a bare username.
+ */
 export function formatCwd(cwd: string, home: string | undefined): string {
-	if (home && cwd.startsWith(home)) {
-		return `~${cwd.slice(home.length)}`;
+	if (home && cwd === home) {
+		return "~";
 	}
-	return cwd;
+	const name = cwd.split(/[\\/]/).filter(Boolean).pop();
+	return name ?? cwd;
 }
 
 /** Nerd font icons — codepoints extracted from the reference opencode plugin. */

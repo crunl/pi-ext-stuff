@@ -6,7 +6,6 @@
  * into its own jiti instance:
  *   - pi-safety → withCodexToolPresentation / createCodexToolRendering / …
  *   - permission UIs → markToolCall
- *   - statusline     → applyAutocompleteAbove
  *
  * Contract: importing this module (and anything it re-exports) runs no
  * side effects. Host patching only happens when a register/apply/install

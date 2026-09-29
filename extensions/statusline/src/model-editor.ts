@@ -23,10 +23,9 @@
  * post-process super.render() output.
  */
 
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { makeModeBadgeDecorator } from "./badge.ts";
-import { BOX_MIN_WIDTH, boxEditorLines } from "./box-editor.ts";
 import { buildBottomBorder, buildTopBorder } from "./border-labels.ts";
+import { BOX_MIN_WIDTH, boxEditorLines } from "./box-editor.ts";
 import { stripAnsi } from "./format.ts";
 
 export interface ModelInfoProvider {
@@ -44,30 +43,66 @@ export interface PermissionsModeProvider {
 /** Theme color key used for the model/effort powerline segments. */
 export type ModelPillColor = "mdLink" | "accent";
 
+export interface BoxChromeProviders {
+	getModelInfo?: ModelInfoProvider;
+	getStats?: StatsProvider;
+	getPermissionsMode?: PermissionsModeProvider;
+	getBadgeFgAnsi?: (color: "warning" | "error") => string | undefined;
+	getPillFgAnsi?: (color: ModelPillColor) => string | undefined;
+	isEnabled?: () => boolean;
+}
+
+export interface BorderColorable {
+	borderColor?(text: string): string;
+}
+
+export interface RenderableEditor {
+	render(width: number): string[];
+}
+
+const BOX_CHROME_APPLIED = Symbol.for("@x1a2h1/statusline:box-chrome-applied");
+
 /**
- * When false, the bottom border stays a plain rule and the footer owns
- * model/effort display (powerline segments). Flip to true to put the
- * pill back on the editor bottom border.
+ * Decorates an existing editor instance in-place with statusline's boxed chrome.
+ *
+ * Wraps editor.render() rather than replacing the editor class, preserving any
+ * other decorations (such as autocomplete-above) applied by earlier extensions.
  */
 export const SHOW_MODEL_ON_BORDER = false;
 
-export class ModelLineEditor extends CustomEditor {
-	/** Injected callback returning current model info (reads live ctx). */
-	getModelInfo: ModelInfoProvider = () => undefined;
-	/** Injected callback returning token totals for the top border. */
-	getStats: StatsProvider = () => undefined;
-	/** Injected callback returning the mode published by pi-safety. */
-	getPermissionsMode: PermissionsModeProvider = () => undefined;
-	/** Badge-color ANSI provider (captured lazily from the footer theme). */
-	getBadgeFgAnsi: (color: "warning" | "error") => string | undefined = () => undefined;
-	/** Model/effort pill color provider (truecolor fg used as segment bg). */
-	getPillFgAnsi: (color: ModelPillColor) => string | undefined = () => undefined;
+export function applyBoxChrome<T extends RenderableEditor>(
+	editor: T,
+	providers: BoxChromeProviders = {},
+): T {
+	if ((editor as Record<symbol, unknown>)[BOX_CHROME_APPLIED]) {
+		return editor;
+	}
+	(editor as Record<symbol, unknown>)[BOX_CHROME_APPLIED] = true;
 
-	render(width: number): string[] {
+	const originalRender = editor.render.bind(editor);
+	const {
+		getModelInfo = () => undefined,
+		getStats = () => undefined,
+		getPermissionsMode = () => undefined,
+		getBadgeFgAnsi = () => undefined,
+		getPillFgAnsi = () => undefined,
+		isEnabled = () => true,
+	} = providers;
+
+	editor.render = (width: number): string[] => {
+		if (!isEnabled()) {
+			return originalRender(width);
+		}
+
 		const boxed = width >= BOX_MIN_WIDTH;
 		const innerWidth = boxed ? width - 2 : width;
-		const lines = super.render(innerWidth);
+		const lines = originalRender(innerWidth);
 		if (lines.length === 0) return lines;
+
+		const colorizeBorder = (text: string): string => {
+			const borderFn = (editor as BorderColorable).borderColor;
+			return typeof borderFn === "function" ? borderFn.call(editor, text) : text;
+		};
 
 		// Locate pure horizontal border lines (all ─ after stripping ANSI).
 		let topIdx = -1;
@@ -81,22 +116,21 @@ export class ModelLineEditor extends CustomEditor {
 		}
 
 		// Top border: powerline mode pill on the left, token stats on the right.
-		// Caps stay in boxed mode — the pill sits after the corner, not on it.
 		if (topIdx !== -1) {
-			const mode = this.getPermissionsMode();
-			const top = buildTopBorder(innerWidth, mode?.label, this.getStats());
+			const mode = getPermissionsMode();
+			const top = buildTopBorder(innerWidth, mode?.label, getStats());
 			if (top !== undefined) {
 				const decorate = makeModeBadgeDecorator(
-					mode ? this.getBadgeFgAnsi(mode.severity) : undefined,
+					mode ? getBadgeFgAnsi(mode.severity) : undefined,
 				);
 				const badge = top.mode.length > 0 ? decorate(top.mode) : "";
 				lines[topIdx] =
-					this.borderColor(top.pre) + badge + this.borderColor(top.post);
+					colorizeBorder(top.pre) + badge + colorizeBorder(top.post);
 			}
 		}
 
-		// Bottom border: model/effort powerline pill (optional — footer may own it).
-		const info = this.getModelInfo();
+		// Bottom border: model/effort powerline pill (optional).
+		const info = getModelInfo();
 		if (
 			SHOW_MODEL_ON_BORDER &&
 			info &&
@@ -106,22 +140,25 @@ export class ModelLineEditor extends CustomEditor {
 			const bottom = buildBottomBorder(
 				innerWidth,
 				info,
-				this.getPillFgAnsi("mdLink"),
-				this.getPillFgAnsi("accent"),
+				getPillFgAnsi("mdLink"),
+				getPillFgAnsi("accent"),
 			);
 			if (bottom !== undefined) {
 				lines[bottomIdx] =
-					this.borderColor(bottom.pre) + bottom.pill + this.borderColor(bottom.post);
+					colorizeBorder(bottom.pre) + bottom.pill + colorizeBorder(bottom.post);
 			}
 		}
 
 		if (!boxed) return lines;
-		// Labels are already spliced in, so the borders are no longer pure ─
-		// runs — hand boxEditorLines the indices we just used.
 		if (topIdx === -1 || bottomIdx === -1) return lines;
-		return boxEditorLines(lines, innerWidth, (s) => this.borderColor(s), {
+
+		return boxEditorLines(lines, innerWidth, colorizeBorder, {
 			topIdx,
 			bottomIdx,
 		});
-	}
+	};
+
+	return editor;
 }
+
+export type CustomEditorLike = RenderableEditor & BorderColorable;

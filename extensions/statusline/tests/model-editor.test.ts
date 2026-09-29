@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BADGE_CAP_WIDTH } from "../src/badge.ts";
 import { buildBottomBorder, buildTopBorder } from "../src/border-labels.ts";
+import { applyBoxChrome } from "../src/model-editor.ts";
 
 const WIDTH = 40;
 
@@ -91,4 +92,73 @@ test("bottom border: astral icons still leave a full-width rule", () => {
 	const plain = (bottom.pre + bottom.pill + bottom.post).replace(/\x1b\[[0-9;]*m/g, "");
 	assert.equal([...plain].length, 30);
 	assert.ok(plain.endsWith("─"));
+});
+
+test("applyBoxChrome: wraps editor in-place and preserves original properties", () => {
+	const rawEditor = {
+		customProp: 42,
+		borderColor: (s: string) => `[c]${s}[/c]`,
+		render: (width: number) => {
+			const border = "─".repeat(width);
+			return [border, "hello", border];
+		},
+	};
+
+	const decorated = applyBoxChrome(rawEditor, {
+		getPermissionsMode: () => ({ label: "Plan", severity: "warning" }),
+		isEnabled: () => true,
+	});
+
+	assert.equal(decorated, rawEditor, "returns exact same object instance");
+	assert.equal(decorated.customProp, 42);
+
+	const lines = decorated.render(30);
+	// Boxed with corner and rail
+	assert.ok(lines[0]!.includes("╭"));
+	assert.ok(lines[0]!.includes("Plan"));
+	assert.ok(lines[lines.length - 1]!.includes("╰"));
+});
+
+test("applyBoxChrome: isEnabled=false transparently falls back to raw render", () => {
+	let enabled = true;
+	const rawEditor = {
+		borderColor: (s: string) => s,
+		render: (width: number) => {
+			const border = "─".repeat(width);
+			return [border, "input", border];
+		},
+	};
+
+	const decorated = applyBoxChrome(rawEditor, {
+		isEnabled: () => enabled,
+	});
+
+	// When enabled: boxed
+	const boxedLines = decorated.render(30);
+	assert.ok(boxedLines[0]!.startsWith("╭"));
+
+	// When disabled: raw untouched render
+	enabled = false;
+	const rawLines = decorated.render(30);
+	assert.equal(rawLines[0], "─".repeat(30));
+	assert.equal(rawLines[1], "input");
+	assert.equal(rawLines[2], "─".repeat(30));
+});
+
+test("applyBoxChrome: is idempotent on repeated calls", () => {
+	let renderCount = 0;
+	const rawEditor = {
+		borderColor: (s: string) => s,
+		render: (width: number) => {
+			renderCount++;
+			const border = "─".repeat(width);
+			return [border, "input", border];
+		},
+	};
+
+	applyBoxChrome(rawEditor);
+	applyBoxChrome(rawEditor);
+
+	rawEditor.render(30);
+	assert.equal(renderCount, 1, "inner render called once per render() invocation");
 });

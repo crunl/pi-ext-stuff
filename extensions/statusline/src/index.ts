@@ -14,13 +14,10 @@
  *   /statusline  — toggle between this statusline and the built-in layout
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-// standalone.ts is pi-core's side-effect-free surface: no register graph
-// gets pulled into this jiti instance.
-import { applyAutocompleteAbove } from "../../pi-core/standalone.ts";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installFooter } from "./footer.ts";
 import { resolveModelInfo } from "./model-info.ts";
-import { ModelLineEditor } from "./model-editor.ts";
+import { applyBoxChrome, type ModelPillColor } from "./model-editor.ts";
 import { isPermissionsModeEvent, PermissionsModeState } from "./status-mode.ts";
 import { computeUsageTotals } from "./usage.ts";
 
@@ -61,40 +58,61 @@ export default function statusline(pi: ExtensionAPI) {
 	const install = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		currentCtx = ctx;
-		// Captured from the footer factory's theme (full Theme, not EditorTheme).
-		const badgeFgAnsi: Partial<Record<"warning" | "error", string>> = {};
-		const pillFgAnsi: Partial<Record<"mdLink" | "accent", string>> = {};
+
 		installFooter(ctx, {
 			getModelInfo: modelInfo,
-			onTheme: (theme) => {
-				badgeFgAnsi.warning = theme.getFgAnsi("warning");
-				badgeFgAnsi.error = theme.getFgAnsi("error");
-				pillFgAnsi.mdLink = theme.getFgAnsi("mdLink");
-				pillFgAnsi.accent = theme.getFgAnsi("accent");
-			},
 			onRequestRender: (fn) => {
 				requestRender = fn;
 			},
 		});
-		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-			const editor = new ModelLineEditor(tui, theme, keybindings);
-			editor.getModelInfo = modelInfo;
-			editor.getStats = stats;
-			editor.getPermissionsMode = () => {
-				const severity = permissionsMode.severity();
-				const label = permissionsMode.get();
-				if (severity === "none" || label === undefined) return undefined;
-				return { label, severity };
-			};
-			editor.getBadgeFgAnsi = (color) => badgeFgAnsi[color];
-			editor.getPillFgAnsi = (color) => pillFgAnsi[color];
-			return applyAutocompleteAbove(editor, tui as Parameters<typeof applyAutocompleteAbove>[1]);
-		});
+
+		const previous = ctx.ui.getEditorComponent();
+		if ((previous as { __statuslineBoxChrome?: boolean } | undefined)?.__statuslineBoxChrome) return;
+
+		const factory = (
+			tui: Parameters<NonNullable<typeof previous>>[0],
+			theme: Parameters<NonNullable<typeof previous>>[1],
+			keybindings: Parameters<NonNullable<typeof previous>>[2],
+		) => {
+			const editor = previous
+				? previous(tui, theme, keybindings)
+				: new CustomEditor(tui, theme, keybindings);
+
+			return applyBoxChrome(editor, {
+				getModelInfo: modelInfo,
+				getStats: stats,
+				getPermissionsMode: () => {
+					const severity = permissionsMode.severity();
+					const label = permissionsMode.get();
+					if (severity === "none" || label === undefined) return undefined;
+					return { label, severity };
+				},
+				getBadgeFgAnsi: (color) => {
+					try {
+						// SAFETY: ctx.ui.theme is the full Theme object at runtime exposing getFgAnsi.
+						return (ctx.ui.theme as unknown as { getFgAnsi(c: string): string })?.getFgAnsi(color);
+					} catch {
+						return undefined;
+					}
+				},
+				getPillFgAnsi: (color: ModelPillColor) => {
+					try {
+						// SAFETY: ctx.ui.theme is the full Theme object at runtime exposing getFgAnsi.
+						return (ctx.ui.theme as unknown as { getFgAnsi(c: string): string })?.getFgAnsi(color);
+					} catch {
+						return undefined;
+					}
+				},
+				isEnabled: () => enabled,
+			});
+		};
+
+		(factory as { __statuslineBoxChrome?: boolean }).__statuslineBoxChrome = true;
+		ctx.ui.setEditorComponent(factory);
 	};
 
 	const uninstall = (ctx: ExtensionContext) => {
 		ctx.ui.setFooter(undefined);
-		ctx.ui.setEditorComponent(undefined);
 		permissionsMode.reset();
 	};
 

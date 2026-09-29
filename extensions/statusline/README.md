@@ -96,13 +96,14 @@ modeleffortfolderbranch
 /reload
 ```
 
-## 开发
+## 接线与组合
 
-实现入口 `src/index.ts`（根 `index.ts` 仅转发，符合 pi 自动发现规则）；
-`model-editor.ts`（boxed chrome）/ `box-editor.ts`（纯函数）/ `footer.ts` /
-`usage.ts` / `format.ts` 各司其职。接线方式：`ctx.ui.setEditorComponent()` +
-`ctx.ui.setFooter()`，参考 pi 官方 `modal-editor.ts` / `custom-footer.ts`
-示例；并把 `pi-safety` 的 mode 移入 editor 下边框。
+实现入口 `src/index.ts`（根 `index.ts` 仅转发，符合 pi 自动发现规则）。
+采用**就地包装（Wrap in-place）**机制：
+- `ctx.ui.setFooter()`：实现自定义底部栏。
+- `ctx.ui.setEditorComponent()`：通过 `getEditorComponent()` 取前序工厂获取实例后，以 `applyBoxChrome` 包装 `render(width)`，而非整车替换 Editor 实例，因而与 `pi-core` 的 `autocomplete-above` 等任意前置/后置装饰器自然叠加兼容，无静态依赖。
+- 颜色直接读取公开的 `ctx.ui.theme`（完整 Theme）。
+- 权限状态通过 `pi-safety:mode` 总线事件解耦接收。
 
 ## 当前降级行为
 
@@ -118,5 +119,5 @@ modeleffortfolderbranch
 - footer 尚未实现宽度分级降级（10 格 → 5 格 → 仅 tokens）
 - provider 始终显示，不区分单 provider 和多 provider
 - 未显示内置 footer 的 `(auto)` 自动压缩标记
-- 其他扩展若也调用 `setEditorComponent()`，后安装者会覆盖先安装者
+- 若存在其他第三方扩展调用 `setEditorComponent()` 且未读取 `getEditorComponent()` 进行叠加，其后安装仍会整体替换输入框工厂
 - Nerd Font glyph 的最终视觉效果取决于终端字体和 fallback 配置
