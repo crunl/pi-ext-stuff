@@ -199,16 +199,49 @@ provenance reason 文本测试；「cause 标签不改变授权」再钉一条�
 5. 验收按 AGENTS.md：`preflight:sibling` → `check` → `lint` → `test`；本设计不触发
    host-turn-boundary。
 
+## 4. 切片实录（实施日 2026-09-29）
+
+三个切片全部落地。验收按 AGENTS.md（`preflight:sibling` → `check` → `lint` → `test`）：
+
+- **Slice A = `048c9c9`**（P0-1 cause 共标）：设计原样。验收时 sibling 干净
+  （preflight OK，pi-core 随仓 @ `803c040`）；check/lint 绿，1732 测试通过（+12）。
+- **Slice B = `57cf334`**（M1 替换体展开）：判决翻转与设计表一致（引号孪生、
+  反引号孪生 NeedsApproval→Forbidden；inert/参数展开/撕碎面零改动）。提交时
+  sibling 被无关的注释级 pi-core 编辑弄脏 → 当场记为 provisional；随后在干净
+  worktree 对上重跑（本仓与 sibling 同 @ `57cf334`）：preflight OK、check/lint
+  绿、1740 通过。**实施真相两条**（设计未预言、不改判决）：
+  1. 未引号形态的提取器**从不触发**——撕碎已把 `(`/`)` 从 segment source 剥掉，
+     引号态只在完整 source 上存在。即未引号孪生的危险覆盖**仍是撕碎**，M1 把
+     「引号内 + 反引号」两个形态变成机制；孪生同判由 property 测试钉住。
+  2. 双重引号嵌套（`echo "$(echo "$(rm -rf /)")"`）撕碎后配对错位 → 配对失败
+     不出体（fail-closed），覆盖留在撕碎，verdict 同 Forbidden；provenance 注释
+     只标提取器真正找到的体，诚实标注机制归属。
+- **Slice C = `56f92ea`**（M2 heredoc inert 区）：判决不变（heredoc 本就压不住
+  fold），`cat <<'EOF'\n$(date)\nEOF` 的 cause 从 substitution_unproven 改为诚实的
+  heredoc_unproven。`cat < <(cmd)` 防误判靠「`<<` 与定界符间不容空白」的拒绝式
+  解析；here-string 不建区。干净 worktree 对验收（同 @ `56f92ea`）：preflight
+  OK、check/lint 绿、1747 通过。
+- **设计表两处实测修正**：① `cat <<'EOF'\n$(date)\nEOF` 在 M1 时代就已是
+  NeedsApproval（表中「当前误判 Forbidden」对该形态不成立；误 Forbidden 的是
+  体内含**裸危险命令行**的形态）。② `echo $(pkill x)` 已实测并钉测试：内层
+  pkill 成为普通段被 tier-2 拦（cause `process_control`），下文 claim 行同步收口。
+- **遗留（不在本设计范围，指认归属）**：撕碎产生的**假段 trusted**（`exe="$"`）
+  与**引号定界 heredoc 体内的裸危险行**（`cat <<'EOF'\nrm -rf /\nEOF` 仍误
+  Forbidden——真实 shell 该体是纯数据）都在**分词器**，scanner 修复不触及；归
+  P1「heredoc 消费方区分 / 撕碎卫生」。`# $(…)` 注释上下文全仓无处理，基线即
+  Forbidden（撕碎巧合），同属分词器面。
+
 ## This note does not claim
 
 - 不声称 cause 词汇完备：新机制出现时落 `other_explicit_review` 是设计内 miss 方向；
   完备性由穷尽 switch 对**代码站点**成立，不对**世界**成立。
-- 不声称 M1 关掉了所有 substitution fail-open：descent 仍不证安全（公理 3），
-  `echo $(pkill x)` 类内层副作用依赖内层同样过 tier-2（内层 pkill 段会成为普通段被
-  tier-2 拦住——这是嵌套展开的自然结果，测试须钉住，但本 note 未实测该例）。
+- 不声称 M1 关掉了所有 substitution fail-open：descent 仍不证安全（公理 3）。
+  内层副作用（`echo $(pkill x)`）已实测钉测试：内层段成为普通段被 tier-2 拦。
+  未引号形态的危险覆盖仍依赖撕碎（§4 Slice B 之 1），机制化仅限引号内与反引号。
 - 不处理 P1/P2 项（cd-fold、heredoc 消费方区分、假段 trusted、`cargo owner list`、
   BASH_ENV 类）；`echo "$(date)"` 的 Skip 化明确留给产品决定（09-29 note §判断）。
 - 三个研究子代理之二提供本文事实，第三个（参照分类学）未返回；fx `ApprovalReason`
   「原因=元数据不=判决」与 codex descent 教义的引用沿用本会话早前已实测记录与仓内
   09-24 note，未二次复核。
-- 未跑任何验收命令；未改产品代码；「最优雅」是本日期的工程判断，不是证明。
+- 未跑验收命令、未改产品代码是本文**初写日**的状态；实施与验收见 §4。
+  「最优雅」是本日期的工程判断，不是证明。

@@ -42,7 +42,14 @@
 ## 4. 新缺口（按严重度）
 
 - **G1（中低）PowerShell 危险规则缺失。** `powershell` tool 走同一 POSIX 解析器（`risk.ts:671-672`），无 `Remove-Item -Force`/`del /f`/`start+URL`（Codex windows 全文 + `powershell.rs:43,77-88`）。`powershell -Command "Remove-Item C:\tmp -Force"` 本地约 LOW。缓解：POSIX 少用+沙盒内。建议：加 `remove-item|ri|del|erase|rd|rmdir + -force` 同段规则，否则标 REVIEW。
-- **G2（低）`$()` 隐藏 `rm -f` 只到 REVIEW。** `bash -lc 'echo $(rm -rf /)'`：`splitShellSegments:155` 在括号处撕碎，`isDangerousSegment` 只见 `echo`，靠 substitution 进 REVIEW；Codex literal 递归直接 `ForcedRm`（pin 自带测试 L~286）。tier 差一级，但 provenance 丢了（Guardian 仅 tier+通用 reason），而 `guardian-policy.ts:74,182` 允许 rm -rf 降级。建议：对 substitution 段递归扫内层 words，或写命中来源进 `staticReason`。
+- **G2（已修正并关闭，2026-09-29）** ~~`$()` 隐藏 `rm -f` 只到 REVIEW~~。原文示例
+  `bash -lc 'echo $(rm -rf /)'` 实测**当时就已 Forbidden**——`splitShellSegments` 在
+  裸 `(`/`)` 上撕碎，内层 `rm` 恰成独立段被危险层看见（巧合，非机制）。真正的洞是
+  **引号内形态**：`echo "$(rm -rf /)"`、反引号、`bash -c` 体内再套引号，实测
+  NeedsApproval（rm 永不成段）。已由 `57cf334` 关闭：`scanShellSyntax` 在 raw source
+  上配对提取活替换体，经 `shell -c` 同一条解析+信任继承进 tier-1，provenance 写进
+  review reason（`Dangerous command inside shell substitution: …`，即本行当年建议的
+  「命中来源进 staticReason」）。修正依据与实测：`2026-09-29-p0-review-cause-and-substitution-design.md` §2.1/§4。
 - **G3（低）`rm` 基名归一弱（Windows 向）。** 本地 `basename().toLowerCase()`（`risk.ts:581`）不去盘符/后缀；Codex L96–121 去。`rm.exe -f` Windows 漏检。非目标平台。
 - **G4（记录，正向偏离）**：`command/builtin/nohup/time` 剥离（`risk.ts:234-257`，Codex `command rm -rf` 两条路径都 miss）、大小写归一（Codex POSIX 敏感）、`bash -*c*` 任意展开（`:584-587,611-631`；Codex 仅 `-c|-lc`）。本地更严，无需改。
 - **G5（极低）trap 递归无深度计数**（`risk.ts:1260-1266`；Codex 每次 descent +1 受 8 界）。受输入长度限，加深度参数即合拢。
