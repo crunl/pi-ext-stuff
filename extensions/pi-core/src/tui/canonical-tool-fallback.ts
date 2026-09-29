@@ -183,7 +183,10 @@ function registerIfCanonical<P extends ToolDefinition["parameters"], D, S>(
 }
 
 function isCanonicalBuiltin(owner: ToolInfoSnapshot, name: CanonicalBuiltinName): boolean {
-  return owner.sourceInfo.source === "builtin" && owner.sourceInfo.path === `<builtin:${name}>`;
+  return (
+    owner.sourceInfo.source === "builtin" &&
+    (owner.sourceInfo.path === `builtin:${name}` || owner.sourceInfo.path === `<builtin:${name}>`)
+  );
 }
 
 function matchesCanonicalMetadata(owner: ToolInfoSnapshot, definition: ToolMetadata): boolean {
@@ -196,6 +199,7 @@ function matchesCanonicalMetadata(owner: ToolInfoSnapshot, definition: ToolMetad
 }
 
 function snapshotToolInfos(tools: ToolInfo[]): ToolInfoSnapshot[] {
+  // SAFETY: Deeply frozen clone of tool metadata satisfying the readonly ToolInfoSnapshot shape.
   return Object.freeze(
     tools.map((tool) =>
       Object.freeze({

@@ -327,6 +327,23 @@ describe("canonical builtin presentation fallback", () => {
     expect(harness.registered.map((tool) => tool.name)).toEqual(["bash", "write", "edit"]);
   });
 
+  it("recognizes modern unbracketed builtin:name sourceInfo.path format (Pi 0.99.0+)", () => {
+    const modernOwner = (name: ToolName): ToolInfo => ({
+      ...makeOwner(name),
+      sourceInfo: {
+        path: `builtin:${name}`,
+        source: "builtin",
+        scope: "temporary",
+        origin: "top-level",
+      },
+    });
+
+    const harness = makeHarness([modernOwner("bash"), modernOwner("write"), modernOwner("edit")]);
+    registerCanonicalBuiltinFallback(harness.pi, makeDependencies());
+    sessionStart(harness, makeContext());
+    expect(harness.registered.map((tool) => tool.name)).toEqual(["bash", "write", "edit"]);
+  });
+
   it("does not install a fallback after the owner becomes an extension", () => {
     const harness = makeHarness([makeOwner("bash"), makeOwner("write"), makeOwner("edit")]);
     registerCanonicalBuiltinFallback(harness.pi, makeDependencies());
