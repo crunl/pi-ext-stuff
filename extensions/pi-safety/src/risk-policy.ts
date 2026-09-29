@@ -7,7 +7,7 @@ import { type ResidualSignal, residualsForPrompt } from "./permissions/residual.
 import {
   type ApprovalDisposition,
   analyzeShellGitNetwork,
-  classifyRisk,
+  classifyRiskWithCause,
   deletionExecutables,
   deletionTargets,
   isPublicNetworkHost,
@@ -405,13 +405,19 @@ export async function evaluateRiskRequest(
   // (`invocationHasExternalSideEffect`, e.g. `terraform apply`) is not
   // exempted — the sandbox guards the connection boundary, not the API
   // semantics of the call — so it stays HARD.
-  let risk = classifyRisk(
+  const classification = classifyRiskWithCause(
     request,
     sandboxedBashNetwork,
     [],
     filesystem.protectedWritePaths,
     filesystem.allowWrite,
   );
+  let risk = classification.disposition;
+  // The proof the static layer failed to make, present exactly when the
+  // classifier itself reviewed. The later flips (uncovered write roots, the
+  // protected-path deletion carve-out) are not static-cause reviews, so they
+  // keep their own stamps and leave this undefined.
+  const staticCause = classification.cause;
   if (filesystemWriteRoots.length > 0 && risk === "Skip") risk = "NeedsApproval";
 
   const allowWrite = [...filesystem.allowWrite];
@@ -508,6 +514,10 @@ export async function evaluateRiskRequest(
         writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
         actionReview:
           reportedRisk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
+        // Co-stamp only: rides alongside `action_review` (and under
+        // escalation), never replaces a bucket. Undefined for the flips the
+        // classifier itself did not make.
+        cause: staticCause,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
       justification: escalation.requested

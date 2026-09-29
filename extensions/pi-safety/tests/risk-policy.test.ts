@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
+import type { ResidualSignal } from "../src/permissions/residual.ts";
 import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
 import {
   evaluateHostFirstRulesOnly,
@@ -2490,5 +2491,30 @@ describe("RiskDecision residual stamps", () => {
       risk: "Forbidden",
       residuals: expect.arrayContaining(["risk_not_skip"]),
     });
+    // A proven-dangerous verdict is not a failed proof: the review-cause
+    // vocabulary stays out of `static_risk` buckets.
+    expect(decision).toMatchObject({
+      residuals: expect.not.arrayContaining(["substitution_unproven", "lex_incomplete"]),
+    });
+  });
+
+  it("co-stamps the failed static proof beside action_review", async () => {
+    const cases: [string, ResidualSignal][] = [
+      ['echo "$(date)"', "substitution_unproven"],
+      ["cat <<'EOF'\nhi\nEOF", "heredoc_unproven"],
+      ["kill 4321", "process_control"],
+      ["GIT_TRACE=1 git status", "env_context_unproven"],
+    ];
+    for (const [command, cause] of cases) {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-cause-"));
+      const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
+      expect(decision, command).toMatchObject({
+        action: "prompt",
+        risk: "NeedsApproval",
+        // Exact array: the cause co-stamps next to `action_review` and
+        // replaces nothing.
+        residuals: ["action_review", cause, "risk_not_skip"],
+      });
+    }
   });
 });

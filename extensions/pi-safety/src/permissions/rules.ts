@@ -21,6 +21,23 @@ export interface PermissionRequest {
   networkTargets?: string[];
 }
 
+/**
+ * Which clause of the decomposable conjunction failed first, named by the
+ * mechanism that failed — never by the disposition it produced. The
+ * `risk_not_low` rename (docs/research/2026-09-25-disposition-vocabulary-alignment.md)
+ * is why: a tag that names a disposition lies the next time the disposition
+ * vocabulary moves. `lex_incomplete` covers lex error, incomplete input, a
+ * nameless command word, and an unreduced brace group.
+ */
+export type SegmentUnprovenCause =
+  | "lex_incomplete"
+  | "wrapper_unreduced"
+  | "nested_git_program"
+  | "command_word_unproven"
+  | "program_reinterpreted"
+  | "substitution_unproven"
+  | "heredoc_unproven";
+
 export interface CommandSegment {
   source: string;
   /** Raw executable token before basename normalization. */
@@ -49,6 +66,13 @@ export interface CommandSegment {
    * brace group. Only a decomposable segment can be proven safe by inspection.
    */
   decomposable: boolean;
+  /**
+   * The first failed clause of the `decomposable` conjunction, recorded at the
+   * fold itself so no consumer has to re-derive it and drift from it. Absent
+   * exactly when `decomposable` is true. Observational: it co-stamps the
+   * review, it never changes a disposition.
+   */
+  unprovenCause?: SegmentUnprovenCause;
 }
 
 export interface RuleMatch {

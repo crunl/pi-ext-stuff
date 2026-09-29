@@ -29,7 +29,7 @@ import {
   invocationRemoteEffectUnclassified,
 } from "./command-effects.ts";
 import { isDangerousWords } from "./dangerous-commands.ts";
-import type { CommandSegment, PermissionRequest } from "./rules.ts";
+import type { CommandSegment, PermissionRequest, SegmentUnprovenCause } from "./rules.ts";
 import { deletionExecutables } from "./rules.ts";
 import { scanShellSyntax } from "./shell-lexer.ts";
 import { extractShellNetworkHosts, invocationUsesNetwork } from "./shell-network.ts";
@@ -61,6 +61,34 @@ import { parseCommandSegments, shellStateCrossesSegments } from "./shell-segment
  * score on a four-point scale — and the two should not be read as one scale.
  */
 export type ApprovalDisposition = "Skip" | "NeedsApproval" | "Forbidden";
+
+/**
+ * Which proof the static layer failed to make, for an action that did not get
+ * a Skip. Segment-level causes are recorded at the fold itself
+ * (`parseCommandSegment`); the rest are named at the tier that refuses.
+ * `unproven_other` is the defensive member: reaching it means a new refusal
+ * path forgot to name itself, and it must surface as `other_explicit_review`
+ * rather than be guessed.
+ *
+ * A cause names the mechanism that failed, never the disposition it produced
+ * — the `risk_not_low` rename showed that a tag naming a value from the
+ * disposition vocabulary starts lying the moment that vocabulary moves. The
+ * cause is observational and travels as a co-stamped residual signal; it is
+ * never a skip credential (`src/permissions/residual.ts`).
+ */
+export type ReviewCause =
+  | SegmentUnprovenCause
+  | "process_control"
+  | "env_context_unproven"
+  | "state_crosses_segments"
+  | "remote_effect_unclassified"
+  | "unproven_other";
+
+export interface RiskClassification {
+  disposition: ApprovalDisposition;
+  /** Present exactly when the disposition is a static review (NeedsApproval). */
+  cause?: ReviewCause;
+}
 
 function extractedPaths(input: Record<string, unknown>, cwd: string): string[] {
   return ["path", "filePath", "targetPath", "sourcePath"].flatMap((key) => {
@@ -201,31 +229,62 @@ export function classifyRisk(
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
   workspaceWriteRoots: readonly string[] = [request.cwd],
 ): ApprovalDisposition {
+  return classifyRiskWithCause(
+    request,
+    networkApproved,
+    approvedWriteRoots,
+    protectedWritePaths,
+    workspaceWriteRoots,
+  ).disposition;
+}
+
+/**
+ * `classifyRisk` with the failed proof named. The tier logic is the original
+ * one — same order, same conditions — only each refusal now says which of its
+ * own conjuncts it hit. `unprovenGitReason` (a `{kind, reason}` verdict whose
+ * code never reached the metrics) is the precedent this closes: the code
+ * travels, the human string stays optional.
+ */
+export function classifyRiskWithCause(
+  request: PermissionRequest,
+  networkApproved = false,
+  approvedWriteRoots: string[] = [],
+  protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
+  workspaceWriteRoots: readonly string[] = [request.cwd],
+): RiskClassification {
   const lowerTool = request.tool.toLowerCase();
-  if (lowerTool === "websearch") return "Skip";
-  if (lowerTool === "webfetch") return webFetchRisk(request);
+  if (lowerTool === "websearch") return { disposition: "Skip" };
+  if (lowerTool === "webfetch") return { disposition: webFetchRisk(request) };
   if (request.operation === "write") {
-    return writeRisk(request, approvedWriteRoots, protectedWritePaths, workspaceWriteRoots);
+    return {
+      disposition: writeRisk(request, approvedWriteRoots, protectedWritePaths, workspaceWriteRoots),
+    };
   }
-  if (request.operation === "read") return "Skip";
+  if (request.operation === "read") return { disposition: "Skip" };
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
-  if (!command) return "NeedsApproval";
+  // An execute operation with no command string is not unreadable shell, it
+  // is no shell at all; naming it lex_incomplete keeps "nothing to read" and
+  // "could not read" in one honest bucket.
+  if (!command) return { disposition: "NeedsApproval", cause: "lex_incomplete" };
   const segments = request.commandSegments ?? normalizedSegmentsFor(command, request.cwd);
   // Tier 1 — proven dangerous (forced rm, non-exempt network, external side
-  // effect) is never downgraded to a review.
-  if (!networkApproved && request.networkTargets?.length) return "Forbidden";
+  // effect) is never downgraded to a review. A proven verdict needs no cause:
+  // `static_risk` already buckets it, and the review-cause vocabulary names
+  // failed proofs, not succeeded ones.
+  if (!networkApproved && request.networkTargets?.length) return { disposition: "Forbidden" };
   if (
     segments.some(
       (segment) =>
         isDangerousSegment(segment) || (!networkApproved && invocationUsesNetwork(segment)),
     )
   )
-    return "Forbidden";
+    return { disposition: "Forbidden" };
   // Tier 2 — proven side-effecting: the argv is fully determined, but what it
   // does is not confined by the filesystem or network policy (Unix signals).
   // This is a review, not a block, matching fx `approval_required(
   // process_or_system)`.
-  if (segments.some(invocationControlsProcesses)) return "NeedsApproval";
+  if (segments.some(invocationControlsProcesses))
+    return { disposition: "NeedsApproval", cause: "process_control" };
   // A segment whose surroundings are unproven — an inert `GIT_` variable, a
   // wrapper that could not be reduced — is not decomposable either, and this is
   // where that becomes a review rather than a refusal. Refusal is the network
@@ -233,7 +292,8 @@ export function classifyRisk(
   // at all; here the program is identified and only its context is unproven, so
   // tier 3 does not hold. `GIT_TRACE=1 git status` belongs: the words name git,
   // the variable changes nothing about which binary runs, and a human settles it.
-  if (segments.some((segment) => segment.executableContextUntrusted)) return "NeedsApproval";
+  if (segments.some((segment) => segment.executableContextUntrusted))
+    return { disposition: "NeedsApproval", cause: "env_context_unproven" };
   // Tier 3 — proven safe: static argv equals runtime argv for the whole
   // command, so nothing is left to prove. A rewritable argv, an unreadable
   // option grammar, or state crossing a segment boundary is not.
@@ -250,7 +310,32 @@ export function classifyRisk(
   // string or stdin program, a substitution, a heredoc, or a brace group. The
   // static word list is not the argv that runs, so fail closed into review
   // instead of guessing.
-  return decomposable ? "Skip" : "NeedsApproval";
+  if (decomposable) return { disposition: "Skip" };
+  return {
+    disposition: "NeedsApproval",
+    cause: firstUnprovenCause(command, segments, request.cwd),
+  };
+}
+
+/**
+ * The first failed clause of the tier-3 gate, read off the same conjuncts in
+ * the same order so the cause and the boolean can never disagree. Segment
+ * folds report themselves; a non-decomposable segment without a reported
+ * cause is a gap in the fold and surfaces as `unproven_other`, never as a
+ * guessed bucket.
+ */
+function firstUnprovenCause(
+  command: string,
+  segments: readonly CommandSegment[],
+  cwd: string,
+): ReviewCause {
+  if (scanShellSyntax(command).hasExecutableSubstitution) return "substitution_unproven";
+  for (const segment of segments) {
+    if (!segment.decomposable) return segment.unprovenCause ?? "unproven_other";
+  }
+  if (shellStateCrossesSegments(segments, cwd)) return "state_crosses_segments";
+  if (segments.some(invocationRemoteEffectUnclassified)) return "remote_effect_unclassified";
+  return "unproven_other";
 }
 
 export { isPublicNetworkHost } from "../network-host.ts";

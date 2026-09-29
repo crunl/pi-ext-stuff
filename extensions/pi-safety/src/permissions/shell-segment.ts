@@ -10,7 +10,7 @@ import {
   gitExecutableEnvNames,
   gitExecutesNestedProgram,
 } from "./git-exec-entries.ts";
-import type { CommandSegment } from "./rules.ts";
+import type { CommandSegment, SegmentUnprovenCause } from "./rules.ts";
 import { assignmentName, scanShellSyntax, shellWords, splitShellSegments } from "./shell-lexer.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
@@ -783,6 +783,28 @@ function parseCommandSegment(source: string): CommandSegment {
   // A Git invocation can be told to run another program — a shell alias, a
   // pager, a `bisect run` payload — without any of those words naming it.
   const nestedGitProgram = executable === "git" && gitExecutesNestedProgram(words, args);
+  // The decomposable conjunction evaluated clause by clause, with the first
+  // failing clause recorded as this segment's cause. Clause order matches the
+  // conjunction that used to stand in its place, so the boolean is exactly
+  // `cause === undefined` and no consumer can drift from the fold.
+  let unprovenCause: SegmentUnprovenCause | undefined;
+  if (lexed.error !== undefined || lexed.incomplete || nameless) {
+    unprovenCause = "lex_incomplete";
+  } else if (context.unclassifiable) {
+    unprovenCause = "wrapper_unreduced";
+  } else if (nestedGitProgram) {
+    unprovenCause = "nested_git_program";
+  } else if (commandWordIsUnprovable(executableToken)) {
+    unprovenCause = "command_word_unproven";
+  } else if (reExec) {
+    unprovenCause = "program_reinterpreted";
+  } else if (syntax.hasExecutableSubstitution) {
+    unprovenCause = "substitution_unproven";
+  } else if (syntax.hasHereDocument) {
+    unprovenCause = "heredoc_unproven";
+  } else if (hasGroupingWord(words)) {
+    unprovenCause = "lex_incomplete";
+  }
   return {
     source,
     executableToken,
@@ -802,18 +824,11 @@ function parseCommandSegment(source: string): CommandSegment {
     // list: the lexing completed, no dynamic executable, no re-interpreted
     // string, no nested Git program, no substitution, no heredoc body, no
     // unreduced brace group, and no wrapper whose argument grammar could not be
-    // reduced to the real command.
-    decomposable:
-      lexed.error === undefined &&
-      !lexed.incomplete &&
-      !nameless &&
-      !context.unclassifiable &&
-      !nestedGitProgram &&
-      !commandWordIsUnprovable(executableToken) &&
-      !reExec &&
-      !syntax.hasExecutableSubstitution &&
-      !syntax.hasHereDocument &&
-      !hasGroupingWord(words),
+    // reduced to the real command. The clauses live in `unprovenCause` above;
+    // defining the boolean as their negation is what stops the fold and the
+    // cause from ever disagreeing.
+    decomposable: unprovenCause === undefined,
+    unprovenCause,
   };
 }
 
@@ -852,7 +867,19 @@ export function parseCommandSegments(command: string): CommandSegment[] {
         : { ...nestedSegment, executableTrusted: false, executableContextUntrusted: true };
     return inner.map((nestedSegment) => {
       const inherited = inherit(nestedSegment);
-      return bodyRewritesArgv ? { ...inherited, decomposable: false } : inherited;
+      return bodyRewritesArgv
+        ? {
+            ...inherited,
+            decomposable: false,
+            // The host body re-runs a program string, so even a well-formed
+            // inner argv is not the argv the outer command started with. Keep
+            // the inner segment's own cause when it has one; otherwise name
+            // the body mechanism that forced this.
+            unprovenCause:
+              inherited.unprovenCause ??
+              (body.hasExecutableSubstitution ? "substitution_unproven" : "heredoc_unproven"),
+          }
+        : inherited;
     });
   });
   return [...segments, ...nested];

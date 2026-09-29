@@ -9,6 +9,7 @@ import {
   extractShellNetworkHosts,
   isPublicNetworkHost,
   normalizeToolCall,
+  parseCommandSegments,
 } from "../src/permissions/risk.ts";
 import {
   deletionExecutables,
@@ -722,5 +723,49 @@ describe("cd normalization admission lists", () => {
     for (const name of deletionFloor) expect(deletionExecutables.has(name)).toBe(true);
     for (const name of stateSetterFloor) expect(shellStateSetters.has(name)).toBe(true);
     for (const name of directoryChangerFloor) expect(shellDirectoryChangers.has(name)).toBe(true);
+  });
+});
+
+describe("segment unproven cause", () => {
+  it.each([
+    ['echo "unterminated', "lex_incomplete"],
+    ["{ ls; }", "lex_incomplete"],
+    ["su -c ls", "wrapper_unreduced"],
+    ["env -C /tmp ls", "wrapper_unreduced"],
+    ["$PROG ls", "command_word_unproven"],
+    ["git -c core.pager=cat log", "nested_git_program"],
+    ["trap 'ls' EXIT", "program_reinterpreted"],
+    ['echo "$(date)"', "substitution_unproven"],
+    ["cat <<'EOF'\nhi\nEOF", "heredoc_unproven"],
+  ] as const)("names the failed clause of %s", (command, cause) => {
+    const segments = parseCommandSegments(command);
+    expect(segments.some((segment) => segment.unprovenCause === cause)).toBe(true);
+  });
+
+  it("keeps the fold and the cause one fact", () => {
+    const battery = [
+      "git status",
+      'echo "$(date)"',
+      "su -c ls",
+      "{ ls; }",
+      "cat <<'EOF'\nx\nEOF",
+      "bash -c 'cat $(pwd)'",
+      'echo "unterminated',
+    ];
+    for (const command of battery) {
+      for (const segment of parseCommandSegments(command)) {
+        // `decomposable` is defined as `unprovenCause === undefined` at the
+        // fold, so a segment that cannot be trusted always says why, and a
+        // segment that can never pretends otherwise.
+        expect(segment.decomposable).toBe(segment.unprovenCause === undefined);
+      }
+    }
+  });
+
+  it("keeps the inner segment's own cause when the body rewrites argv", () => {
+    const segments = parseCommandSegments("bash -c 'cat <<EOF\nx\nEOF'");
+    const cat = segments.find((segment) => segment.executable === "cat");
+    expect(cat?.decomposable).toBe(false);
+    expect(cat?.unprovenCause).toBe("heredoc_unproven");
   });
 });

@@ -1,3 +1,5 @@
+import type { ReviewCause } from "./risk.ts";
+
 /** Closed residual-signal vocabulary for P0 skip-LLM fail-closed reviews. */
 export const RESIDUAL_SIGNALS = [
   "rule_ask",
@@ -14,6 +16,21 @@ export const RESIDUAL_SIGNALS = [
   "inline_network_uncovered",
   "capability_uncovered",
   "other_explicit_review",
+  // Static review causes: which proof the static layer failed to make
+  // (`ReviewCause` in ./risk.ts). They co-stamp `action_review`; they never
+  // replace a bucket and never act as a skip credential. Appended as a block
+  // so the pre-cause signals keep their exact history.
+  "process_control",
+  "env_context_unproven",
+  "state_crosses_segments",
+  "remote_effect_unclassified",
+  "lex_incomplete",
+  "wrapper_unreduced",
+  "nested_git_program",
+  "command_word_unproven",
+  "program_reinterpreted",
+  "substitution_unproven",
+  "heredoc_unproven",
 ] as const;
 
 export type ResidualSignal = (typeof RESIDUAL_SIGNALS)[number];
@@ -47,6 +64,13 @@ export function residualsForPrompt(input: {
   actionReview?: boolean;
   capabilityUncovered?: boolean;
   hostAdmissionReview?: boolean;
+  /**
+   * The static layer's failed proof, co-stamped next to `action_review`.
+   * Orthogonal: it rides along under escalation too, and it never replaces
+   * a bucket — re-bucketing would cut the `action_review` time series the
+   * way the `risk_not_low` rename once cut `risk_not_skip`.
+   */
+  cause?: ReviewCause;
 }): ResidualSignal[] {
   const residuals: ResidualSignal[] = [];
   if (input.ruleDeny) residuals.push("rule_deny");
@@ -56,10 +80,46 @@ export function residualsForPrompt(input: {
   if (input.writeUncovered) residuals.push("write_root_uncovered");
   if (input.networkUncovered) residuals.push("network_uncovered");
   if (input.actionReview) residuals.push("action_review");
+  if (input.cause !== undefined) residuals.push(causeToResidual(input.cause));
   if (input.hostAdmissionReview) residuals.push("host_admission_review");
   if (input.capabilityUncovered) residuals.push("capability_uncovered");
   if (input.risk !== "Skip") residuals.push("risk_not_skip");
   return ensureNonEmptyResiduals(residuals);
+}
+
+/**
+ * Total mapping from a static review cause to the residual signal that
+ * co-stamps it. `unproven_other` deliberately lands on `other_explicit_review`:
+ * a cause no fold named must look exactly like a stamp no call site provided,
+ * because both mean "this review reached the edge of the vocabulary".
+ */
+export function causeToResidual(cause: ReviewCause): ResidualSignal {
+  switch (cause) {
+    case "process_control":
+      return "process_control";
+    case "env_context_unproven":
+      return "env_context_unproven";
+    case "state_crosses_segments":
+      return "state_crosses_segments";
+    case "remote_effect_unclassified":
+      return "remote_effect_unclassified";
+    case "lex_incomplete":
+      return "lex_incomplete";
+    case "wrapper_unreduced":
+      return "wrapper_unreduced";
+    case "nested_git_program":
+      return "nested_git_program";
+    case "command_word_unproven":
+      return "command_word_unproven";
+    case "program_reinterpreted":
+      return "program_reinterpreted";
+    case "substitution_unproven":
+      return "substitution_unproven";
+    case "heredoc_unproven":
+      return "heredoc_unproven";
+    case "unproven_other":
+      return "other_explicit_review";
+  }
 }
 
 /**
