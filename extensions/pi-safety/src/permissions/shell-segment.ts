@@ -11,7 +11,15 @@ import {
   gitExecutesNestedProgram,
 } from "./git-exec-entries.ts";
 import type { CommandSegment, SegmentUnprovenCause } from "./rules.ts";
-import { assignmentName, scanShellSyntax, shellWords, splitShellSegments } from "./shell-lexer.ts";
+import { analyzeCommandWithAst, type SegmentFacts, shellAstParserInstalled } from "./shell-ast.ts";
+import {
+  assignmentName,
+  isEnvAssignmentToken,
+  scanShellSyntax,
+  shellWords,
+  skippedHeredocSubstitutions,
+  splitShellSegments,
+} from "./shell-lexer.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 
@@ -404,9 +412,16 @@ function executableContext(words: readonly string[]): ExecutableContext {
       index += 1;
       while (index < words.length) {
         const token = words[index] ?? "";
-        const name = assignmentName(token);
-        if (name) {
-          applyImpact(name);
+        if (isEnvAssignmentToken(token)) {
+          // `env` accepts any non-`-`-prefixed `NAME=` item, so
+          // the name is everything left of the first `=` — wider
+          // than the legal shell identifier the bare-assignment
+          // prefix above still requires. An unknown name carries
+          // no trust impact (`executableTrustImpact` matches exact
+          // names and the `GIT_` namespace only), so consuming a
+          // wider item as an assignment can only widen which
+          // items are eaten, never which program the words name.
+          applyImpact(token.slice(0, token.indexOf("=")));
           index += 1;
           continue;
         }
@@ -751,14 +766,38 @@ function reExecutesString(
   );
 }
 
-function parseCommandSegment(source: string): CommandSegment {
-  // Redirections are shell syntax, not words: `>out rm -f x` runs `rm`, and the
-  // lexer has already dropped the operator and its target, so the word list here
-  // is the argv the command actually receives. Nothing downstream has to know
-  // that a redirect existed — `hasRedirect` and `hasHereDocument` come from a
-  // separate scan of the raw text.
+/**
+ * Above this the fold refuses an argv as untrustworthy. The AST adapter enforces the
+ * same bound on its side; repeating it here is what stops a front end from handing the
+ * fold a word list the danger scan would never finish reading.
+ */
+const MAX_SEGMENT_WORDS = 1024;
+
+/**
+ * The V1 front end's facts for one segment: the hand-written lexer's word list plus
+ * the raw-text syntax scan.
+ *
+ * Redirections are shell syntax, not words: `>out rm -f x` runs `rm`, and the lexer has
+ * already dropped the operator and its target, so the word list here is the argv the
+ * command actually receives. Nothing downstream has to know that a redirect existed —
+ * `hasRedirect` and `hasHereDocument` come from a separate scan of the raw text.
+ */
+function segmentLexFacts(source: string): SegmentFacts {
   const lexed = shellWords(source);
-  const words = lexed.words;
+  const syntax = scanShellSyntax(source);
+  return {
+    source,
+    words: lexed.words,
+    lexIncomplete: lexed.error !== undefined || lexed.incomplete !== undefined,
+    hasExecutableSubstitution: syntax.hasExecutableSubstitution,
+    hasActiveRedirect: syntax.hasActiveRedirect,
+    hasHereDocument: syntax.hasHereDocument,
+    bodies: syntax.liveSubstitutions,
+  };
+}
+
+function foldSegment(facts: SegmentFacts): CommandSegment {
+  const { source, words } = facts;
   // Reserved words are structural only in command position, which the char
   // segmenter already isolated: it splits on `;`/`&`/`|`/newline, so the
   // keyword is leading. Bash treats one behind an assignment or wrapper
@@ -776,7 +815,6 @@ function parseCommandSegment(source: string): CommandSegment {
   const nameless = executableToken === "";
   const executable = basename(executableToken).toLowerCase();
   const args = words.slice(index + 1);
-  const syntax = scanShellSyntax(source);
   const commandIndex = inlineProgramOptionIndex(args);
   const nestedShell = shellExecutables.has(executable) && commandIndex >= 0;
   const reExec = reExecutesString(executable, args, nestedShell);
@@ -788,7 +826,7 @@ function parseCommandSegment(source: string): CommandSegment {
   // conjunction that used to stand in its place, so the boolean is exactly
   // `cause === undefined` and no consumer can drift from the fold.
   let unprovenCause: SegmentUnprovenCause | undefined;
-  if (lexed.error !== undefined || lexed.incomplete || nameless) {
+  if (facts.lexIncomplete || nameless) {
     unprovenCause = "lex_incomplete";
   } else if (context.unclassifiable) {
     unprovenCause = "wrapper_unreduced";
@@ -798,9 +836,9 @@ function parseCommandSegment(source: string): CommandSegment {
     unprovenCause = "command_word_unproven";
   } else if (reExec) {
     unprovenCause = "program_reinterpreted";
-  } else if (syntax.hasExecutableSubstitution) {
+  } else if (facts.hasExecutableSubstitution) {
     unprovenCause = "substitution_unproven";
-  } else if (syntax.hasHereDocument) {
+  } else if (facts.hasHereDocument) {
     unprovenCause = "heredoc_unproven";
   } else if (hasGroupingWord(words)) {
     unprovenCause = "lex_incomplete";
@@ -817,8 +855,8 @@ function parseCommandSegment(source: string): CommandSegment {
     // adding an argument that made it non-decomposable.
     executableContextUntrusted: context.contextUntrusted,
     args,
-    hasRedirect: syntax.hasActiveRedirect,
-    hasSubstitution: syntax.hasExecutableSubstitution,
+    hasRedirect: facts.hasActiveRedirect,
+    hasSubstitution: facts.hasExecutableSubstitution,
     nestedShell,
     // Static argv equals runtime argv only when nothing can rewrite the word
     // list: the lexing completed, no dynamic executable, no re-interpreted
@@ -837,6 +875,114 @@ export function parseCommandSegments(command: string): CommandSegment[] {
 }
 
 /**
+ * Whether a command's argv is not fixed, at command-line scale.
+ *
+ * `risk.ts` uses this to refuse tier 3 and to name the tier 4 cause, so the question it
+ * answers is "can any segment of this command line hide argv behind an expansion". The
+ * V1 text scan is the floor and is never retired here: a `$` the grammar happens to read
+ * as an ordinary character still counts, and a front end that abstains must not buy a
+ * relaxation with its silence. The AST is consulted per segment, on the statement's own
+ * span, where the text scan cannot tell a quoted `|` from an operator.
+ */
+export function commandHasExecutableSubstitution(command: string): boolean {
+  if (scanShellSyntax(command).hasExecutableSubstitution) return true;
+  const facts = astSegmentFacts(command);
+  if (facts === undefined) return false;
+  return facts.some((segment) => segment.hasExecutableSubstitution);
+}
+
+/**
+ * The AST front end's facts for a whole command line, or `undefined` when it abstains.
+ *
+ * Three abstentions, in the order they are checked.
+ *
+ *  - **No parser installed.** The host never enabled the migration, or the WASM bridge
+ *    failed to load. This is the default state of the shipped extension.
+ *  - **Outside the model.** The adapter returns nothing for a control-flow form, a
+ *    subshell, a `!` negation, a pipeline behind a redirect, a node type it does not
+ *    know, or a parse that threw.
+ *  - **Not the same partition, or not the same argv.** The segments have to land on the
+ *    exact byte spans the character splitter cut, and each span's word list has to be
+ *    the list the lexer builds, after the grammar-correction zones below are settled.
+ *
+ * The third rule is what makes "V2 is never looser than V1" a property of the code
+ * rather than of a test suite. A richer syntax tree can disagree with the lexer in two
+ * ways, and both of them are relaxations: re-segmenting the line changes which argv
+ * belong to which command, and a shorter word list for one span removes argv from the
+ * danger check. Where the AST is *more* complete than the lexer, the divergence is a
+ * fail-closed loss of the AST path, never a quieter verdict. Retiring the lexer's
+ * partition is later-phase work, gated on the differential suite.
+ */
+function astSegmentFacts(command: string): SegmentFacts[] | undefined {
+  if (!shellAstParserInstalled()) return undefined;
+  const analysis = analyzeCommandWithAst(command);
+  if (analysis === undefined) return undefined;
+  const chunks = splitShellSegments(command);
+  if (analysis.segments.length !== chunks.length) return undefined;
+  const facts: SegmentFacts[] = [];
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index] ?? "";
+    const segment = analysis.segments[index];
+    if (segment === undefined || segment.source !== chunk) return undefined;
+    const lexed = segmentLexFacts(chunk);
+    if (!argvAligned(lexed, segment)) return undefined;
+    facts.push({
+      source: chunk,
+      // The lexer's list is used once agreement is proven, rather than the AST's copy:
+      // it is the same list, and reading it from one owner keeps the fold's argv exactly
+      // the argv the danger scan saw before the migration.
+      words: lexed.words,
+      // The front end attributes incompleteness to the span it
+      // belongs to — the lexer's own scan of the span, or an
+      // error region the grammar marked inside the span's
+      // statement — so an error elsewhere in the line cannot
+      // tighten a span the front end read whole.
+      lexIncomplete: lexed.lexIncomplete || segment.lexIncomplete,
+      hasExecutableSubstitution:
+        lexed.hasExecutableSubstitution || segment.hasExecutableSubstitution,
+      hasActiveRedirect: lexed.hasActiveRedirect || segment.hasActiveRedirect,
+      hasHereDocument: lexed.hasHereDocument || segment.hasHereDocument,
+      // A body either front end saw gets expanded. The AST can name a substitution the
+      // text scan shredded; the scan can name one the grammar hid inside a construct.
+      bodies: [...new Set([...lexed.bodies, ...segment.bodies])],
+    });
+  }
+  return facts;
+}
+
+/**
+ * Whether the AST front end answered for this command line — the
+ * same predicate the segment fold dispatches on, exposed so the
+ * differential suite gates on production's own engagement instead
+ * of re-deriving a weaker one that can drift from it.
+ */
+export function astFrontEndEngaged(command: string): boolean {
+  return astSegmentFacts(command) !== undefined;
+}
+
+/**
+ * Whether the two front ends name the same argv for the same span.
+ *
+ * `shellWords` keeps a `VAR=value` prefix word — only the redirect path
+ * drops words — and the fold's `executableContext` consumes those words by
+ * advancing its index, so the assignment has to be present for the wrapper
+ * reduction to see the program behind it (`FOO=1 rm -f x` must keep `FOO=1`
+ * for `rm` to be found). The AST's word list must therefore equal the
+ * lexer's word for word: a shorter list on either side removes argv from the
+ * danger check, and any disagreement sends the whole command line to the
+ * lexer.
+ */
+function argvAligned(lexed: SegmentFacts, ast: SegmentFacts): boolean {
+  if (lexed.words.length > MAX_SEGMENT_WORDS || ast.words.length > MAX_SEGMENT_WORDS) {
+    return false;
+  }
+  return (
+    lexed.words.length === ast.words.length &&
+    lexed.words.every((word, index) => word === (ast.words[index] ?? ""))
+  );
+}
+
+/**
  * Substitution bodies nest; expansion stops at the same depth bound the
  * dangerous-wrapper walk uses (`MAX_DANGEROUS_WRAPPER_DEPTH` in
  * dangerous-commands.ts). A command that hides its argv under more than
@@ -846,8 +992,35 @@ export function parseCommandSegments(command: string): CommandSegment[] {
 const MAX_SUBSTITUTION_NESTING = 8;
 
 function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] {
-  const segments = splitShellSegments(command).map(parseCommandSegment);
-  const nested = segments.flatMap((segment) => {
+  // Only the top-level line is a candidate for the AST. A body the expander pulled out
+  // of `bash -c '…'` or `$(…)` is already text whose quoting the outer front end
+  // resolved, and re-parsing it with a second grammar would compare spans that were
+  // never comparable. The lexer owns those.
+  const ast = depth === 0 ? astSegmentFacts(command) : undefined;
+  const chunks = splitShellSegments(command);
+  // Substitutions inside an active heredoc body run, but the body is
+  // data the splitter never lets become a chunk, so no per-chunk scan
+  // can see them. They belong to the chunk that opened the heredoc,
+  // and the expander below treats them exactly like a substitution in
+  // that chunk's own text — the same `bodies` -> `expandBody` path an
+  // inline substitution takes, so the danger check and its
+  // `dangerousSubstitution` attribution apply unchanged.
+  const heredocSubstitutions = skippedHeredocSubstitutions(command);
+  const facts = chunks.map((source, index) => {
+    const frontEnd = ast?.[index] ?? segmentLexFacts(source);
+    const skipped = heredocSubstitutions[index];
+    if (skipped === undefined || skipped.length === 0) return frontEnd;
+    return {
+      ...frontEnd,
+      bodies: [...new Set([...frontEnd.bodies, ...skipped])],
+    };
+  });
+  const segments = facts.map((fact) => {
+    // `foldSegment` is the whole verdict, and it is the same call on both paths: the
+    // AST can change a fact, never a rule.
+    return foldSegment(fact);
+  });
+  const nested = segments.flatMap((segment, index) => {
     // The body inherits the host segment's environment, and the inner parse
     // starts from a fresh `executableContext`, so it cannot see what the outer
     // words established. That made the trust gate a single wrapper away:
@@ -912,7 +1085,7 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
     // words there still set every boolean on their own segment's scan, so the
     // command still fails closed; just the extra inspection stops.
     if (depth < MAX_SUBSTITUTION_NESTING) {
-      for (const body of scanShellSyntax(segment.source).liveSubstitutions) {
+      for (const body of facts[index]?.bodies ?? []) {
         results.push(...expandBody(body, "substitution"));
       }
     }

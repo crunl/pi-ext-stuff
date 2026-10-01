@@ -31,9 +31,12 @@ import {
 import { isDangerousWords } from "./dangerous-commands.ts";
 import type { CommandSegment, PermissionRequest, SegmentUnprovenCause } from "./rules.ts";
 import { deletionExecutables } from "./rules.ts";
-import { scanShellSyntax } from "./shell-lexer.ts";
 import { extractShellNetworkHosts, invocationUsesNetwork } from "./shell-network.ts";
-import { parseCommandSegments, shellStateCrossesSegments } from "./shell-segment.ts";
+import {
+  commandHasExecutableSubstitution,
+  parseCommandSegments,
+  shellStateCrossesSegments,
+} from "./shell-segment.ts";
 
 /**
  * What this layer decided to do with an owned tool call.
@@ -311,7 +314,7 @@ export function classifyRiskWithCause(
   // command, so nothing is left to prove. A rewritable argv, an unreadable
   // option grammar, or state crossing a segment boundary is not.
   const decomposable =
-    !scanShellSyntax(command).hasExecutableSubstitution &&
+    !commandHasExecutableSubstitution(command) &&
     segments.every((segment) => segment.decomposable) &&
     // A compound command that publishes shell state in one segment and reads it
     // in another cannot be analysed segment by segment.
@@ -342,7 +345,7 @@ function firstUnprovenCause(
   segments: readonly CommandSegment[],
   cwd: string,
 ): ReviewCause {
-  if (scanShellSyntax(command).hasExecutableSubstitution) return "substitution_unproven";
+  if (commandHasExecutableSubstitution(command)) return "substitution_unproven";
   for (const segment of segments) {
     if (!segment.decomposable) return segment.unprovenCause ?? "unproven_other";
   }

@@ -3,6 +3,11 @@ allowBuilds:
   esbuild: true
   esbuild@0.28.2: true
   protobufjs: true
+  # tree-sitter-bash's `install` script runs node-gyp-build, which compiles the
+  # native Node binding. pi-safety parses through web-tree-sitter and the
+  # package's shipped tree-sitter-bash.wasm, so the native binding is never
+  # loaded and building it would only add a toolchain dependency.
+  tree-sitter-bash: false
 minimumReleaseAgeExclude:
   - '@earendil-works/pi-agent-core@0.86.0'
   - '@earendil-works/pi-ai@0.86.0'

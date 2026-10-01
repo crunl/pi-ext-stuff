@@ -145,6 +145,11 @@ import {
 } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
+import {
+  activateTreeSitterShellParser,
+  treeSitterParserEnabled,
+  treeSitterShellFailure,
+} from "./tree-sitter/shell-backend.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 function policyDeniedError(reason: string): Error {
@@ -230,12 +235,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
   let shortcutWarningShown = false;
+  /** One Shell AST parser activation failure notice per registration. */
+  let shellParserFailureReported = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let guardianTranscriptEpoch = 0;
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   let guardianInvalidationAfterModeChange = false;
   /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
   let pendingModeRefresh = false;
+  /** Report one activation failure per registration, on whichever ctx learns of it first. */
+  const reportShellParserActivationFailure = (ctx: ExtensionContext): void => {
+    if (shellParserFailureReported) return;
+    shellParserFailureReported = true;
+    const failure = treeSitterShellFailure();
+    const notice = renderPermissionNotice({
+      kind: "shell-parser-activation-failed",
+      reason: failure ? `${failure.name}: ${failure.message}` : "unknown failure",
+    });
+    if (ctx.hasUI) ctx.ui.notify(notice, "error");
+  };
   const permissions = new PiSafetyRuntime<PiGuardianReviewContext>({
     guardian: createPiGuardianAdapter(autoReviewer),
     policy: {
@@ -1191,6 +1209,19 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const preparePermissionExecution = async (
     ctx: ExtensionContext,
   ): Promise<PreparedPermissionExecution> => {
+    // The Shell AST migration's ready barrier. Off by default, and a no-op await once
+    // it has resolved, so the four tool paths below all see the same front-end state
+    // before a command is classified. A failure here leaves the lexer in charge; it
+    // cannot block a request, because nothing in the bridge throws. The session_start
+    // prewarm attempts the same activation earlier; both share the once-guard in
+    // reportShellParserActivationFailure, so a failure is said exactly once.
+    if (
+      treeSitterParserEnabled() &&
+      !shellParserFailureReported &&
+      !(await activateTreeSitterShellParser())
+    ) {
+      reportShellParserActivationFailure(ctx);
+    }
     // Host turns apply at turn_start. Direct tool-hook paths without lifecycle
     // events drain here; same-step tools after a host turn_start keep the
     // prior applied mode until the next step boundary.
@@ -2211,6 +2242,26 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     resetBranchPermissionContext("session changed");
     session.clearLifecycleEvents();
     const generation = session.getGeneration();
+    // Prewarm the Shell AST bridge off the request path. The first command's
+    // barrier awaits the same memoized activation, so this only moves the
+    // one-time grammar load earlier; a failure surfaces here instead of at the
+    // first command. Fire-and-forget by design: the barrier in
+    // preparePermissionExecution remains the single enforcement point that no
+    // command is classified before the front end settles.
+    if (treeSitterParserEnabled()) {
+      void (async () => {
+        try {
+          if (!(await activateTreeSitterShellParser())) {
+            if (session.isCurrentGeneration(generation)) {
+              reportShellParserActivationFailure(ctx);
+            }
+          }
+        } catch {
+          // The bridge never throws by contract; a detached prewarm must still not
+          // surface as an unhandled rejection if that ever changes.
+        }
+      })();
+    }
     let candidate: LoadedSafetyConfig;
     try {
       candidate = await loadSafetyConfig(agentDir);

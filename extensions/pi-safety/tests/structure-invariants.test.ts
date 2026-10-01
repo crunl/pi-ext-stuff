@@ -26,6 +26,19 @@ describe("structure invariants named by the cohesion review", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("resolves the grammar wasm lazily, never at module load", async () => {
+    const source = await readFile("src/tree-sitter/shell-backend.ts", "utf8");
+    // A top-level resolve() runs at import time: an unresolvable package
+    // would throw before register.ts (a static importer) finishes loading,
+    // taking the whole extension and V1 permissions down with it. Resolution
+    // must therefore stay inside a function body, never at column zero.
+    expect(source).not.toContain("TREE_SITTER_BASH_WASM_PATH");
+    const topLevelResolve = source
+      .split("\n")
+      .filter((line) => line.includes("resolve(") && !/^\s/.test(line));
+    expect(topLevelResolve).toEqual([]);
+  });
+
   it("RegisterExtensionOptions has no filtering-proxy factory seam", async () => {
     const source = await readFile("src/register.ts", "utf8");
     expect(source).toMatch(/export interface RegisterExtensionOptions/);
@@ -196,7 +209,9 @@ describe("layer boundaries named by the import-graph review", () => {
       for (const edge of await valueEdges(file)) {
         if (
           edge.target.startsWith("@earendil-works/") ||
-          edge.target === "@anthropic-ai/sandbox-runtime"
+          edge.target === "@anthropic-ai/sandbox-runtime" ||
+          edge.target === "web-tree-sitter" ||
+          edge.target === "tree-sitter-bash"
         ) {
           offenders.push(`${file} -> ${edge.target}`);
         }
@@ -221,6 +236,7 @@ describe("layer boundaries named by the import-graph review", () => {
   it("propose layer never touches authority names and owns no I/O but paths.ts", async () => {
     const authorityOffenders: string[] = [];
     const ioOffenders: string[] = [];
+    const grammarOffenders: string[] = [];
     for (const file of await proposeModules()) {
       const text = await readFile(file, "utf8");
       // Reuse the block-aware parser: join continuation lines so a symbol split
@@ -262,10 +278,19 @@ describe("layer boundaries named by the import-graph review", () => {
           // impure member of the propose layer, not a precedent.
           ioOffenders.push(file);
         }
+        if (/from\s+"(web-tree-sitter|tree-sitter-bash)"/.test(statement.text)) {
+          // The tree-sitter grammar reaches the propose layer only
+          // through the parser the host bridge injects
+          // (installShellAstParser); a value import here would couple
+          // the pure fold to the WASM runtime and the grammar package
+          // the bridge owns.
+          grammarOffenders.push(file);
+        }
       }
     }
     expect(authorityOffenders).toEqual([]);
     expect(ioOffenders).toEqual([]);
+    expect(grammarOffenders).toEqual([]);
   });
 
   it("review layer never wires the host and spawns only via the worker client", async () => {

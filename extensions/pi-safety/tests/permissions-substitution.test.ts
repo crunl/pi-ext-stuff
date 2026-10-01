@@ -5,7 +5,11 @@ import {
   normalizeToolCall,
   parseCommandSegments,
 } from "../src/permissions/risk.ts";
-import { scanShellSyntax } from "../src/permissions/shell-lexer.ts";
+import {
+  scanShellSyntax,
+  skippedHeredocSubstitutions,
+  splitShellSegments,
+} from "../src/permissions/shell-lexer.ts";
 
 describe("live substitution extraction", () => {
   it("reports the body of every live substitution, inert ones none", () => {
@@ -162,9 +166,22 @@ describe("inert heredoc bodies", () => {
   });
 
   it("still inspects an unquoted body, because the shell runs it", () => {
-    expect(
-      classifyRisk(normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /)\nEOF" }, "/w/r")),
-    ).toBe("Forbidden");
+    // The body's substitution is live shell source: the body is data
+    // the segmenter must not cut into commands, but an unquoted
+    // delimiter means the shell runs every substitution in it (measured
+    // in real bash: the payload executes). The body's substitution is
+    // therefore handed to the segment that opened the heredoc, and the
+    // forced deletion it would run is tier 1's to refuse — the same
+    // verdict the inline spelling earns, and the same one the codex
+    // truth table returns (ForcedRm).
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /)\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "Forbidden",
+      dangerousSubstitution: "rm -rf /",
+    });
   });
 
   it("routes a nested side-effecting body through tier 2", () => {
@@ -175,5 +192,314 @@ describe("inert heredoc bodies", () => {
       true,
     );
     expect(review).toEqual({ disposition: "NeedsApproval", cause: "process_control" });
+  });
+});
+
+describe("active heredoc body substitutions", () => {
+  // Real bash runs every substitution in an unquoted-delimiter body —
+  // measured: the payload below executes and deletes its target — and
+  // the codex truth table classifies the command as dangerous
+  // (ForcedRm), the same verdict the inline spelling earns. The
+  // splitter keeps body lines out of the segment list (they are
+  // data), so a body's substitutions reach the danger check through
+  // the segment that opened the heredoc, exactly as an inline
+  // substitution's body does.
+  it("refuses a forced deletion spelled in an active body", () => {
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "Forbidden",
+      dangerousSubstitution: "rm -rf /tmp/work",
+    });
+  });
+
+  it("refuses a forced deletion in an unterminated active body", () => {
+    // An unterminated body runs to the end of the input, so the
+    // substitution in it is still live shell source.
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "Forbidden",
+      dangerousSubstitution: "rm -rf /tmp/work",
+    });
+  });
+
+  it("leaves an inert body's substitution inert", () => {
+    // A quoted or escaped delimiter makes the body literal text: the
+    // shell never runs the substitution, so nothing may be expanded
+    // out of it. The heredoc itself is still unproven — a review,
+    // never an approval — and the codex truth table agrees (safe).
+    for (const opener of ["<<'EOF'", '<<"EOF"', "<<\\EOF"]) {
+      const review = classifyRiskWithCause(
+        normalizeToolCall("bash", { command: `cat ${opener}\n$(rm -rf /tmp/work)\nEOF` }, "/w/r"),
+        true,
+      );
+      expect(review, opener).toEqual({
+        disposition: "NeedsApproval",
+        cause: "heredoc_unproven",
+      });
+    }
+  });
+
+  it("keeps a bare command in an active body inert data", () => {
+    // No substitution, nothing runs: the body is cat's stdin, and a
+    // forced deletion spelled as plain data deletes nothing (measured
+    // in bash; codex agrees, safe).
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /tmp/work\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "NeedsApproval",
+      cause: "heredoc_unproven",
+    });
+  });
+
+  it("keeps a harmless body substitution a review, not a refusal", () => {
+    // `pwd` runs but names no danger, so the command stays a review
+    // for the substitution it cannot prove.
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\n$(pwd)\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "NeedsApproval",
+      cause: "substitution_unproven",
+    });
+  });
+
+  it("judges a dangerous substitution identically in both positions", () => {
+    // The regression this test pins: real bash runs the same live
+    // substitution from an inline position and from an active heredoc
+    // body alike, so the two spellings must earn the same disposition.
+    // Before the fix only the inline position reached tier 1's danger
+    // check — the body's substitution was invisible to it.
+    const inline = classifyRisk(
+      normalizeToolCall("bash", { command: "echo $(rm -rf /tmp/work)" }, "/w/r"),
+      true,
+    );
+    const inBody = classifyRisk(
+      normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(inline).toBe("Forbidden");
+    expect(inBody).toBe(inline);
+  });
+});
+
+describe("heredoc bodies are data, not commands", () => {
+  // A heredoc body is the command's stdin, so a bare command spelled
+  // inside it runs nothing. Each expectation below is the behaviour
+  // real bash was measured to have: the body is inert text, and only
+  // what follows a bare delimiter line is a command again.
+  it("raises no segment for a bare command inside a body", () => {
+    const segments = parseCommandSegments("cat <<EOF\nrm -f /tmp/work\nEOF");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
+  });
+
+  it("does not forbid a forced deletion that is only body data", () => {
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\nrm -f /tmp/work\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "NeedsApproval",
+      cause: "heredoc_unproven",
+    });
+  });
+
+  it("keeps an inert body's substitution inert and the command a review", () => {
+    const segments = parseCommandSegments("cat <<'EOF'\n$(rm -rf /)\nEOF");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<'EOF'\n$(rm -rf /)\nEOF" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "NeedsApproval",
+      cause: "heredoc_unproven",
+    });
+  });
+
+  it("resumes segmentation after the delimiter line", () => {
+    const segments = parseCommandSegments("cat <<EOF\ndata\nEOF\nrm -f /tmp/x");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat", "rm"]);
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: "cat <<EOF\ndata\nEOF\nrm -f /tmp/x" }, "/w/r"),
+      ),
+    ).toBe("Forbidden");
+  });
+
+  it("reads an unterminated heredoc as data to the end, inventing no commands", () => {
+    // The delimiter line must be the bare delimiter; `EOF && git push`
+    // is body data, so the heredoc never closes and nothing after the
+    // first line is a command.
+    const segments = parseCommandSegments("cat <<EOF\nrm -rf /\nEOF && git push");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /\nEOF && git push" }, "/w/r"),
+      true,
+    );
+    expect(review).toEqual({
+      disposition: "NeedsApproval",
+      cause: "heredoc_unproven",
+    });
+  });
+
+  it("consumes queued bodies in order, then resumes segmentation", () => {
+    const segments = parseCommandSegments("cat <<A <<B\nx\nA\ny\nB\nrm -f /tmp/x");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat", "rm"]);
+  });
+
+  it("matches a strip-tabs delimiter once its leading tabs are gone", () => {
+    const segments = parseCommandSegments("cat <<-EOF\n\tx\n\tEOF\nrm -f /tmp/x");
+    expect(segments.map((segment) => segment.executable)).toEqual(["cat", "rm"]);
+  });
+
+  it("opens no heredoc for a << inside a comment", () => {
+    // A `#` that begins a word comments the rest of its line, so
+    // the `<<EOF` there is text and the lines after it are real
+    // commands — measured in bash, which runs them. The splitter
+    // keeps cutting them, so a forced deletion a commented
+    // heredoc appears to swallow stays visible.
+    const segments = parseCommandSegments("git push # <<EOF\nrm -f /tmp/x\nEOF");
+    expect(segments.map((segment) => segment.executable)).toEqual(["git", "rm", "eof"]);
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: "git push # <<EOF\nrm -f /tmp/x\nEOF" }, "/w/r"),
+      ),
+    ).toBe("Forbidden");
+  });
+});
+
+describe("skipped heredoc substitutions stay index-aligned with the splitter", () => {
+  // `skippedHeredocSubstitutions` walks the command a second time and
+  // hands each skipped active body's substitutions to the chunk that
+  // opened it, matched by index. Two traversals of the same grammar can
+  // drift, and drift here fails open: an entry past the last chunk is
+  // never read, so the substitution silently leaves tier 1's view. These
+  // invariants hold for every shape regardless of which side moved.
+  const forced = ["rm", "-rf", "/tmp/work"].join(" ");
+  const forcedFile = ["rm", "-f", "/tmp/x"].join(" ");
+  const shapes = [
+    `cat <<EOF\n$(${forced})\nEOF`,
+    `cat <<'EOF'\n$(${forced})\nEOF`,
+    `cat <<"EOF"\n$(${forced})\nEOF`,
+    `cat <<\\EOF\n$(${forced})\nEOF`,
+    `cat <<-EOF\n\t$(${forced})\n\tEOF`,
+    `cat <<EOF\n$(${forced})`,
+    `cat <<A <<B\nx\nA\n$(${forcedFile})\nB`,
+    `cat <<A <<B\n$(${forcedFile})\nA\ny\nB`,
+    `cat <<'A' <<B\nx\nA\n$(${forcedFile})\nB`,
+    `cat <<A <<'B'\n$(${forcedFile})\nA\ny\nB`,
+    `cat <<'A' <<'B' <<C\nx\nA\ny\nB\n$(${forcedFile})\nC`,
+    `cat <<A <<'B' <<C\n$(${forcedFile})\nA\ny\nB\nz\nC`,
+    `cat 2<<EOF\n$(${forced})\nEOF`,
+    `echo hi; cat <<EOF\n$(${forced})\nEOF`,
+    `cat <<EOF\n$(${forced})\nEOF; echo hi`,
+    `cat <<EOF\n$(${forced})\nEOF | grep x`,
+    `( cat <<EOF\n$(${forced})\nEOF )`,
+    `if true; then cat <<EOF\n$(${forced})\nEOF\nfi`,
+    `for i in 1; do cat <<EOF\n$(${forced})\nEOF\ndone`,
+    `cat <<EOF\n${forced}\nEOF`,
+    `cat <<EOF\n$(pwd)\nEOF`,
+    `echo "<<EOF"\n$(${forcedFile})`,
+    `git push # <<EOF\n${forcedFile}\nEOF`,
+    "cat <<EOF",
+    "cat <<",
+    "echo 1 <<str",
+  ];
+
+  it("never attributes a body past the last chunk, where no reader looks", () => {
+    for (const command of shapes) {
+      const chunks = splitShellSegments(command);
+      const skipped = skippedHeredocSubstitutions(command);
+      for (const [index, bodies] of skipped.entries()) {
+        if (bodies === undefined || bodies.length === 0) continue;
+        expect(
+          index,
+          `body lost past chunk ${chunks.length - 1} in ${JSON.stringify(command)}`,
+        ).toBeLessThan(chunks.length);
+      }
+    }
+  });
+
+  it("attributes only substitutions the command text really carries", () => {
+    // Inventing a body would be its own defect: tier 1 would refuse a
+    // deletion the shell never runs. Every attributed body has to be a
+    // substitution the command actually spells, so nothing is refused
+    // that the text does not contain.
+    //
+    // Deliberately not `scanShellSyntax(command).liveSubstitutions`: that
+    // scan misses a body when an active heredoc is queued ahead of an
+    // inert one (`cat <<A <<'B'`), and this walk is what closes the gap.
+    for (const command of shapes) {
+      for (const bodies of skippedHeredocSubstitutions(command)) {
+        for (const body of bodies ?? []) {
+          expect(
+            command.includes(`$(${body})`) || command.includes(`\`${body}\``),
+            `invented body ${JSON.stringify(body)} in ${JSON.stringify(command)}`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("closes the raw scan's gap when an active heredoc is queued first", () => {
+    // `cat <<A <<'B'`: the body belongs to A, which is unquoted and so
+    // runs its substitutions — measured in bash, which deletes the file.
+    // The whole-command scan reports nothing live here, so without this
+    // walk the forced deletion would leave tier 1's view entirely.
+    const command = `cat <<A <<'B'\n$(${forcedFile})\nA\ny\nB`;
+    expect(scanShellSyntax(command).liveSubstitutions).toEqual([]);
+    expect(skippedHeredocSubstitutions(command).flat()).toEqual([forcedFile]);
+    expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r"))).toBe("Forbidden");
+  });
+
+  it("refuses a forced deletion in any active body, at any queue position", () => {
+    // Measured in bash: a body belongs to the heredoc operator that
+    // opened it, in declaration order, and an unquoted body runs its
+    // substitutions — deleting the victim file in each of these.
+    for (const command of [
+      `cat <<EOF\n$(${forced})\nEOF`,
+      `cat <<A <<B\nx\nA\n$(${forcedFile})\nB`,
+      `cat <<A <<B\n$(${forcedFile})\nA\ny\nB`,
+      `cat <<'A' <<B\nx\nA\n$(${forcedFile})\nB`,
+      `cat <<A <<'B'\n$(${forcedFile})\nA\ny\nB`,
+      `cat <<'A' <<'B' <<C\nx\nA\ny\nB\n$(${forcedFile})\nC`,
+      `cat <<-EOF\n\t$(${forced})\n\tEOF`,
+      `cat <<EOF\n$(${forced})`,
+      `echo hi; cat <<EOF\n$(${forced})\nEOF`,
+      `( cat <<EOF\n$(${forced})\nEOF )`,
+      `if true; then cat <<EOF\n$(${forced})\nEOF\nfi`,
+      `for i in 1; do cat <<EOF\n$(${forced})\nEOF\ndone`,
+    ]) {
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r")), command).toBe(
+        "Forbidden",
+      );
+    }
+  });
+
+  it("leaves an inert body's substitution inert, at any queue position", () => {
+    // The same bodies, quoted: bash reads them as literal text and the
+    // victim file survives, so a refusal here would be a false positive.
+    for (const command of [
+      `cat <<'EOF'\n$(${forced})\nEOF`,
+      `cat <<"EOF"\n$(${forced})\nEOF`,
+      `cat <<\\EOF\n$(${forced})\nEOF`,
+      `cat <<-'EOF'\n\t$(${forced})\n\tEOF`,
+      `cat <<'A' <<B\n$(${forcedFile})\nA\ny\nB`,
+      `cat <<A <<'B'\nx\nA\n$(${forcedFile})\nB`,
+      `cat <<'A' <<'B' <<'C'\n$(${forcedFile})\nA\ny\nB\nz\nC`,
+    ]) {
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r")), command).not.toBe(
+        "Forbidden",
+      );
+    }
   });
 });

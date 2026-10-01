@@ -49,7 +49,8 @@ export type PermissionNotice =
       reason: string;
       recovery: "restored" | "unavailable";
     }
-  | { kind: "mode-change-failed"; reason: string };
+  | { kind: "mode-change-failed"; reason: string }
+  | { kind: "shell-parser-activation-failed"; reason: string };
 
 export interface PermissionSummary {
   mode: PermissionMode;
@@ -218,6 +219,8 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
         : `Sandbox activation failed, and the previous sandbox could not be restored. Sandboxed execution is unavailable.\nReason: ${renderFailureReason(notice.reason)}`;
     case "mode-change-failed":
       return `Permission mode change failed. The previous mode remains active.\nReason: ${renderFailureReason(notice.reason)}`;
+    case "shell-parser-activation-failed":
+      return `Shell AST parser activation failed; commands are classified by the lexer.\nReason: ${renderFailureReason(notice.reason)}`;
   }
 }
 

@@ -4,7 +4,7 @@
  * recursive checks through `sudo`/`env` wrappers and `trap` actions.
  * Everything else is left to the sandbox boundary (see stage 3 path checks).
  */
-import { assignmentName } from "./shell-lexer.ts";
+import { isEnvAssignmentToken } from "./shell-lexer.ts";
 
 const MAX_DANGEROUS_WRAPPER_DEPTH = 8;
 
@@ -30,7 +30,7 @@ function dangerousEnv(words: string[], depth: number): boolean {
     if (
       argument === "-i" ||
       argument === "--ignore-environment" ||
-      assignmentName(argument) !== undefined
+      isEnvAssignmentToken(argument)
     ) {
       index += 1;
       continue;
