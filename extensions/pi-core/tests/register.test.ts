@@ -18,9 +18,15 @@ describe("pi-core registration", () => {
     const tools = new Map<string, any>();
     registerExtension(createPiMock({ registerTool: (tool: any) => tools.set(tool.name, tool) }));
 
-    expect([...tools.keys()]).toEqual(["read", "grep", "find", "ls"]);
+    expect([...tools.keys()]).toEqual(["read", "grep", "find", "ls", "codemode"]);
+    // Codex tools and the codemode tree both own their shell (no host chrome).
     expect([...tools.values()].every((tool) => tool.renderShell === "self")).toBe(true);
-    expect([...tools.values()].every((tool) => typeof tool.promptSnippet === "string")).toBe(true);
+    expect(typeof tools.get("codemode")?.renderResult).toBe("function");
+    expect(
+      [...tools.keys()]
+        .filter((name) => name !== "codemode")
+        .every((name) => typeof tools.get(name)?.promptSnippet === "string"),
+    ).toBe(true);
     expect(tools.get("read")?.promptGuidelines).toContain(
       "Use read to examine files instead of cat or sed.",
     );

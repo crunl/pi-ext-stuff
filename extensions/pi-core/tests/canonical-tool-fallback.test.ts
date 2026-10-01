@@ -42,6 +42,7 @@ function makeOwner(
     description: definition.description,
     parameters: definition.parameters as never,
     promptGuidelines: definition.promptGuidelines,
+    exposure: "direct",
     sourceInfo: {
       path: source === "builtin" ? `<builtin:${name}>` : `<${source}:${name}>`,
       source,

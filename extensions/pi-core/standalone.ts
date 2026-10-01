@@ -12,16 +12,16 @@
  * function is explicitly called.
  */
 
-export { applyAutocompleteAbove } from "./src/tui/autocomplete-above.ts";
 export {
-  withCodexToolPresentation,
   codexBashToolSpec,
   codexEditToolSpec,
   codexWriteToolSpec,
   colorizeEditDiffSummary,
   compactBashStatusSpacing,
-  summarizeEditDiff,
-  createEditDiffBox,
   createCodexToolRendering,
+  createEditDiffBox,
+  summarizeEditDiff,
+  withCodexToolPresentation,
 } from "../../packages/shared-tool-presentation/src/index.ts";
+export { applyAutocompleteAbove } from "./src/tui/autocomplete-above.ts";
 export { markToolCall, type ToolCallMark } from "./src/tui/tool-call-mark.ts";

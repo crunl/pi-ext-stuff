@@ -88,12 +88,16 @@ describe("Pi 0.86.0 compatibility seams", () => {
 
   it("retains the canonical builtin source marker format", () => {
     // canonical-tool-fallback identifies Pi's canonical bash/write/edit owners
-    // by sourceInfo.path === `<builtin:name>`. The marker is assembled at the
-    // host's registration call site, not behind a public API, so pin the
-    // emitted format in the bundled session source.
+    // by sourceInfo.path. Pi ≤0.88 inlined `<builtin:name>`; 0.99.0+ builds
+    // `BUILTIN_PATH_PREFIX + name` (`builtin:name`). Pin the seam we rely on.
     const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
     const sessionSource = join(dirname(entry), "core", "agent-session.js");
     expect(existsSync(sessionSource)).toBe(true);
-    expect(readFileSync(sessionSource, "utf8")).toContain("<builtin:${");
+    const source = readFileSync(sessionSource, "utf8");
+    expect(
+      source.includes("BUILTIN_PATH_PREFIX") ||
+        source.includes("<builtin:${") ||
+        source.includes("builtin:${"),
+    ).toBe(true);
   });
 });
