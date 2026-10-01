@@ -31,28 +31,31 @@ export function isEnvAssignmentToken(token: string): boolean {
 }
 
 /**
- * Split a command line into the character spans of its top-level
- * commands: the shell's own statement boundaries (`;`, `&`, `|`,
- * `\n`, and the grouping parentheses) and nothing inside a
- * heredoc body. A heredoc body is the command's input data, not
- * code the shell will run — a body spelling `rm -rf /` deletes
- * nothing — so a body line raises no segment of its own and the
- * split resumes at the line after the body's delimiter. An
- * unterminated body runs to the end of the source, exactly as
- * the shell reads it (everything after it is data). Substitutions
- * inside an *active* (unquoted-delimiter) body still run, and
- * are still caught — by the raw-source scan, not by this split.
+ * One walk of a command line. `segments` and `skippedBodies` are the
+ * projections `splitShellSegments` and `skippedHeredocSubstitutions`
+ * return. A second copy of this walk can drift, and a body stored
+ * past the last segment is never read.
+ *
+ * @internal Exported for `shell-segment.ts` and the invariant tests only.
+ * Callers outside this package should use the two projections, which carry
+ * the contract; this shape exists so both can share one traversal.
  */
-export function splitShellSegments(command: string): string[] {
+export function splitShellText(command: string): {
+  segments: string[];
+  skippedBodies: string[][];
+} {
   const segments: string[] = [];
+  const skippedBodies: string[][] = [];
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaped = false;
   // Heredocs opened on the line being scanned, in the order the
   // shell consumes their bodies; one line can queue more than one
   // (`cat <<A <<B`). The newline that ends the command line opens
-  // the first queued body.
-  const pendingHeredocs: HeredocSpec[] = [];
+  // the first queued body. `chunk` is the index this segment will
+  // take: the operator's text is still in `current`, so the segment
+  // has not been pushed yet, and `segments.length` is that index.
+  const pendingHeredocs: { spec: HeredocSpec; active: boolean; chunk: number }[] = [];
   // A `#` that begins a word starts a comment that runs to the
   // end of its line. Nothing in a comment is shell syntax, so a
   // `<<` there names no heredoc and the lines after it stay
@@ -77,7 +80,7 @@ export function splitShellSegments(command: string): string[] {
       if (character === quote) quote = undefined;
       continue;
     }
-    if (character === "'" || character === '"') {
+    if (!comment && (character === "'" || character === '"')) {
       current += character;
       quote = character;
       continue;
@@ -100,7 +103,15 @@ export function splitShellSegments(command: string): string[] {
     if (!comment && character === "<" && command[index + 1] === "<" && command[index + 2] !== "<") {
       const heredoc = heredocDelimiterAt(command, index, true);
       if (heredoc !== undefined) {
-        pendingHeredocs.push(heredoc.spec);
+        pendingHeredocs.push({
+          spec: heredoc.spec,
+          // `inertHeredocAt` answers for a quoted or escaped delimiter,
+          // whose body the shell reads as literal text; an active body's
+          // substitutions run and must reach the danger check. Kept as a
+          // second call rather than folded into `heredocDelimiterAt`.
+          active: inertHeredocAt(command, index) === undefined,
+          chunk: segments.length,
+        });
         current += command.slice(index, heredoc.end);
         index = heredoc.end - 1;
         continue;
@@ -117,119 +128,6 @@ export function splitShellSegments(command: string): string[] {
         let newline = index;
         let next = command.length;
         while (pendingHeredocs.length > 0) {
-          next = heredocBodySpan(command, newline, pendingHeredocs.shift() as HeredocSpec).next;
-          if (next >= command.length) break;
-          newline = next - 1;
-        }
-        index = next - 1;
-      }
-      continue;
-    }
-    current += character;
-  }
-  if (current.trim()) segments.push(current.trim());
-  return segments;
-}
-
-/**
- * The live substitution bodies that lie inside the heredoc bodies
- * `splitShellSegments` skips, one array per chunk it returns, in
- * chunk order.
- *
- * A heredoc body is the command's input data, so the splitter never
- * lets a body line become a chunk of its own — but an active
- * (unquoted-delimiter) body still runs every substitution in it, and
- * those bodies are the only live text the per-chunk scan can no
- * longer reach once the splitter skips the body. The raw-source scan
- * over the whole command still reports them (it walks an active body
- * and consumes only an inert one), so each skipped active body's
- * substitutions are handed to the chunk that opened its heredoc, where
- * the segment expander treats them exactly as it treats a substitution
- * in that chunk's own text.
- *
- * The traversal mirrors `splitShellSegments` statement for statement —
- * same comment tracking, same operator recognition, same body
- * consumption — so the arrays line up with its chunks by index. Only
- * active bodies contribute: an inert body is literal text the shell
- * never re-reads, so its substitutions stay unreported. That is the
- * same active/inert decision `inertHeredocAt` already encodes for the
- * raw-source scan, reused here rather than re-derived.
- */
-export function skippedHeredocSubstitutions(command: string): string[][] {
-  const perChunk: string[][] = [];
-  let chunk = -1;
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  // Heredocs opened so far, each carrying the index of the chunk that
-  // opened it: the operator's text is part of the chunk being built, so
-  // that chunk is the next one the splitter pushes.
-  const pendingHeredocs: { spec: HeredocSpec; active: boolean; chunk: number }[] = [];
-  let comment = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index] as string;
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      current += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      current += character;
-      if (character === quote) quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      current += character;
-      quote = character;
-      continue;
-    }
-    if (character === "\n") {
-      comment = false;
-    } else if (
-      !comment &&
-      character === "#" &&
-      (index === 0 || /\s/.test(command[index - 1] as string))
-    ) {
-      comment = true;
-    }
-    // A heredoc operator is not word text: everything from the body's
-    // first line through its delimiter line is data, so the operator and
-    // its delimiter stay in the command's span and the body never reaches
-    // the split. An unrecognized shape (an empty delimiter, a here-string)
-    // falls through and keeps the character-at-a-time reading, which is
-    // today's behavior.
-    if (!comment && character === "<" && command[index + 1] === "<" && command[index + 2] !== "<") {
-      const heredoc = heredocDelimiterAt(command, index, true);
-      if (heredoc !== undefined) {
-        pendingHeredocs.push({
-          spec: heredoc.spec,
-          // `inertHeredocAt` answers for a quoted or escaped delimiter,
-          // whose body the shell reads as literal text; an active body's
-          // substitutions run and must reach the danger check.
-          active: inertHeredocAt(command, index) === undefined,
-          chunk: chunk + 1,
-        });
-        current += command.slice(index, heredoc.end);
-        index = heredoc.end - 1;
-        continue;
-      }
-    }
-    if (/[;&|()\n]/.test(character)) {
-      if (current.trim()) chunk += 1;
-      current = "";
-      // The newline that opens a queued body: consume every queued body
-      // through its delimiter line and resume at the start of the line
-      // after the last one, which is where the shell resumes reading
-      // commands.
-      if (character === "\n" && pendingHeredocs.length > 0) {
-        let newline = index;
-        let next = command.length;
-        while (pendingHeredocs.length > 0) {
           const pending = pendingHeredocs.shift() as {
             spec: HeredocSpec;
             active: boolean;
@@ -239,7 +137,7 @@ export function skippedHeredocSubstitutions(command: string): string[][] {
           if (pending.active) {
             const bodies = scanShellSyntax(consumed.body).liveSubstitutions;
             if (bodies.length > 0) {
-              perChunk[pending.chunk] = [...(perChunk[pending.chunk] ?? []), ...bodies];
+              skippedBodies[pending.chunk] = [...(skippedBodies[pending.chunk] ?? []), ...bodies];
             }
           }
           next = consumed.next;
@@ -252,7 +150,59 @@ export function skippedHeredocSubstitutions(command: string): string[][] {
     }
     current += character;
   }
-  return perChunk;
+  if (current.trim()) segments.push(current.trim());
+  return { segments, skippedBodies };
+}
+
+/**
+ * Split a command line into the character spans of its top-level
+ * commands: the shell's own statement boundaries (`;`, `&`, `|`,
+ * `\n`, and the grouping parentheses) and nothing inside a
+ * heredoc body. A heredoc body is the command's input data, not
+ * code the shell will run — a body spelling `rm -rf /` deletes
+ * nothing — so a body line raises no segment of its own and the
+ * split resumes at the line after the body's delimiter. An
+ * unterminated body runs to the end of the source, exactly as
+ * the shell reads it (everything after it is data). Substitutions
+ * inside an *active* (unquoted-delimiter) body still run, and
+ * are still caught — by the raw-source scan, not by this split.
+ *
+ * These spans are the `segments` projection of `splitShellText`.
+ * `skippedHeredocSubstitutions` is the other projection of that
+ * same walk, not a second copy of it.
+ */
+export function splitShellSegments(command: string): string[] {
+  return splitShellText(command).segments;
+}
+
+/**
+ * The live substitution bodies that lie inside the heredoc bodies
+ * `splitShellSegments` skips, one array per chunk it returns, in
+ * chunk order.
+ *
+ * A heredoc body is the command's input data, so the splitter never
+ * lets a body line become a chunk of its own — but an active
+ * (unquoted-delimiter) body still runs every substitution in it, and
+ * those bodies are the only live text the per-chunk scan can no
+ * longer reach once the splitter skips the body. The raw-source scan
+ * walks an active body and consumes only an inert one, and it reports
+ * those substitutions only when no inert heredoc is queued ahead of an
+ * active one — a mixed queue drops them. This function fills that gap
+ * and hands each skipped active body's substitutions to the chunk that
+ * opened its heredoc, where the segment expander treats them exactly as
+ * it treats a substitution in that chunk's own text.
+ *
+ * This list is the `skippedBodies` projection of `splitShellText`,
+ * the same walk `splitShellSegments` projects — same comment
+ * tracking, same operator recognition, same body consumption — so
+ * the arrays line up with its chunks by index. Only active bodies
+ * contribute: an inert body is literal text the shell never
+ * re-reads, so its substitutions stay unreported. That is the same
+ * active/inert decision `inertHeredocAt` already encodes for the
+ * raw-source scan, reused here rather than re-derived.
+ */
+export function skippedHeredocSubstitutions(command: string): string[][] {
+  return splitShellText(command).skippedBodies;
 }
 
 /**
@@ -439,17 +389,44 @@ interface HeredocSpec {
  * that scan must keep reading such a body as live source, so
  * the bare form reports undefined exactly as it always has.
  */
+function insideArithmeticContext(source: string, index: number): boolean {
+  let depth = 0;
+  let back = index - 1;
+  while (back >= 0 && /\s/.test(source[back] as string)) back -= 1;
+  for (; back >= 0; back -= 1) {
+    const character = source[back];
+    // A command separator ends the enclosing expression: an arithmetic context
+    // can never span `;`, a newline, or a pipeline/boolean operator, so a `((`
+    // found beyond one belongs to an earlier command (possibly inside a string)
+    // and must not be attributed to this `<<`. Without this the scan reaches an
+    // unclosed literal `((` in a prior quoted word and the real heredoc opener
+    // is lost, over-blocking every following line.
+    if (character === ";" || character === "\n" || character === "|" || character === "&")
+      return false;
+    if (character === ")") depth += 1;
+    else if (character === "(") {
+      if (depth > 0) {
+        depth -= 1;
+        continue;
+      }
+      let before = back - 1;
+      while (before >= 0 && /\s/.test(source[before] as string)) before -= 1;
+      return source[before] === "(";
+    }
+  }
+  return false;
+}
+
 function heredocDelimiterAt(
   source: string,
   start: number,
   allowActive: boolean,
 ): { spec: HeredocSpec; end: number } | undefined {
+  if (insideArithmeticContext(source, start)) return undefined;
   let position = start + 2;
   if (source[position] === "<") return undefined; // here-string: one word, expands
-  while (source[position] >= "0" && source[position] <= "9") position += 1; // fd number
   const stripTabs = source[position] === "-";
   if (stripTabs) position += 1;
-  while (source[position] >= "0" && source[position] <= "9") position += 1;
   const quote = source[position];
   let delimiter: string;
   if (quote === "'") {

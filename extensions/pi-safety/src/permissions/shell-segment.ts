@@ -19,6 +19,7 @@ import {
   shellWords,
   skippedHeredocSubstitutions,
   splitShellSegments,
+  splitShellText,
 } from "./shell-lexer.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
@@ -887,8 +888,10 @@ export function parseCommandSegments(command: string): CommandSegment[] {
 export function commandHasExecutableSubstitution(command: string): boolean {
   if (scanShellSyntax(command).hasExecutableSubstitution) return true;
   const facts = astSegmentFacts(command);
-  if (facts === undefined) return false;
-  return facts.some((segment) => segment.hasExecutableSubstitution);
+  if (facts?.some((segment) => segment.hasExecutableSubstitution)) {
+    return true;
+  }
+  return skippedHeredocSubstitutions(command).some((bodies) => bodies.length > 0);
 }
 
 /**
@@ -997,7 +1000,10 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
   // resolved, and re-parsing it with a second grammar would compare spans that were
   // never comparable. The lexer owns those.
   const ast = depth === 0 ? astSegmentFacts(command) : undefined;
-  const chunks = splitShellSegments(command);
+  // One walk: segments and the skipped-body lists are projections of
+  // it. A second walk can store a body past the last segment, and
+  // that entry is never read.
+  const { segments: chunks, skippedBodies: heredocSubstitutions } = splitShellText(command);
   // Substitutions inside an active heredoc body run, but the body is
   // data the splitter never lets become a chunk, so no per-chunk scan
   // can see them. They belong to the chunk that opened the heredoc,
@@ -1005,7 +1011,6 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
   // that chunk's own text — the same `bodies` -> `expandBody` path an
   // inline substitution takes, so the danger check and its
   // `dangerousSubstitution` attribution apply unchanged.
-  const heredocSubstitutions = skippedHeredocSubstitutions(command);
   const facts = chunks.map((source, index) => {
     const frontEnd = ast?.[index] ?? segmentLexFacts(source);
     const skipped = heredocSubstitutions[index];

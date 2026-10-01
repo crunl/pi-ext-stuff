@@ -381,14 +381,13 @@ function addErrorSegments(
 
 /**
  * A segment rendered by the lexer rather than the AST, for text the AST does not
- * model: a recovered error span, an out-of-model comment, and every heredoc body line.
+ * model: a recovered error span or an out-of-model comment.
  *
- * Heredoc bodies are the honest case. A quoted delimiter makes the body literal text,
- * which is what the AST says, but the shipped lexer hands each body line to the danger
- * check as its own segment - and a body spelling `rm -rf /` is exactly the payload a
- * reviewer should see. Until phase 2 decides body text deliberately, reproducing that
- * view costs precision and buys nothing back but the guarantee that V2 never hides an
- * argv V1 showed.
+ * Heredoc body lines are not among those spans. The heredoc-aware splitter keeps a
+ * body inside the opener's segment, and this front end reads a body only in
+ * `collectSubstitutions`'s `heredoc_body` branch. Whether body text is reviewed as
+ * its own payload is still a phase-2 decision; none of the call sites here receive
+ * a body line.
  */
 function lexSegment(source: string): SegmentFacts {
   const lexed = shellWords(source);

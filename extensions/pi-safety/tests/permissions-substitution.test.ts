@@ -4,11 +4,13 @@ import {
   classifyRiskWithCause,
   normalizeToolCall,
   parseCommandSegments,
+  type RiskClassification,
 } from "../src/permissions/risk.ts";
 import {
   scanShellSyntax,
   skippedHeredocSubstitutions,
   splitShellSegments,
+  splitShellText,
 } from "../src/permissions/shell-lexer.ts";
 
 describe("live substitution extraction", () => {
@@ -413,7 +415,196 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     "cat <<EOF",
     "cat <<",
     "echo 1 <<str",
+    // Over-strict false positives: an unclosed literal `((` in an earlier
+    // word must not reach across a command separator and cancel a real
+    // heredoc opener. Measured in bash — the victim survives every one of
+    // these, so `Forbidden` here would block a deletion the shell never
+    // runs. The last entry is the control: a *closed* `$((1))` never
+    // misfired, before or after the separator guard.
+    `echo "((" ; cat <<'EOF'\n$(${forced})\nEOF`,
+    `echo "((" ; cat <<EOF\n${forcedFile}\nEOF`,
+    `echo "(("\ncat <<'EOF'\n$(${forced})\nEOF`,
+    `(( ; cat <<'EOF'\n$(${forced})\nEOF`,
+    `echo x # ((\ncat <<'EOF'\n$(${forced})\nEOF`,
+    `echo "((" && cat <<'EOF'\n$(${forced})\nEOF`,
+    `echo $((1)) ; cat <<'EOF'\n$(${forced})\nEOF`,
   ];
+
+  it("attributes an active body to the chunk that opened its heredoc", () => {
+    // `echo` is chunk 0 and opens nothing. The body belongs to `cat`,
+    // chunk 1. A mis-attribution still classifies Forbidden — the
+    // expander does not care which host segment received the body — so
+    // only this index check catches it. Index 0 is a hole (`undefined`),
+    // not `null`: `JSON.stringify` renders that hole as null.
+    const command = `echo hi; cat <<EOF\n$(${forcedFile})\nEOF`;
+    const skipped = skippedHeredocSubstitutions(command);
+    expect(splitShellSegments(command)).toHaveLength(2);
+    expect(skipped).toHaveLength(2);
+    expect(skipped[0]).toBeUndefined();
+    expect(skipped[1]).toEqual([forcedFile]);
+  });
+
+  it("names substitution_unproven once D4 sees a mixed-queue body", () => {
+    // D4 makes `commandHasExecutableSubstitution` ask
+    // `skippedHeredocSubstitutions` after the raw scan. Before that, the
+    // mixed queue was `heredoc_unproven`: the raw scan drops an active
+    // body queued ahead of an inert one, so `$(pwd)` never became
+    // `substitution_unproven`. Both shapes are that cause now. Deleting
+    // the D4 question splits them again.
+    for (const command of ["cat <<A\n$(pwd)\nA", "cat <<A <<'B'\n$(pwd)\nA\ny\nB"]) {
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        command,
+      ).toEqual({ disposition: "NeedsApproval", cause: "substitution_unproven" });
+    }
+  });
+
+  it("pins a disposition on every shape, so no corpus entry is unjudged", () => {
+    // Every entry of `shapes` gets an expected disposition here, derived by
+    // index rather than retyped, so adding a shape without judging it fails
+    // this test instead of silently widening the unjudged set. The old form
+    // asserted `toHaveLength(11)` against a hand-typed literal: the count
+    // compared only with itself, and the "26 - 12 - 3" arithmetic lived in a
+    // comment nothing checked.
+    //
+    // `shapes[19]` and the seven over-strict entries added for the arithmetic
+    // guard are data bodies: no substitution bash would run, so the review is
+    // `heredoc_unproven` and must not become Forbidden. `shapes[21]` and
+    // `shapes[22]` are Forbidden *without* `dangerousSubstitution` because the
+    // `$(` there is shredded by an operator or sits in a comment, so it is not
+    // `nestedFrom === "substitution"` (`risk.ts`) — that asymmetry is intended.
+    const expected: readonly RiskClassification[] = [
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "substitution_unproven" },
+      { disposition: "Forbidden" },
+      { disposition: "Forbidden" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "lex_incomplete" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "NeedsApproval", cause: "substitution_unproven" },
+    ];
+    expect(expected).toHaveLength(shapes.length);
+    shapes.forEach((command, index) => {
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        `${index}: ${command}`,
+      ).toEqual(expected[index]);
+    });
+    for (const command of ["cat <<EOF", "cat <<", "echo 1 <<str"]) {
+      expect(() => splitShellSegments(command), command).not.toThrow();
+      expect(() => skippedHeredocSubstitutions(command), command).not.toThrow();
+    }
+  });
+
+  it("keeps a quoted character inside a comment from swallowing lines", () => {
+    // D7 added `!comment` to the quote branch (`shell-lexer.ts`), not to the
+    // `<<` operator branch — that one already had it. So the shape that pins
+    // D7 is a quote *inside a comment*: at HEAD the apostrophe opened a quote
+    // region that ran to end of input, `lex_incomplete` swallowed the next
+    // line as string data, and a forced deletion bash really runs escaped
+    // tier 1. Measured in bash: rc=0, victim deleted, stderr empty.
+    const apostrophe = String.fromCharCode(39);
+    const shapes: readonly [string, { disposition: string; cause?: string }][] = [
+      [`git push # don${apostrophe}t\n${forcedFile}`, { disposition: "Forbidden" }],
+      [`echo hi # ${apostrophe}$(${forcedFile})`, { disposition: "Forbidden" }],
+    ];
+    for (const [command, expected] of shapes) {
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        command,
+      ).toEqual(expected);
+    }
+    // The segments prove the mechanism: the deletion is its own chunk, not
+    // string data inside an unterminated quote.
+    expect(splitShellSegments(`git push # don${apostrophe}t\n${forcedFile}`)).toEqual([
+      `git push # don${apostrophe}t`,
+      forcedFile,
+    ]);
+  });
+
+  it("reads a shift inside arithmetic as arithmetic, and a digit-led delimiter whole", () => {
+    // D1B replaced two fd-digit scans with `insideArithmeticContext`. Both
+    // halves are measured in bash, victim deleted in every case:
+    //
+    // 1. `<<x` inside `$(( ))` is a shift operator, not a heredoc. At HEAD the
+    //    `<<` opened a heredoc that swallowed the next line as body data, so
+    //    the forced deletion never reached tier 1.
+    // 2. `cat <<2X` names the delimiter `2X`. The removed scans ate the
+    //    leading digits and looked for `X`, so the real terminator line `2X`
+    //    never closed the heredoc and the command after it stayed hidden.
+    const arith: readonly [string, { disposition: string }][] = [
+      [`echo $((1<<x))\n${forcedFile}`, { disposition: "Forbidden" }],
+      [`((1<<x))\n${forcedFile}`, { disposition: "Forbidden" }],
+    ];
+    const digitDelims: readonly [string, { disposition: string }][] = [
+      [`cat <<2X\nbody\n2X\n${forcedFile}`, { disposition: "Forbidden" }],
+      [`cat <<0EOF\nbody\n0EOF\n${forcedFile}`, { disposition: "Forbidden" }],
+    ];
+    for (const [command, expected] of [...arith, ...digitDelims]) {
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        command,
+      ).toEqual(expected);
+    }
+    // The delimiter is `2X`, so a line reading `X` does not close the heredoc
+    // and the deletion after it is body data — the opposite of the case above.
+    expect(splitShellSegments(`cat <<2X\nbody\n2X\n${forcedFile}`)).toEqual([
+      "cat <<2X",
+      forcedFile,
+    ]);
+    expect(
+      classifyRiskWithCause(
+        normalizeToolCall("bash", { command: `cat <<2X\nbody\nX\n${forcedFile}` }, "/w/r"),
+        true,
+      ),
+    ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
+  });
+
+  it("projects segments and skipped bodies from one traversal", () => {
+    // The two exports are projections of `splitShellText`, so this compares a
+    // pure function with a manual call of itself: it cannot fail while the
+    // projections exist. What it guards is re-splitting — if someone gives
+    // either export its own walk again, the two can drift and this goes red.
+    // The bound below holds structurally (`chunk` is captured as
+    // `segments.length` before the push, and the body loop pushes before
+    // consuming), so wrong-but-in-range attribution is what actually needs a
+    // pin; that is "attributes an active body to the chunk that opened its
+    // heredoc" above, for one shape.
+    for (const command of shapes) {
+      const once = splitShellText(command);
+      expect(splitShellSegments(command), command).toEqual(once.segments);
+      expect(skippedHeredocSubstitutions(command), command).toEqual(once.skippedBodies);
+      for (const [index, bodies] of once.skippedBodies.entries()) {
+        if (bodies === undefined || bodies.length === 0) continue;
+        expect(index, command).toBeLessThan(once.segments.length);
+      }
+    }
+  });
 
   it("never attributes a body past the last chunk, where no reader looks", () => {
     for (const command of shapes) {
@@ -488,6 +679,8 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
   it("leaves an inert body's substitution inert, at any queue position", () => {
     // The same bodies, quoted: bash reads them as literal text and the
     // victim file survives, so a refusal here would be a false positive.
+    // The verdict is specifically a heredoc review. `.not.toBe("Forbidden")`
+    // would stay green if this drifted to Skip, which is looser.
     for (const command of [
       `cat <<'EOF'\n$(${forced})\nEOF`,
       `cat <<"EOF"\n$(${forced})\nEOF`,
@@ -497,9 +690,10 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       `cat <<A <<'B'\nx\nA\n$(${forcedFile})\nB`,
       `cat <<'A' <<'B' <<'C'\n$(${forcedFile})\nA\ny\nB\nz\nC`,
     ]) {
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r")), command).not.toBe(
-        "Forbidden",
-      );
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        command,
+      ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
     }
   });
 });

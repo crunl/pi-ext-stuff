@@ -270,8 +270,8 @@ const OUT_OF_MODEL: readonly string[] = [
   // `>|` is not a descriptor duplication and not a plain truncate: the splitter stops
   // after `>`, the grammar keeps going.
   "cmd >|f",
-  // Heredoc bodies are separate segments to the lexer, and a body spelling a dangerous
-  // command is exactly the payload a reviewer must keep seeing.
+  // Heredoc bodies are data inside the opener's span to the lexer, not segments of
+  // their own.
   "cat <<EOF\nrm -f /tmp/work\nEOF",
   "cat <<'EOF'\n$(rm -rf /)\nEOF",
   "cat <<-EOF\n x\n EOF",
