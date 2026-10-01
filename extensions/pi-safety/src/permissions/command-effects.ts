@@ -90,15 +90,25 @@ export type ExternalEffect = "proved" | "refuted" | "unknown";
  */
 
 /**
- * Tools whose bare invocation already runs actions. `npm` with no subcommand
- * installs; `yarn` with no subcommand installs; the others resolve to an install
- * or a run. There is no verb to read, so a verb scan finds nothing and reports
- * no mutation, which is why this is listed rather than derived.
+ * Package managers invoked with no subcommand, which a verb scan cannot read:
+ * there is no verb, so the scan finds nothing and reports no mutation, which
+ * is why these are listed rather than derived.
  *
- * Four entries, and they are the four the reference implementation lists for the
- * same reason at `command_effect.zig:147-170`, where a bare npm/bun/pnpm/yarn
- * gets no static answer and goes to the reviewer. This is that rule, not a
- * per-tool grammar.
+ * The listing is not a claim that a bare invocation installs. Measured on this
+ * machine: `npm` (11.17.0) prints usage and exits 1, `pnpm` prints usage on
+ * stderr and exits 2, `bun` (1.3.14) prints its command list and exits 0, and
+ * only `yarn` (1.22.22, the classic line) actually ran `install` — logging
+ * `[1/4] Resolving packages…` through `[3/4] Linking dependencies…` and
+ * exiting 1. Three of the four are usage output. The reason to review a bare
+ * invocation is therefore that it has no verb to prove harmless, not that it
+ * is known to act; reviewing a help print costs one prompt, and the opposite
+ * mistake would cost more.
+ *
+ * The four names are the four the reference implementation handles at
+ * `command_effect.zig:147-170`, where `reversibleNpm` and
+ * `reversiblePackageRunner` both return `false` at `words.len == 0`, so a bare
+ * npm/bun/pnpm/yarn gets no static answer and goes to the reviewer. This is
+ * that routing, not a per-tool grammar.
  */
 const bareInvocationRunsActions = new Set(["bun", "npm", "pnpm", "yarn"]);
 

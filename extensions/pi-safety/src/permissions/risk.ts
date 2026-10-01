@@ -50,10 +50,24 @@ import {
  * The names and the three levels are Codex's, from `ExecApprovalRequirement` in
  * `codex-rs/core/src/tools/sandboxing.rs` at the pinned `129fd21`:
  * `Skip { bypass_sandbox }`, `NeedsApproval { reason }`, `Forbidden { reason }`.
- * The forbidden tier has the same source on both sides — Codex's
- * `dangerous_command_match` and this package's `isDangerousWords`, which mirrors
- * `is_dangerous_command.rs` — so a reader can check one against the other
- * directly. fx is not the reference for this shape: its `Risk { low, medium,
+ * The dangerous route into that tier is the one shared with Codex, and only
+ * that route: `Forbidden` is also reached here by `webFetchRisk`, by a
+ * protected write path, and by a network target without a grant, none of which
+ * Codex's dangerous-command layer decides. On the shared route, this package's
+ * `isDangerousWords` mirrors Codex's `dangerous_command_match_for_exec`
+ * (`is_dangerous_command.rs:123-150`) in three of its four arms — `rm` with a
+ * force option, `sudo` pass-through, and the `env` assignment skip — and in the
+ * wrapper depth bound of 8. It is not a mirror of the whole file. Codex's
+ * `trap` arm lands in `isDangerousSegment` here; the `bash -lc` literal
+ * recursion that Codex runs inside `dangerous_command_match_with_depth`
+ * (`:65-72`) is done here by `parseCommandSegments`; and the basename lookup
+ * Codex performs in `executable_name_lookup_key` (`:96-121`) happens in
+ * `shell-segment.ts` before a segment is built. That lookup is also one
+ * deliberate divergence — Codex does not fold case on POSIX, this package does
+ * — as are Codex's Windows and PowerShell rules, which have no counterpart
+ * here. So a reader can check the three arms and the bound against Codex
+ * directly, and must look elsewhere for the rest.
+ * fx is not the reference for this shape: its `Risk { low, medium,
  * high, critical }` paired with `Decision { clear, caution }` is a two-axis
  * assessment produced by its model reviewer, and a static classifier has no
  * producer for a four-point score.
