@@ -2063,7 +2063,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       reason: Type.Optional(Type.String()),
       scope: Type.Optional(Type.Literal("turn")),
       permissions: Type.Object({
-        filesystem: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
+        file_system: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
         network: Type.Optional(
           Type.Union([
             Type.Object({ hosts: Type.Array(Type.String()) }),
@@ -2081,7 +2081,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (!isSupportedPermissionRequestShape(params)) {
         const reason =
-          "request_permissions requires an unambiguous turn-scoped network.hosts OR network_access:true request, and/or filesystem.write";
+          "request_permissions requires an unambiguous turn-scoped network.hosts OR network_access:true request, and/or file_system.write";
         throw policyDeniedError(reason);
       }
       const actionSignal = _signal;

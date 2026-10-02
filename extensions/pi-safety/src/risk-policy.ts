@@ -87,7 +87,7 @@ export function isSupportedPermissionRequestShape(
     !Object.hasOwn(input, "permissions") ||
     (Object.hasOwn(input, "scope") && input.scope !== "turn") ||
     (Object.hasOwn(input, "reason") && typeof input.reason !== "string") ||
-    !dataRecord(input.permissions, ["network", "filesystem"]) ||
+    !dataRecord(input.permissions, ["network", "file_system"]) ||
     (Object.hasOwn(input.permissions, "network") &&
       !validScope(input.permissions.network, "hosts") &&
       !(
@@ -95,8 +95,8 @@ export function isSupportedPermissionRequestShape(
         Object.hasOwn(input.permissions.network, "network_access") &&
         input.permissions.network.network_access === true
       )) ||
-    (Object.hasOwn(input.permissions, "filesystem") &&
-      !validScope(input.permissions.filesystem, "write"))
+    (Object.hasOwn(input.permissions, "file_system") &&
+      !validScope(input.permissions.file_system, "write"))
   )
     return false;
   return true;
@@ -113,17 +113,17 @@ async function evaluateRequestPermissions(
       action: "block",
       risk: "Forbidden",
       reason:
-        "request_permissions supports turn-scoped network.hosts OR network_access:true, and filesystem.write lists",
+        "request_permissions supports turn-scoped network.hosts OR network_access:true, and file_system.write lists",
     };
   }
   const permissions = input.permissions;
   const network = isRecord(permissions.network) ? permissions.network : {};
-  const filesystem = isRecord(permissions.filesystem) ? permissions.filesystem : {};
+  const fileSystem = isRecord(permissions.file_system) ? permissions.file_system : {};
   const authority = effectiveNetworkAuthority(networkPolicy);
   const normalized = await normalizePermissionAmendment(
     {
       hosts: stringList(network.hosts),
-      writeRoots: stringList(filesystem.write),
+      writeRoots: stringList(fileSystem.write),
       allowPrivateTargets: authority.privateTargets,
       allowedDomains: networkPolicy.allowedDomains,
     },

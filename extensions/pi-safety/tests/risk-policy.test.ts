@@ -28,7 +28,7 @@ describe("Permission request own-property shape", () => {
       reason: "bounded access",
       permissions: {
         network: { hosts: ["narrow.example"] },
-        filesystem: { write: ["/tmp/request-shape"] },
+        file_system: { write: ["/tmp/request-shape"] },
       },
     };
   }
@@ -51,7 +51,7 @@ describe("Permission request own-property shape", () => {
 
   // These descriptor forms are rejected for JSON-like schema consistency;
   // not every layer independently represents an authority-widening exploit.
-  describe.each(["root", "permissions", "network", "filesystem", "hosts", "write"] as const)(
+  describe.each(["root", "permissions", "network", "file_system", "hosts", "write"] as const)(
     "%s layer",
     (layer) => {
       it.each(["hidden", "accessor", "unknown", "hidden-unknown", "symbol"] as const)(
@@ -65,11 +65,11 @@ describe("Permission request own-property shape", () => {
                 ? [input.permissions, "network", input.permissions.network]
                 : layer === "network"
                   ? [input.permissions.network, "hosts", input.permissions.network.hosts]
-                  : layer === "filesystem"
-                    ? [input.permissions.filesystem, "write", input.permissions.filesystem.write]
+                  : layer === "file_system"
+                    ? [input.permissions.file_system, "write", input.permissions.file_system.write]
                     : layer === "hosts"
                       ? [input.permissions.network.hosts, "0", "narrow.example"]
-                      : [input.permissions.filesystem.write, "0", "/tmp/request-shape"];
+                      : [input.permissions.file_system.write, "0", "/tmp/request-shape"];
           let reads = 0;
           if (form === "accessor") {
             Object.defineProperty(target, key, {
@@ -99,7 +99,8 @@ describe("Permission request own-property shape", () => {
 
   it.each(["hosts", "write"] as const)("rejects sparse or custom-prototype %s lists", (key) => {
     const wrap = (list: string[]) => ({
-      permissions: key === "hosts" ? { network: { hosts: list } } : { filesystem: { write: list } },
+      permissions:
+        key === "hosts" ? { network: { hosts: list } } : { file_system: { write: list } },
     });
     const sparse = new Array<string>(2);
     sparse[1] = "narrow.example";
@@ -117,9 +118,9 @@ describe("Permission request own-property shape", () => {
         input,
         input.permissions,
         input.permissions.network,
-        input.permissions.filesystem,
+        input.permissions.file_system,
       ];
-      const lists = [input.permissions.network.hosts, input.permissions.filesystem.write];
+      const lists = [input.permissions.network.hosts, input.permissions.file_system.write];
       if (form === "frozen") {
         for (const value of [...records, ...lists]) Object.freeze(value);
       }
@@ -141,6 +142,15 @@ describe("Permission request own-property shape", () => {
     expect(isSupportedPermissionRequestShape({ permissions: { network: { hosts: [] } } })).toBe(
       true,
     );
+  });
+
+  it("rejects the legacy filesystem spelling so no compatibility alias returns", () => {
+    expect(
+      isSupportedPermissionRequestShape({
+        scope: "turn",
+        permissions: { filesystem: { write: ["/tmp/legacy"] } },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -295,7 +305,7 @@ describe("ApprovalDisposition policy gate", () => {
     await expect(
       evaluateRiskRequest(
         "request_permissions",
-        { permissions: { filesystem: { write: [cwd] } }, scope: "turn" },
+        { permissions: { file_system: { write: [cwd] } }, scope: "turn" },
         cwd,
         config(),
       ),
@@ -2446,7 +2456,7 @@ describe("RiskDecision residual stamps", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-amend-"));
     const decision = await evaluateRiskRequest(
       "request_permissions",
-      { permissions: { filesystem: { write: [join(cwd, "out")] } }, scope: "turn" },
+      { permissions: { file_system: { write: [join(cwd, "out")] } }, scope: "turn" },
       cwd,
       config(),
     );

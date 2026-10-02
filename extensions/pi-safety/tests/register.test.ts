@@ -3933,6 +3933,8 @@ describe("Permission mode registration", () => {
     expect(tool).toBeDefined();
     const serialized = JSON.stringify(tool?.parameters);
     expect(serialized).toContain("network_access");
+    expect(serialized).toContain("file_system");
+    expect(serialized).not.toContain('"filesystem"');
     expect(serialized).not.toContain('"enabled"');
     expect(serialized).not.toContain("allowUnixSockets");
     expect(serialized).not.toContain("unixSockets");
