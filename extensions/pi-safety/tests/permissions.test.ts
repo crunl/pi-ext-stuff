@@ -110,7 +110,7 @@ describe("permission rules", () => {
       { action: "deny", tool: "bash", pattern: "git status*git push*" },
     ]);
 
-    expect(match?.action).toBe("deny");
+    expect(match?.decision).toBe("deny");
   });
 });
 

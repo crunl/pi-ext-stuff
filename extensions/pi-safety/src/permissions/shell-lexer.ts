@@ -355,7 +355,7 @@ export interface ShellSyntax {
    * An unclosed or unpairable substitution yields no body — the booleans
    * already fail the command closed, and a parser must never be fed
    * half-matched text. Count is capped (precedent:
-   * `MAX_DANGEROUS_WRAPPER_DEPTH`); the cap only limits how many bodies are
+   * `MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH`); the cap only limits how many bodies are
    * reported, never the booleans.
    */
   liveSubstitutions: string[];

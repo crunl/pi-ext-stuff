@@ -200,7 +200,7 @@ export function evaluateHostFirstRulesOnly(
 ): { block: true; reason: string } | undefined {
   const request = normalizeToolCall(tool, input, cwd);
   const match = matchRules(request, config.rules);
-  if (match?.action === "deny") {
+  if (match?.decision === "deny") {
     return { block: true, reason: "Denied by permissions rule" };
   }
   return undefined;
@@ -348,7 +348,7 @@ export async function evaluateRiskRequest(
   }
   const filesystemWriteRoots = [...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
-  if (rule?.action === "deny") {
+  if (rule?.decision === "deny") {
     return { action: "block", risk: "Forbidden", reason: "Denied by permissions rule" };
   }
   if (request.operation === "external") {
@@ -356,7 +356,7 @@ export async function evaluateRiskRequest(
     // host-first B uses evaluateHostFirstRulesOnly and foreign A is out of
     // tool_call governance. This branch is compatibility-only — do not route
     // host-first/foreign here to resurrect host-admission review.
-    if (rule?.action === "ask") {
+    if (rule?.decision === "ask") {
       return {
         action: "prompt",
         risk: "NeedsApproval",
@@ -372,7 +372,7 @@ export async function evaluateRiskRequest(
     return {
       action: "allow",
       risk: "Skip",
-      reason: rule?.action === "allow" ? "Allowed by permissions rule" : "Host tool policy",
+      reason: rule?.decision === "allow" ? "Allowed by permissions rule" : "Host tool policy",
     };
   }
   const sandboxedBashNetwork =
@@ -472,7 +472,7 @@ export async function evaluateRiskRequest(
   }
 
   if (
-    rule?.action === "allow" &&
+    rule?.decision === "allow" &&
     risk !== "Forbidden" &&
     filesystemWriteRoots.length === 0 &&
     !escalationRequested
@@ -480,7 +480,7 @@ export async function evaluateRiskRequest(
     return { action: "allow", risk, reason: "Allowed by permissions rule" };
   }
 
-  const promptedByRule = rule?.action === "ask";
+  const promptedByRule = rule?.decision === "ask";
   // An unproven Git context can only *raise* the disposition, never lower it.
   // Overwriting it unconditionally turned a proven-dangerous `Forbidden` into a
   // `NeedsApproval` review for the same command: `git -C /x status; rm -rf /tmp/victim`

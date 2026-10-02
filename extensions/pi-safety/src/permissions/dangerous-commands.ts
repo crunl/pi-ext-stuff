@@ -6,7 +6,7 @@
  */
 import { isEnvAssignmentToken } from "./shell-lexer.ts";
 
-const MAX_DANGEROUS_WRAPPER_DEPTH = 8;
+const MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH = 8;
 
 /** True when `rm` was invoked with `-f`/`--force` (or a flag bundle containing `f`). */
 function rmArgsIncludeForce(args: string[]): boolean {
@@ -51,7 +51,7 @@ export function isDangerousWords(words: string[], depth = 0): boolean {
   // The segment path pre-strips wrappers via executableContext before calling
   // in, so this bound guards direct calls to this exported helper and future
   // callers that hand over raw words.
-  if (depth > MAX_DANGEROUS_WRAPPER_DEPTH) return true;
+  if (depth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH) return true;
   if (words.length === 0) return false;
   const executable = words[0] ?? "";
   if (executable === "rm") return rmArgsIncludeForce(words.slice(1));

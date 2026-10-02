@@ -84,7 +84,7 @@ export interface CommandSegment {
 }
 
 export interface RuleMatch {
-  action: PermissionRule["action"];
+  decision: PermissionRule["action"];
   rule: PermissionRule;
 }
 
@@ -115,8 +115,8 @@ export function matchRules(
       (!rule.pattern || globMatches(text, rule.pattern)),
   );
   return matches.reduce<RuleMatch | undefined>((best, rule) => {
-    if (!best || actionRank[rule.action] > actionRank[best.action])
-      return { action: rule.action, rule };
+    if (!best || actionRank[rule.action] > actionRank[best.decision])
+      return { decision: rule.action, rule };
     return best;
   }, undefined);
 }

@@ -987,7 +987,7 @@ function argvAligned(lexed: SegmentFacts, ast: SegmentFacts): boolean {
 
 /**
  * Substitution bodies nest; expansion stops at the same depth bound the
- * dangerous-wrapper walk uses (`MAX_DANGEROUS_WRAPPER_DEPTH` in
+ * dangerous-wrapper walk uses (`MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH` in
  * dangerous-commands.ts). A command that hides its argv under more than
  * eight substitutions has already failed every decomposable gate on the way
  * down; the cap only bounds work, never a trust decision.
