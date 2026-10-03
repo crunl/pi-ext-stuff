@@ -52,6 +52,29 @@
 - **等价性判定**：pi 的 escalated/unrestricted 无私网执法 == codex 的 escalated 无 `NetworkProxy`。故 D1 移除静态私网硬阻既未比 codex 更严（不再额外硬阻 codex 会放行的命令），也未比 codex 更松（运行时逐端点边界在沙箱路径仍完好）。缺口同源，不在“不更严也不更松”的对齐目标内修理。
 - **若将来要收紧**：应当在下一次对齐中连同 codex 一起改（先给 codex 的 escalated 路径加回网络代理，再谈 pi），否则会变成比 codex 更严。
 
+## 与 codex 4dd51f4 的差异（已复核）
+
+> 复核：reviewer subagent 对 11 条重点做双侧真源核实；下表为可落盘的结论，行号已按当前 HEAD 修正。
+
+| 主题 | 结论 | pi 证据 | codex 证据 |
+|---|---|---|---|
+| 危险命令默认处置 | 机制性差异：pi 单层 NeedsApproval；codex 按 AskForApproval 三档（Never→Forbidden，其余→Prompt） | `risk.ts:303-311`, `dangerous-commands.ts:57-59` | `exec_policy.rs:799-807` |
+| 大小写折叠 | pi 更严：pi `basename().toLowerCase()`，codex POSIX 不折叠（仅 Windows 折叠） | `shell-segment.ts:817` | `is_dangerous_command.rs:96-106` |
+| 解析失败回退 | 等价（Allow≡Skip）：codex 整向量回退，非危险命令在 OnRequest 下 Allow；pi 全段 `lex_incomplete` 回退，非危险词 Skip | `risk.ts:368-375` | `exec_policy.rs:876-904`, `:818-836` |
+| substitution `$(...)` | pi 更严：pi 任意 `$`/反引号置 `hasExecutableSubstitution` 进 tier4b；codex 仅在 shell-literal 递归中触及 | `shell-lexer.ts:659-674` | `is_dangerous_command.rs:65-72`, `:278` |
+| wrapper | pi 更严·机制性差异：codex 仅 rm/sudo/env/trap 四臂；pi 额外 timeout/nice/stdbuf/unbuffer/nohup/setsid/exec/time/command/builtin，展开失败→wrapper_unreduced | `shell-segment.ts:330-537` | `is_dangerous_command.rs:123-147` |
+| git nested program | 暂不落盘：codex 全仓 grep 0 命中只能证明「当前 HEAD 无 git 臂」，无法证明 `fc073c9` 已删除（仅对旧 pin 成立） | `git-exec-entries.ts:216` | grep 0 命中 |
+| 网络静态层无关 | 等价（D1 对齐）：两侧静态层均网络无关，网络由执行层 NetworkBoundary/代理逐端点强制 | `risk.ts:300-302`, `risk-policy.ts:377-390` | `exec_policy.rs` 无命令级网络阻断 |
+| 升级摘网络代理 | 等价（同源）：codex `requires_escalated_permissions()→None`，pi escalated/unrestricted 裸后端 | `risk-policy.ts:263-264`, `register.ts:1654-1690` | `sandboxing.rs:315-324`, `unified_exec.rs:288` |
+| 写保护 | pi 更严：pi protectedWritePaths 硬 Forbidden（不可批准）；codex `assess_patch_safety` 产出 AutoApprove/AskUser/Reject，Reject 仅 Never 或沙箱不可用 | `risk.ts:190-195`, `risk-policy.ts:433-453` | `safety.rs:67-125` |
+| yolo vs Never | 机制性差异：pi yolo 是整层绕过（跳过静态危险命令层 + 关沙箱）；codex Never 是静态层内一条分支（危险命令仍 Forbidden、保留沙箱） | `approve-for-me-engine.ts:919,1964`, `state.ts:5` | `exec_policy.rs:799-813`, `sandboxing.rs:333-338`, `network_approval.rs:191-193` |
+| 网络授权机制 | 机制性差异（位置等价）：pi 每连接回调 JS authorizer；codex 声明式 NetworkProxy 对象由 `enforce_managed_network` 开关 | `sandbox.ts:168-171` | `sandboxing.rs:411`, `:478-486` |
+
+补充（已核实、随行确认）：
+- 未匹配命令默认：codex 在 OnRequest+Restricted+无 override 下 Allow（靠沙箱兜底）；pi 对应 tier-4b fail-closed NeedsApproval——pi 更严，与「解析失败回退」同源，合并为一条。
+- 深度界：两侧均为 8，等价。
+- `risk.ts:16-20` 头注释仍把 tier1 写成「proven dangerous -> Forbidden」，与实际 `:303`（NeedsApproval）矛盾，为过期描述；以 `:303` 为准。
+
 ## 范围说明
 
 本文件覆盖 C1/B1/D1（目标 `murgifgg-u2he0e`）、B1 的 F1 修正，以及 F2 留档。上一 session 的完整审计（24 条差异）基于旧 codex @ `129fd21` + 旧 pi @ `67879f3`——codex 已重构（`129fd21` 不可用；`exec_safety_policy.rs`/`dangerous_command.rs`/`network_approval_policy.rs`/`network_safety.rs` 在当前 HEAD 已不存在于原路径）。其余差异需对当前 HEAD `4dd51f4` 重新核实后才能采信或对齐——不在本次改动范围内。
