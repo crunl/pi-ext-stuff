@@ -31,7 +31,8 @@ import {
 import { isDangerousWords } from "./dangerous-commands.ts";
 import type { CommandSegment, PermissionRequest, SegmentUnprovenCause } from "./rules.ts";
 import { deletionExecutables } from "./rules.ts";
-import { extractShellNetworkHosts, invocationUsesNetwork } from "./shell-network.ts";
+import { shellWords } from "./shell-lexer.ts";
+import { extractShellNetworkHosts } from "./shell-network.ts";
 import {
   commandHasExecutableSubstitution,
   parseCommandSegments,
@@ -247,14 +248,12 @@ export function deletionTargets(segment: CommandSegment): string[] {
 
 export function classifyRisk(
   request: PermissionRequest,
-  networkApproved = false,
   approvedWriteRoots: string[] = [],
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
   workspaceWriteRoots: readonly string[] = [request.cwd],
 ): ApprovalDisposition {
   return classifyRiskWithCause(
     request,
-    networkApproved,
     approvedWriteRoots,
     protectedWritePaths,
     workspaceWriteRoots,
@@ -270,7 +269,6 @@ export function classifyRisk(
  */
 export function classifyRiskWithCause(
   request: PermissionRequest,
-  networkApproved = false,
   approvedWriteRoots: string[] = [],
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
   workspaceWriteRoots: readonly string[] = [request.cwd],
@@ -290,22 +288,24 @@ export function classifyRiskWithCause(
   // "could not read" in one honest bucket.
   if (!command) return { disposition: "NeedsApproval", cause: "lex_incomplete" };
   const segments = request.commandSegments ?? normalizedSegmentsFor(command, request.cwd);
-  // Tier 1 — proven dangerous (forced rm, non-exempt network, external side
-  // effect) is never downgraded to a review. A proven verdict needs no cause:
-  // `static_risk` already buckets it, and the review-cause vocabulary names
-  // failed proofs, not succeeded ones.
-  if (!networkApproved && request.networkTargets?.length) return { disposition: "Forbidden" };
-  if (
-    segments.some(
-      (segment) =>
-        isDangerousSegment(segment) || (!networkApproved && invocationUsesNetwork(segment)),
-    )
-  ) {
+  // Tier 1 — proven dangerous (forced rm, sudo, env wrapper). Mirrors
+  // codex `render_decision_for_unmatched_command_for_platform`: a proven
+  // dangerous command is a review the user settles, not a hard block
+  // (codex `AskForApproval::OnRequest` → `Prompt`). The static layer
+  // runs only in pi's `auto` mode, which is that policy; pi has no
+  // `AskForApproval::Never` mode (`yolo` bypasses this layer entirely),
+  // so codex's `Never → Forbidden` arm is unreachable here. A proven
+  // verdict needs no cause: `static_risk` already buckets it, and the
+  // review-cause vocabulary names failed proofs, not succeeded ones.
+  // Network egress is not judged here — the runtime `NetworkBoundary`
+  // owns it (codex `NetworkProxy`), so a non-exempt network target is
+  // no longer a static refusal.
+  if (segments.some((segment) => isDangerousSegment(segment))) {
     const substituted = segments.find(
       (segment) => segment.nestedFrom === "substitution" && isDangerousSegment(segment),
     );
     return {
-      disposition: "Forbidden",
+      disposition: "NeedsApproval",
       ...(substituted ? { dangerousSubstitution: substituted.source } : {}),
     };
   }
@@ -336,11 +336,47 @@ export function classifyRiskWithCause(
     // An invocation whose remote effect this layer cannot prove has not been
     // shown to be read-only.
     segments.every((segment) => !invocationRemoteEffectUnclassified(segment));
-  // Tier 4 — unclassifiable: a dynamic executable word, a re-interpreted
+  if (decomposable) return { disposition: "Skip" };
+  // Tier 4a — lex parse failure / incomplete input. codex
+  // `commands_for_exec_policy_for_platform` (exec_policy.rs:876-904)
+  // uses the parser's plain commands when non-empty, and only falls
+  // back to the raw command vector (exec_policy.rs:900-903) — judged
+  // by `dangerous_command_match_for_platform`
+  // (shell-command/src/command_safety/is_dangerous_command.rs:42),
+  // whose `dangerous_command_match_for_exec` (:123-147) matches the
+  // first word against `rm`(+force)/`sudo`/`env`/`trap` — when the
+  // parse yields none (a failed parse, or a command with no plain
+  // commands such as `FOO=1` or `>out`). Mirror the fallback: judge
+  // the raw command's words — a dangerous program is still a review, a
+  // non-dangerous one is Allow (the default policy). pi's
+  // `isDangerousWords` (dangerous-commands.ts:47-65) matches the
+  // first word against `rm`/`sudo`/`env`; the matcher's `trap` and
+  // shell-literal branches do not arise for the lex-incomplete /
+  // no-plain-commands commands that reach this tier, so the sets
+  // coincide here. A brace group is excluded: codex parses it
+  // successfully and judges the commands nested inside it, so a group —
+  // whose nested argv the leading word cannot see — fails closed below
+  // instead of taking this fallback. The fallback needs *every* segment
+  // to be `lex_incomplete`: codex's fallback hands the whole raw
+  // command vector over as one unit (exec_policy.rs:900-902) and does
+  // not care that one segment parsed and another did not, so one
+  // segment with a stronger unproven reason
+  // (command_word_unproven/substitution_unproven/heredoc_unproven/
+  // wrapper_unreduced/nested_git_program/program_reinterpreted/grouped)
+  // means the command is not the "no token-level expansion at all"
+  // case the fallback describes, and it fails closed below as Tier 4b.
+  if (
+    !segments.some((segment) => segment.grouped) &&
+    segments.every((segment) => segment.unprovenCause === "lex_incomplete")
+  ) {
+    return isDangerousWords(shellWords(command).words)
+      ? { disposition: "NeedsApproval" }
+      : { disposition: "Skip" };
+  }
+  // Tier 4b — unclassifiable: a dynamic executable word, a re-interpreted
   // string or stdin program, a substitution, a heredoc, or a brace group. The
   // static word list is not the argv that runs, so fail closed into review
   // instead of guessing.
-  if (decomposable) return { disposition: "Skip" };
   return {
     disposition: "NeedsApproval",
     cause: firstUnprovenCause(command, segments, request.cwd),

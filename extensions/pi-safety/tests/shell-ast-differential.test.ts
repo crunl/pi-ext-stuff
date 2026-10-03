@@ -60,14 +60,15 @@ interface Observation {
  * Everything the review path derives from one command, with the AST front end either
  * installed or not.
  *
- * `networkApproved` is true so a network subcommand reaches the tier that reads the
- * substitution facts instead of being refused by the network rule first; the deletion
- * targets are collected per segment because that is where argv visibility is lost.
+ * The static layer does not refuse network subcommands (network egress is gated at
+ * runtime), so a network subcommand reaches the tiers that read the substitution
+ * facts; the deletion targets are collected per segment because that is where argv
+ * visibility is lost.
  */
 function observe(command: string): Observation {
   const segments = parseCommandSegments(command);
   const request = normalizeToolCall("bash", { command }, "/work/repo");
-  const review = classifyRiskWithCause(request, true);
+  const review = classifyRiskWithCause(request);
   return {
     segments,
     disposition: review.disposition,
@@ -474,7 +475,7 @@ describe("shell AST differential (phase 1)", () => {
     }
   });
 
-  it("refuses to downgrade a forbidden command, however it is spelled", () => {
+  it("refuses to downgrade a dangerous command, however it is spelled", () => {
     const forbidden = [
       "rm -rf /",
       "rm -rf / --no-preserve-root",
@@ -487,12 +488,12 @@ describe("shell AST differential (phase 1)", () => {
     installShellAstParser(undefined);
     for (const command of forbidden) {
       const before = observe(command);
-      expect(before.disposition, command).toBe("Forbidden");
+      expect(before.disposition, command).toBe("NeedsApproval");
       installShellAstParser(parser);
       const after = observe(command);
       installShellAstParser(undefined);
       expect(relaxations(before, after), command).toEqual([]);
-      expect(after.disposition, command).toBe("Forbidden");
+      expect(after.disposition, command).toBe("NeedsApproval");
     }
     installShellAstParser(undefined);
   });

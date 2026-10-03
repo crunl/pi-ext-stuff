@@ -10,7 +10,6 @@ import {
   classifyRiskWithCause,
   deletionExecutables,
   deletionTargets,
-  isPublicNetworkHost,
   normalizeToolCall,
   parseCommandSegments,
 } from "./permissions/risk.ts";
@@ -375,39 +374,21 @@ export async function evaluateRiskRequest(
       reason: rule?.decision === "allow" ? "Allowed by permissions rule" : "Host tool policy",
     };
   }
-  const sandboxedBashNetwork =
-    !escalationRequested &&
-    config.sandbox.enabled &&
-    request.operation === "execute" &&
-    tool.toLowerCase() === "bash";
-  if (request.networkTargets?.some((host) => !isPublicNetworkHost(host)) && !sandboxedBashNetwork) {
-    return {
-      action: "block",
-      risk: "Forbidden",
-      reason: "Private or special-use network target is blocked",
-    };
-  }
-
   const filesystem = createFilesystemPolicy(
     config.sandbox,
     cwd,
     protectedWritePaths ? [...protectedWritePaths] : undefined,
   );
   // Bash is executed inside the active sandbox. Static policy identifies
-  // explicit additional filesystem capabilities; network effects are
-  // authorized at the SRT connection boundary so one approved endpoint never
-  // turns into a whole-command replay. The sandboxed Bash path therefore runs
-  // the same classifier with only that network exemption: a command whose
-  // static argv cannot be shown to equal its runtime argv stays REVIEW
-  // (fail closed) instead of a separate dangerous-only HARD/LOW ternary.
-  // The exemption covers network effects only (`networkTargets` /
-  // `invocationUsesNetwork`); an external side effect
-  // (`invocationHasExternalSideEffect`, e.g. `terraform apply`) is not
-  // exempted — the sandbox guards the connection boundary, not the API
-  // semantics of the call — so it stays HARD.
+  // explicit additional filesystem capabilities; network egress is
+  // authorized per-endpoint at the runtime NetworkBoundary (codex
+  // NetworkProxy analogue), never here, so the classifier is
+  // network-agnostic. A command whose static argv cannot be shown to
+  // equal its runtime argv stays REVIEW (fail closed); a proven
+  // dangerous argv is a review the user settles (codex `OnRequest`
+  // → `Prompt`), not a hard block.
   const classification = classifyRiskWithCause(
     request,
-    sandboxedBashNetwork,
     [],
     filesystem.protectedWritePaths,
     filesystem.allowWrite,
@@ -482,12 +463,14 @@ export async function evaluateRiskRequest(
 
   const promptedByRule = rule?.decision === "ask";
   // An unproven Git context can only *raise* the disposition, never lower it.
-  // Overwriting it unconditionally turned a proven-dangerous `Forbidden` into a
-  // `NeedsApproval` review for the same command: `git -C /x status; rm -rf /tmp/victim`
-  // reported `Forbidden` before and `NeedsApproval` after, so the Guardian was
-  // handed a weaker static risk for a command tier 1 had already proved, and the
-  // `static_risk` metric stopped counting those. `Forbidden` is the one value
-  // that survives, and the tier-1 reason is kept so the cause is not hidden.
+  // The elevation is scoped to `Skip`: a disposition the classifier already set
+  // — most commonly a tier-1 `NeedsApproval` for a proven-dangerous command —
+  // is left untouched, so the unproven-Git stamp never replaces the verdict or
+  // hides the tier-1 cause behind a vaguer reason. `NeedsApproval` is the
+  // strongest disposition the classifier returns for a command (a
+  // proven-dangerous argv is a review the user settles, not a hard block), so
+  // it is the value that survives here, and the tier-1 reason is kept so the
+  // cause is not hidden.
   const unprovenGitElevates = unprovenGitReason !== undefined && risk === "Skip";
   const reportedRisk = unprovenGitElevates ? "NeedsApproval" : risk;
   const wouldPrompt =

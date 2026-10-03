@@ -827,6 +827,10 @@ function foldSegment(facts: SegmentFacts): CommandSegment {
   // conjunction that used to stand in its place, so the boolean is exactly
   // `cause === undefined` and no consumer can drift from the fold.
   let unprovenCause: SegmentUnprovenCause | undefined;
+  // Tracked apart from the `lex_incomplete` cause: a brace group is the one
+  // unproven clause whose body can hide a nested command, so the fallback in
+  // `risk.ts` must fail closed on it rather than judge the leading word.
+  let grouped = false;
   if (facts.lexIncomplete || nameless) {
     unprovenCause = "lex_incomplete";
   } else if (context.unclassifiable) {
@@ -843,6 +847,7 @@ function foldSegment(facts: SegmentFacts): CommandSegment {
     unprovenCause = "heredoc_unproven";
   } else if (hasGroupingWord(words)) {
     unprovenCause = "lex_incomplete";
+    grouped = true;
   }
   return {
     source,
@@ -867,6 +872,7 @@ function foldSegment(facts: SegmentFacts): CommandSegment {
     // defining the boolean as their negation is what stops the fold and the
     // cause from ever disagreeing.
     decomposable: unprovenCause === undefined,
+    grouped,
     unprovenCause,
   };
 }

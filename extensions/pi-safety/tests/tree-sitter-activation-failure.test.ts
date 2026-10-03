@@ -88,11 +88,11 @@ describe("tree-sitter activation failure fails closed to the lexer", () => {
     const truncated = parseCommandSegments("rm -f /tmp/work &&");
     expect(truncated[0]?.decomposable).toBe(true);
     expect(truncated[0]?.unprovenCause).toBeUndefined();
-    // The forced-deletion gate is untouched: fail-closed does not depend
+    // The forced-deletion review is untouched: it does not depend
     // on the front end.
     const request = normalizeToolCall("bash", { command: "rm -rf /" }, "/work/repo");
-    const review = classifyRiskWithCause(request, true);
-    expect(review.disposition).toBe("Forbidden");
+    const review = classifyRiskWithCause(request);
+    expect(review.disposition).toBe("NeedsApproval");
   });
 
   it("fails closed when the grammar package root cannot be resolved", async () => {

@@ -42,7 +42,7 @@ describe("env assignment items (codex-aligned)", () => {
     expect(isDangerousWords(["env", "--chdir=/tmp", "rm", "-f", "/tmp/x"])).toBe(false);
   });
 
-  it("forbids a forced removal behind a non-identifier assignment", () => {
+  it("reviews a forced removal behind a non-identifier assignment", () => {
     for (const command of [
       "env 1=foo rm -f /tmp/x",
       "env FOO-BAR=1 rm -f /tmp/x",
@@ -50,10 +50,9 @@ describe("env assignment items (codex-aligned)", () => {
       "env 1=foo rm -f /tmp/x && echo after",
     ]) {
       const review = classifyRiskWithCause(
-        normalizeToolCall("bash", { command }, "/work/repo"),
-        true,
+        normalizeToolCall("bash", { command }, "/work/repo")
       );
-      expect(review.disposition, command).toBe("Forbidden");
+      expect(review.disposition, command).toBe("NeedsApproval");
     }
   });
 
@@ -96,14 +95,12 @@ describe("env -- terminator (codex-aligned, known gap)", () => {
     expect(isDangerousWords(["env", "--", "FOO=1", "rm", "-rf", "/tmp/x"])).toBe(false);
     expect(
       classifyRiskWithCause(
-        normalizeToolCall("bash", { command: "env -- 1=foo rm -f /tmp/x" }, "/work/repo"),
-        true,
+        normalizeToolCall("bash", { command: "env -- 1=foo rm -f /tmp/x" }, "/work/repo")
       ),
     ).toEqual({ disposition: "Skip" });
     expect(
       classifyRiskWithCause(
-        normalizeToolCall("bash", { command: "env =foo rm -f /tmp/x" }, "/work/repo"),
-        true,
+        normalizeToolCall("bash", { command: "env =foo rm -f /tmp/x" }, "/work/repo")
       ),
     ).toEqual({ disposition: "NeedsApproval", cause: "command_word_unproven" });
   });

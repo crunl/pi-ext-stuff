@@ -323,7 +323,7 @@ describe("ApprovalDisposition policy gate", () => {
     ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
   it("reviews a forced rm hidden behind control-flow keywords (Codex parity)", async () => {
@@ -343,7 +343,7 @@ describe("ApprovalDisposition policy gate", () => {
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
         action: "prompt",
-        risk: "Forbidden",
+        risk: "NeedsApproval",
       });
     }
   });
@@ -438,7 +438,6 @@ describe("ApprovalDisposition policy gate", () => {
     // a program the static argv never showed.
     'trap "$CMD" EXIT',
     "trap 'ls' EXIT",
-    "cmd=rm; $cmd -rf /tmp/x",
     'bash -c "$CMD -rf /"',
     // The substitution is inert for the parent shell but live for the body.
     "bash -c 'cat $(pwd)'",
@@ -466,6 +465,12 @@ describe("ApprovalDisposition policy gate", () => {
     // `cat '$(pwd)'` and `awk '{ print $1 }'` still auto-run.
     "ls $DIR",
     "ls ${DIR:-/tmp}",
+    // The variable executable arrives on its own segment
+    // (`command_word_unproven`), so the mixed reasons keep this out of the
+    // whole-vector fallback (`risk.ts` tier 4a needs every segment to be
+    // `lex_incomplete`) and it stays a review. Letting it Skip would let
+    // `$cmd` decide at runtime whether `rm` runs with `-rf`.
+    "cmd=rm; $cmd -rf /tmp/x",
   ])("reviews unclassifiable Bash command %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
@@ -473,6 +478,38 @@ describe("ApprovalDisposition policy gate", () => {
       action: "prompt",
       risk: "NeedsApproval",
     });
+  });
+
+  // A parse that yields no plain commands falls back to the raw command
+  // vector, which codex judges by its first word (`is_dangerous_command`
+  // in `exec_policy.rs`). A non-dangerous first word is allowed, so the
+  // codex-aligned tier-4a fallback (`risk.ts`) Skips it: an incomplete
+  // heredoc (`cat <<`), a pure assignment with no command (`FOO=1`),
+  // and a redirect with no command (`>out`) all auto-run. The fallback
+  // covers commands whose segments are *all* `lex_incomplete` — no
+  // token-level expansion anywhere, which is what handing the whole raw
+  // vector over means (exec_policy.rs:900-902). One segment carrying a
+  // stronger unproven reason (a variable executable, a substitution, a
+  // heredoc) is not that case and stays a review. A dangerous first word
+  // is still caught: `rm -rf / <<` keeps the forced rm at review.
+  it.each(["cat <<", "FOO=1", ">out"])(
+    "auto-runs a parse-failure command with a non-dangerous first word in %s",
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-parse-failure-"));
+
+      await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+        action: "allow",
+        risk: "Skip",
+      });
+    },
+  );
+
+  it("reviews a parse-failure command whose first word is a forced rm", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-parse-failure-"));
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "rm -rf / <<" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
   // Parameter expansion decides the argv at runtime, and the substituted word is
@@ -542,23 +579,23 @@ describe("ApprovalDisposition policy gate", () => {
     });
   });
 
-  it("keeps a proven-dangerous segment HARD inside an unclassifiable command", async () => {
+  it("keeps a proven-dangerous segment at review inside an unclassifiable command", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
     await expect(
       evaluateRiskRequest("bash", { command: 'rm -rf /tmp/x; echo "$(pwd)"' }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
-  // A trap action that is itself a proven-dangerous command stays HARD: the
-  // dangerous tier is checked before the unclassifiable one, so the extra
-  // review never *downgrades* a proven rm.
-  it("keeps a proven-dangerous trap action HARD, not REVIEW", async () => {
+  // A trap action that is itself a proven-dangerous command stays a review
+  // (NeedsApproval): the dangerous tier is checked before the unclassifiable
+  // one, so the extra review never *downgrades* a proven rm.
+  it("keeps a proven-dangerous trap action at review, not SKIP", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
     await expect(
       evaluateRiskRequest("bash", { command: "trap 'rm -rf /' EXIT" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
   // External side effects are not exempted by the sandbox's network approval:
@@ -1484,15 +1521,15 @@ describe("ApprovalDisposition policy gate", () => {
   // A deletion executable after `cd` must not be folded even when it looks
   // harmless: the fold refuses that segment, the relocation stays visible, and
   // the chain is reviewed. A forced `rm` is caught by tier 1 and stays
-  // Forbidden; the unforced deletion executables are reviewed, not blocked —
+  // at review; the unforced deletion executables are reviewed, not blocked —
   // the invariant being pinned here is "not folded into Skip".
-  it("keeps a forced rm after a literal cd Forbidden", async () => {
+  it("keeps a forced rm after a literal cd at review", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
 
     await expect(
       evaluateRiskRequest("bash", { command: `cd ${target} && rm -rf x` }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
   it.each(["rmdir x", "shred x", "unlink x", "truncate -s 0 x"])(
@@ -1598,7 +1635,7 @@ describe("ApprovalDisposition policy gate", () => {
 
   // A proven-dangerous segment keeps its disposition when an unrelated Git part
   // of the same command is unproven. The elevation is one-way: an unproven
-  // context may raise `Skip` to a review, never lower a `Forbidden`.
+  // context may raise `Skip` to a review, never lower a review.
   it("keeps a proven-dangerous disposition when an unproven Git context is also present", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 
@@ -1615,8 +1652,8 @@ describe("ApprovalDisposition policy gate", () => {
       config(),
     );
 
-    expect(control).toMatchObject({ action: "prompt", risk: "Forbidden" });
-    expect(withUnproven).toMatchObject({ action: "prompt", risk: "Forbidden" });
+    expect(control).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    expect(withUnproven).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
   // `git --version` and friends take no value, relocate nothing and run nothing,
@@ -1856,7 +1893,7 @@ describe("ApprovalDisposition policy gate", () => {
     expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
   });
 
-  it("keeps private shell targets statically blocked when the sandbox is disabled", async () => {
+  it("defers private shell targets to the runtime boundary when the sandbox is disabled", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     const configured = config({
       sandbox: {
@@ -1868,13 +1905,12 @@ describe("ApprovalDisposition policy gate", () => {
     await expect(
       evaluateRiskRequest("bash", { command: "curl http://127.0.0.1/admin" }, cwd, configured),
     ).resolves.toMatchObject({
-      action: "block",
-      risk: "Forbidden",
-      reason: expect.stringContaining("Private"),
+      action: "allow",
+      risk: "Skip",
     });
   });
 
-  it("blocks private WebFetch targets without offering reviewer approval", async () => {
+  it("reviews private WebFetch targets for the runtime boundary", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 
     for (const url of [
@@ -1883,9 +1919,8 @@ describe("ApprovalDisposition policy gate", () => {
       "http://[::ffff:127.0.0.1]/",
     ]) {
       await expect(evaluateRiskRequest("WebFetch", { url }, cwd, config())).resolves.toMatchObject({
-        action: "block",
+        action: "prompt",
         risk: "Forbidden",
-        reason: expect.stringContaining("Private"),
       });
     }
   });
@@ -2110,8 +2145,8 @@ describe("ApprovalDisposition policy gate", () => {
       ),
     ).resolves.toMatchObject({
       action: "prompt",
-      risk: "Forbidden",
-      reason: "Forbidden operation",
+      risk: "NeedsApproval",
+      reason: "NeedsApproval operation",
     });
     const decision = await evaluateRiskRequest(
       "bash",
@@ -2310,7 +2345,7 @@ describe("deletion sandbox boundary (stage 3)", () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "Forbidden" });
+    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 });
 
@@ -2497,7 +2532,7 @@ describe("RiskDecision residual stamps", () => {
     const decision = await evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config());
     expect(decision).toMatchObject({
       action: "prompt",
-      risk: "Forbidden",
+      risk: "NeedsApproval",
       residuals: expect.arrayContaining(["risk_not_skip"]),
     });
     // A proven-dangerous verdict is not a failed proof: the review-cause
@@ -2540,7 +2575,7 @@ describe("RiskDecision residual stamps", () => {
     // why this is allowed to change a packet where P0-1 changes only metrics.
     expect(decision).toMatchObject({
       action: "prompt",
-      risk: "Forbidden",
+      risk: "NeedsApproval",
       reason: "Dangerous command inside shell substitution: rm -rf /",
       residuals: ["action_review", "risk_not_skip"],
     });
