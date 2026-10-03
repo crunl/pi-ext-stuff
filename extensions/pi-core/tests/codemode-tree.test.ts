@@ -125,6 +125,23 @@ describe("createCodemodeTreeRendering", () => {
     expect(joined).not.toContain("├");
   });
 
+  it("mentions generated images in the collapsed glance", () => {
+    const joined = render(
+      {
+        content: [
+          { type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\nbody" },
+          { type: "image", data: "iVBOR", mimeType: "image/png" },
+        ],
+        details: {
+          calls: [{ id: "c1", name: "bash", args: '{"command":"ls"}', status: "ok" }],
+        },
+      },
+      { expanded: false },
+      context(false),
+    );
+    expect(joined.trimEnd()).toBe("└ Ran 1 command · 1 image");
+  });
+
   it("renders child rows and collapsible code/output when expanded", () => {
     const joined = render(
       {
@@ -143,6 +160,7 @@ describe("createCodemodeTreeRendering", () => {
     expect(joined).toContain("pwd");
     expect(joined).toContain("▸ code");
     expect(joined).toContain("▸ output");
+    expect(joined).not.toContain("images");
   });
 
   it("hides script output while partial", () => {
@@ -182,5 +200,73 @@ describe("createCodemodeTreeRendering", () => {
     const result = component.handleMouse({ type: "click", button: "left", y: 1 });
     expect(result).toMatchObject({ handled: true });
     expect(state.expandedCode).toBe(true);
+  });
+
+  it("shows an images section and toggles it on click", () => {
+    const state: Record<string, unknown> = {};
+    const component = rendering.renderResult!(
+      {
+        content: [
+          { type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\nbody" },
+          { type: "image", data: "iVBOR", mimeType: "image/png" },
+          { type: "image", data: "/9j/", mimeType: "image/jpeg" },
+        ],
+        details: {
+          calls: [{ id: "c1", name: "bash", args: '{"command":"ls"}', status: "ok" }],
+        },
+      } as never,
+      { expanded: true, isPartial: false } as never,
+      theme,
+      context(true, state) as never,
+    ) as {
+      render(width: number): string[];
+      handleMouse(event: { type: string; button: string; y: number }): unknown;
+    };
+
+    // line 0 = root, 1 = code, 2 = call, 3 = output, 4 = images
+    const before = component.render(80).join("\n");
+    expect(before).toContain("2 images");
+    expect(before).toContain("▸ images");
+    const result = component.handleMouse({ type: "click", button: "left", y: 4 });
+    expect(result).toMatchObject({ handled: true });
+    expect(state.expandedImages).toBe(true);
+    expect(component.render(80).join("\n")).toContain("generated images are attached");
+    // Clicking again collapses the section.
+    const second = component.handleMouse({ type: "click", button: "left", y: 4 });
+    expect(second).toMatchObject({ handled: true });
+    expect(state.expandedImages).toBe(false);
+  });
+
+  it("keeps click mapping exact when output wraps to visual rows", () => {
+    const longLine = "y".repeat(100);
+    const state: Record<string, unknown> = { expandedOutput: true };
+    const component = rendering.renderResult!(
+      {
+        content: [
+          { type: "text", text: `Script completed\nWall time 0.1 seconds\nOutput:\n${longLine}` },
+          { type: "image", data: "iVBOR", mimeType: "image/png" },
+        ],
+        details: { calls: [] },
+      } as never,
+      { expanded: true, isPartial: false } as never,
+      theme,
+      context(true, state) as never,
+    ) as {
+      render(width: number): string[];
+      handleMouse(event: { type: string; button: string; y: number }): unknown;
+    };
+
+    // width 40 → content width 35 → 100-char line wraps to 3 visual rows.
+    // line 0 = root, 1 = code, 2 = output head, 3-5 = output body, 6 = images head.
+    const lines = component.render(40);
+    expect(lines).toHaveLength(7);
+    expect(lines[6]).toContain("images");
+    const result = component.handleMouse({ type: "click", button: "left", y: 6 });
+    expect(result).toMatchObject({ handled: true });
+    expect(state.expandedImages).toBe(true);
+    // A body row still maps to its own section.
+    const outputToggle = component.handleMouse({ type: "click", button: "left", y: 4 });
+    expect(outputToggle).toMatchObject({ handled: true });
+    expect(state.expandedOutput).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { type Component, Text } from "@earendil-works/pi-tui";
+import { type Component, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type CallStatus,
   type ChildRow,
@@ -24,6 +24,7 @@ export interface CodemodeTreeState {
   expandedCalls?: Set<string>;
   expandedCode?: boolean;
   expandedOutput?: boolean;
+  expandedImages?: boolean;
   leadingIconOverride?: string;
 }
 
@@ -57,11 +58,11 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-/** `└ Ran 1 command · Read 3 files · Edited 1 file · 1 failed` */
+/** `└ Ran 1 command · Read 3 files · Edited 1 file · 1 failed · 2 images` */
 export function formatCodemodeGlance(
   glance: GlanceSummary,
   theme: CodemodeTreeTheme,
-  options: { leadingIconOverride?: string } = {},
+  options: { leadingIconOverride?: string; imageCount?: number } = {},
 ): string {
   const root = options.leadingIconOverride
     ? theme.fg("warning", theme.bold(options.leadingIconOverride))
@@ -81,7 +82,10 @@ export function formatCodemodeGlance(
         )
       : "";
   const active = glance.running > 0 ? theme.fg("warning", ` · ${glance.running} running`) : "";
-  return `${root} ${parts.join(theme.fg("muted", " · "))}${failure}${active}`;
+  const imageCount = options.imageCount ?? 0;
+  const images =
+    imageCount > 0 ? theme.fg("muted", ` · ${plural(imageCount, "image", "images")}`) : "";
+  return `${root} ${parts.join(theme.fg("muted", " · "))}${failure}${active}${images}`;
 }
 
 export function formatNestedCallRow(
@@ -108,7 +112,7 @@ export function formatNestedCallRow(
   return `${icon} ${name}${body}${tail}${error}`;
 }
 
-type TreeSectionId = "code" | `call:${string}` | "output";
+type TreeSectionId = "code" | `call:${string}` | "output" | "images";
 
 interface TreeSection {
   id: TreeSectionId;
@@ -117,21 +121,51 @@ interface TreeSection {
   open: boolean;
 }
 
+/** Columns taken by paintTreeLines' `  │  ` body indent. */
+const TREE_BODY_INDENT = 5;
+
 function blockHead(label: string, block: TextBlock, theme: CodemodeTreeTheme): string {
   return `${theme.fg("toolTitle", label)}  ${theme.fg("muted", `${block.lineCount} lines · ${block.preview}`)}`;
+}
+
+/**
+ * Wrap raw body lines to the visible content width, then style each visual
+ * row. Pre-wrapping keeps every body entry at one terminal row so click
+ * y-mapping (sectionAtY) stays exact even for minified single-line output —
+ * the same wrapped-lines-instead-of-logical-lines rule Pi 1.0.0 applies to
+ * its own collapsed codemode preview.
+ */
+function styleWrapped(
+  rawLines: string[],
+  contentWidth: number,
+  style: (text: string) => string,
+): string[] {
+  const out: string[] = [];
+  for (const raw of rawLines) {
+    if (contentWidth <= 0) {
+      out.push(style(raw));
+      continue;
+    }
+    for (const row of wrapTextWithAnsi(raw, contentWidth)) {
+      out.push(style(row));
+    }
+  }
+  return out;
 }
 
 function buildSections(
   view: TreeView,
   theme: CodemodeTreeTheme,
   state: CodemodeTreeState,
+  width: number,
 ): TreeSection[] {
+  const contentWidth = width > 0 ? Math.max(1, width - TREE_BODY_INDENT) : 0;
   const sections: TreeSection[] = [];
   if (view.code) {
     sections.push({
       id: "code",
       head: blockHead("code", view.code, theme),
-      body: view.code.lines.map((line) => theme.fg("dim", line)),
+      body: styleWrapped(view.code.lines, contentWidth, (line) => theme.fg("dim", line)),
       open: state.expandedCode === true,
     });
   }
@@ -139,10 +173,18 @@ function buildSections(
     const open = state.expandedCalls?.has(child.id) ?? child.status === "error";
     const body: string[] = [];
     if (child.status === "error" && child.errorText) {
-      body.push(theme.fg("error", `    ${child.errorText}`));
+      body.push(
+        ...styleWrapped([`    ${child.errorText}`], contentWidth, (line) =>
+          theme.fg("error", line),
+        ),
+      );
     }
     if (child.argsPreview) {
-      body.push(theme.fg("dim", `    ${child.argsPreview}`));
+      body.push(
+        ...styleWrapped([`    ${child.argsPreview}`], contentWidth, (line) =>
+          theme.fg("dim", line),
+        ),
+      );
     }
     sections.push({
       id: `call:${child.id}`,
@@ -152,15 +194,33 @@ function buildSections(
     });
   }
   if (view.output) {
-    const body = view.output.lines.map((line) => theme.fg("toolOutput", line));
+    const body = styleWrapped(view.output.lines, contentWidth, (line) =>
+      theme.fg("toolOutput", line),
+    );
     if (view.fullOutputPath) {
-      body.push(theme.fg("muted", `full output: ${view.fullOutputPath}`));
+      body.push(
+        ...styleWrapped([`full output: ${view.fullOutputPath}`], contentWidth, (line) =>
+          theme.fg("muted", line),
+        ),
+      );
     }
     sections.push({
       id: "output",
       head: blockHead("output", view.output, theme),
       body,
       open: state.expandedOutput === true,
+    });
+  }
+  if (view.imageCount > 0) {
+    sections.push({
+      id: "images",
+      head: `${theme.fg("toolTitle", "images")}  ${theme.fg("muted", plural(view.imageCount, "image", "images"))}`,
+      body: styleWrapped(
+        ["generated images are attached to the script result (not previewed in tree view)"],
+        contentWidth,
+        (line) => theme.fg("dim", line),
+      ),
+      open: state.expandedImages === true,
     });
   }
   return sections;
@@ -203,25 +263,28 @@ interface TuiMouseEventLike {
 }
 
 function createClickableTree(options: {
-  buildLines: () => { lines: string[]; sections: TreeSection[] };
+  buildLines: (width: number) => { lines: string[]; sections: TreeSection[] };
   onToggle: (sectionId: TreeSectionId) => void;
 }): Component {
-  let cache: { lines: string[]; sections: TreeSection[] } | undefined;
-  const read = () => {
-    cache = options.buildLines();
+  let cache: { width: number; lines: string[]; sections: TreeSection[] } | undefined;
+  let lastWidth = 80;
+  const read = (width: number) => {
+    if (!cache || cache.width !== width) {
+      lastWidth = width;
+      cache = { width, ...options.buildLines(width) };
+    }
     return cache;
   };
   return {
     render(width: number) {
-      void width;
-      return read().lines;
+      return read(width).lines;
     },
     invalidate() {
       cache = undefined;
     },
     handleMouse(event: TuiMouseEventLike) {
       if (event.type !== "click" || event.button !== "left") return undefined;
-      const { sections } = read();
+      const { sections } = read(lastWidth);
       const index = sectionAtY(sections, event.y);
       if (index < 0) return undefined;
       const section = sections[index];
@@ -240,6 +303,10 @@ function toggleSection(state: CodemodeTreeState, id: TreeSectionId): void {
   }
   if (id === "output") {
     state.expandedOutput = !state.expandedOutput;
+    return;
+  }
+  if (id === "images") {
+    state.expandedImages = !state.expandedImages;
     return;
   }
   const callId = id.slice("call:".length);
@@ -303,6 +370,7 @@ export function createCodemodeTreeRendering(): CodemodeTreeRendering {
         component.setText(
           formatCodemodeGlance(view.glance, theme, {
             leadingIconOverride: state.leadingIconOverride,
+            imageCount: view.imageCount,
           }),
         );
         return component;
@@ -310,10 +378,11 @@ export function createCodemodeTreeRendering(): CodemodeTreeRendering {
 
       const root = formatCodemodeGlance(view.glance, theme, {
         leadingIconOverride: state.leadingIconOverride,
+        imageCount: view.imageCount,
       });
       return createClickableTree({
-        buildLines: () => {
-          const sections = buildSections(view, theme, state);
+        buildLines: (width: number) => {
+          const sections = buildSections(view, theme, state, width);
           return { lines: paintTreeLines(root, sections), sections };
         },
         onToggle: (id) => {

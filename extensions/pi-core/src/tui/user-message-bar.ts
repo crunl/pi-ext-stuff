@@ -1,10 +1,16 @@
 /**
  * user-message-bar - Crush-style left rail plus a content background band.
  *
- * Pi paints user messages as a full-width ChatGPT-style background band
- * (`Box` + `userMessageBg` + paddingY blank rows). There is no public hook
- * for that chrome, so we patch `UserMessageComponent.prototype.render`:
- *   - unwrap the Box (drops its paddingY blank rows)
+ * Host shapes (both supported, detected at render time):
+ * - Pi ≤0.99: `Box(outputPad, paddingY=1, userMessageBg)` around
+ *   `Markdown(text, 0, 0)`. We unwrap the Box (drops its paddingY blank
+ *   rows) and keep the Markdown child only.
+ * - Pi 1.0.0+: the Box is gone (it kept a second full-width copy of every
+ *   line); `Markdown(text, outputPad, paddingY=1)` carries its own padding
+ *   rows and background. We keep it as-is but drop its own paddingY blank
+ *   rows so the bar owns the only blank bands.
+ *
+ * In both cases the patch then:
  *   - prefix every line with a 1-column accent bar
  *   - re-apply `userMessageBg` to the content columns only
  *   - restore one blank banded row above and below (min 3 rows for 1 line)
@@ -23,13 +29,15 @@
  */
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { Container, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { isInteractiveTui } from "./ui-guard.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const BAR = "▌";
+// Built via string concat: a regex literal with \x1b trips noControlCharactersInRegex.
+const SGR_PREFIX_RE = new RegExp(`^((?:${String.fromCharCode(0x1b)}\\[[0-9;]*m)*)( +)`);
 
 type ThemeRef = () => Theme | undefined;
 
@@ -75,8 +83,42 @@ export function applyUserMessageBar(getTheme: ThemeRef): void {
       // Render content at reduced width so the bar does not steal wrap space.
       // Bypass the original OSC133 wrapper: we re-apply marks after the bar.
       const contentWidth = Math.max(1, width - gutter);
-      const lines = Container.prototype.render.call(this, contentWidth);
+      const child = (this as unknown as { children?: unknown[] }).children?.[0] as
+        | { paddingX?: unknown; paddingY?: unknown }
+        | undefined;
+      const readPad = (value: unknown): number =>
+        typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+      const ownPad = readPad(child?.paddingY);
+      const margin = readPad(child?.paddingX);
+      let lines = Container.prototype.render.call(this, contentWidth);
       if (lines.length === 0) return lines;
+      // Host 1.0.0+ renders Markdown with its own paddingY blank rows (the Box
+      // that used to own them is gone). Drop them so the bar below owns the
+      // only blank bands; keep everything else byte-for-byte.
+      if (ownPad > 0) {
+        const isBlankRow = (line: string) => stripTerminalSequences(line).trim() === "";
+        let top = 0;
+        while (top < ownPad && top < lines.length && isBlankRow(lines[top] ?? "")) top += 1;
+        let bottom = 0;
+        while (
+          bottom < ownPad &&
+          bottom < lines.length - top &&
+          isBlankRow(lines[lines.length - 1 - bottom] ?? "")
+        )
+          bottom += 1;
+        if (top > 0 || bottom > 0) lines = lines.slice(top, lines.length - bottom);
+      }
+      if (lines.length === 0) return lines;
+      // The same Markdown also paints its own paddingX left margin. Strip
+      // exactly that margin (spaces after any leading SGR codes) so content
+      // hugs the bar like before; inner styling and indentation survive.
+      if (margin > 0) {
+        const unmargin = (_match: string, codes: string, spaces: string): string => {
+          const drop = Math.min(margin, spaces.length);
+          return `${codes}${spaces.slice(drop)}`;
+        };
+        lines = lines.map((line) => line.replace(SGR_PREFIX_RE, unmargin));
+      }
 
       const bar = theme ? theme.fg("borderAccent", BAR) : BAR;
       const bandRow = (line: string) => {

@@ -5,7 +5,7 @@ import { createCodemodeTreeRendering } from "./codemode-tree.ts";
 /**
  * Shadow-register `codemode` with tree presentation.
  *
- * Pi has no renderer-only registration API (0.99.1). We take the public
+ * Pi has no renderer-only registration API (1.0.0). We take the public
  * `createCodemodeExtension()` factory, run it against a registerTool-capturing
  * proxy so execute/prepareLoadout stay verbatim, and splice in tree renderers.
  *

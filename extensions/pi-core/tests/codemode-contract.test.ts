@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  countImageBlocks,
   extractScriptOutput,
   stripScriptHeader,
   summarizeCallArgs,
   toTreeView,
 } from "../src/tui/codemode-contract.ts";
 
-/** 0.99.1-shaped payloads. Keep in sync when the upstream pin moves. */
+/** 1.0.0-shaped payloads. Keep in sync when the upstream pin moves. */
 const detailFixture = {
   calls: [
     {
@@ -64,8 +65,33 @@ describe("summarizeCallArgs", () => {
   });
 });
 
+describe("countImageBlocks", () => {
+  it("counts image parts and ignores text and malformed parts", () => {
+    expect(
+      countImageBlocks({
+        content: [
+          { type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\nok" },
+          { type: "image", data: "iVBOR", mimeType: "image/png" },
+          { type: "image", data: "/9j/", mimeType: "image/jpeg" },
+          { type: "image" },
+          "garbage",
+          null,
+        ],
+      }),
+    ).toBe(3);
+  });
+
+  it("returns zero without content", () => {
+    expect(countImageBlocks(undefined)).toBe(0);
+    expect(countImageBlocks({})).toBe(0);
+    expect(countImageBlocks({ content: [] })).toBe(0);
+    expect(countImageBlocks({ content: null } as never)).toBe(0);
+    expect(countImageBlocks({ content: "garbage" } as never)).toBe(0);
+  });
+});
+
 describe("toTreeView", () => {
-  it("maps a 0.99.1-shaped details payload", () => {
+  it("maps a 1.0.0-shaped details payload (unchanged since 0.99.1)", () => {
     const view = toTreeView({
       details: detailFixture,
       args: { code: "await tools.bash({ command: 'ls' })\n// more\n// lines" },
@@ -88,6 +114,7 @@ describe("toTreeView", () => {
     expect(view.code?.lineCount).toBe(3);
     expect(view.output?.preview).toContain("ok");
     expect(view.fullOutputPath).toBe("/tmp/out.txt");
+    expect(view.imageCount).toBe(0);
     expect(view.capabilities.childResultPreview).toBe(false);
   });
 
@@ -121,5 +148,31 @@ describe("toTreeView", () => {
       args: {},
     });
     expect(view.capabilities.childResultPreview).toBe(true);
+  });
+
+  it("reports image blocks from models.generateImages()", () => {
+    const view = toTreeView({
+      details: { calls: [] },
+      args: {},
+      result: {
+        content: [
+          { type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\ndone" },
+          { type: "image", data: "iVBOR", mimeType: "image/png" },
+        ],
+      },
+    });
+    expect(view.imageCount).toBe(1);
+    expect(view.output?.preview).toContain("done");
+  });
+
+  it("hides images while partial, like script output", () => {
+    const view = toTreeView({
+      details: { calls: [] },
+      args: {},
+      result: { content: [{ type: "image", data: "iVBOR", mimeType: "image/png" }] },
+      isPartial: true,
+    });
+    expect(view.imageCount).toBe(0);
+    expect(view.output).toBeNull();
   });
 });

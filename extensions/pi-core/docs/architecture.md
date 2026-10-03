@@ -45,13 +45,13 @@ Adding an export here is the only supported way to widen the contract.
 - `canonical-tool-fallback.ts` — TUI-only adapter for canonical bash/write/edit.
   It snapshots `getAllTools()` before registering anything, skips extension/SDK
   owners, reconstructs definitions with Pi's public factories, and never calls
-  `setActiveTools`. Validation pin 0.99.1 still cannot expose the actual definition or host
+  `setActiveTools`. Validation pin 1.0.0 still cannot expose the actual definition or host
   `SettingsManager` through the extension context, so an SDK
   `baseToolsOverride`, custom/non-file-backed shell settings, and a later
   dynamic same-name registration cannot be distinguished safely. Those SDK
   configurations should use the `off` flag; these remain documented
   compatibility boundaries rather than private-registry patch points.
-- Validation pin 0.99.1 still has no public renderer-only registration API: execution and
+- Validation pin 1.0.0 still has no public renderer-only registration API: execution and
   rendering are combined in `ToolDefinition`. If a future Pi release exposes
   an API such as `registerToolRenderer(name, renderer)`, replace this Adapter
   with that host integration while keeping `withCodexToolPresentation` as the
@@ -145,5 +145,7 @@ the `<builtin:name>` source marker format emitted by the host.
 ## Codemode presentation
 
 - `src/tui/codemode-contract.ts` — defensive mapping of upstream `codemode` payloads to `TreeView`.
-- `src/tui/codemode-tree.ts` — tree UI over `TreeView`.
+- `src/tui/codemode-tree.ts` — tree UI over `TreeView`. Body rows are
+  pre-wrapped to the visible width (Pi 1.0.0 wrapped-lines rule) so click
+  y-mapping stays exact; generated images get an `images` placeholder section.
 - `src/tui/codemode-tool.ts` — shadow registration (keeps upstream execute).

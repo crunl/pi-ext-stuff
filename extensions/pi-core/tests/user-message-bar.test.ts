@@ -103,6 +103,15 @@ describe("applyUserMessageBar", () => {
     expect(lines[1]).not.toContain(C_ON);
   });
 
+  it("strips the host left margin but keeps content indentation", () => {
+    applyUserMessageBar(() => mockTheme);
+    // Host 1.0.0 Markdown paints its own paddingX margin; the bar must hug
+    // content while a 2-space indent survives the 1-space margin strip.
+    const lines = renderUser("  indented");
+    const content = lines.map(plain).find((line) => line.includes("indented")) ?? "";
+    expect(content.startsWith("▌  indented")).toBe(true);
+  });
+
   it("restores the original band rendering after reset", () => {
     applyUserMessageBar(() => mockTheme);
     const barred = renderUser("hi");

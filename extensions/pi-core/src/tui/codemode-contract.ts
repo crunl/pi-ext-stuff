@@ -6,8 +6,11 @@
  * renderer consumes {@link TreeView} only. Keep parsing fail-soft: unknown
  * fields are ignored, missing fields default, bad JSON never throws.
  *
- * Upstream pin: `@earendil-works/pi-coding-agent` 0.99.1. `CodemodeNestedCall`
+ * Upstream pin: `@earendil-works/pi-coding-agent` 1.0.0. `CodemodeNestedCall`
  * is not exported there — we mirror it structurally on purpose.
+ * (`CodemodeToolDetails`/`CodemodeNestedCall` are unchanged from 0.99.1;
+ * 1.0.0 only adds `models.generateImages()`, whose image blocks arrive as
+ * `image` content parts alongside the text output.)
  */
 
 export type CallStatus = "running" | "ok" | "error" | "cancelled" | "unknown";
@@ -45,6 +48,8 @@ export interface TreeView {
   readonly code: TextBlock | null;
   readonly output: TextBlock | null;
   readonly fullOutputPath?: string;
+  /** Image blocks in the script result (1.0.0 `models.generateImages()`). Never throws. */
+  readonly imageCount: number;
   readonly capabilities: {
     readonly childResultPreview: boolean;
   };
@@ -82,7 +87,8 @@ export function stripScriptHeader(text: string): string {
 
 function textBlocksToPlain(result: { content?: readonly unknown[] } | undefined): string[] {
   const out: string[] = [];
-  for (const part of result?.content ?? []) {
+  if (!Array.isArray(result?.content)) return out;
+  for (const part of result.content) {
     if (
       typeof part === "object" &&
       part !== null &&
@@ -99,6 +105,23 @@ function textBlocksToPlain(result: { content?: readonly unknown[] } | undefined)
 
 export function extractScriptOutput(result: { content?: readonly unknown[] } | undefined): string {
   return stripScriptHeader(textBlocksToPlain(result).join("\n")).trim();
+}
+
+/** Count `image` content parts (1.0.0 `models.generateImages()` output). Fail-soft. */
+export function countImageBlocks(result: { content?: readonly unknown[] } | undefined): number {
+  let count = 0;
+  if (!Array.isArray(result?.content)) return count;
+  for (const part of result.content) {
+    if (
+      typeof part === "object" &&
+      part !== null &&
+      "type" in part &&
+      (part as { type?: unknown }).type === "image"
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function collapseText(text: string, limit: number): string {
@@ -244,6 +267,7 @@ export function toTreeView(input: ToTreeViewInput): TreeView {
     code: toTextBlock(codeText, CODE_PREVIEW_CHARS),
     output: toTextBlock(outputText, OUTPUT_PREVIEW_CHARS),
     ...(fullOutputPath === undefined ? {} : { fullOutputPath }),
+    imageCount: input.isPartial ? 0 : countImageBlocks(input.result),
     capabilities: {
       childResultPreview: rawCalls.some(
         (raw) => typeof raw === "object" && raw !== null && "resultPreview" in raw,
