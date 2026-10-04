@@ -3,7 +3,7 @@ import { DEFAULT_CONFIG } from "../src/config.ts";
 import { PermissionModeRuntime } from "../src/mode-runtime.ts";
 
 function stateEntry(
-  mode: "auto" | "yolo" | "default",
+  mode: "auto" | "yolo" | (string & {}),
   configFingerprint: string,
   auto = { consecutiveDenials: 0, paused: false },
 ): unknown {
@@ -99,7 +99,7 @@ describe("PermissionModeRuntime", () => {
     );
   });
 
-  it("restores the persisted mode and state without legacy pending data", () => {
+  it("restores the persisted mode and state without a pendingMode field", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     const configFingerprint = runtime.snapshot().configFingerprint;
 
@@ -121,11 +121,11 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.snapshot()).not.toHaveProperty("pendingMode");
   });
 
-  it("coerces a legacy default mode to Auto during restore", () => {
+  it("coerces an unsupported persisted mode to auto during restore", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     const configFingerprint = runtime.snapshot().configFingerprint;
 
-    runtime.restore([stateEntry("default", configFingerprint)], DEFAULT_CONFIG);
+    runtime.restore([stateEntry("unsupported", configFingerprint)], DEFAULT_CONFIG);
 
     expect(runtime.mode).toBe("auto");
   });

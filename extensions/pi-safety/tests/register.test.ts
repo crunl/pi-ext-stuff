@@ -33,6 +33,26 @@ const wasmReads = vi.hoisted(() => ({
   paths: [] as Array<string | URL | Buffer>,
 }));
 
+/**
+ * Actions handed to the facade's Engine submit seam. Yolo Bash must not
+ * appear here: it has no review, grant, or lease to derive, so the register
+ * layer executes it directly.
+ */
+const engineSubmissions = vi.hoisted(() => [] as unknown[]);
+
+vi.mock("../src/pi-safety.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/pi-safety.ts")>();
+  const prototype = actual.PiSafetyRuntime.prototype as unknown as {
+    submit: (...args: never[]) => unknown;
+  };
+  const submit = prototype.submit;
+  prototype.submit = function (this: unknown, ...args: never[]): unknown {
+    engineSubmissions.push(args[0]);
+    return submit.apply(this, args);
+  };
+  return actual;
+});
+
 // The Shell AST cases below need the grammar read to fail on demand
 // (the once-notification case). Every other read passes through
 // untouched, so the rest of this file sees the real filesystem.
@@ -180,6 +200,7 @@ function reviewStatusCalls(app: Pick<Harness, "setStatus">): unknown[][] {
 }
 
 afterEach(async () => {
+  engineSubmissions.length = 0;
   const directories = tempDirectories.splice(0);
   await Promise.all(
     directories.map((directory) => rm(directory, { recursive: true, force: true })),
@@ -1703,9 +1724,9 @@ describe("Permission mode registration", () => {
   });
 
   it("keeps a non-zero exit on the unrestricted backend out of permission failures", async () => {
-    // The unrestricted (yolo) lease runs on the bare local backend. A command
-    // that exits non-zero there is the command's result, not a permission
-    // failure, so the captured exit code must keep it completed.
+    // Yolo Bash executes directly on the bare local backend. A command that
+    // exits non-zero there is the command's result, not a permission failure,
+    // so the captured exit code must keep it completed.
     const app = await makeHarness({ useRealBashTool: true, risk: () => blockRisk() });
     await startSession(app);
     const shortcut = app.shortcuts.get("shift+tab");
@@ -1718,6 +1739,156 @@ describe("Permission mode registration", () => {
     });
     expect(JSON.stringify(result)).not.toContain("The permitted action failed");
     expect(app.sandboxManager.execute).not.toHaveBeenCalled();
+  });
+
+  it("executes yolo Bash directly without submitting an Engine invocation", async () => {
+    // Yolo derives no review, grant, admission, or lease, so the register layer
+    // owns the execution. The Auto path in the same harness proves the seam
+    // spy is live: only Bash in yolo mode should be missing from it.
+    engineSubmissions.length = 0;
+    const app = await makeHarness({ risk: () => lowRisk() });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "auto-bash", "printf auto");
+    expect(engineSubmissions).toHaveLength(1);
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+
+    engineSubmissions.length = 0;
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context); // auto -> yolo
+    await startTurn(app, 1);
+    app.riskEvaluator.mockClear();
+    await executeBash(app, "yolo-direct", "printf direct");
+
+    expect(engineSubmissions).toHaveLength(0);
+    expect(app.reviewInputs).toHaveLength(0);
+    expect(app.riskEvaluator).not.toHaveBeenCalled();
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+    expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a direct yolo non-zero exit a completed command result", async () => {
+    // Same invariant as the engine-driven case above, on the direct path: the
+    // captured exit code, not the thrown rendering, decides the classification.
+    engineSubmissions.length = 0;
+    const app = await makeHarness({ risk: () => blockRisk(), localExitCode: 3 });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+
+    const result = (await executeBash(app, "yolo-direct-exit", "printf boom")) as {
+      content: Array<{ type: "text"; text: string }>;
+      details: { exitCode?: number | null };
+    };
+    expect(result.details.exitCode).toBe(3);
+    expect(result.content[0]?.text).toContain("Command exited with code 3");
+    expect(engineSubmissions).toHaveLength(0);
+    expect(app.reviewInputs).toHaveLength(0);
+
+    // The completed result still reaches the model as a failed command.
+    await expect(
+      invoke(app, "tool_result", {
+        type: "tool_result",
+        toolCallId: "yolo-direct-exit",
+        toolName: "bash",
+        input: { command: "printf boom" },
+        content: result.content,
+        details: result.details,
+        isError: false,
+      }),
+    ).resolves.toEqual({ isError: true });
+  });
+
+  it("warns about possible effects when a direct yolo command fails after starting", async () => {
+    // The command started, so a later infrastructure failure must not read as a
+    // clean permission failure the agent may simply retry.
+    const app = await makeHarness({
+      risk: () => blockRisk(),
+      localPostExit0Error: new Error("output temp file could not be closed"),
+    });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+
+    await expect(executeBash(app, "yolo-post-exec", "printf ok")).rejects.toMatchObject({
+      code: "execution-failed",
+      effectsMayHaveOccurred: true,
+      message: expect.stringMatching(
+        /Earlier effects may have occurred[\s\S]*output temp file could not be closed/,
+      ),
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it("aborts a running direct yolo Bash when the turn closes, marking effects", async () => {
+    // The Engine aborts its in-flight attempts when a turn closes; the direct
+    // path owns no Engine attempt, so the register layer must signal the same
+    // cancellation and keep the context-changed classification.
+    const app = await makeHarness({ risk: () => blockRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+    await startAgent(app);
+
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    app.bareBashExecute.mockImplementation(async () => {
+      entered();
+      await endAgent(app);
+      return { content: [], details: undefined };
+    });
+
+    const pending = executeBash(app, "yolo-turn-close", "printf slow");
+    await entry;
+    await expect(pending).rejects.toMatchObject({
+      code: "stale-invocation",
+      effectsMayHaveOccurred: true,
+      message: expect.stringContaining("Earlier effects may have occurred"),
+    });
+    expect(app.reviewInputs).toHaveLength(0);
+  });
+
+  it("refuses a second direct yolo Bash on the same tool-call ID", async () => {
+    // The Engine rejects a duplicate tool-call ID at its own in-flight set; the
+    // direct path runs that check itself.
+    const app = await makeHarness({ risk: () => blockRisk() });
+    await startSession(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    app.bareBashExecute.mockImplementation(async () => {
+      entered();
+      await gate;
+      return { content: [], details: undefined };
+    });
+
+    const first = executeBash(app, "yolo-shared-id", "printf first");
+    await entry;
+    await expect(executeBash(app, "yolo-shared-id", "printf second")).rejects.toMatchObject({
+      code: "concurrent-invocation",
+      message: expect.stringContaining(
+        "Another permission-controlled action is already in progress",
+      ),
+    });
+    release();
+    await first;
+    expect(app.bareBashExecute).toHaveBeenCalledOnce();
   });
 
   it("keeps a local post-exec infrastructure failure terminal even after exit 0", async () => {

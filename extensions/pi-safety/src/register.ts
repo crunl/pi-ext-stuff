@@ -116,6 +116,7 @@ import {
   plainReviewResultRenderer,
   type ReviewPartialResult,
   type ReviewRenderResult,
+  type ReviewStatusBridge,
 } from "./review-renderer.ts";
 import {
   evaluateHostFirstRulesOnly,
@@ -159,6 +160,23 @@ function policyDeniedError(reason: string): Error {
   );
 }
 
+/**
+ * The same agent-facing failure shape `executePermissionAction` renders from
+ * an Engine outcome, for register-layer paths that submit no invocation.
+ */
+function agentPermissionError(
+  code: "aborted" | "concurrent-invocation" | "execution-failed" | "stale-invocation",
+  reason: string,
+  effectsMayHaveOccurred = false,
+): Error {
+  const permissionError = {
+    code,
+    reason,
+    ...(effectsMayHaveOccurred ? { effectsMayHaveOccurred: true as const } : {}),
+  };
+  return Object.assign(new Error(renderPermissionErrorForAgent(permissionError)), permissionError);
+}
+
 export type GuardianPolicySource = (context: {
   cwd: string;
   configFingerprint: string;
@@ -186,6 +204,17 @@ interface EffectiveExecutionContext {
   config: SafetyConfig;
   baseSandboxConfig?: SandboxPolicy;
   sandboxReady: boolean;
+}
+
+/**
+ * A direct-yolo bash attempt. Mirrors the Engine's `InFlightAttempt` in the two
+ * respects the register layer must preserve: the abort controller that a
+ * closing turn signals, and the terminal error that records why.
+ */
+interface YoloDirectAttempt {
+  readonly turnDepth: number;
+  readonly controller: AbortController;
+  terminalError?: Error;
 }
 
 class ActivationSupersededError extends Error {
@@ -317,6 +346,36 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     | undefined;
   const session = new PermissionSession();
+  /**
+   * In-flight tool-call IDs of direct-yolo bash attempts. The Engine rejects a
+   * duplicate at its own `inFlightCallIds`; the direct path submits no Engine
+   * invocation, so the same dedup runs here. Tool-call IDs are globally unique,
+   * so one registry covers every nesting level.
+   */
+  const yoloDirectCallIds = new Set<string>();
+  /**
+   * Abort channel for direct-yolo bash attempts, which own no Engine attempt
+   * record. Every transition that ends or invalidates a permission context
+   * aborts the entries it owns, mirroring Engine `abortAttempts`/`closeState`.
+   * `turnDepth` scopes a nested close to the entries its own level started.
+   */
+  const yoloDirectAttempts = new Set<YoloDirectAttempt>();
+  const abortYoloDirectAttempts = (reason: string, minTurnDepth = 1): void => {
+    // Engine parity for a closed/invalidated turn: the attempt keeps the
+    // context-changed classification instead of the raw abort error, and the
+    // command may already have run, so effects are marked.
+    const terminalError = agentPermissionError(
+      "stale-invocation",
+      "Permission context changed",
+      true,
+    );
+    for (const entry of yoloDirectAttempts) {
+      if (entry.turnDepth < minTurnDepth) continue;
+      yoloDirectAttempts.delete(entry);
+      entry.terminalError ??= terminalError;
+      entry.controller.abort(new Error(reason));
+    }
+  };
   let baseSandboxConfig: SandboxPolicy | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -370,8 +429,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     autoReviewer.invalidateSession();
   };
 
-  const resetBranchPermissionContext = (reason: string): void => {
+  /**
+   * Every register-layer permission invalidation must also stop the direct-yolo
+   * attempts the Engine never owned; `permissions.invalidate` alone cannot.
+   */
+  const invalidatePermissions = (reason: string): void => {
+    abortYoloDirectAttempts(reason);
     permissions.invalidate(reason);
+  };
+
+  const resetBranchPermissionContext = (reason: string): void => {
+    invalidatePermissions(reason);
     session.bumpGeneration();
     cancelInFlightModeTransition();
     guardianTranscript = [];
@@ -701,12 +769,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // fallback path, which never pushed an Engine turn.
     if (session.getTurnDepth() > 1) {
       const closesEngineNestedTurn = session.activeNestedTurnHasSnapshot();
+      // A session-only nested level has no separate depth to scope to; it
+      // shares the innermost snapshot with its parent level, so its own
+      // direct attempts close with it.
+      const nestedDepth = session.getTurnDepth();
       session.finishNestedTurn();
+      abortYoloDirectAttempts(reason, nestedDepth);
       if (closesEngineNestedTurn) permissions.closeNestedTurn(reason);
       return undefined;
     }
     const closingTurnId = session.finishNestedTurn();
     if (closingTurnId === undefined) return undefined;
+    abortYoloDirectAttempts(reason);
     permissions.closeTurn(reason);
     if (guardianInvalidationAfterModeChange) {
       guardianInvalidationAfterModeChange = false;
@@ -834,7 +908,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     activationFailure = undefined;
     configFailure = undefined;
     if (force) {
-      permissions.invalidate("permission context changed");
+      invalidatePermissions("permission context changed");
       invalidatePermissionContext("permission context changed");
     }
     loaded = candidate;
@@ -1123,8 +1197,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * never by hot-swapping the sandbox profile mid-attempt.
    *
    * Must call activateConfig with force=false: force=true goes through
-   * commitActivation's permissions.invalidate and would wipe grants, nested
-   * turns, and the Auto denial circuit at the step boundary.
+   * commitActivation's invalidatePermissions (which aborts in-flight direct
+   * yolo attempts) and would wipe grants, nested turns, and the Auto
+   * denial circuit at the step boundary.
    */
   const applyPendingTurnModeRefresh = async (ctx: ExtensionContext): Promise<void> => {
     if (!modeRuntime || !loaded) return;
@@ -1557,6 +1632,88 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     return runtimeDenialFromEvidence(evidence, capability);
   };
 
+  const executeYoloDirectBash = async (
+    id: string,
+    params: BashParams,
+    signal: AbortSignal | undefined,
+    reviewBridge: ReviewStatusBridge,
+    executionSnapshot: PermissionExecutionSnapshot,
+    canonicalCwd: string,
+  ): Promise<BashResult> => {
+    // Yolo submits no Engine invocation, so the guards the Engine applies to a
+    // queued action are re-applied here against the live turn.
+    if (
+      session.getTurnPhase() !== "active" ||
+      session.currentExecutionSnapshot() !== executionSnapshot
+    ) {
+      throw agentPermissionError("stale-invocation", "Turn changed while action was queued");
+    }
+    if (signal?.aborted) throw agentPermissionError("aborted", "Operation aborted");
+    if (yoloDirectCallIds.has(id)) {
+      throw agentPermissionError(
+        "concurrent-invocation",
+        "Another invocation owns this tool-call ID",
+      );
+    }
+    yoloDirectCallIds.add(id);
+    const attempt: YoloDirectAttempt = {
+      turnDepth: session.getTurnDepth(),
+      controller: new AbortController(),
+    };
+    yoloDirectAttempts.add(attempt);
+    const attemptSignal = signal
+      ? AbortSignal.any([signal, attempt.controller.signal])
+      : attempt.controller.signal;
+    // The same exit-code seam the Engine-driven unrestricted lease uses: pi
+    // renders a non-zero or null status as a thrown error, and only the
+    // captured status at the operations seam can classify it as the command's
+    // own result rather than a permission failure.
+    const exitCodeSlot: ExitCodeSlot = { code: undefined };
+    const localBash = () =>
+      bashToolFactory(canonicalCwd, {
+        operations: captureExitCode(resolveLocalBashOperations(), exitCodeSlot, "local"),
+      });
+    // Effects are possible from the moment the child may have started. Both
+    // failure paths below run after `execute`, and a timeout can leave the
+    // slot empty even though the command already ran, so the flag is the
+    // engine's own rule: an attempt that reached the executor may have acted.
+    try {
+      const value = await localBash().execute(
+        id,
+        params,
+        attemptSignal,
+        reviewBridge.onUpdate as BashOnUpdate,
+      );
+      // Engine parity: a terminal turn error or a mid-flight abort outranks a
+      // returned result, and a turn that changed while the command ran is a
+      // stale invocation whose effects may already exist.
+      if (attempt.terminalError) throw attempt.terminalError;
+      if (
+        session.getTurnPhase() !== "active" ||
+        session.currentExecutionSnapshot() !== executionSnapshot
+      ) {
+        throw agentPermissionError("stale-invocation", "Permission context changed", true);
+      }
+      if (attemptSignal.aborted) {
+        throw agentPermissionError("aborted", "Operation aborted", true);
+      }
+      return value;
+    } catch (error: unknown) {
+      if (attempt.terminalError) throw attempt.terminalError;
+      if (attemptSignal.aborted) {
+        throw agentPermissionError("aborted", "Operation aborted", true);
+      }
+      const completed = completedIfCommandRan(error, error, exitCodeSlot);
+      if (completed) return completed;
+      // The Engine marks any executor failure as possibly effectful, whether
+      // it threw or returned a failure outcome.
+      throw agentPermissionError("execution-failed", errorMessage(error), true);
+    } finally {
+      yoloDirectCallIds.delete(id);
+      yoloDirectAttempts.delete(attempt);
+    }
+  };
+
   const executePermissionedBash = async (
     id: string,
     params: BashParams,
@@ -1577,17 +1734,34 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const canonicalParams = call.input;
     const capturedTranscript = currentGuardianTranscriptSnapshot();
     const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
+    // SAFETY: the bridge invokes onUpdate solely with ReviewPartialResult
+    // payloads, which the host update channel accepts; no other call shape
+    // flows through this seam.
+    const reviewBridge = createReviewStatusBridge(
+      onUpdate as unknown as (result: ReviewPartialResult) => void,
+      ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
+    );
+    // Yolo submits no invocation, so nothing in the Engine's unrestricted
+    // lease can clear a review it never entered; the direct path owns the
+    // execution instead (see executeYoloDirectBash).
+    if (executionSnapshot.mode === "yolo") {
+      return executeYoloDirectBash(
+        actionId,
+        canonicalParams,
+        signal,
+        reviewBridge,
+        executionSnapshot,
+        canonicalCwd,
+      );
+    }
 
-    const risk =
-      executionSnapshot.mode === "yolo"
-        ? undefined
-        : await evaluateManagedRisk(
-            "bash",
-            canonicalParams as Record<string, unknown>,
-            ctx,
-            executionContext,
-            canonicalCwd,
-          );
+    const risk = await evaluateManagedRisk(
+      "bash",
+      canonicalParams as Record<string, unknown>,
+      ctx,
+      executionContext,
+      canonicalCwd,
+    );
     // Ceiling before review: admission-declared roots/hosts merge into the
     // execution lease, so an allow-risk verdict would otherwise carry an
     // out-of-envelope capability past the narrowed child base policy.
@@ -1626,10 +1800,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // SAFETY: the bridge invokes onUpdate solely with ReviewPartialResult
     // payloads, which the host update channel accepts; no other call shape
     // flows through this seam.
-    const reviewBridge = createReviewStatusBridge(
-      onUpdate as unknown as (result: ReviewPartialResult) => void,
-      ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
-    );
     const action: PiAction<BashResult, PiGuardianReviewContext, BashParams> = {
       captured,
       kind: "sandbox",
@@ -2322,7 +2492,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   });
 
   pi.on("session_shutdown", async () => {
-    permissions.invalidate("session shutdown");
+    invalidatePermissions("session shutdown");
     session.bumpGeneration();
     cancelInFlightModeTransition();
     session.resetTurn();
@@ -2565,7 +2735,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             settleModeTransitionBarrier(transitionBarrier, true);
             return;
           }
-          permissions.invalidate(PERMISSION_MODE_CHANGED_REASON);
+          invalidatePermissions(PERMISSION_MODE_CHANGED_REASON);
           invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           let runtime = modeRuntime;
           if (!runtime) {

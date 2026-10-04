@@ -34,10 +34,10 @@ describe("permission session state", () => {
     expect(calls).toEqual([["pi-safety-state", state]]);
   });
 
-  it("restores the last valid state entry, coercing legacy modes to auto", () => {
+  it("restores the last valid state entry, coercing removed modes to auto", () => {
     const malformed: unknown[] = [];
     const first = {
-      mode: "plan" as string,
+      mode: "unsupported" as string,
       auto: { consecutiveDenials: 1, paused: false },
       sandboxProfile: "workspace-write" as const,
       configFingerprint: fingerprintConfig(DEFAULT_CONFIG),
@@ -61,13 +61,13 @@ describe("permission session state", () => {
     expect(state).toEqual(latest);
     expect(malformed).toHaveLength(1);
 
-    // A session persisted with a removed default/plan mode restores as auto.
-    const legacyOnly = reducePermissionEntries(
+    // A session persisted with a removed mode restores as auto.
+    const removedModeOnly = reducePermissionEntries(
       [{ type: "custom", customType: "pi-safety-state", data: first }],
       DEFAULT_CONFIG,
     );
-    expect(legacyOnly.mode).toBe("auto");
-    expect(legacyOnly.auto.consecutiveDenials).toBe(1);
+    expect(removedModeOnly.mode).toBe("auto");
+    expect(removedModeOnly.auto.consecutiveDenials).toBe(1);
   });
 
   it("restores a persisted YOLO session state", () => {

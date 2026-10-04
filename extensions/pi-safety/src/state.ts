@@ -4,9 +4,6 @@ import { isRecord } from "./unknown-value.ts";
 
 export type PermissionMode = "auto" | "yolo";
 
-/** Modes persisted by older versions; they restore as "auto". */
-const legacyModes = new Set<string>(["default", "plan"]);
-
 export interface PermissionSessionState {
   mode: PermissionMode;
   auto: { consecutiveDenials: number; paused: boolean };
@@ -26,13 +23,7 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 
 function isSessionState(value: unknown): value is PermissionSessionState {
   if (!isRecord(value)) return false;
-  // Accept legacy modes here so reducePermissionEntries can coerce them.
-  if (
-    typeof value.mode !== "string" ||
-    (!isPermissionMode(value.mode) && !legacyModes.has(value.mode))
-  ) {
-    return false;
-  }
+  if (typeof value.mode !== "string") return false;
   const auto = value.auto;
   if (!isRecord(auto)) return false;
   return (
@@ -75,7 +66,7 @@ export function reducePermissionEntries(
       continue;
     }
     state = structuredClone(candidate.data);
-    if (!isPermissionMode(state.mode)) state.mode = "auto"; // legacy default/plan -> auto
+    if (!isPermissionMode(state.mode)) state.mode = "auto"; // unsupported persisted mode restores as auto
   }
   return state;
 }
