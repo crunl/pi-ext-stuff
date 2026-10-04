@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerAutocompleteAbove } from "./tui/autocomplete-above.ts";
 import { registerCodexToolRendering } from "./tui/built-in-tools.ts";
 import { registerCanonicalBuiltinFallback } from "./tui/canonical-tool-fallback.ts";
 import { registerCodemodeTreeTool } from "./tui/codemode-tool.ts";
+import { registerEditorChrome } from "./tui/editor-chrome.ts";
 import { registerEffortCommand } from "./tui/effort-command.ts";
 import { registerExitCommand } from "./tui/exit-command.ts";
 import { applyMarkdownCodeFrame } from "./tui/markdown-code-frame.ts";
@@ -17,7 +17,7 @@ export function registerExtension(pi: ExtensionAPI): void {
   registerCodexToolRendering(pi);
   registerCodemodeTreeTool(pi);
   registerCanonicalBuiltinFallback(pi);
-  registerAutocompleteAbove(pi);
+  registerEditorChrome(pi);
   registerSelectorTabNav(pi);
   registerEffortCommand(pi);
   registerExitCommand(pi);

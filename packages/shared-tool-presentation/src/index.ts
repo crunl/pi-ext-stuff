@@ -22,6 +22,14 @@ export {
   summarizeBashOutput,
   summarizeEditDiff,
 } from "./codex-tool-specs.ts";
+export {
+  BADGE_CAP_WIDTH,
+  PL_LEFT,
+  PL_RIGHT,
+  contrastTextFor,
+  makeModeBadgeDecorator,
+  parseTruecolor,
+} from "./badge.ts";
 export { createEditDiffBox, parseEditDiff } from "./edit-diff.ts";
 export { createBashExpandedEvidence, commandGlance, BASH_GLANCE_BUDGET } from "./bash-evidence.ts";
 export { highlightShellCommandLines, MAX_COMMAND_CHARS } from "./shell-command-highlight.ts";
@@ -30,3 +38,9 @@ export {
   type CodexToolRendererSpec,
 } from "./tool-renderer.ts";
 export { type OutputPad, type OutputPaddingSource } from "./output-padding.ts";
+export {
+  type ModeSeverity,
+  type PermissionsModeEvent,
+  isPermissionsModeEvent,
+  PermissionsModeState,
+} from "./permissions-mode.ts";

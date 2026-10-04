@@ -18,7 +18,7 @@
  * (no Pi isLight API for custom themes).
  */
 
-import { parseTruecolor } from "./badge.ts";
+import { parseTruecolor } from "../../../packages/shared-tool-presentation/src/badge.ts";
 
 export type PaletteKey = "model" | "folder" | "git";
 export type EffortLevel =

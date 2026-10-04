@@ -1,12 +1,11 @@
 /**
- * statusline — custom footer + boxed editor chrome with embedded status.
+ * statusline — custom footer.
  *
  * Layout:
  *   [ messages ... ]
- *   ╭──Auto────────────── ↑284k ↓37.3k ─╮   <- editor top (pill + stats)
- *   │ input…                              │
- *   ╰─────────────────────────────────────╯   <- editor bottom (plain when
- *                                                SHOW_MODEL_ON_BORDER=false)
+ *   ╭──Auto────────────────────────────────╮  <- editor chrome (core-owned)
+ *   │ input…                                │
+ *   ╰──────────────────────────────────────╯
  *   modeleffortfolderbranch   CH% █░ tok  <- footer powerline + stats
  *   [other extensions' statuses]              <- footer.ts (optional line 2)
  *
@@ -14,29 +13,14 @@
  *   /statusline  — toggle between this statusline and the built-in layout
  */
 
-import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installFooter } from "./footer.ts";
 import { resolveModelInfo } from "./model-info.ts";
-import { applyBoxChrome, type ModelPillColor } from "./model-editor.ts";
-import { isPermissionsModeEvent, PermissionsModeState } from "./status-mode.ts";
-import { computeUsageTotals } from "./usage.ts";
 
 export default function statusline(pi: ExtensionAPI) {
 	let enabled = true;
-	// Live model info shared with the editor via closure; updated on events.
+	// Live model info shared with the footer via closure; updated on events.
 	let currentCtx: ExtensionContext | undefined;
-	const permissionsMode = new PermissionsModeState();
-
-	// Mode badge source: structured "pi-safety:mode" bus events only. The
-	// event's label is the badge text; its severity drives visibility and
-	// color. The setStatus string the publisher emits in the same call is
-	// the built-in footer's generic status text and does not drive the badge.
-	// requestRender is captured from the footer factory once installed.
-	let requestRender: (() => void) | undefined;
-	pi.events.on("pi-safety:mode", (data) => {
-		if (!isPermissionsModeEvent(data)) return;
-		if (permissionsMode.applyEvent(data)) requestRender?.();
-	});
 
 	const modelInfo = () => {
 		const ctx = currentCtx;
@@ -49,71 +33,15 @@ export default function statusline(pi: ExtensionAPI) {
 		});
 	};
 
-	const stats = () => {
-		if (!currentCtx) return undefined;
-		const totals = computeUsageTotals(currentCtx);
-		return { input: totals.input, output: totals.output };
-	};
-
 	const install = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		currentCtx = ctx;
 
-		installFooter(ctx, {
-			getModelInfo: modelInfo,
-			onRequestRender: (fn) => {
-				requestRender = fn;
-			},
-		});
-
-		const previous = ctx.ui.getEditorComponent();
-		if ((previous as { __statuslineBoxChrome?: boolean } | undefined)?.__statuslineBoxChrome) return;
-
-		const factory = (
-			tui: Parameters<NonNullable<typeof previous>>[0],
-			theme: Parameters<NonNullable<typeof previous>>[1],
-			keybindings: Parameters<NonNullable<typeof previous>>[2],
-		) => {
-			const editor = previous
-				? previous(tui, theme, keybindings)
-				: new CustomEditor(tui, theme, keybindings);
-
-			return applyBoxChrome(editor, {
-				getModelInfo: modelInfo,
-				getStats: stats,
-				getPermissionsMode: () => {
-					const severity = permissionsMode.severity();
-					const label = permissionsMode.get();
-					if (severity === "none" || label === undefined) return undefined;
-					return { label, severity };
-				},
-				getBadgeFgAnsi: (color) => {
-					try {
-						// SAFETY: ctx.ui.theme is the full Theme object at runtime exposing getFgAnsi.
-						return (ctx.ui.theme as unknown as { getFgAnsi(c: string): string })?.getFgAnsi(color);
-					} catch {
-						return undefined;
-					}
-				},
-				getPillFgAnsi: (color: ModelPillColor) => {
-					try {
-						// SAFETY: ctx.ui.theme is the full Theme object at runtime exposing getFgAnsi.
-						return (ctx.ui.theme as unknown as { getFgAnsi(c: string): string })?.getFgAnsi(color);
-					} catch {
-						return undefined;
-					}
-				},
-				isEnabled: () => enabled,
-			});
-		};
-
-		(factory as { __statuslineBoxChrome?: boolean }).__statuslineBoxChrome = true;
-		ctx.ui.setEditorComponent(factory);
+		installFooter(ctx, { getModelInfo: modelInfo });
 	};
 
 	const uninstall = (ctx: ExtensionContext) => {
 		ctx.ui.setFooter(undefined);
-		permissionsMode.reset();
 	};
 
 	// Install on every session (also covers /resume, forks, session switches)
@@ -121,22 +49,21 @@ export default function statusline(pi: ExtensionAPI) {
 		if (enabled) install(ctx);
 	});
 
-	// Model or thinking level changed — editor border reads modelInfo() live,
-	// just keep ctx fresh (ctx.model/thinkingLevel are per-context snapshots).
+	// Model or thinking level changed — footer reads modelInfo() live.
 	pi.on("model_select", (_event, ctx) => {
 		currentCtx = ctx;
 	});
 
 	pi.registerCommand("statusline", {
-		description: "Toggle custom statusline (footer + editor border model info)",
+		description: "Toggle custom statusline footer",
 		handler: async (_args, ctx) => {
 			enabled = !enabled;
 			if (enabled) {
 				install(ctx);
-				ctx.ui.notify("statusline: custom layout enabled", "info");
+				ctx.ui.notify("statusline: custom footer enabled", "info");
 			} else {
 				uninstall(ctx);
-				ctx.ui.notify("statusline: built-in layout restored", "info");
+				ctx.ui.notify("statusline: built-in footer restored", "info");
 			}
 		},
 	});

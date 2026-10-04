@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseTruecolor } from "../src/badge.ts";
+import { parseTruecolor } from "../../../packages/shared-tool-presentation/src/badge.ts";
 import { resolveModelInfo } from "../src/model-info.ts";
 import {
 	effortColor,

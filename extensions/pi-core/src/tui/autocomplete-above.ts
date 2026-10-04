@@ -1,10 +1,8 @@
-import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { EditorFloatPanel, type FloatingTui } from "./editor-float-panel.ts";
 import { FRAME_OVERHEAD, frameLines, padToWidth } from "./frame.ts";
 import { installSelectorFloat } from "./selector-float.ts";
 import { SELECT_DOWN, SELECT_UP, setSelectorNavAnchor } from "./selector-tab-nav.ts";
-import { isInteractiveTui } from "./ui-guard.ts";
 
 /** Mirror of pi-tui AutocompleteItem (official contract). */
 interface CompletionItem {
@@ -170,30 +168,4 @@ export function applyAutocompleteAbove<T extends PatchableEditor>(editor: T, tui
   };
 
   return editor;
-}
-
-/**
- * Install the above-panel behavior. Composes with an editor factory set by an
- * earlier extension; extensions that install their own editor AFTER pi-core
- * (e.g. statusline) must call applyAutocompleteAbove() on their instance.
- */
-export function registerAutocompleteAbove(pi: ExtensionAPI): void {
-  pi.on("session_start", (_event, ctx) => {
-    if (!isInteractiveTui(ctx)) return;
-    const previous = ctx.ui.getEditorComponent();
-    // The host resets the editor factory before re-emitting session_start,
-    // but guard anyway: never wrap our own factory (would grow the closure
-    // chain across resumes/forks if that reset ever changes).
-    if ((previous as { __autocompleteAbove?: boolean } | undefined)?.__autocompleteAbove) return;
-    const factory = (
-      tui: Parameters<NonNullable<typeof previous>>[0],
-      theme: Parameters<NonNullable<typeof previous>>[1],
-      keybindings: Parameters<NonNullable<typeof previous>>[2],
-    ) =>
-      previous
-        ? applyAutocompleteAbove(previous(tui, theme, keybindings), tui)
-        : applyAutocompleteAbove(new CustomEditor(tui, theme, keybindings), tui);
-    (factory as { __autocompleteAbove?: boolean }).__autocompleteAbove = true;
-    ctx.ui.setEditorComponent(factory);
-  });
 }

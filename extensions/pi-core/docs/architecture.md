@@ -97,9 +97,19 @@ Adding an export here is the only supported way to widen the contract.
   Duration is a memory side-channel from `thinking_start`/`thinking_delta`;
   resume degrades to `Thought`. Expand remains host-owned (click / ctrl+t).
   Not exported from `standalone.ts`.
-- Floating overlay chain (call order): `autocomplete-above.ts` installs the
-  autocomplete provider and the editor float panel
-  (`editor-float-panel.ts`); `selector-float.ts` marks floatable selectors and
+- Floating overlay chain (call order): `editor-chrome.ts` installs one
+  editor factory that composes `model-editor.ts` (rounded box +
+  permissions-mode badge in the top border) inner and
+  `autocomplete-above.ts` (autocomplete provider and the editor float
+  panel, `editor-float-panel.ts`) outer, so the panel aligns with the
+  box. The badge state comes from pi-safety's structured
+  `pi-safety:mode` bus event (`severity` drives visibility/color,
+  `label` is display copy); a state change repaints via the editor
+  factory's `tui.requestRender()`. Box geometry lives in
+  `box-editor.ts` (corner/rail wrapping; scroll-indicator rows count as
+  borders) and `border-labels.ts` (top-border segments); badge pill
+  rendering comes from `@crunl/shared-tool-presentation`
+  (`badge.ts`). `selector-float.ts` marks floatable selectors and
   `selector-tab-nav.ts` anchors Shift+Tab navigation into them. Placement uses
   public `TUI.mode`, `children`, `showOverlay`, and the regular renderer's
   `captureRenderState()`; fullscreen autocomplete uses the bottom dock while

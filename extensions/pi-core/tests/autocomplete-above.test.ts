@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  applyAutocompleteAbove,
-  registerAutocompleteAbove,
-} from "../src/tui/autocomplete-above.ts";
+import { applyAutocompleteAbove } from "../src/tui/autocomplete-above.ts";
 import type { FloatingTui } from "../src/tui/editor-float-panel.ts";
 import { frameLines } from "../src/tui/frame.ts";
 
@@ -300,80 +297,5 @@ describe("applyAutocompleteAbove - enter completion", () => {
 
     expect(editor.__received).toEqual(["\t"]);
     expect(editor.__received).not.toContain("\r"); // never reaches submit
-  });
-});
-
-describe("registerAutocompleteAbove", () => {
-  function sessionStartContext() {
-    let editorFactory: any;
-    const ctx = {
-      hasUI: true,
-      mode: "tui",
-      ui: {
-        getEditorComponent: () => editorFactory,
-        setEditorComponent: (factory: any) => {
-          editorFactory = factory;
-        },
-      },
-    };
-    return { ctx, getFactory: () => editorFactory };
-  }
-
-  function fakePi(handlers: Map<string, (event: unknown, ctx: unknown) => void>) {
-    return {
-      on: (name: string, handler: (event: unknown, ctx: unknown) => void) => {
-        handlers.set(name, handler);
-      },
-    } as any;
-  }
-
-  it("installs a patched editor factory on session_start", () => {
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
-    registerAutocompleteAbove(fakePi(handlers));
-
-    const { ctx, getFactory } = sessionStartContext();
-    handlers.get("session_start")?.({}, ctx);
-
-    expect(typeof getFactory()).toBe("function");
-  });
-
-  it("wraps a previously installed factory instead of discarding it", () => {
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
-    registerAutocompleteAbove(fakePi(handlers));
-
-    const inner = fakeEditor();
-    const previous = vi.fn(() => inner);
-    const { ctx, getFactory } = sessionStartContext();
-    ctx.ui.setEditorComponent(previous);
-    handlers.get("session_start")?.({}, ctx);
-
-    const produced = getFactory()({}, {}, {});
-    expect(previous).toHaveBeenCalledOnce();
-    expect(produced).toBe(inner);
-    expect((produced as any).__autocompleteAbove).toBe(true);
-  });
-
-  it("does not re-wrap its own factory on repeated session_start", () => {
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
-    registerAutocompleteAbove(fakePi(handlers));
-
-    const { ctx, getFactory } = sessionStartContext();
-    handlers.get("session_start")?.({}, ctx);
-    const first = getFactory();
-    handlers.get("session_start")?.({}, ctx); // host did NOT reset
-    handlers.get("session_start")?.({}, ctx);
-
-    expect(getFactory()).toBe(first); // unchanged, no nesting
-  });
-
-  it("does not install terminal components in RPC mode", () => {
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
-    registerAutocompleteAbove(fakePi(handlers));
-
-    const { ctx, getFactory } = sessionStartContext();
-    ctx.mode = "rpc";
-    handlers.get("session_start")?.({}, ctx);
-
-    expect(getFactory()).toBeUndefined();
   });
 });

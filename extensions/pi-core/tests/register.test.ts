@@ -4,6 +4,7 @@ import registerExtension from "../index.ts";
 function createPiMock(overrides: Record<string, unknown> = {}) {
   return {
     on: vi.fn(),
+    events: { on: vi.fn() },
     registerCommand: vi.fn(),
     registerTool: vi.fn(),
     registerFlag: vi.fn(),
@@ -50,6 +51,20 @@ describe("pi-core registration", () => {
     ]) {
       expect(events.has(event)).toBe(true);
     }
+  });
+
+  it("subscribes the editor chrome to the pi-safety:mode bus and session_start", () => {
+    const sessionEvents = new Set<string>();
+    const busEvents = new Set<string>();
+    registerExtension(
+      createPiMock({
+        on: (event: string) => sessionEvents.add(event),
+        events: { on: (event: string) => busEvents.add(event) },
+      }),
+    );
+
+    expect(sessionEvents.has("session_start")).toBe(true);
+    expect(busEvents.has("pi-safety:mode")).toBe(true);
   });
 
   it("registers /exit as alias for /quit", () => {

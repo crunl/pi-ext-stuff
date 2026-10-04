@@ -1,43 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	formatModelStatus,
 	isPermissionsModeEvent,
 	PermissionsModeState,
+} from "../../../packages/shared-tool-presentation/src/permissions-mode.ts";
+import {
 	partitionExtensionStatuses,
 	powerlineChain,
 	syncPermissionsMode,
 } from "../src/status-mode.ts";
-
-const info = {
-	modelId: "gpt-5.6-sol-fast",
-	effort: "xhigh",
-};
-
-test("formats model and effort as a powerline pill (inverse fallback)", () => {
-	// First segment: trailing pad only. Later segments: lead + trail.
-	assert.equal(
-		formatModelStatus(info),
-		"\uE0B6\x1b[7m\u{F035B} gpt-5.6-sol-fast \x1b[27m\uE0B0\x1b[7m \u{F09D1} xhigh \x1b[27m\uE0B4",
-	);
-});
-
-test("paints pill segments with the provided truecolor foregrounds", () => {
-	const out = formatModelStatus(
-		info,
-		"\x1b[38;2;100;100;100m",
-		"\x1b[38;2;200;50;50m",
-	);
-	assert.ok(out.includes("\x1b[48;2;100;100;100m"));
-	assert.ok(out.includes("\x1b[48;2;200;50;50m"));
-	assert.ok(out.includes("\x1b[38;2;100;100;100m\x1b[48;2;200;50;50m"));
-});
-
-test("omits the effort segment when effort is absent", () => {
-	const out = formatModelStatus({ ...info, effort: undefined });
-	assert.ok(out.includes("\u{F035B} gpt-5.6-sol-fast"));
-	assert.ok(!out.includes("\u{F09D1}"));
-});
 
 test("powerlineChain joins N segments with caps and seps", () => {
 	const out = powerlineChain([

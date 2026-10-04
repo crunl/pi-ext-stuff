@@ -9,7 +9,8 @@
  * Gutters follow settings.outputPad (read live from settings.json), so
  * footer lines up with chat messages without any sibling dependency.
  *
- * Model/effort live here when SHOW_MODEL_ON_BORDER is false.
+ * Model/effort live here (the editor border is owned by the core
+ * extension's editor chrome).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -42,18 +43,16 @@ interface FooterTheme {
 
 export interface FooterOptions {
 	getModelInfo?: () => ModelStatusInfo | undefined;
-	onRequestRender?: (requestRender: () => void) => void;
 }
 
 export function installFooter(
 	ctx: ExtensionContext,
 	options: FooterOptions = {},
 ): void {
-	const { getModelInfo, onRequestRender } = options;
+	const { getModelInfo } = options;
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
-		onRequestRender?.(() => queueMicrotask(() => tui.requestRender()));
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 
 		return {

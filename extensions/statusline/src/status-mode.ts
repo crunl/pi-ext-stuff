@@ -1,5 +1,4 @@
-import { contrastTextFor, parseTruecolor, PL_LEFT, PL_RIGHT } from "./badge.ts";
-import { ICONS } from "./format.ts";
+import { contrastTextFor, parseTruecolor, PL_LEFT, PL_RIGHT } from "../../../packages/shared-tool-presentation/src/badge.ts";
 
 /** Powerline right solid arrowhead — segment divider inside the pill. */
 const PL_SEP = "";
@@ -30,33 +29,12 @@ export function powerlineChain(segments: readonly PowerlineSegment[]): string {
 	if (segments.length === 0) return "";
 	const first = segments[0]!;
 	let out = cap(PL_LEFT, first.ansi) + body(`${first.text} `, first.ansi);
-	for (let i = 1; i < segments.length; i++) {
+	for (let i = 1; i < segments.length; i += 1) {
 		const prev = segments[i - 1]!;
 		const cur = segments[i]!;
 		out += sep(prev.ansi, cur.ansi) + body(` ${cur.text} `, cur.ansi);
 	}
 	return out + cap(PL_RIGHT, segments[segments.length - 1]!.ansi);
-}
-
-/**
- * Bottom-border label: powerline pill with model, optional effort segment
- * split by a half-triangle. Mode lives in the top border.
- *
- *   model
- *   modeleffort
- */
-export function formatModelStatus(
-	info: ModelStatusInfo,
-	modelAnsi?: string,
-	effortAnsi?: string,
-): string {
-	const segments: PowerlineSegment[] = [
-		{ text: `${ICONS.model} ${info.modelId}`, ansi: modelAnsi },
-	];
-	if (info.effort) {
-		segments.push({ text: `${ICONS.effort} ${info.effort}`, ansi: effortAnsi });
-	}
-	return powerlineChain(segments);
 }
 
 function cap(glyph: string, ansi: string | undefined): string {
@@ -83,30 +61,6 @@ function sep(leftAnsi: string | undefined, rightAnsi: string | undefined): strin
 	return `${fg}${bg}${PL_SEP}\x1b[39m\x1b[49m`;
 }
 
-/** Badge severity published by pi-safety ("none" hides the badge). */
-export type ModeSeverity = "none" | "warning" | "error";
-
-/** Structured mode event from pi-safety ("pi-safety:mode"). */
-export interface PermissionsModeEvent {
-	mode: string;
-	label: string;
-	severity: ModeSeverity;
-}
-
-export function isPermissionsModeEvent(
-	data: unknown,
-): data is PermissionsModeEvent {
-	if (typeof data !== "object" || data === null) return false;
-	const record = data as Record<string, unknown>;
-	return (
-		typeof record.mode === "string" &&
-		typeof record.label === "string" &&
-		(record.severity === "none" ||
-			record.severity === "warning" ||
-			record.severity === "error")
-	);
-}
-
 export function partitionExtensionStatuses(
 	statuses: ReadonlyMap<string, string>,
 ): { mode: string | undefined; remaining: Array<[string, string]> } {
@@ -119,49 +73,9 @@ export function partitionExtensionStatuses(
 	};
 }
 
-/**
- * Permissions badge state. Fed by structured "pi-safety:mode" bus events
- * only. The publisher emits the event and the setStatus string atomically
- * in one call, so there is no window where only the string exists; the badge
- * stays hidden until the first event arrives.
- */
-export class PermissionsModeState {
-	#label: string | undefined;
-	#severity: ModeSeverity = "none";
-
-	/** Badge text, or undefined when the badge is hidden. */
-	get(): string | undefined {
-		return this.#severity === "none" ? undefined : this.#label;
-	}
-
-	severity(): ModeSeverity {
-		return this.#severity;
-	}
-
-	/** Apply a structured mode event. Returns true when a render is needed. */
-	applyEvent(event: PermissionsModeEvent): boolean {
-		return this.#set(event.label, event.severity);
-	}
-
-	/** Reset (e.g. statusline uninstall). */
-	reset(): boolean {
-		return this.#set(undefined, "none");
-	}
-
-	#set(label: string | undefined, severity: ModeSeverity): boolean {
-		// A hidden badge has no visible label: normalize so default→default
-		// label churn never reports a spurious render.
-		const effectiveLabel = severity === "none" ? undefined : label;
-		if (this.#label === effectiveLabel && this.#severity === severity)
-			return false;
-		this.#label = effectiveLabel;
-		this.#severity = severity;
-		return true;
-	}
-}
-
 export function syncPermissionsMode(
 	statuses: ReadonlyMap<string, string>,
 ): Array<[string, string]> {
 	return partitionExtensionStatuses(statuses).remaining;
 }
+
