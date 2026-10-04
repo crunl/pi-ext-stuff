@@ -5,11 +5,11 @@
  * backgrounds). Layout: model | effort | folder | git.
  *
  * Dark fixed: model=mauve, folder=sky, git=yellow.
- * Dark effort (docs/dark-palette-effort-research.md):
+ * Dark effort:
  *   green → blue → rosewater → flamingo → peach → pink.
  *
  * Light fixed: model=mauve (not error-red), folder=teal, git=yellow.
- * Light effort (docs/light-palette-effort-research.md):
+ * Light effort:
  *   green → blue → lavender → flamingo → peach → pink.
  *   medium uses lavender, not rosewater — Latte rosewater→flamingo
  *   adjacent ΔE is only 4.3 and would blur level changes.

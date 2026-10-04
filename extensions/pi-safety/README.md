@@ -51,7 +51,7 @@ npm run check && npm run lint && npm test
 ```
 
 See [`AGENTS.md`](AGENTS.md) (commands, product boundaries, layout) and
-[`docs/host-api-boundaries.md`](docs/host-api-boundaries.md).
+[`docs/pi-safety.md`](../../docs/pi-safety.md) for the full extension walkthrough.
 
 ## Migrating from `pi-permissions` (renamed September 2026)
 

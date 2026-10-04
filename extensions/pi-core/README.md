@@ -75,7 +75,7 @@ non-file-backed tool configuration should set it to `off`.
 - Module naming in `src/tui/*`: `create*` = pure factories, `apply*` /
   `install*` = host patches, `register*` = extension hooks.
 
-See `docs/architecture.md` for the full module map.
+See [`docs/pi-core.md`](../../docs/pi-core.md) for the full module map.
 
 ## License
 
