@@ -589,11 +589,12 @@ describe("narrow static risk contract", () => {
     // nested `rm -rf /` is analysed as a forced deletion, so these are a review (NeedsApproval).
     ['echo "x" $(rm -rf /)', "NeedsApproval"],
     ["echo 'x' $(rm -rf /)", "NeedsApproval"],
-    // A bare package manager has no verb to find, and may run install or
-    // lifecycle actions anyway. `some` over an empty operand list read as "no
-    // mutation" and auto-approved it.
-    ["npm", "NeedsApproval"],
-    ["pnpm", "NeedsApproval"],
+    // A bare package manager has no verb to find. Measured on this machine,
+    // bare `npm`/`pnpm`/`bun` only print usage/help, so they decompose to
+    // Skip; only classic `yarn` actually runs `install` and stays reviewed.
+    ["npm", "Skip"],
+    ["pnpm", "Skip"],
+    ["yarn", "NeedsApproval"],
     // `env -C DIR` moves the working directory, so operands resolve against a
     // root the request never named. The reference implementation sends the whole
     // `env` invocation to review rather than parsing the option.
@@ -742,7 +743,7 @@ describe("segment unproven cause", () => {
     ["git -c core.pager=cat log", "nested_git_program"],
     ["trap 'ls' EXIT", "program_reinterpreted"],
     ['echo "$(date)"', "substitution_unproven"],
-    ["cat <<'EOF'\nhi\nEOF", "heredoc_unproven"],
+    ["cat <<A <<'B'\n$y\nA\nx\nB", "heredoc_unproven"],
   ] as const)("names the failed clause of %s", (command, cause) => {
     const segments = parseCommandSegments(command);
     expect(segments.some((segment) => segment.unprovenCause === cause)).toBe(true);
@@ -768,10 +769,10 @@ describe("segment unproven cause", () => {
     }
   });
 
-  it("keeps the inner segment's own cause when the body rewrites argv", () => {
+  it("keeps the inner segment's own verdict when the body rewrites nothing", () => {
     const segments = parseCommandSegments("bash -c 'cat <<EOF\nx\nEOF'");
     const cat = segments.find((segment) => segment.executable === "cat");
-    expect(cat?.decomposable).toBe(false);
-    expect(cat?.unprovenCause).toBe("heredoc_unproven");
+    expect(cat?.decomposable).toBe(true);
+    expect(cat?.unprovenCause).toBeUndefined();
   });
 });

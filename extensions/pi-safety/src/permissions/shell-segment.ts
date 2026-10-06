@@ -793,6 +793,7 @@ function segmentLexFacts(source: string): SegmentFacts {
     hasExecutableSubstitution: syntax.hasExecutableSubstitution,
     hasActiveRedirect: syntax.hasActiveRedirect,
     hasHereDocument: syntax.hasHereDocument,
+    heredocExpansionRisk: false,
     bodies: syntax.liveSubstitutions,
   };
 }
@@ -843,7 +844,7 @@ function foldSegment(facts: SegmentFacts): CommandSegment {
     unprovenCause = "program_reinterpreted";
   } else if (facts.hasExecutableSubstitution) {
     unprovenCause = "substitution_unproven";
-  } else if (facts.hasHereDocument) {
+  } else if (facts.heredocExpansionRisk) {
     unprovenCause = "heredoc_unproven";
   } else if (hasGroupingWord(words)) {
     unprovenCause = "lex_incomplete";
@@ -951,6 +952,7 @@ function astSegmentFacts(command: string): SegmentFacts[] | undefined {
         lexed.hasExecutableSubstitution || segment.hasExecutableSubstitution,
       hasActiveRedirect: lexed.hasActiveRedirect || segment.hasActiveRedirect,
       hasHereDocument: lexed.hasHereDocument || segment.hasHereDocument,
+      heredocExpansionRisk: lexed.heredocExpansionRisk || segment.heredocExpansionRisk,
       // A body either front end saw gets expanded. The AST can name a substitution the
       // text scan shredded; the scan can name one the grammar hid inside a construct.
       bodies: [...new Set([...lexed.bodies, ...segment.bodies])],
@@ -1009,7 +1011,11 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
   // One walk: segments and the skipped-body lists are projections of
   // it. A second walk can store a body past the last segment, and
   // that entry is never read.
-  const { segments: chunks, skippedBodies: heredocSubstitutions } = splitShellText(command);
+  const {
+    segments: chunks,
+    skippedBodies: heredocSubstitutions,
+    heredocExpansionRisk,
+  } = splitShellText(command);
   // Substitutions inside an active heredoc body run, but the body is
   // data the splitter never lets become a chunk, so no per-chunk scan
   // can see them. They belong to the chunk that opened the heredoc,
@@ -1020,10 +1026,15 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
   const facts = chunks.map((source, index) => {
     const frontEnd = ast?.[index] ?? segmentLexFacts(source);
     const skipped = heredocSubstitutions[index];
-    if (skipped === undefined || skipped.length === 0) return frontEnd;
+    const risk = heredocExpansionRisk[index] === true;
+    const withRisk =
+      risk && !frontEnd.heredocExpansionRisk
+        ? { ...frontEnd, heredocExpansionRisk: true }
+        : frontEnd;
+    if (skipped === undefined || skipped.length === 0) return withRisk;
     return {
-      ...frontEnd,
-      bodies: [...new Set([...frontEnd.bodies, ...skipped])],
+      ...withRisk,
+      bodies: [...new Set([...withRisk.bodies, ...skipped])],
     };
   });
   const segments = facts.map((fact) => {
@@ -1067,7 +1078,13 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
       nestedFrom: "shell_body" | "substitution",
     ): CommandSegment[] => {
       const syntax = scanShellSyntax(body);
-      const bodyRewritesArgv = syntax.hasExecutableSubstitution || syntax.hasHereDocument;
+      // Only a live substitution rewrites the body's argv. A bare `<<`
+      // alone must not flip `hasHereDocument` into a forced
+      // decomposable:false + heredoc_unproven for the nested body:
+      // the direct scanShellSyntax(body) call already sees active-body
+      // `$`/backtick chars and sets hasExecutableSubstitution for them,
+      // and inert bodies never expand at all.
+      const bodyRewritesArgv = syntax.hasExecutableSubstitution;
       return parseSegmentsAtDepth(body, depth + 1).map((nestedSegment) => {
         const inherited = { ...inherit(nestedSegment), nestedFrom };
         return bodyRewritesArgv
@@ -1078,9 +1095,7 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
               // inner argv is not the argv the outer command started with. Keep
               // the inner segment's own cause when it has one; otherwise name
               // the body mechanism that forced this.
-              unprovenCause:
-                inherited.unprovenCause ??
-                (syntax.hasExecutableSubstitution ? "substitution_unproven" : "heredoc_unproven"),
+              unprovenCause: inherited.unprovenCause ?? "substitution_unproven",
             }
           : inherited;
       });

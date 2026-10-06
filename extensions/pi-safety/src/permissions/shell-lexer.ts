@@ -43,9 +43,20 @@ export function isEnvAssignmentToken(token: string): boolean {
 export function splitShellText(command: string): {
   segments: string[];
   skippedBodies: string[][];
+  /**
+   * Per-chunk liveness: index `i` is true when one of the heredocs
+   * chunk `i` opened was active (`active === true` from
+   * `inertHeredocAt(...) === undefined`) AND its body (the
+   * `heredocBodySpan` result) matched `/[$`]/` — the case where the
+   * shell would actually expand the body, so the static argv the
+   * fold reads is not the argv that runs. Inert bodies and clean
+   * bare bodies are false, and a bare `<<` alone never raises it.
+   */
+  heredocExpansionRisk: boolean[];
 } {
   const segments: string[] = [];
   const skippedBodies: string[][] = [];
+  const expansionRisk: boolean[] = [];
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaped = false;
@@ -135,6 +146,7 @@ export function splitShellText(command: string): {
           };
           const consumed = heredocBodySpan(command, newline, pending.spec);
           if (pending.active) {
+            if (/[$`]/.test(consumed.body)) expansionRisk[pending.chunk] = true;
             const bodies = scanShellSyntax(consumed.body).liveSubstitutions;
             if (bodies.length > 0) {
               skippedBodies[pending.chunk] = [...(skippedBodies[pending.chunk] ?? []), ...bodies];
@@ -151,7 +163,11 @@ export function splitShellText(command: string): {
     current += character;
   }
   if (current.trim()) segments.push(current.trim());
-  return { segments, skippedBodies };
+  return {
+    segments,
+    skippedBodies,
+    heredocExpansionRisk: segments.map((_segment, index) => expansionRisk[index] === true),
+  };
 }
 
 /**
@@ -612,6 +628,10 @@ export function scanShellSyntax(source: string): ShellSyntax {
   // Quoted-delimiter heredocs detected on the current line; each body starts
   // at the next newline, in order, the way the shell assigns them.
   const pendingHeredocs: HeredocSpec[] = [];
+  // A `#` starts a comment exactly like in `splitShellText`: only when no
+  // quote is open and it begins a word, and it ends at the newline. The
+  // substitution/redirect/control flags below never fire on comment text.
+  let comment = false;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (escaped) {
@@ -631,13 +651,24 @@ export function scanShellSyntax(source: string): ShellSyntax {
     // including the closing `"`, and report no substitution, no redirect and no
     // control operator behind it: `echo "it's" `+"`rm -rf /`"+` reached Tier 3's
     // substitution gate as satisfied and auto-approved LOW.
-    if (character === "'" && quote === undefined) {
+    if (character === "'" && quote === undefined && !comment) {
       quote = "'";
       continue;
     }
-    if (character === '"') {
+    if (character === '"' && !comment) {
       quote = quote === '"' ? undefined : '"';
       continue;
+    }
+    if (quote === undefined) {
+      if (character === "\n") {
+        comment = false;
+      } else if (
+        !comment &&
+        character === "#" &&
+        (index === 0 || /\s/.test(source[index - 1] as string))
+      ) {
+        comment = true;
+      }
     }
     // Any `$` or backtick outside a single-quoted region expands, and an expanded
     // word is whatever the variable holds — so the static argv is not the argv that
@@ -656,7 +687,7 @@ export function scanShellSyntax(source: string): ShellSyntax {
     //
     // Single-quoted regions returned above, so a literal `$` inside quotes is not
     // reached here; an escaped `\$` was consumed by the `escaped` branch.
-    if (character === "`" || character === "$") {
+    if (!comment && (character === "`" || character === "$")) {
       hasExecutableSubstitution = true;
       // Reaching here means the substitution is live: single-quoted regions
       // returned above, and `\$` was consumed by the `escaped` branch. The
@@ -674,13 +705,13 @@ export function scanShellSyntax(source: string): ShellSyntax {
         if (body !== undefined) liveSubstitutions.push(body);
       }
     }
-    if (quote === undefined && (character === "<" || character === ">")) {
+    if (!comment && quote === undefined && (character === "<" || character === ">")) {
       hasActiveRedirect = true;
     }
     // `<<WORD` (heredoc) and `<<<WORD` (here-string) feed content the char
     // segmenter keeps as separate text, so the command's real input is not in
     // the argv we parsed.
-    if (quote === undefined && character === "<" && source[index + 1] === "<") {
+    if (!comment && quote === undefined && character === "<" && source[index + 1] === "<") {
       hasHereDocument = true;
       const inert = inertHeredocAt(source, index);
       if (inert !== undefined) pendingHeredocs.push(inert);
@@ -703,6 +734,7 @@ export function scanShellSyntax(source: string): ShellSyntax {
       continue;
     }
     if (
+      !comment &&
       quote === undefined &&
       (character === "&" ||
         character === ";" ||

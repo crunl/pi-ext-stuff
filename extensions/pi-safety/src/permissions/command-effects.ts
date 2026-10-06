@@ -91,26 +91,22 @@ export type ExternalEffect = "proved" | "refuted" | "unknown";
 
 /**
  * Package managers invoked with no subcommand, which a verb scan cannot read:
- * there is no verb, so the scan finds nothing and reports no mutation, which
- * is why these are listed rather than derived.
+ * there is no verb, so the scan finds nothing and reports no mutation.
  *
- * The listing is not a claim that a bare invocation installs. Measured on this
- * machine: `npm` (11.17.0) prints usage and exits 1, `pnpm` prints usage on
- * stderr and exits 2, `bun` (1.3.14) prints its command list and exits 0, and
- * only `yarn` (1.22.22, the classic line) actually ran `install` — logging
- * `[1/4] Resolving packages…` through `[3/4] Linking dependencies…` and
- * exiting 1. Three of the four are usage output. The reason to review a bare
- * invocation is therefore that it has no verb to prove harmless, not that it
- * is known to act; reviewing a help print costs one prompt, and the opposite
- * mistake would cost more.
+ * Only `yarn` stays on that routing. Measured on this machine: `npm` (11.17.0)
+ * prints usage and exits 1, `pnpm` prints usage on stderr and exits 2, `bun`
+ * (1.3.14) prints its command list and exits 0 — all three are usage/help
+ * listings with no mutation, so a bare invocation of them is decomposable and
+ * simply Skips. Only `yarn` (1.22.22, the classic line) actually ran `install`
+ * — logging `[1/4] Resolving packages…` through `[3/4] Linking dependencies…`
+ * and exiting 1 — so bare `yarn` keeps its guarded review.
  *
- * The four names are the four the reference implementation handles at
- * `command_effect.zig:147-170`, where `reversibleNpm` and
- * `reversiblePackageRunner` both return `false` at `words.len == 0`, so a bare
- * npm/bun/pnpm/yarn gets no static answer and goes to the reviewer. This is
- * that routing, not a per-tool grammar.
+ * This is the same shape as the reference implementation's listing, not a
+ * per-tool grammar: `command_effect.zig:147-170` returns `false` at
+ * `words.len == 0` for the package runners there; the review is routing, not
+ * a claim about what each tool does.
  */
-const bareInvocationRunsActions = new Set(["bun", "npm", "pnpm", "yarn"]);
+const bareInvocationRunsActions = new Set(["yarn"]);
 
 /**
  * Whether this invocation's remote effect is unprovable, so a reviewer decides.

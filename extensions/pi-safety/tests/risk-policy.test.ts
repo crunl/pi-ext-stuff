@@ -441,7 +441,7 @@ describe("ApprovalDisposition policy gate", () => {
     'bash -c "$CMD -rf /"',
     // The substitution is inert for the parent shell but live for the body.
     "bash -c 'cat $(pwd)'",
-    "cat <<'EOF'\nhello\nEOF",
+    "cat <<A <<'B'\n$y\nA\nx\nB",
     // The word after a value-taking option is that option's value, not a script
     // operand: `bash -o pipefail` / `python -X utf8` read the program from the
     // pipe in front of them, so no word in the argv names it.
@@ -2545,7 +2545,7 @@ describe("RiskDecision residual stamps", () => {
   it("co-stamps the failed static proof beside action_review", async () => {
     const cases: [string, ResidualSignal][] = [
       ['echo "$(date)"', "substitution_unproven"],
-      ["cat <<'EOF'\nhi\nEOF", "heredoc_unproven"],
+      ["cat <<A <<'B'\n$y\nA\nx\nB", "heredoc_unproven"],
       ["kill 4321", "process_control"],
       ["GIT_TRACE=1 git status", "env_context_unproven"],
     ];

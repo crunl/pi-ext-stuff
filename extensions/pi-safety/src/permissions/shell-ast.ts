@@ -86,6 +86,15 @@ export interface SegmentFacts {
   hasExecutableSubstitution: boolean;
   hasActiveRedirect: boolean;
   hasHereDocument: boolean;
+  /**
+   * Whether one of this segment's pending heredocs was active (a bare,
+   * unquoted delimiter) AND its body carried expansion characters
+   * (`/[$`]/`). The fold gates the `heredoc_unproven` clause on this,
+   * not on the blanket `hasHereDocument` provenance marker: an inert
+   * (quoted/escaped-delimiter) body, or a bare body with no `$`/backtick,
+   * never makes the static argv a lie about the runtime argv.
+   */
+  heredocExpansionRisk: boolean;
   /** Live `$(…)`, backtick and `<(…)` bodies, in source order — the nested argv. */
   bodies: string[];
 }
@@ -399,6 +408,10 @@ function lexSegment(source: string): SegmentFacts {
     hasExecutableSubstitution: syntax.hasExecutableSubstitution,
     hasActiveRedirect: syntax.hasActiveRedirect,
     hasHereDocument: syntax.hasHereDocument,
+    // Never computed by a span-local scan: liveness runs over the chunk's
+    // pending heredocs and their bodies, which only the command-line walk
+    // (`splitShellText`) owns. `parseSegmentsAtDepth` stamps it on.
+    heredocExpansionRisk: false,
     bodies: syntax.liveSubstitutions,
   };
 }
@@ -442,6 +455,7 @@ function buildSegment(source: string, statement: StatementInfo): SegmentFacts | 
       baseline.hasExecutableSubstitution || substitutions.substitution || liveAssignments(command),
     hasActiveRedirect: baseline.hasActiveRedirect || statement.redirects.length > 0,
     hasHereDocument: baseline.hasHereDocument || hereDocuments(statement.redirects),
+    heredocExpansionRisk: false,
     bodies: substitutions.bodies,
   };
 }

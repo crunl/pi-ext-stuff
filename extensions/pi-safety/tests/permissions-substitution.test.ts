@@ -159,11 +159,15 @@ describe("inert heredoc bodies", () => {
     expect(scanShellSyntax('wc <<< "$(date)"').liveSubstitutions).toEqual(["date"]);
   });
 
-  it("names the heredoc as the failed proof, not a substitution", () => {
+  it("names no heredoc cause for a quoted-delimiter body", () => {
+    // A quoted delimiter is inert: the body is literal text, so the
+    // command stays decomposable and no tier-4b cause fires. The
+    // dangerous-looking body substitution is inert, so there is no
+    // substitution cause either.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<'EOF'\n$(date)\nEOF" }, "/work/repo"),
     );
-    expect(review).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
   it("still inspects an unquoted body, because the shell runs it", () => {
@@ -228,30 +232,25 @@ describe("active heredoc body substitutions", () => {
   it("leaves an inert body's substitution inert", () => {
     // A quoted or escaped delimiter makes the body literal text: the
     // shell never runs the substitution, so nothing may be expanded
-    // out of it. The heredoc itself is still unproven — a review,
-    // never an approval — and the codex truth table agrees (safe).
+    // out of it — and there is no expansion to review, so the command
+    // decomposes to Skip rather than a themed review.
     for (const opener of ["<<'EOF'", '<<"EOF"', "<<\\EOF"]) {
       const review = classifyRiskWithCause(
         normalizeToolCall("bash", { command: `cat ${opener}\n$(rm -rf /tmp/work)\nEOF` }, "/w/r"),
       );
-      expect(review, opener).toEqual({
-        disposition: "NeedsApproval",
-        cause: "heredoc_unproven",
-      });
+      expect(review, opener).toEqual({ disposition: "Skip" });
     }
   });
 
   it("keeps a bare command in an active body inert data", () => {
-    // No substitution, nothing runs: the body is cat's stdin, and a
-    // forced deletion spelled as plain data deletes nothing (measured
-    // in bash; codex agrees, safe).
+    // No substitution, nothing runs, and the body carries no expansion
+    // characters either: the body is cat's stdin, and a forced deletion
+    // spelled as plain data deletes nothing (measured in bash; codex
+    // agrees, safe). A bare delimiter alone no longer raises a review.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /tmp/work\nEOF" }, "/w/r"),
     );
-    expect(review).toEqual({
-      disposition: "NeedsApproval",
-      cause: "heredoc_unproven",
-    });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
   it("keeps a harmless body substitution a review, not a refusal", () => {
@@ -297,22 +296,16 @@ describe("heredoc bodies are data, not commands", () => {
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -f /tmp/work\nEOF" }, "/w/r"),
     );
-    expect(review).toEqual({
-      disposition: "NeedsApproval",
-      cause: "heredoc_unproven",
-    });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
-  it("keeps an inert body's substitution inert and the command a review", () => {
+  it("keeps an inert body's substitution inert, so the command decomposes", () => {
     const segments = parseCommandSegments("cat <<'EOF'\n$(rm -rf /)\nEOF");
     expect(segments.map((segment) => segment.executable)).toEqual(["cat"]);
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<'EOF'\n$(rm -rf /)\nEOF" }, "/w/r"),
     );
-    expect(review).toEqual({
-      disposition: "NeedsApproval",
-      cause: "heredoc_unproven",
-    });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
   it("resumes segmentation after the delimiter line", () => {
@@ -334,10 +327,7 @@ describe("heredoc bodies are data, not commands", () => {
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\nrm -rf /\nEOF && git push" }, "/w/r"),
     );
-    expect(review).toEqual({
-      disposition: "NeedsApproval",
-      cause: "heredoc_unproven",
-    });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
   it("consumes queued bodies in order, then resumes segmentation", () => {
@@ -454,9 +444,11 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // compared only with itself, and the "26 - 12 - 3" arithmetic lived in a
     // comment nothing checked.
     //
-    // `shapes[19]` and the seven over-strict entries added for the arithmetic
-    // guard are data bodies: no substitution bash would run, so the review is
-    // `heredoc_unproven` and must not be judged as a dangerous substitution. `shapes[21]` and
+    // `shapes[1]`–`shapes[3]` and `shapes[26]`–`shapes[31]` are quoted-delimiter
+    // heredocs whose bodies bash never re-reads: no `heredoc_unproven` anymore,
+    // so they decompose to `Skip`. `shapes[19]`, `shapes[23]` and `shapes[25]`
+    // are bare delimiters whose (possibly unterminated) bodies carry no `$` or
+    // backtick, so no expansion risk and no review either. `shapes[21]` and
     // `shapes[22]` are NeedsApproval *without* `dangerousSubstitution` because the
     // `$(` there is shredded by an operator or sits in a comment, so it is not
     // `nestedFrom === "substitution"` (`risk.ts`) — that asymmetry is intended.
@@ -470,9 +462,9 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // substitution, or a variable executable) and fails closed instead.
     const expected: readonly RiskClassification[] = [
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
@@ -488,19 +480,19 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "Skip" },
       { disposition: "NeedsApproval", cause: "substitution_unproven" },
       { disposition: "NeedsApproval" },
       { disposition: "NeedsApproval" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
       { disposition: "Skip" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
-      { disposition: "NeedsApproval", cause: "heredoc_unproven" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
+      { disposition: "Skip" },
       { disposition: "NeedsApproval", cause: "substitution_unproven" },
     ];
     expect(expected).toHaveLength(shapes.length);
@@ -576,7 +568,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       classifyRiskWithCause(
         normalizeToolCall("bash", { command: `cat <<2X\nbody\nX\n${forcedFile}` }, "/w/r"),
       ),
-    ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
+    ).toEqual({ disposition: "Skip" });
   });
 
   it("projects segments and skipped bodies from one traversal", () => {
@@ -673,8 +665,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
   it("leaves an inert body's substitution inert, at any queue position", () => {
     // The same bodies, quoted: bash reads them as literal text and the
     // victim file survives, so a refusal here would be a false positive.
-    // The verdict is specifically a heredoc review. A bare `.not.toBe("Skip")`
-    // would stay green if the cause drifted, which is looser.
+    // There is nothing to review at all now: an inert body never expands.
     for (const command of [
       `cat <<'EOF'\n$(${forced})\nEOF`,
       `cat <<"EOF"\n$(${forced})\nEOF`,
@@ -687,7 +678,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       expect(
         classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
-      ).toEqual({ disposition: "NeedsApproval", cause: "heredoc_unproven" });
+      ).toEqual({ disposition: "Skip" });
     }
   });
 });
