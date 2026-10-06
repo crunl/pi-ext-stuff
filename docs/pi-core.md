@@ -122,7 +122,7 @@ returns zero import statements. The real edges are:
 | Consumer | Actual import |
 | --- | --- |
 | `pi-safety` | `extensions/pi-safety/src/register.ts:27` imports `codexBashToolSpec`, `codexEditToolSpec`, `codexWriteToolSpec`, `createCodexToolRendering as createPiCoreCodexToolRendering` from `../../../packages/shared-tool-presentation/src/index.ts`. |
-| `statusline` | `extensions/statusline/src/palette.ts:21` and `extensions/statusline/src/status-mode.ts:1` import from `../../../packages/shared-tool-presentation/src/badge.ts`. |
+| `statusline` | `extensions/statusline/src/palette.ts:23` and `extensions/statusline/src/status-mode.ts:1` import from `../../../packages/shared-tool-presentation/src/badge.ts`. |
 | `tool-result-budget` | No cross-package imports; Node builtins and the extension API only (`extensions/tool-result-budget/index.ts:23-25`). |
 
 `extensions/pi-safety/tests/structure-invariants.test.ts` pins both facts: the
@@ -701,6 +701,5 @@ Two conventions to keep: every new cross-extension component is exported from
 (`extensions/pi-core/AGENTS.md:92-93`), and TUI-only behavior goes behind
 `isInteractiveTui()` (`:91`).
 
-`extensions/pi-core/AGENTS.md:89-90` still tells maintainers to keep
-`docs/architecture.md` in sync. That file is gone; this document replaced it. Update
-this file instead.
+`extensions/pi-core/AGENTS.md:89-90` now points at this document as the module
+map; the old `docs/architecture.md` reference it used to carry is gone.

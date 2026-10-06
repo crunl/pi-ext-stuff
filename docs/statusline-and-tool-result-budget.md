@@ -160,15 +160,15 @@ settings 文件：
   否则重读。这样 `/settings` 写入后下一帧即生效，无需 watch 定时器。
 - `resetOutputPadCache`（`src/output-pad.ts:82-85`）是测试用的清缓存接口。
 
-### 2.7 调色板系统（`src/palette.ts`，111 行）
+### 2.7 调色板系统（`src/palette.ts`，113 行）
 
 双主题 Catppuccin，按终端明暗选择：
 
-- `PALETTE_DARK` = Frappé（`src/palette.ts:38-52`，注释称对应 live theme `catppuccin-frappe`）。
+- `PALETTE_DARK` = Frappé（`src/palette.ts:40-54`，注释称对应 live theme `catppuccin-frappe`）。
   - fixed：model `#ca9ee6`（mauve）、folder `#99d1db`（sky）、git `#e5c890`（yellow）。
   - effort：minimal `#a6d189`（green）→ low `#8caaee`（blue）→ medium `#f2d5cf`（rosewater）→
     high `#eebebe`（flamingo）→ xhigh `#ef9f76`（peach）→ max `#f4b8e4`（pink）。
-- `PALETTE_LIGHT` = Latte（`src/palette.ts:55-68`）。
+- `PALETTE_LIGHT` = Latte（`src/palette.ts:57-71`）。
   - fixed：model `#8839ef`（mauve，不是 error-red 的 `#e64553`）、folder `#179299`（teal）、
     git `#df8e1d`（yellow）。
   - effort：minimal `#40a02b`（green）→ low `#1e66f5`（blue）→ **medium `#7287fd`（lavender）** →
@@ -176,20 +176,22 @@ settings 文件：
     与 dark 的唯一差异在 medium：dark 用 rosewater，light 用 lavender。
 
   代码注释给出的理由是：Latte 的 rosewater → flamingo 相邻 ΔE 只有 4.3，等级变化会糊在一起
-  （`src/palette.ts:14-15`）。该数值与上面的色值未能复现（见第五节第 1 条），此处如实转述注释，不背书该数字。
-- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:24-30`）。
+  （`src/palette.ts:14-15`）。该数值**可复现**，度量是 OKLab 欧氏距离 ×100（下称 OKΔE），
+  实测 `#dc8a78` → `#dd7878` = 4.3212（见第五节第 1 条）。注意 rosewater 是被否决的备选色，
+  它并不在 `PALETTE_LIGHT` 中，所以这个 4.3 无法只从上面的色值表推出。
+- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:26-32`）。
 
-明暗检测（`isLightThemeFrom`，`src/palette.ts:80-92`）：
+明暗检测（`isLightThemeFrom`，`src/palette.ts:82-94`）：
 
 - pi 对自定义主题没有 `isLight` API，因此读 live theme 的 `userMessageBg` 背景 ANSI：
-  `theme?.getBgAnsi?.("userMessageBg")`（`src/palette.ts:84`），用 `parseTruecolor` 解析为 RGB。
-- 判据是 YIQ 亮度 `(299r + 587g + 114b) / 1000 >= 128`（`src/palette.ts:88`）。
-- 解析不到颜色或抛错时返回 `false`（即按 dark 处理）（`src/palette.ts:85-87`、`src/palette.ts:89-91`）。
-  注释给出参照值：Latte 的 `userMessageBg`（mantle）约 232 luma，Frappé 约 42（`src/palette.ts:77-78`）。
+  `theme?.getBgAnsi?.("userMessageBg")`（`src/palette.ts:86`），用 `parseTruecolor` 解析为 RGB。
+- 判据是 YIQ 亮度 `(299r + 587g + 114b) / 1000 >= 128`（`src/palette.ts:90`）。
+- 解析不到颜色或抛错时返回 `false`（即按 dark 处理）（`src/palette.ts:87-89`、`src/palette.ts:91-93`）。
+  注释给出参照值：Latte 的 `userMessageBg`（mantle）约 232 luma，Frappé 约 42（`src/palette.ts:79-80`）。
 
-其余导出：`paletteForLight(isLight)`（`src/palette.ts:71-73`）；`effortColor(level, palette)`
-（`src/palette.ts:94-102`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
-（`src/palette.ts:101`）；`truecolorFg(hex)`（`src/palette.ts:105-110`）把 hex 转成
+其余导出：`paletteForLight(isLight)`（`src/palette.ts:73-75`）；`effortColor(level, palette)`
+（`src/palette.ts:96-104`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
+（`src/palette.ts:103`）；`truecolorFg(hex)`（`src/palette.ts:107-112`）把 hex 转成
 `\x1b[38;2;r;g;bm` 前景序列，可被 `badge.parseTruecolor` 解析。
 
 颜色本身只作为“前景色”传入段落，真正作为背景渲染由 2.3 的 `powerlineChain` 完成。
@@ -199,7 +201,7 @@ settings 文件：
 **statusline 源码对 pi-core 没有任何 import。** 逐个核对 `extensions/statusline/src/` 的 import：
 只有三类——pi SDK（`@earendil-works/pi-coding-agent` 的类型、`@earendil-works/pi-tui` 的
 `truncateToWidth`/`visibleWidth`）、Node 内建（`node:fs`/`node:os`/`node:path`）、以及本地包
-`packages/shared-tool-presentation/src/badge.ts`（`src/palette.ts:21`、`src/status-mode.ts:1`）。
+`packages/shared-tool-presentation/src/badge.ts`（`src/palette.ts:23`、`src/status-mode.ts:1`）。
 不存在任何 `pi-core` 字样的引用。
 
 这一约束被测试固定：`tests/structure-invariants.test.ts` 名为 “statusline has zero static imports from
@@ -261,12 +263,16 @@ statusline 自身**没有扩展配置键**。可调项都来自外部：
 注释记录了作者本机的观测（302 个 session）：单请求上下文增长 p50 = 888、p90 = 4.4K、p99 = 15.4K、
 max = 162.1K tokens（`index.ts:5`）。pi 的 compaction 触发条件是
 `tokens > contextWindow - reserveTokens`（`index.ts:6-7`，注释引用
-`dist/core/compaction/compaction.js:160`），而它**只在回合之间**复查；于是一批过大的工具输出可以一次性
-越过触发线，落进 max_tokens 截断（`available = window - est - 4096`，下限 1 → `"length"` + `output=1`）
-并触发唯一的一次 overflow 恢复，之后报 “Context overflow recovery failed”（`index.ts:7-10`）。
+`dist/core/compaction/compaction.js:160`——该行号**已过期**，见第五节第 2 条），而它**只在回合之间**复查；
+于是一批过大的工具输出可以一次性越过触发线，落进 max_tokens 截断
+（注释写作 `available = window - est - 4096`，下限 1 → `"length"` + `output=1`；该公式在当前
+pi 1.0.0 中**找不到对应实现**）并触发唯一的一次 overflow 恢复，之后报
+“Context overflow recovery failed”（`index.ts:7-10`；该字符串真实存在，但在 `dist/core/agent-session.js:2349`
+与 `:2525`，不在 compaction.js）。
 本扩展不压缩、不中断、不触碰 pi 的 compaction 或 custom entries，因此与 `/goal` 续跑、pi-subagents、
-goal 预算记账互不影响（`index.ts:12-14`）。**上述 pi 内部机制与路径引自注释，本仓库未安装 pi SDK，
-无法就地验证**（见第五节第 2 条）。
+goal 预算记账互不影响（`index.ts:12-14`）。**以上 pi 内部机制均已对照宿主全局安装的
+pi 1.0.0 核实，结论是：触发条件与 overflow 字符串为真，但注释里的行号与截断公式已过期**
+（见第五节第 2 条）。
 
 ### 3.2 预算与常量（`index.ts:27-36`）
 
@@ -399,21 +405,41 @@ pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
 
 ## 五、未能验证的声明
 
-以下项目我无法在本仓库内证实，已在正文中标注为“引自注释/README”或与实测不符：
+以下项目我无法在本仓库内证实，已在正文中标注为“引自注释/README”：
 
-1. **Latte rosewater → flamingo 相邻 ΔE = 4.3**（`src/palette.ts:14-15`）。用官方 Catppuccin Latte 色值
-   实测：`#dc8a78`（rosewater）→ `#dd7878`（flamingo）得 CIE76 ΔE ≈ 11.7、CIEDE2000 ΔE00 ≈ 7.4，
-   均非 4.3。正文只转述代码注释给出的理由，未背书该数字。
-2. **pi 的 compaction 机制**：`dist/core/compaction/compaction.js:160`、
-   `tokens > contextWindow - reserveTokens` 触发条件、`available = window - est - 4096` 截断公式、
-   以及字符串 “Context overflow recovery failed”，全部引自 `tool-result-budget/index.ts:6-12` 的注释。
-   本仓库未安装 pi SDK（`node_modules/@earendil-works` 不存在），无法对照 pi 源码。
+1. **Latte rosewater → flamingo 相邻 ΔE = 4.3**（`src/palette.ts:14-15`）——**已复现，度量需标注**。
+   实测 rosewater `#dc8a78` → flamingo `#dd7878`：CIE76 ≈ 11.7、CIEDE2000 ≈ 7.4，均非 4.3；
+   但 **OKLab 欧氏距离 ×100 = 4.3212**，即 4.3。该度量出自已删除的研究文档
+   `extensions/statusline/docs/light-palette-effort-research.md`（提交 `fa5e279` 可见），
+   其中定义 “OKLab 欧氏距离 ×100（OKΔE）” 并给出相邻 effort 档 ≥6 的门槛；据此 4.3 低于门槛，
+   注释中“等级变化会糊在一起”的理由成立（实际采用的 lavender → flamingo OKΔE ≈ 24.6）。
+   注意 rosewater 并不在 `PALETTE_LIGHT` 中（它是被否决的备选色），故该数值无法只从色值表推出。
+   `src/palette.ts` 的注释已补标度量名。
+2. **pi 的 compaction 机制**：已对照宿主全局安装的 pi 1.0.0
+   （`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent`）逐项核实
+   `tool-result-budget/index.ts:6-12` 注释里的四项断言，**两项为真、两项已过期**：
+   - ✅ 触发条件 `tokens > contextWindow - reserveTokens` 为真：真实实现是
+     `dist/core/compaction/compaction.js:173-177` 的
+     `export function shouldCompact(contextTokens, contextWindow, settings)`，返回
+     `contextTokens > contextWindow - settings.reserveTokens`（`:176`）。
+   - ❌ 注释引用的 `compaction.js:160` **行号已过期**：该行实际是 `return estimate;`，与触发条件无关。
+     正确行号是 `:176`（`settings.reserveTokens` 默认值在 `:55`）。
+   - ✅ 字符串 “Context overflow recovery failed” 为真，但在
+     `dist/core/agent-session.js:2349`（`"…failed after one compact-and-retry attempt…"`）与
+     `:2525`（`` `…failed: ${message}` ``），**不在** compaction.js。
+   - ❌ 截断公式 `available = window - est - 4096` **找不到对应实现**：在 pi 1.0.0 的整个 `dist/`
+     下 grep `- 4096` 零命中。
+   更正说明：本节此前写作「本仓库未安装 pi SDK，无法对照 pi 源码」。该说法**只对了一半**——
+   仓库内 `node_modules/@earendil-works` 确实不存在，但宿主全局装着 pi 1.0.0，因此是**可以**对照的，
+   上述结论即为对照所得。
 3. **根 README “pi-core 被 statusline 依赖”的表述**：与代码不符。statusline 源码零处提到 `pi-core`，
    且 `tests/structure-invariants.test.ts` 主动断言这一点；两者共享的是
    `packages/shared-tool-presentation`。正文按代码纠正。
 4. **`getAgentDir()` 的实际返回值**（是否等于 `~/.pi/agent`）：由 pi SDK 提供，仓库内无法确认；
    因此 `SPILL_DIR` 的默认绝对路径只能标为“代码所写的默认表达式”。
 5. **终端最终视觉效果**：powerline 帽/箭头/图标的实际观感、Nerd Font 回退行为，无法在无 TUI 环境验证。
-6. **Latte medium 选 lavender 的“对比度上限”依据**：可验证的是 light 段落色值与
-   `medium = #7287fd`（lavender）这一事实，以及它与两侧（blue / flamingo）的实测距离；
-   注释中“cap contrast on pale backgrounds”的具体测量出处无法核实。
+6. **`palette.ts:4-5` “cap contrast on pale backgrounds” 的具体测量出处**：仍无法核实。需要更正的是
+   本文此前把这句话当成了“medium 选 lavender”的依据——它其实是解释**Light 档整体为何用 Latte
+   而非 Frappé**（浅底上压低对比度），与 medium 的选色是两件事。medium 选 lavender 的依据是可核实的
+   OKΔE 档距：lavender → flamingo ≈ 24.6、blue → lavender ≈ 12.3，而被否决的 rosewater → flamingo
+   仅 ≈ 4.3（见第 1 条）。研究文档另给出 sapphire 被否的原因（与 folder teal 仅 ≈ 5.1，会撞色）。

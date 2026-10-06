@@ -205,7 +205,7 @@ copies.
 - `extensions/pi-core/src/tui/{model-editor,editor-chrome,border-labels}.ts` —
   `badge.ts` / `permissions-mode.ts` deep imports.
 - `extensions/statusline/src/status-mode.ts:1` and
-  `extensions/statusline/src/palette.ts:21` — `badge.ts` deep imports.
+  `extensions/statusline/src/palette.ts:23` — `badge.ts` deep imports.
 
 The shared package's own `tsconfig.json` resolves the `@earendil-works/*`
 peer packages and `*` through `../../extensions/pi-core/node_modules`
@@ -250,7 +250,7 @@ tool-result-budget   (standalone: no cross-package imports)
   `src/guardian-tools.ts` and `src/register.ts`, and `@earendil-works/pi-ai`
   only by `src/auto-reviewer.ts`.
 - `statusline` imports `shared-tool-presentation/badge.ts` directly
-  (`src/status-mode.ts:1`, `src/palette.ts:21`) plus
+  (`src/status-mode.ts:1`, `src/palette.ts:23`) plus
   `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
   (`src/footer.ts:16-17`). It does not import `pi-core` or
   `pi-safety` code; it receives pi-safety's mode via the
@@ -433,11 +433,12 @@ that rule. Consequences:
   conventions, acceptance procedure), but they are invisible to anyone
   who clones the repo.
 
-Note: two `AGENTS.md` files still reference deleted per-extension docs —
-`extensions/pi-safety/AGENTS.md` points at `docs/host-api-boundaries.md`
-(`:53`, `:291`) and `docs/research/` (`:286`), and
-`extensions/pi-core/AGENTS.md:89` points at `docs/architecture.md`. None of
-those paths exist in the tree any more, so those references are dangling.
+Note: the two `AGENTS.md` files used to reference deleted per-extension docs
+(`docs/host-api-boundaries.md`, `docs/research/`, `docs/architecture.md`).
+Those references have been repointed — to this root `docs/` set, to the
+"Product boundaries" section of `extensions/pi-safety/AGENTS.md`, and (for the
+research archive) to git history at commit `96da0b4`. Both files are gitignored
+by `~/.gitignore_global`, so they are local-only and never reach a clone.
 
 ## Repo shape at a glance
 
