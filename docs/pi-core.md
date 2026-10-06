@@ -603,7 +603,7 @@ It matters at every point where pi-core touches host UI:
 
 | Call site | Guarded behavior |
 | --- | --- |
-| `output-padding.ts:140-147` | Starts settings watching only in the TUI; otherwise stops the controller. |
+| `output-padding.ts:139-147` | Starts settings watching only in the TUI; otherwise stops the controller. |
 | `canonical-tool-fallback.ts:64` | Registers the canonical fallback only in the TUI. |
 | `editor-chrome.ts:40` | Installs the editor factory only in the TUI. |
 | `selector-tab-nav.ts:106` | Installs the raw-input rewrite only in the TUI. |

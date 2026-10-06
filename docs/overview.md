@@ -39,7 +39,7 @@ It contains four pi extensions and one internal shared library.
 
 | Member | Purpose | src | tests |
 | --- | --- | --- | --- |
-| `extensions/pi-safety` | Permission modes, sandbox, guardian reviewer | 64 files / 23,949 lines | 54 files / 27,162 lines |
+| `extensions/pi-safety` | Permission modes, sandbox, guardian reviewer | 64 files / 24,901 lines | 54 files / 27,162 lines |
 | `extensions/pi-core` | Codex-style tool presentation, TUI polish | 37 files / 5,114 lines + 44 entry lines | 36 files / 5,929 lines |
 | `packages/shared-tool-presentation` | Pure presentation specs/renderers (shared lib) | 15 files / 2,090 lines | 3 files / 182 lines |
 | `extensions/statusline` | Boxed footer: token/model/effort/usage | 8 files / 725 lines + 2 entry lines | 5 files / 341 lines |
@@ -97,9 +97,10 @@ Catppuccin dual-theme truecolor (`extensions/statusline/README.md`,
 written in Chinese). It installs via `ctx.ui.setFooter()` on every
 `session_start` and toggles with the `/statusline` command
 (`extensions/statusline/src/index.ts:38-70`). It is the only member
-with no `private` field and no `version`
-(`extensions/statusline/package.json:1-8`). It is the only member
-without a `version` field or `files`/`exports` maps.
+with no `version` field (`extensions/statusline/package.json:1-8`); all
+five members carry `private: true`. It also declares neither a `files`
+nor an `exports` map — a distinction it shares with `pi-safety`, the only
+other member lacking both.
 
 ### `extensions/tool-result-budget`
 
@@ -432,16 +433,23 @@ that rule. Consequences:
   conventions, acceptance procedure), but they are invisible to anyone
   who clones the repo.
 
-Note: `extensions/pi-safety/AGENTS.md` references `docs/host-api-boundaries.md`
-and `docs/research/`, which were among the deleted per-extension docs —
-those references now point at files that no longer exist in the tree.
+Note: two `AGENTS.md` files still reference deleted per-extension docs —
+`extensions/pi-safety/AGENTS.md` points at `docs/host-api-boundaries.md`
+(`:53`, `:291`) and `docs/research/` (`:286`), and
+`extensions/pi-core/AGENTS.md:89` points at `docs/architecture.md`. None of
+those paths exist in the tree any more, so those references are dangling.
 
 ## Repo shape at a glance
 
-- 261 tracked files (excluding `node_modules`, which is gitignored).
-- Total tracked TypeScript-ish source ≈ 32,000 lines across the five
-  members; total tracked content ≈ 59,000 lines.
+- 265 tracked files. One of them is `packages/shared-tool-presentation/node_modules`,
+  a tracked symlink (git mode `120000`) to `../../extensions/pi-core/node_modules`
+  — so `node_modules` is not uniformly gitignored; this one path is in the tree.
+  Excluding it, 264.
+- Tracked source lines across the five members: 32,121 for `.ts`/`.mts`, 33,340
+  including the `.mjs` files. Total tracked content is 75,438 lines; the gap is
+  mostly tests (33,614) plus the two `pnpm-lock.yaml` files (4,898).
 - Everything is ESM (`.ts`), loaded directly by pi's `jiti`; the only
   non-TS sources are `pi-safety`'s two `.mjs` Guardian worker files
   (`src/guardian-worker.mjs`, `src/guardian-worker-limits.mjs`) and its
-  `scripts/*.mjs` helpers.
+  `scripts/*.mjs` helpers. The remaining non-code tracked files are the
+  two `LICENSE` files and three `.gitignore` files.
