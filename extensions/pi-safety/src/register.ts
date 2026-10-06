@@ -31,11 +31,15 @@ import {
 } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
+  bashFailureText,
   captureExitCode,
   commandExitCode,
+  completedBashFailure,
+  completedBashFromResult,
   completedIfCommandRan,
   type ExitCodeSlot,
   type RuntimeDenialOutcome,
+  returnedBashFailure,
   runtimeDenialFromEvidence,
 } from "./bash-outcome.ts";
 import {
@@ -1611,15 +1615,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
-  const withFailureDiagnostics = async (commandId: string, error: unknown): Promise<unknown> => {
+  /** SRT failure diagnostics the backend recorded for a command, if any. */
+  const failureDiagnosticsText = async (commandId: string): Promise<string | undefined> => {
     try {
-      const diagnostics = await sandboxManager.readFailureDiagnostics?.(commandId);
-      return diagnostics
-        ? new Error(`${errorMessage(error)}\n${diagnostics}`, { cause: error })
-        : error;
+      return await sandboxManager.readFailureDiagnostics?.(commandId);
     } catch {
-      return error;
+      return undefined;
     }
+  };
+
+  const withFailureDiagnostics = async (commandId: string, error: unknown): Promise<unknown> => {
+    const diagnostics = await failureDiagnosticsText(commandId);
+    return diagnostics
+      ? new Error(`${errorMessage(error)}\n${diagnostics}`, { cause: error })
+      : error;
   };
 
   const runtimeDenialOutcome = async (
@@ -1630,6 +1639,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       ? await sandboxManager.classifyDenial?.(commandId)
       : undefined;
     return runtimeDenialFromEvidence(evidence, capability);
+  };
+
+  /**
+   * The sandboxed failure pipeline, shared by thrown and returned
+   * failures (Pi 1.x returns a failed command instead of throwing
+   * it): append the backend's failure diagnostics to the evidence —
+   * labelled observations, never authorization evidence — then let
+   * an authoritative runtime denial win over command-status
+   * classification. Returns the diagnosed evidence for the caller
+   * to complete as the command's own result.
+   */
+  const diagnoseSandboxedFailure = async (
+    commandId: string,
+    evidence: string,
+  ): Promise<{ text: string; denial: RuntimeDenialOutcome | undefined }> => {
+    const diagnostics = await failureDiagnosticsText(commandId);
+    const text = diagnostics ? `${evidence}\n${diagnostics}` : evidence;
+    const denial = await runtimeDenialOutcome(commandId, text);
+    return { text, denial };
   };
 
   const executeYoloDirectBash = async (
@@ -1664,10 +1692,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const attemptSignal = signal
       ? AbortSignal.any([signal, attempt.controller.signal])
       : attempt.controller.signal;
-    // The same exit-code seam the Engine-driven unrestricted lease uses: pi
-    // renders a non-zero or null status as a thrown error, and only the
-    // captured status at the operations seam can classify it as the command's
-    // own result rather than a permission failure.
+    // The same exit-code seam the Engine-driven unrestricted lease uses.
+    // Pi 1.x *returns* a non-zero exit as an error result carrying the
+    // structured exit code, and throws only signal terminations (plus
+    // aborts, timeouts, and infrastructure failures); the captured status
+    // at the operations seam classifies a thrown status as the command's
+    // own result rather than a permission failure, and the returned
+    // contract is recognized directly on the result channel below.
     const exitCodeSlot: ExitCodeSlot = { code: undefined };
     const localBash = () =>
       bashToolFactory(canonicalCwd, {
@@ -1697,7 +1728,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (attemptSignal.aborted) {
         throw agentPermissionError("aborted", "Operation aborted", true);
       }
-      return value;
+      // A Pi 1.x returned failure is the command's own result: normalize it
+      // so the status rides in `details` (the currency the `tool_result`
+      // hook reads) and the failure is marked as an error result.
+      return completedBashFromResult(value) ?? value;
     } catch (error: unknown) {
       if (attempt.terminalError) throw attempt.terminalError;
       if (attemptSignal.aborted) {
@@ -1816,10 +1850,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         authorizeCapability,
         rejectCapability,
       }) => {
-        // Records the child's exit code at the operations seam. `undefined`
-        // means the child never reported a status (denial, abort, or a failure
-        // before/at spawn); a timeout may also leave it undefined after the
-        // child had already started. All of these stay a failure.
+        // Records the child's exit code at the operations seam for the
+        // thrown-status path (Pi 1.x signal terminations; every status
+        // under Pi 0.86). `undefined` means the child never reported a
+        // status (denial, abort, or a failure before/at spawn); a timeout
+        // may also leave it undefined after the child had already started.
+        // All of these stay a failure. A Pi 1.x non-zero exit never
+        // reaches the catch — it is returned and recognized on the result
+        // channel below.
         const exitCodeSlot: ExitCodeSlot = { code: undefined };
         // Unrestricted and escalated leases share the bare local backend;
         // the sandboxed branch builds its own wrapper below.
@@ -1830,14 +1868,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         try {
           if (attemptSignal.aborted) throw new Error("aborted");
           if (mode === "unrestricted") {
+            const value = await localBash().execute(
+              call.id,
+              call.input,
+              attemptSignal,
+              reviewBridge.onUpdate as BashOnUpdate,
+            );
+            // A Pi 1.x returned failure is the command's own result.
             return {
               kind: "completed",
-              value: await localBash().execute(
-                call.id,
-                call.input,
-                attemptSignal,
-                reviewBridge.onUpdate as BashOnUpdate,
-              ),
+              value: completedBashFromResult(value) ?? value,
             };
           }
           if (mode === "escalated") {
@@ -1857,14 +1897,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               };
             }
             if (attemptSignal.aborted) throw new Error("aborted");
+            const value = await localBash().execute(
+              call.id,
+              call.input,
+              attemptSignal,
+              reviewBridge.onUpdate as BashOnUpdate,
+            );
+            // A Pi 1.x returned failure is the command's own result.
             return {
               kind: "completed",
-              value: await localBash().execute(
-                call.id,
-                call.input,
-                attemptSignal,
-                reviewBridge.onUpdate as BashOnUpdate,
-              ),
+              value: completedBashFromResult(value) ?? value,
             };
           }
           if (mode !== "sandboxed" || !policy) {
@@ -1894,24 +1936,37 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
               "sandboxed",
             ),
           });
-          return {
-            kind: "completed",
-            value: await sandboxLifecycleLease.runShared(() => {
-              assertUnmediatedExecutionCurrent(policy, executionSnapshot);
-              return sandboxedBash.execute(
-                call.id,
-                call.input,
-                attemptSignal,
-                reviewBridge.onUpdate as BashOnUpdate,
-              );
-            }, attemptSignal),
-          };
+          const value = await sandboxLifecycleLease.runShared(() => {
+            assertUnmediatedExecutionCurrent(policy, executionSnapshot);
+            return sandboxedBash.execute(
+              call.id,
+              call.input,
+              attemptSignal,
+              reviewBridge.onUpdate as BashOnUpdate,
+            );
+          }, attemptSignal);
+          // Pi 1.x returns a failed command as an error result instead
+          // of throwing it, so the sandboxed failure pipeline must also
+          // run on the returned path. An authoritative runtime denial
+          // still wins over the command's own status.
+          const failure = returnedBashFailure(value);
+          if (!failure) return { kind: "completed", value };
+          const { text, denial } = await diagnoseSandboxedFailure(
+            call.id,
+            bashFailureText(failure),
+          );
+          if (denial) return denial;
+          return { kind: "completed", value: completedBashFailure(failure, text) };
         } catch (error: unknown) {
           if (attemptSignal.aborted) return { kind: "failed", error };
           if (mode === "sandboxed") {
-            const diagnosed = await withFailureDiagnostics(call.id, error);
-            const denied = await runtimeDenialOutcome(call.id, errorMessage(diagnosed));
-            if (denied) return denied;
+            const { text, denial } = await diagnoseSandboxedFailure(call.id, errorMessage(error));
+            if (denial) return denial;
+            // Diagnostics are appended for the agent, so a diagnosed
+            // error is rebuilt around the original; with no diagnostics
+            // the original error object itself is preserved.
+            const diagnosed =
+              text === errorMessage(error) ? error : new Error(text, { cause: error });
             const completed = completedIfCommandRan(error, diagnosed, exitCodeSlot);
             if (completed) return { kind: "completed", value: completed };
             return { kind: "failed", error: diagnosed };
@@ -2631,12 +2686,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   );
 
   // A completed command that reported a non-zero or missing status is a
-  // failure the model must see. Pi returns every *returned* tool result as
-  // `isError: false` (it only sets `isError: true` for a thrown execute), so
-  // this event is the only channel that can correct it. Content is left alone:
-  // the command's own output is the failure report, not permission copy.
+  // failure the model must see. Pi 1.x's bash tool marks such returned
+  // results itself (`isError: true`, honored by the agent loop, which
+  // keeps `details` and `structuredContent`), and the bash adapter marks
+  // every outcome it builds — so this hook is the safety net for executors
+  // that return a failed command without the flag: Pi 0.86 hardcodes every
+  // returned result to `isError: false`. It only ever flips the flag;
+  // content stays the command's own output, never permission copy, and a
+  // result that already is an error is left untouched so the host keeps
+  // its details and structured content.
   pi.on("tool_result", (event: ToolResultEvent): ToolResultEventResult | undefined => {
-    if (event.toolName !== "bash") return undefined;
+    if (event.toolName !== "bash" || event.isError) return undefined;
     const exitCode = commandExitCode(event.details);
     return exitCode === undefined || exitCode === 0 ? undefined : { isError: true };
   });

@@ -26,6 +26,7 @@ describe("completedIfCommandRan", () => {
     expect(completedIfCommandRan(status, presented, slot(2))).toEqual({
       content: [{ type: "text", text: "boom\n\nCommand exited with code 2\n\nSRT diagnostic" }],
       details: { exitCode: 2 },
+      isError: true,
     });
   });
 
@@ -40,6 +41,7 @@ describe("completedIfCommandRan", () => {
     expect(completedIfCommandRan(status, status, slot(null))).toEqual({
       content: [{ type: "text", text: "boom\n\nCommand terminated without an exit code" }],
       details: { exitCode: null },
+      isError: true,
     });
   });
 });
