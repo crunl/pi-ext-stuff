@@ -13,6 +13,8 @@
  *   green → blue → lavender → flamingo → peach → pink.
  *   medium uses lavender, not rosewater — Latte rosewater→flamingo
  *   adjacent ΔE is only 4.3 and would blur level changes.
+ *   (ΔE here = OKLab Euclidean distance ×100, not CIE76/CIEDE2000;
+ *   adjacent effort levels are meant to stay ≥6 apart.)
  *
  * Light/dark is detected from the live theme's userMessageBg luminance
  * (no Pi isLight API for custom themes).

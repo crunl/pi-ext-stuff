@@ -5,6 +5,7 @@ import {
   type Socket,
 } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { isLoopbackAddress, normalizeNetworkHost } from "../src/network-host.ts";
 import {
   noProxyMatchesHost,
   SandboxConnectGuard,
@@ -38,10 +39,10 @@ function restoreProxyEnvironment(): void {
   savedEnvironment.clear();
 }
 
-async function listen(server: Server): Promise<number> {
+async function listen(server: Server, host = "127.0.0.1"): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
+    server.listen(0, host, () => resolve());
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("test server has no port");
@@ -212,6 +213,18 @@ describe("SandboxConnectGuard", () => {
     expect(shouldBypassParentProxy("10.0.0.1", undefined)).toBe(false);
   });
 
+  it("canonicalizes IPv4-mapped loopback to a distinct literal from ::1", () => {
+    // The IPv6 parent-proxy tests dial a real ::1 listener; pinning this
+    // normalization here keeps the mapped-form rewrite covered.
+    expect(normalizeNetworkHost("::ffff:127.0.0.1")).toBe("::ffff:7f00:1");
+    expect(normalizeNetworkHost("[::ffff:127.0.0.1]")).toBe("::ffff:7f00:1");
+    expect(normalizeNetworkHost("::1")).toBe("::1");
+    expect(normalizeNetworkHost("127.0.0.1")).toBe("127.0.0.1");
+    // Both mapped spellings and plain ::1 stay loopback for policy purposes.
+    expect(isLoopbackAddress("::ffff:7f00:1")).toBe(true);
+    expect(isLoopbackAddress("::1")).toBe(true);
+  });
+
   it("rejects malformed upstream proxy credentials during startup", async () => {
     clearProxyEnvironment();
     process.env.HTTP_PROXY = "http://proxy-user:%ZZ@proxy.example";
@@ -220,14 +233,14 @@ describe("SandboxConnectGuard", () => {
     await guard.close();
   });
 
-  it("rejects an unauthenticated CONNECT before consuming a ticket", async () => {
+  it("rejects an unauthenticated CONNECT before consuming a ticket", async (ctx) => {
     clearProxyEnvironment();
     const guard = new SandboxConnectGuard();
     try {
       try {
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -244,14 +257,14 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("tears down a pending CONNECT dial when the client disconnects", async () => {
+  it("tears down a pending CONNECT dial when the client disconnects", async (ctx) => {
     clearProxyEnvironment();
     const guard = new SandboxConnectGuard();
     try {
       try {
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -289,14 +302,14 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("handles an interrupted plain HTTP dial without an uncaught socket error", async () => {
+  it("handles an interrupted plain HTTP dial without an uncaught socket error", async (ctx) => {
     clearProxyEnvironment();
     const guard = new SandboxConnectGuard();
     try {
       try {
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -335,7 +348,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("requires an exact one-shot ticket and forwards CONNECT head bytes", async () => {
+  it("requires an exact one-shot ticket and forwards CONNECT head bytes", async (ctx) => {
     clearProxyEnvironment();
     const target = createNetServer((socket) => {
       socket.once("data", (chunk) => {
@@ -351,7 +364,8 @@ describe("SandboxConnectGuard", () => {
       } catch (error) {
         // The managed test runner may deny loopback binds. The integration
         // assertions still run in normal Node environments with networking.
-        if (isNetworkBindUnavailable(error)) return;
+        // ctx.skip() throws, so the enclosing finally still tears down.
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -378,7 +392,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("falls back to the next frozen address for CONNECT within one timeout budget", async () => {
+  it("falls back to the next frozen address for CONNECT within one timeout budget", async (ctx) => {
     clearProxyEnvironment();
     const target = createNetServer((socket) => {
       socket.once("data", (chunk) => socket.end(`TARGET:${chunk.toString("latin1")}`));
@@ -390,7 +404,7 @@ describe("SandboxConnectGuard", () => {
         targetPort = await listen(target);
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -415,14 +429,14 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("tries every frozen address and consumes the ticket when all CONNECT attempts fail", async () => {
+  it("tries every frozen address and consumes the ticket when all CONNECT attempts fail", async (ctx) => {
     clearProxyEnvironment();
     const guard = new SandboxConnectGuard();
     try {
       try {
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -449,7 +463,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("falls back before sending a plain HTTP request body", async () => {
+  it("falls back before sending a plain HTTP request body", async (ctx) => {
     clearProxyEnvironment();
     const target = createNetServer((socket) => {
       socket.once("data", () =>
@@ -463,7 +477,7 @@ describe("SandboxConnectGuard", () => {
         targetPort = await listen(target);
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -486,7 +500,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("does not use HTTPS_PROXY for non-tunnel plain HTTP", async () => {
+  it("does not use HTTPS_PROXY for non-tunnel plain HTTP", async (ctx) => {
     clearProxyEnvironment();
     process.env.HTTPS_PROXY = "http://127.0.0.1:1";
     const target = createNetServer((socket) => {
@@ -501,7 +515,7 @@ describe("SandboxConnectGuard", () => {
         targetPort = await listen(target);
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -520,7 +534,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("pins an IPv6 target in the upstream HTTP absolute-form request and accepts bracketed proxy hosts", async () => {
+  it("pins an IPv6 target in the upstream HTTP absolute-form request and accepts bracketed proxy hosts", async (ctx) => {
     clearProxyEnvironment();
     const upstream = createNetServer((socket) => {
       let buffer = Buffer.alloc(0);
@@ -538,12 +552,15 @@ describe("SandboxConnectGuard", () => {
     try {
       let upstreamPort: number;
       try {
-        upstreamPort = await listen(upstream);
-        process.env.HTTP_PROXY = `http://[::ffff:127.0.0.1]:${upstreamPort}`;
+        // A true IPv6 loopback literal: the IPv4-mapped spelling
+        // [::ffff:127.0.0.1] is rewritten to ::ffff:7f00:1 before dialing,
+        // so the guard never connected to the literal the test wrote.
+        upstreamPort = await listen(upstream, "::1");
+        process.env.HTTP_PROXY = `http://[::1]:${upstreamPort}`;
         process.env.HTTPS_PROXY = "http://127.0.0.1:1";
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -567,7 +584,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("uses the frozen IPv6 authority for both upstream CONNECT target and Host", async () => {
+  it("uses the frozen IPv6 authority for both upstream CONNECT target and Host", async (ctx) => {
     clearProxyEnvironment();
     const upstream = createNetServer((socket) => {
       let buffer = Buffer.alloc(0);
@@ -586,12 +603,12 @@ describe("SandboxConnectGuard", () => {
     try {
       let upstreamPort: number;
       try {
-        upstreamPort = await listen(upstream);
+        upstreamPort = await listen(upstream, "::1");
         process.env.HTTP_PROXY = "http://127.0.0.1:1";
-        process.env.HTTPS_PROXY = `http://[::ffff:127.0.0.1]:${upstreamPort}`;
+        process.env.HTTPS_PROXY = `http://[::1]:${upstreamPort}`;
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -613,7 +630,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("falls back across frozen candidates when an upstream CONNECT rejects the first", async () => {
+  it("falls back across frozen candidates when an upstream CONNECT rejects the first", async (ctx) => {
     clearProxyEnvironment();
     const requests: string[] = [];
     let connectionNumber = 0;
@@ -642,7 +659,7 @@ describe("SandboxConnectGuard", () => {
         process.env.HTTP_PROXY = `http://127.0.0.1:${upstreamPort}`;
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -666,7 +683,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("does not consume a ticket for a different host and keeps the listener after reset", async () => {
+  it("does not consume a ticket for a different host and keeps the listener after reset", async (ctx) => {
     clearProxyEnvironment();
     const target = createNetServer((socket) => socket.end());
     const guard = new SandboxConnectGuard();
@@ -676,7 +693,7 @@ describe("SandboxConnectGuard", () => {
         targetPort = await listen(target);
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
@@ -703,7 +720,7 @@ describe("SandboxConnectGuard", () => {
     }
   });
 
-  it("destroys active relays when an execution is reset", async () => {
+  it("destroys active relays when an execution is reset", async (ctx) => {
     clearProxyEnvironment();
     const target = createNetServer(() => undefined);
     const guard = new SandboxConnectGuard();
@@ -714,7 +731,7 @@ describe("SandboxConnectGuard", () => {
         targetPort = await listen(target);
         await guard.start();
       } catch (error) {
-        if (isNetworkBindUnavailable(error)) return;
+        if (isNetworkBindUnavailable(error)) ctx.skip("loopback bind unavailable");
         throw error;
       }
       const parent = guard.parentProxyUrl;
