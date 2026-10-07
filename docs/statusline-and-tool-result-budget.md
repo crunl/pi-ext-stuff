@@ -164,34 +164,33 @@ settings 文件：
 
 双主题 Catppuccin，按终端明暗选择：
 
-- `PALETTE_DARK` = Frappé（`src/palette.ts:40-54`，注释称对应 live theme `catppuccin-frappe`）。
+- `PALETTE_DARK` = Frappé（`src/palette.ts:54-68`，注释称对应 live theme `catppuccin-frappe`）。
   - fixed：model `#ca9ee6`（mauve）、folder `#99d1db`（sky）、git `#e5c890`（yellow）。
   - effort：minimal `#a6d189`（green）→ low `#8caaee`（blue）→ medium `#f2d5cf`（rosewater）→
     high `#eebebe`（flamingo）→ xhigh `#ef9f76`（peach）→ max `#f4b8e4`（pink）。
-- `PALETTE_LIGHT` = Latte（`src/palette.ts:57-71`）。
-  - fixed：model `#8839ef`（mauve，不是 error-red 的 `#e64553`）、folder `#179299`（teal）、
-    git `#df8e1d`（yellow）。
-  - effort：minimal `#40a02b`（green）→ low `#1e66f5`（blue）→ **medium `#7287fd`（lavender）** →
-    high `#dd7878`（flamingo）→ xhigh `#fe640b`（peach）→ max `#ea76cb`（pink）。
-    与 dark 的唯一差异在 medium：dark 用 rosewater，light 用 lavender。
+- `PALETTE_LIGHT` = Latte（`src/palette.ts:71-85`；提交 `880d6de` 起同色相压深，见下）。
+  - fixed：model `#8839ef`（mauve，不变）→ folder `#00787f`（深青）→ git `#a25c00`（深赭）。
+  - effort：minimal `#148002`（深绿）→ low `#0761ef`（深蓝）→ medium `#4564d5`（深宝石蓝）→
+    high `#ae4f51`（砖红）→ xhigh `#ca3700`（深橙红）→ max `#b03f95`（深品红）。
 
-  代码注释给出的理由是：Latte 的 rosewater → flamingo 相邻 ΔE 只有 4.3，等级变化会糊在一起
-  （`src/palette.ts:14-15`）。该数值**可复现**，度量是 OKLab 欧氏距离 ×100（下称 OKΔE），
-  实测 `#dc8a78` → `#dd7878` = 4.3212（见第五节第 1 条）。注意 rosewater 是被否决的备选色，
-  它并不在 `PALETTE_LIGHT` 中，所以这个 4.3 无法只从上面的色值表推出。
-- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:26-32`）。
+  压深的理由（`src/palette.ts:11-31`）：Latte accent 本是前景色，直接做 pill 底在浅底上对比度
+  不足（旧 git 黄块 vs 底仅 2.31、白字 vs 旧 teal/green 仅 3.74/3.34）。故 Light 每档沿色相压深，
+  直至同时满足"前景 vs 底 ≥4.5 且白字 vs 块 ≥4.5"；压深后 YIQ 全 <128，白字是既有
+  `contrastTextFor` 规则的自然输出，无需改规则。model `#8839ef` 本已达标故不动。
+  此前的 rosewater/lavender 选色分析见第五节第 1、6 条的后续注记（已被本轮取代）。
+- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:40-46`）。
 
 明暗检测（`isLightThemeFrom`，`src/palette.ts:82-94`）：
 
 - pi 对自定义主题没有 `isLight` API，因此读 live theme 的 `userMessageBg` 背景 ANSI：
-  `theme?.getBgAnsi?.("userMessageBg")`（`src/palette.ts:86`），用 `parseTruecolor` 解析为 RGB。
-- 判据是 YIQ 亮度 `(299r + 587g + 114b) / 1000 >= 128`（`src/palette.ts:90`）。
-- 解析不到颜色或抛错时返回 `false`（即按 dark 处理）（`src/palette.ts:87-89`、`src/palette.ts:91-93`）。
-  注释给出参照值：Latte 的 `userMessageBg`（mantle）约 232 luma，Frappé 约 42（`src/palette.ts:79-80`）。
+  `theme?.getBgAnsi?.("userMessageBg")`（`src/palette.ts:100`），用 `parseTruecolor` 解析为 RGB。
+- 判据是 YIQ 亮度 `(299r + 587g + 114b) / 1000 >= 128`（`src/palette.ts:104`）。
+- 解析不到颜色或抛错时返回 `false`（即按 dark 处理）（`src/palette.ts:102`、`src/palette.ts:105-107`）。
+  注释给出参照值：Latte 的 `userMessageBg`（mantle）约 232 luma，Frappé 约 42（`src/palette.ts:93-94`）。
 
-其余导出：`paletteForLight(isLight)`（`src/palette.ts:73-75`）；`effortColor(level, palette)`
-（`src/palette.ts:96-104`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
-（`src/palette.ts:103`）；`truecolorFg(hex)`（`src/palette.ts:107-112`）把 hex 转成
+其余导出：`paletteForLight(isLight)`（`src/palette.ts:87-89`）；`effortColor(level, palette)`
+（`src/palette.ts:110-118`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
+（`src/palette.ts:117`）；`truecolorFg(hex)`（`src/palette.ts:121-127`）把 hex 转成
 `\x1b[38;2;r;g;bm` 前景序列，可被 `badge.parseTruecolor` 解析。
 
 颜色本身只作为“前景色”传入段落，真正作为背景渲染由 2.3 的 `powerlineChain` 完成。
@@ -201,7 +200,7 @@ settings 文件：
 **statusline 源码对 pi-core 没有任何 import。** 逐个核对 `extensions/statusline/src/` 的 import：
 只有三类——pi SDK（`@earendil-works/pi-coding-agent` 的类型、`@earendil-works/pi-tui` 的
 `truncateToWidth`/`visibleWidth`）、Node 内建（`node:fs`/`node:os`/`node:path`）、以及本地包
-`packages/shared-tool-presentation/src/badge.ts`（`src/palette.ts:23`、`src/status-mode.ts:1`）。
+`packages/shared-tool-presentation/src/badge.ts`（`src/palette.ts:37`、`src/status-mode.ts:1`）。
 不存在任何 `pi-core` 字样的引用。
 
 这一约束被测试固定：`tests/structure-invariants.test.ts` 名为 “statusline has zero static imports from
@@ -415,6 +414,8 @@ pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
    注释中“等级变化会糊在一起”的理由成立（实际采用的 lavender → flamingo OKΔE ≈ 24.6）。
    注意 rosewater 并不在 `PALETTE_LIGHT` 中（它是被否决的备选色），故该数值无法只从色值表推出。
    `src/palette.ts` 的注释已补标度量名。
+
+   **后续注记（提交 `880d6de` 起已取代）**：Light 整套调色板已同色相压深，lavender 本身也不再在 `PALETTE_LIGHT` 中（现 medium 为深宝石蓝 `#4564d5`）。以上 OKΔE 数值作为旧色对的测量仍然成立，但不再描述线上颜色；现行档位区分度由 `src/palette.ts` 头注释（CIE76）与 `tests/palette.test.ts` 的对比度回归测试钉住。
 2. **pi 的 compaction 机制**：已对照宿主全局安装的 pi 1.0.0
    （`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent`）逐项核实
    `tool-result-budget/index.ts:6-12` 注释里的四项断言，**两项为真、两项已过期**：
@@ -443,3 +444,5 @@ pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
    而非 Frappé**（浅底上压低对比度），与 medium 的选色是两件事。medium 选 lavender 的依据是可核实的
    OKΔE 档距：lavender → flamingo ≈ 24.6、blue → lavender ≈ 12.3，而被否决的 rosewater → flamingo
    仅 ≈ 4.3（见第 1 条）。研究文档另给出 sapphire 被否的原因（与 folder teal 仅 ≈ 5.1，会撞色）。
+
+   **后续注记（提交 `880d6de` 起已取代）**：以上 lavender/sapphire 选色讨论针对的是旧 Light 调色板，现行 `PALETTE_LIGHT` 已整体压深（medium 为 `#4564d5`），选色依据改为"同色相压深至双 ≥4.5"，见 `src/palette.ts` 头注释。本条作为历史核查记录保留。
