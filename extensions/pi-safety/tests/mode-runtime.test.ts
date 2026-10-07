@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { PermissionModeRuntime } from "../src/mode-runtime.ts";
+import { nextMode } from "../src/register-support.ts";
 
 function stateEntry(
   mode: "auto" | "yolo" | (string & {}),
@@ -83,15 +84,18 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.autoState).toEqual({ consecutiveDenials: 2, paused: true });
   });
 
-  it("cycles modes while preserving mode persistence and resetting Auto on return", () => {
+  it("toggles modes via activate while preserving persistence and resetting Auto on return", () => {
+    // Production toggles via nextMode()+activate (the runtime.cycle shortcut
+    // is gone): same observable contract — yolo keeps transient Auto state,
+    // returning to auto without preservation resets it.
     const appendEntry = vi.fn();
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, appendEntry);
     runtime.applyAutoState({ consecutiveDenials: 1, paused: false });
 
-    expect(runtime.cycle()).toBe("yolo");
+    expect(runtime.activate(nextMode(runtime.mode))).toBe("yolo");
     expect(runtime.statusLabel).toBe("Bypass permissions");
     expect(runtime.statusSeverity).toBe("error");
-    expect(runtime.cycle()).toBe("auto");
+    expect(runtime.activate(nextMode(runtime.mode))).toBe("auto");
     expect(runtime.autoState).toEqual({ consecutiveDenials: 0, paused: false });
     expect(appendEntry).toHaveBeenLastCalledWith(
       "pi-safety-state",

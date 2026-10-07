@@ -863,6 +863,44 @@ describe("Permission mode registration", () => {
     }
   });
 
+  // Display derives from the *applied* execution snapshot, never from desired
+  // mode. A mid-turn shift+tab flips desired to yolo but enforcement stays
+  // auto until the step boundary — the footer and badge must keep reporting
+  // the enforced mode, or yolo→auto would claim protection that isn't live.
+  it("shows the applied mode, not the desired mode, during a mid-turn cycle", async () => {
+    const app = await makeHarness();
+    await startSession(app);
+    await startAgent(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context); // auto -> yolo desired, applied still auto
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-safety", "Approve for me");
+    const modeEvents = app.emit.mock.calls.filter(([name]) => name === "pi-safety:mode") as [
+      string,
+      { mode: string },
+    ][];
+    expect(modeEvents.length).toBeGreaterThan(0);
+    expect(modeEvents.at(-1)?.[1].mode).toBe("auto");
+  });
+
+  it("publishes the new mode once the step boundary applies it", async () => {
+    const app = await makeHarness();
+    await startSession(app);
+    await startAgent(app);
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context); // desired yolo, applied auto
+    await startTurn(app, 1); // step boundary applies yolo
+
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-safety", "Bypass permissions");
+    const modeEvents = app.emit.mock.calls.filter(([name]) => name === "pi-safety:mode") as [
+      string,
+      { mode: string },
+    ][];
+    expect(modeEvents.at(-1)?.[1].mode).toBe("yolo");
+  });
+
   it("reports sandbox activation failure without mislabeling it as a config error", async () => {
     const app = await makeHarness({
       sandboxInitializeError: new Error("sandbox helper is unavailable"),
@@ -1889,6 +1927,69 @@ describe("Permission mode registration", () => {
     release();
     await first;
     expect(app.bareBashExecute).toHaveBeenCalledOnce();
+  });
+
+  // Differential parity with the direct-path twin above: on the auto path the
+  // Engine owns the in-flight set (approve-for-me-engine.ts:2483), on the
+  // direct path the register layer does. Both must refuse with
+  // concurrent-invocation; if either side ever changes its code, this pair
+  // fails instead of drifting silently.
+  it("refuses a second auto Bash on the same tool-call ID, like the direct path", async () => {
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecute: async () => {
+        entered();
+        await gate;
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const first = executeBash(app, "auto-shared-id", "printf first");
+    await entry;
+    await expect(executeBash(app, "auto-shared-id", "printf second")).rejects.toMatchObject({
+      code: "concurrent-invocation",
+    });
+    release();
+    await first;
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
+  // Differential parity with "aborts a running direct yolo Bash when the turn
+  // closes": a turn close must cancel the in-flight attempt on both paths and
+  // keep the effects warning. The Engine owns the auto path, the register
+  // layer owns the direct path — same observable contract.
+  it("aborts a running auto Bash when the turn closes, marking effects", async () => {
+    let entered!: () => void;
+    const entry = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxExecute: async () => {
+        entered();
+        await endAgent(app);
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+      },
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    const pending = executeBash(app, "auto-turn-close", "printf slow");
+    await entry;
+    await expect(pending).rejects.toMatchObject({
+      code: "stale-invocation",
+      effectsMayHaveOccurred: true,
+    });
   });
 
   it("keeps a local post-exec infrastructure failure terminal even after exit 0", async () => {

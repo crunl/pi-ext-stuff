@@ -82,6 +82,7 @@ import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { NetworkBoundary } from "./network-boundary.ts";
 import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
 import {
+  permissionModeLabel,
   renderExactRetryInstruction,
   renderPermissionErrorForAgent,
   renderPermissionNotice,
@@ -364,6 +365,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * `turnDepth` scopes a nested close to the entries its own level started.
    */
   const yoloDirectAttempts = new Set<YoloDirectAttempt>();
+  /**
+   * Fail closed when a live turn loses its permission context (a branch
+   * switch or reload narrowing a YOLO run) or cannot trust it (a setup
+   * failure while in yolo): an unrestricted turn must not continue
+   * unreviewed. The narrowing-vs-failure distinction stays at the call
+   * sites; only the idle-guarded abort is shared.
+   */
+  const abortLiveTurn = (ctx: Pick<ExtensionContext, "isIdle" | "abort">): void => {
+    if (!ctx.isIdle()) ctx.abort();
+  };
   const abortYoloDirectAttempts = (reason: string, minTurnDepth = 1): void => {
     // Engine parity for a closed/invalidated turn: the attempt keeps the
     // context-changed classification instead of the raw abort error, and the
@@ -418,15 +429,24 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    ctx.ui.setStatus("pi-safety", modeRuntime?.statusLabel ?? "Approve for me");
+    // Display derives from the *applied* execution snapshot — the same mode
+    // enforcement uses — never from the desired modeRuntime alone. During a
+    // mid-turn cycle the two diverge until the step boundary applies it;
+    // showing desired would claim protection (or bypass) that isn't live yet.
+    const appliedMode =
+      session.currentExecutionSnapshot()?.mode ??
+      session.getExecutionSnapshot()?.mode ??
+      modeRuntime?.mode ??
+      "auto";
+    const label = permissionModeLabel(appliedMode);
+    // Parity with PermissionModeRuntime.statusSeverity: warning marks
+    // guardian-reviewed execution, error marks unreviewed execution.
+    const severity = appliedMode === "auto" ? "warning" : "error";
+    ctx.ui.setStatus("pi-safety", label);
     // Structured mode event for status consumers (e.g. statusline). The
     // string published via setStatus above stays as the built-in-footer
     // fallback; consumers should key off `mode`/`severity`, never the label.
-    pi.events.emit("pi-safety:mode", {
-      mode: modeRuntime?.mode ?? "auto",
-      label: modeRuntime?.statusLabel ?? "Approve for me",
-      severity: modeRuntime?.statusSeverity ?? "warning",
-    });
+    pi.events.emit("pi-safety:mode", { mode: appliedMode, label, severity });
   };
 
   const invalidatePermissionContext = (_reason: string): void => {
@@ -1272,6 +1292,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         guardianInvalidationAfterModeChange = false;
         invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
       }
+      // The applied mode may just have changed (this path only runs when the
+      // snapshot diverged from desired): publish it so the footer and badge
+      // track enforcement rather than the desired mode set mid-turn.
+      setDefaultStatus(ctx);
     } catch (error: unknown) {
       if (!session.isCurrentGeneration(generation)) return;
       // Auto path never switched authorization on failure. Yolo already
@@ -2541,7 +2565,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         setDefaultStatus(ctx);
         // A tree switch is an explicit context invalidation. Do not carry an
         // unrestricted YOLO execution into the newly restored branch.
-        if (previousMode === "yolo" && restoredMode !== "yolo" && !ctx.isIdle()) ctx.abort();
+        if (previousMode === "yolo" && restoredMode !== "yolo") abortLiveTurn(ctx);
       }
     });
   });
@@ -2923,7 +2947,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           setDefaultStatus(ctx);
           // /permissions is an explicit policy/config reload, not a
           // turn-local mode toggle; fail closed if it narrows a live YOLO run.
-          if (previousMode === "yolo" && runtime.mode !== "yolo" && !ctx.isIdle()) ctx.abort();
+          if (previousMode === "yolo" && runtime.mode !== "yolo") abortLiveTurn(ctx);
           if (runtime.mode === "yolo") {
             ctx.ui.notify(
               renderPermissionSummary({
@@ -2981,7 +3005,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           if (!candidateLoaded) {
             configFailure = error instanceof Error ? error : new Error(String(error));
           }
-          if (modeRuntime?.mode === "yolo" && !ctx.isIdle()) ctx.abort();
+          if (modeRuntime?.mode === "yolo") abortLiveTurn(ctx);
           reportPermissionSetupError(ctx, error);
         }
       });

@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SafetyConfig } from "./config.ts";
-import { ModeController } from "./modes/controller.ts";
 import { permissionModeLabel } from "./permission-copy.ts";
 import {
   createPermissionSessionState,
@@ -33,7 +32,6 @@ function freshAutoState(): AutoState {
 }
 
 export class PermissionModeRuntime {
-  private controller: ModeController;
   private state: PermissionSessionState;
 
   constructor(
@@ -41,11 +39,10 @@ export class PermissionModeRuntime {
     private readonly appendEntry: ExtensionAPI["appendEntry"],
   ) {
     this.state = functionalState(createPermissionSessionState(config));
-    this.controller = new ModeController(this.state.mode);
   }
 
   get mode(): PermissionMode {
-    return this.controller.active;
+    return this.state.mode;
   }
 
   get autoState(): AutoState {
@@ -69,19 +66,10 @@ export class PermissionModeRuntime {
     mode: PermissionMode,
     { preserveAutoTransientState = false }: PermissionModeActivationOptions = {},
   ): PermissionMode {
-    const result = this.controller.request(mode);
-    this.state.mode = result;
-    if (!preserveAutoTransientState && result === "auto") this.state.auto = freshAutoState();
+    this.state.mode = mode;
+    if (!preserveAutoTransientState && mode === "auto") this.state.auto = freshAutoState();
     this.persist();
-    return result;
-  }
-
-  cycle(): PermissionMode {
-    const result = this.controller.cycle();
-    this.state.mode = result;
-    if (result === "auto") this.state.auto = freshAutoState();
-    this.persist();
-    return result;
+    return mode;
   }
 
   applyAutoState(state: AutoStateInput): void {
@@ -102,7 +90,6 @@ export class PermissionModeRuntime {
 
   restore(entries: readonly unknown[], config: SafetyConfig): void {
     this.state = functionalState(restorePermissionState(entries, config));
-    this.controller = new ModeController(this.state.mode);
   }
 
   snapshot(): PermissionSessionState {

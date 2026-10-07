@@ -1,28 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, fingerprintConfig } from "../src/config.ts";
-import { ModeController } from "../src/modes/controller.ts";
 import {
   createPermissionSessionState,
   persistPermissionState,
   reducePermissionEntries,
   restorePermissionState,
 } from "../src/state.ts";
-
-describe("ModeController", () => {
-  it("cycles between Auto and YOLO immediately", () => {
-    const controller = new ModeController("auto");
-    expect(controller.cycle()).toBe("yolo");
-    expect(controller.cycle()).toBe("auto");
-  });
-
-  it("applies a transition immediately", () => {
-    const controller = new ModeController("auto");
-    expect(controller.request("yolo")).toBe("yolo");
-    expect(controller.active).toBe("yolo");
-    expect(controller.request("auto")).toBe("auto");
-    expect(controller.active).toBe("auto");
-  });
-});
 
 describe("permission session state", () => {
   it("persists state as a pi-safety-state entry", () => {
