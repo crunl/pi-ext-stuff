@@ -14,7 +14,7 @@
  * host-owned: click / `app.thinking.toggle` (ctrl+t).
  */
 import { AssistantMessageComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Markdown, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Markdown, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
 import { createThinkingTimingTracker, type ThinkingTimingTracker } from "./thinking-timing.ts";
 
 export const THINKING_GLANCE_TREE = "└ ";
@@ -77,8 +77,27 @@ interface ComponentInternals {
   lastMessage?: AssistantMessageLike;
   isStreaming: boolean;
   thinkingVisibilityOverrides: Map<number, boolean>;
-  contentContainer: { clear(): void; addChild(c: unknown): void };
+  contentContainer: { clear(): void; addChild(c: unknown): void; children?: unknown[] };
   hasToolCalls?: boolean;
+  __thinkingGlanceCache?: GlanceRenderCache;
+}
+
+type GlanceBlockKind = "spacer" | "text" | "think-hidden" | "think-region" | "tail";
+
+interface GlanceBlockDesc {
+  kind: GlanceBlockKind;
+  sig: string;
+  create: () => Component;
+  refresh?: (existing: Component) => boolean;
+}
+
+interface GlanceRenderCache {
+  hostTheme: unknown;
+  markdownTheme: unknown;
+  outputPad: number;
+  kinds: GlanceBlockKind[];
+  sigs: string[];
+  components: Component[];
 }
 
 type UpdateContent = (message: AssistantMessageLike, isStreaming?: boolean) => void;
@@ -134,31 +153,44 @@ export function applyThinkingGlance(tracker: ThinkingTimingTracker): void {
 
       self.lastMessage = message;
       self.isStreaming = streaming;
-      self.contentContainer.clear();
 
       const contents = message.content ?? [];
+      const hasToolCalls = contents.some((c) => c.type === "toolCall");
+      const descs: GlanceBlockDesc[] = [];
+      const pushSpacer = (): void => {
+        descs.push({
+          kind: "spacer",
+          sig: "spacer",
+          create: () => new Spacer(1),
+          refresh: (existing) => existing instanceof Spacer,
+        });
+      };
       const hasVisibleContent = contents.some(
         (c) =>
           (c.type === "text" && typeof c.text === "string" && c.text.trim()) ||
           (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim()),
       );
-      if (hasVisibleContent) self.contentContainer.addChild(new Spacer(1));
+      if (hasVisibleContent) pushSpacer();
 
       let thinkingRunIndex = 0;
       for (let i = 0; i < contents.length; i++) {
         const content = contents[i];
         if (!content) continue;
         if (content.type === "text" && typeof content.text === "string" && content.text.trim()) {
-          self.contentContainer.addChild(
-            new Markdown(
-              content.text.trim(),
-              self.outputPad,
-              0,
-              self.markdownTheme,
-              undefined,
-              undefined,
-            ),
-          );
+          const source = content.text.trim();
+          descs.push({
+            kind: "text",
+            sig: `text:${source}`,
+            create: () =>
+              new Markdown(source, self.outputPad, 0, self.markdownTheme, undefined, undefined),
+            refresh: (existing) => {
+              if (existing instanceof Markdown) {
+                existing.setText(source);
+                return true;
+              }
+              return false;
+            },
+          });
           continue;
         }
         if (content.type !== "thinking") continue;
@@ -183,58 +215,131 @@ export function applyThinkingGlance(tracker: ThinkingTimingTracker): void {
         const runIndex = thinkingRunIndex++;
         const hidden = self.thinkingVisibilityOverrides.get(runIndex) ?? self.hideThinkingBlock;
         const label = glanceForRun(message, runIndex, streaming);
-        const thinkingComponent = hidden
-          ? new Text(
-              hostTheme ? hostTheme.italic(hostTheme.fg("thinkingText", label)) : label,
-              self.outputPad,
-              0,
-            )
-          : new Markdown(
-              thinkingBlocks.join("\n\n"),
-              self.outputPad,
-              0,
-              self.markdownTheme,
-              {
-                color: (text: string) => (hostTheme ? hostTheme.fg("thinkingText", text) : text),
-                italic: true,
-              } as never,
-              undefined,
-            );
-        self.contentContainer.addChild(
-          new MouseRegion(thinkingComponent, (event) => {
-            if (event.type !== "click" || event.button !== "left") return undefined;
-            self.thinkingVisibilityOverrides.set(runIndex, !hidden);
-            if (self.lastMessage) original.call(this, self.lastMessage);
-            return { handled: true };
-          }),
-        );
-        if (hasVisibleContentAfter) self.contentContainer.addChild(new Spacer(1));
+        if (hidden) {
+          const styled = hostTheme ? hostTheme.italic(hostTheme.fg("thinkingText", label)) : label;
+          descs.push({
+            kind: "think-hidden",
+            sig: `hidden:${runIndex}:${label}`,
+            create: () =>
+              new MouseRegion(new Text(styled, self.outputPad, 0), (event) => {
+                if (event.type !== "click" || event.button !== "left") return undefined;
+                self.thinkingVisibilityOverrides.set(runIndex, !hidden);
+                if (self.lastMessage) original.call(this, self.lastMessage);
+                return { handled: true };
+              }),
+          });
+        } else {
+          const joined = thinkingBlocks.join("\n\n");
+          descs.push({
+            kind: "think-region",
+            sig: `region:${runIndex}:${label}:${joined}`,
+            create: () => {
+              const thinkingComponent = new Markdown(
+                joined,
+                self.outputPad,
+                0,
+                self.markdownTheme,
+                {
+                  color: (text: string) => (hostTheme ? hostTheme.fg("thinkingText", text) : text),
+                  italic: true,
+                } as never,
+                undefined,
+              );
+              return new MouseRegion(thinkingComponent, (event) => {
+                if (event.type !== "click" || event.button !== "left") return undefined;
+                self.thinkingVisibilityOverrides.set(runIndex, !hidden);
+                if (self.lastMessage) original.call(this, self.lastMessage);
+                return { handled: true };
+              });
+            },
+          });
+        }
+        if (hasVisibleContentAfter) pushSpacer();
       }
 
-      const hasToolCalls = contents.some((c) => c.type === "toolCall");
-      self.hasToolCalls = hasToolCalls;
       if (message.stopReason === "length") {
-        self.contentContainer.addChild(new Spacer(1));
-        self.contentContainer.addChild(
-          new Text(paintError("Response was truncated before completion."), self.outputPad, 0),
-        );
+        const truncated = "Response was truncated before completion.";
+        pushSpacer();
+        descs.push({
+          kind: "tail",
+          sig: `tail:length:${truncated}`,
+          create: () => new Text(paintError(truncated), self.outputPad, 0),
+        });
       } else if (!hasToolCalls) {
         if (message.stopReason === "aborted") {
           const abortMessage =
             message.errorMessage && message.errorMessage !== "Request was aborted"
               ? message.errorMessage
               : "Operation aborted";
-          self.contentContainer.addChild(new Spacer(1));
-          self.contentContainer.addChild(new Text(paintError(abortMessage), self.outputPad, 0));
+          pushSpacer();
+          descs.push({
+            kind: "tail",
+            sig: `tail:aborted:${abortMessage}`,
+            create: () => new Text(paintError(abortMessage), self.outputPad, 0),
+          });
         } else if (message.stopReason === "error") {
           const errorMsg = message.errorMessage || "Unknown error";
-          self.contentContainer.addChild(new Spacer(1));
-          self.contentContainer.addChild(
-            new Text(paintError(`Error: ${errorMsg}`), self.outputPad, 0),
-          );
+          const full = `Error: ${errorMsg}`;
+          pushSpacer();
+          descs.push({
+            kind: "tail",
+            sig: `tail:error:${full}`,
+            create: () => new Text(paintError(full), self.outputPad, 0),
+          });
         }
       }
+
+      // Incremental reconcile: reuse warm Markdown/Text instances whose source
+      // is unchanged, so a long thinking stream reparses only the growing tail
+      // instead of the whole transcript every tick. Thinking rows live inside
+      // MouseRegion (child is private, no setter), so only a changed tail row
+      // is rebuilt; plain text blocks refresh in place via setText.
+      const prev = self.__thinkingGlanceCache;
+      const usablePrev =
+        prev &&
+        prev.hostTheme === hostTheme &&
+        prev.markdownTheme === self.markdownTheme &&
+        prev.outputPad === self.outputPad
+          ? prev
+          : undefined;
+      const sigs = descs.map((d) => d.sig);
+      const kids = self.contentContainer.children;
+      const containerIntact =
+        usablePrev !== undefined &&
+        Array.isArray(kids) &&
+        kids.length === usablePrev.components.length &&
+        usablePrev.components.every((c, idx) => kids[idx] === c);
+      const kindsMatch =
+        usablePrev !== undefined &&
+        usablePrev.kinds.length === descs.length &&
+        usablePrev.kinds.every((k, idx) => k === descs[idx]?.kind);
+      const sigsMatch =
+        usablePrev !== undefined &&
+        usablePrev.sigs.length === sigs.length &&
+        usablePrev.sigs.every((s, idx) => s === sigs[idx]);
+      if (containerIntact && kindsMatch && sigsMatch) {
+        self.hasToolCalls = hasToolCalls;
+        return;
+      }
+      const next: Component[] = descs.map((d, idx) => {
+        const old = usablePrev?.kinds[idx] === d.kind ? usablePrev?.components[idx] : undefined;
+        if (old && usablePrev?.sigs[idx] === d.sig) return old;
+        if (old && d.refresh?.(old)) return old;
+        return d.create();
+      });
+      self.contentContainer.clear();
+      for (const child of next) self.contentContainer.addChild(child);
+      self.__thinkingGlanceCache = {
+        hostTheme,
+        markdownTheme: self.markdownTheme,
+        outputPad: self.outputPad,
+        kinds: descs.map((d) => d.kind),
+        sigs,
+        components: next,
+      };
+      self.hasToolCalls = hasToolCalls;
     } catch {
+      (this as unknown as ComponentInternals).__thinkingGlanceCache = undefined;
       original.call(this, message, isStreaming);
     }
   };

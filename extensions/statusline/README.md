@@ -123,7 +123,7 @@ CH66%  █████░░░░░ 80.6k/192k   全量
 
 ## 已知限制
 
-- 当前每次 footer render 都可能重新遍历 session entries 计算 usage；长会话需要后续增加事件驱动缓存
+- footer usage 按 `sessionId + leafId + model` 脏键缓存（`src/usage.ts` 的 `createUsageCache`）：流式 chunk 只命中缓存（零遍历），仅 session/leaf/model 变化时全量重算一次。正确性依赖宿主 append-only 不变量（每次 append 前进 `leafId`，resume/fork 换 `sessionId`）；键不可读时 fail-open 全量重算
 - provider 始终显示，不区分单 provider 和多 provider
 - 未显示内置 footer 的 `(auto)` 自动压缩标记
 - Nerd Font glyph 的最终视觉效果取决于终端字体和 fallback 配置

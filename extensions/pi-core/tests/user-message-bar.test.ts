@@ -130,4 +130,24 @@ describe("applyUserMessageBar", () => {
     const bars = plain(lines[0]).match(/▌/g) ?? [];
     expect(bars.length).toBe(1);
   });
+
+  it("caches repeat renders at the same width (frame cache)", () => {
+    applyUserMessageBar(() => mockTheme);
+    const component = new UserMessageComponent("hi", getMarkdownTheme(), 1);
+    const first = component.render(40);
+    const second = component.render(40);
+    expect(second).toBe(first);
+  });
+
+  it("invalidates the frame cache on width change and invalidate()", () => {
+    applyUserMessageBar(() => mockTheme);
+    const component = new UserMessageComponent("hi", getMarkdownTheme(), 1);
+    const first = component.render(40);
+    expect(component.render(50)).not.toBe(first);
+    const wide = component.render(50);
+    expect(component.render(50)).toBe(wide);
+    component.invalidate();
+    expect(component.render(50)).not.toBe(wide);
+    expect(component.render(50).join("\n")).toBe(wide.join("\n"));
+  });
 });

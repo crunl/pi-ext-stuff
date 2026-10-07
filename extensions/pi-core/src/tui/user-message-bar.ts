@@ -47,8 +47,27 @@ interface BgBox {
 
 interface PatchCarrier {
   render(this: UserMessageComponent, width: number): string[];
+  invalidate?(this: UserMessageComponent): void;
   __userBarOriginal?: (this: UserMessageComponent, width: number) => string[];
+  __userBarInvalidate?: (this: UserMessageComponent) => void;
   __userBarTheme?: ThemeRef;
+}
+
+interface BarCacheEntry {
+  width: number;
+  bar: string;
+  band: string;
+  theme: Theme | undefined;
+  child: unknown;
+  lines: string[];
+}
+
+/** Per-instance frame cache: user messages are immutable, so output varies
+ * only with width, theme colors, and the (post-unwrap) Markdown child. */
+const barCache = new WeakMap<object, BarCacheEntry>();
+
+function clearBarCache(instance: object): void {
+  barCache.delete(instance);
 }
 
 /**
@@ -65,31 +84,59 @@ export function applyUserMessageBar(getTheme: ThemeRef): void {
   proto.__userBarOriginal = original;
   proto.__userBarTheme = getTheme;
 
+  if (typeof proto.invalidate === "function" && proto.__userBarInvalidate === undefined) {
+    proto.__userBarInvalidate = proto.invalidate;
+  }
+  const originalInvalidate = proto.__userBarInvalidate;
+  if (typeof originalInvalidate === "function") {
+    proto.invalidate = function (this: UserMessageComponent): void {
+      clearBarCache(this);
+      originalInvalidate.call(this);
+    };
+  }
+
   proto.render = function (this: UserMessageComponent, width: number): string[] {
     const gutter = 1;
     try {
       const theme = proto.__userBarTheme?.();
       // Unwrap the Box chrome (bg + paddingY blank rows). The Box still owns
       // the Markdown child built by rebuild(); we keep that child only.
-      // Discriminator: Box has setBgFn, Markdown does not.
+      // Discriminator: Box has setBgFn, Markdown does not. Runs once per
+      // instance in practice — after the first unwrap the check fails fast.
       const children = (this as unknown as { children?: unknown[] }).children;
       const first = children?.[0] as (BgBox & { children?: unknown[] }) | undefined;
       if (first && typeof first.setBgFn === "function" && first.children?.[0]) {
         const markdown = first.children[0];
         (this as unknown as { clear(): void }).clear();
         (this as unknown as { addChild(c: unknown): void }).addChild(markdown);
+        clearBarCache(this);
+      }
+
+      const bar = theme ? theme.fg("borderAccent", BAR) : BAR;
+      // Probe of the band color: catches in-place theme mutations where the
+      // theme object identity stays the same but colors change.
+      const band = theme ? theme.bg("userMessageBg", "") : "";
+      const child = (this as unknown as { children?: unknown[] }).children?.[0];
+      const cached = barCache.get(this);
+      if (
+        cached &&
+        cached.width === width &&
+        cached.bar === bar &&
+        cached.band === band &&
+        cached.theme === theme &&
+        cached.child === child
+      ) {
+        return cached.lines;
       }
 
       // Render content at reduced width so the bar does not steal wrap space.
       // Bypass the original OSC133 wrapper: we re-apply marks after the bar.
       const contentWidth = Math.max(1, width - gutter);
-      const child = (this as unknown as { children?: unknown[] }).children?.[0] as
-        | { paddingX?: unknown; paddingY?: unknown }
-        | undefined;
+      const padChild = child as { paddingX?: unknown; paddingY?: unknown } | undefined;
       const readPad = (value: unknown): number =>
         typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-      const ownPad = readPad(child?.paddingY);
-      const margin = readPad(child?.paddingX);
+      const ownPad = readPad(padChild?.paddingY);
+      const margin = readPad(padChild?.paddingX);
       let lines = Container.prototype.render.call(this, contentWidth);
       if (lines.length === 0) return lines;
       // Host 1.0.0+ renders Markdown with its own paddingY blank rows (the Box
@@ -120,7 +167,6 @@ export function applyUserMessageBar(getTheme: ThemeRef): void {
         lines = lines.map((line) => line.replace(SGR_PREFIX_RE, unmargin));
       }
 
-      const bar = theme ? theme.fg("borderAccent", BAR) : BAR;
       const bandRow = (line: string) => {
         // Pad content to the wrap width, then paint the band (mirrors Box.applyBg).
         const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(line)));
@@ -131,6 +177,7 @@ export function applyUserMessageBar(getTheme: ThemeRef): void {
       const out = [bandRow(""), ...lines.map(bandRow), bandRow("")];
       out[0] = OSC133_ZONE_START + out[0];
       out[out.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + out[out.length - 1];
+      barCache.set(this, { width, bar, band, theme, child, lines: out });
       return out;
     } catch {
       return original.call(this, width);
@@ -145,6 +192,10 @@ export function resetUserMessageBar(): void {
     proto.render = proto.__userBarOriginal;
     proto.__userBarOriginal = undefined;
     proto.__userBarTheme = undefined;
+  }
+  if (proto.__userBarInvalidate && typeof proto.invalidate === "function") {
+    proto.invalidate = proto.__userBarInvalidate;
+    proto.__userBarInvalidate = undefined;
   }
 }
 

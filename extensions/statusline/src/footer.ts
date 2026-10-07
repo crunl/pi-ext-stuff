@@ -24,7 +24,7 @@ import { type LeftSeg, renderFooterLines } from "./degrade.ts";
 import { formatCwd, ICONS } from "./format.ts";
 import { getOutputPad } from "./output-pad.ts";
 import { effortColor, isLightThemeFrom, paletteForLight } from "./palette.ts";
-import { computeUsageTotals } from "./usage.ts";
+import { createUsageCache } from "./usage.ts";
 
 interface FooterTheme {
 	fg(color: string, text: string): string;
@@ -42,6 +42,11 @@ export function installFooter(
 ): void {
 	const { getModelInfo } = options;
 	if (!ctx.hasUI || ctx.mode !== "tui") return;
+
+	// Per-install usage cache (fresh on every session_start install): render
+	// fires per streaming chunk but usage only changes per session-state
+	// change, so gather-once-per-key instead of traversing per frame.
+	const usageCache = createUsageCache();
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
@@ -91,15 +96,23 @@ export function installFooter(
 					});
 				}
 
-				// Cache hit rate + context usage feed the right ladder.
-				const totals = computeUsageTotals(ctx);
+				// Cache hit rate + context usage share one snapshot: both derive
+				// from the same session state, refreshed together only when the
+				// session/leaf/model key changes. Hot frames do zero entry
+				// traversal (neither ours nor the host's projection).
+				// NOTE: the two sources are NOT interchangeable — `totals`
+				// sums historical usage (CH% block), `usage` is the host's
+				// live context-window estimate (meter). They are only
+				// co-cached, never merged.
+				const snapshot = usageCache.get(ctx, model?.modelId);
+				const totals = snapshot.totals;
 				const hasCache = totals.cacheRead > 0 || totals.cacheWrite > 0;
 				const cacheRate =
 					hasCache && totals.latestCacheHitRate !== undefined
 						? totals.latestCacheHitRate
 						: undefined;
 
-				const usage = ctx.getContextUsage();
+				const usage = snapshot.usage;
 				const rightUsage = usage
 					? {
 							percent: usage.percent ?? null,
