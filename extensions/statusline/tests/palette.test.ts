@@ -36,16 +36,16 @@ test("dark palette uses Catppuccin Frappé accents", () => {
 	assert.equal(PALETTE_DARK.effort.max, "#f4b8e4");
 });
 
-test("light palette uses Catppuccin Latte accents", () => {
+test("light palette uses pressed-dark Catppuccin hues", () => {
 	assert.equal(PALETTE_LIGHT.fixed.model, "#8839ef");
-	assert.equal(PALETTE_LIGHT.fixed.folder, "#179299");
-	assert.equal(PALETTE_LIGHT.fixed.git, "#df8e1d");
-	assert.equal(PALETTE_LIGHT.effort.minimal, "#40a02b");
-	assert.equal(PALETTE_LIGHT.effort.low, "#1e66f5");
-	assert.equal(PALETTE_LIGHT.effort.medium, "#7287fd");
-	assert.equal(PALETTE_LIGHT.effort.high, "#dd7878");
-	assert.equal(PALETTE_LIGHT.effort.xhigh, "#fe640b");
-	assert.equal(PALETTE_LIGHT.effort.max, "#ea76cb");
+	assert.equal(PALETTE_LIGHT.fixed.folder, "#00787f");
+	assert.equal(PALETTE_LIGHT.fixed.git, "#a25c00");
+	assert.equal(PALETTE_LIGHT.effort.minimal, "#148002");
+	assert.equal(PALETTE_LIGHT.effort.low, "#0761ef");
+	assert.equal(PALETTE_LIGHT.effort.medium, "#4564d5");
+	assert.equal(PALETTE_LIGHT.effort.high, "#ae4f51");
+	assert.equal(PALETTE_LIGHT.effort.xhigh, "#ca3700");
+	assert.equal(PALETTE_LIGHT.effort.max, "#b03f95");
 });
 
 test("effort hues never collide with fixed slots in either palette", () => {
@@ -106,4 +106,76 @@ test("resolveModelInfo hides effort when off or non-reasoning", () => {
 		resolveModelInfo({ modelId: "m", reasoning: true, thinkingLevel: "high" }).modelId,
 		"m",
 	);
+});
+
+// ---------------------------------------------------------------------------
+// Contrast regression tests (WCAG 2.1, computed dependency-free).
+//
+// The pill renders each slot as a background block with auto black/white text
+// (contrastTextFor, YIQ threshold 128); the degraded `|` form renders the same
+// hex as foreground text. Both forms must stay readable on their theme base:
+//   - text (1.4.3): ≥ 4.5 for the label on its block and for the `|` fg on base
+//   - block vs base boundary (1.4.11 non-text): ≥ 3.0
+// Reference bases: latte #eff1f5, frappe #303446.
+
+function channelLum(pair: string): number {
+	const c = Number.parseInt(pair, 16) / 255;
+	return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+}
+
+function relLum(hex: string): number {
+	const r = channelLum(hex.slice(1, 3));
+	const g = channelLum(hex.slice(3, 5));
+	const b = channelLum(hex.slice(5, 7));
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(a: string, b: string): number {
+	const la = relLum(a);
+	const lb = relLum(b);
+	const hi = Math.max(la, lb);
+	const lo = Math.min(la, lb);
+	return (hi + 0.05) / (lo + 0.05);
+}
+
+function yiqLuma(hex: string): number {
+	const r = Number.parseInt(hex.slice(1, 3), 16);
+	const g = Number.parseInt(hex.slice(3, 5), 16);
+	const b = Number.parseInt(hex.slice(5, 7), 16);
+	return (299 * r + 587 * g + 114 * b) / 1000;
+}
+
+test("light slots pass text contrast on the latte base with white pill text", () => {
+	const base = "#eff1f5";
+	const slots = [...Object.values(PALETTE_LIGHT.fixed), ...Object.values(PALETTE_LIGHT.effort)];
+	for (const hex of slots) {
+		// `|` foreground form: slot color as text on the base.
+		assert.ok(
+			contrastRatio(hex, base) >= 4.5,
+			`${hex} as foreground on ${base}: ${contrastRatio(hex, base).toFixed(2)}`,
+		);
+		// Pill form: the pressed-dark slot must take white text under the
+		// existing YIQ-128 rule, and white-on-block must pass 4.5.
+		assert.ok(yiqLuma(hex) < 128, `${hex} must stay dark enough for white pill text`);
+		assert.ok(
+			contrastRatio("#ffffff", hex) >= 4.5,
+			`white text on ${hex}: ${contrastRatio("#ffffff", hex).toFixed(2)}`,
+		);
+	}
+});
+
+test("dark slots pass text contrast on the frappe base with black pill text", () => {
+	const base = "#303446";
+	const slots = [...Object.values(PALETTE_DARK.fixed), ...Object.values(PALETTE_DARK.effort)];
+	for (const hex of slots) {
+		assert.ok(yiqLuma(hex) >= 128, `${hex} must stay light enough for black pill text`);
+		assert.ok(
+			contrastRatio("#000000", hex) >= 4.5,
+			`black text on ${hex}: ${contrastRatio("#000000", hex).toFixed(2)}`,
+		);
+		assert.ok(
+			contrastRatio(hex, base) >= 3.0,
+			`${hex} block vs ${base}: ${contrastRatio(hex, base).toFixed(2)}`,
+		);
+	}
 });

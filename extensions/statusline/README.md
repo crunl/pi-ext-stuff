@@ -30,7 +30,7 @@ modeleffortfolderbranch   CH66.4%  █████░░░░░ 80.6k/192k
 modeleffortfolderbranch
 ```
 
-- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。dark：model=mauve，folder=sky，git=yellow；effort green→blue→rosewater→flamingo→peach→pink。light：model=mauve，folder=teal，git=yellow；effort green→blue→lavender→flamingo→peach→pink。effort=off 时不显示。配色取舍见 `src/palette.ts` 文件头注释。
+- 段色：Catppuccin 双主题 truecolor（dark=Frappe / light=Latte，按 `userMessageBg` 亮度切换）。dark：model=mauve，folder=sky，git=yellow；effort green→blue→rosewater→flamingo→peach→pink。light：model=mauve（不变），folder=深青，git=深赭；effort 取同色相压深版（深绿→深蓝→深宝石蓝→砖红→深橙红→深品红）。取色规则：色相即身份（跨主题、跨 pill/`|` 形态不变），明度做适配——light 端压到"前景 vs 底 ≥4.5 且白字 vs 块 ≥4.5"，故 light 全用白字 pill 文；dark 沿用粉彩端黑字。effort=off 时不显示。配色取舍见 `src/palette.ts` 文件头注释。
 
 ### Footer 右侧
 

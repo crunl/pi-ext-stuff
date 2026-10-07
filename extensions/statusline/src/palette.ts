@@ -8,13 +8,27 @@
  * Dark effort:
  *   green → blue → rosewater → flamingo → peach → pink.
  *
- * Light fixed: model=mauve (not error-red), folder=teal, git=yellow.
- * Light effort:
- *   green → blue → lavender → flamingo → peach → pink.
- *   medium uses lavender, not rosewater — Latte rosewater→flamingo
- *   adjacent ΔE is only 4.3 and would blur level changes.
- *   (ΔE here = OKLab Euclidean distance ×100, not CIE76/CIEDE2000;
- *   adjacent effort levels are meant to stay ≥6 apart.)
+ * Design rule (both themes, both render forms): hue = identity, lightness =
+ * adaptation. Each slot keeps its hue family across themes; the Light
+ * instance is the same hue pressed darker (lower OKLCh lightness) until it
+ * simultaneously satisfies:
+ *   - fg vs light base (#eff1f5) ≥ 4.5  (WCAG 1.4.3; covers the `|` fg form
+ *     and the pill-block vs terminal boundary ≥ 3.0 per 1.4.11), and
+ *   - white text vs block ≥ 4.5.
+ * Pressed dark, every Light slot lands at YIQ < 128, so the existing
+ * `contrastTextFor` rule keeps yielding white pill text with no rule change.
+ * Dark needs no dual stops: Frappé pastels already pass both forms on the
+ * dark base with black text, so Dark is frozen.
+ *
+ * Light fixed: model=mauve (unchanged — already 4.79/5.41), folder=deep teal,
+ * git=deep ochre (never pastel yellow on a pale base: 2.31).
+ * Light effort: same six hue families as Dark, pressed dark —
+ *   deep green → deep blue → deep periwinkle → brick → deep orange-red →
+ *   deep magenta. medium stays clear of model=mauve (ΔE ≈ 44.8), xhigh stays
+ *   clear of git ochre (ΔE ≈ 32.9); the closest adjacent tiers sit at
+ *   ΔE ≈ 17 (CIE76, JND ≈ 2.3; the ≥6 convention in OKLab×100 terms).
+ *   (ΔE here = CIE76; adjacent effort levels are comfortably distinguishable
+ *   and keep a lightness order under deuteranopia.)
  *
  * Light/dark is detected from the live theme's userMessageBg luminance
  * (no Pi isLight API for custom themes).
@@ -53,20 +67,20 @@ export const PALETTE_DARK: PowerlinePalette = {
 	},
 };
 
-/** Catppuccin Latte — light terminal. */
+/** Catppuccin Latte — light terminal. Same hues as Dark, pressed darker (see header). */
 export const PALETTE_LIGHT: PowerlinePalette = {
 	fixed: {
 		model: "#8839ef",
-		folder: "#179299",
-		git: "#df8e1d",
+		folder: "#00787f",
+		git: "#a25c00",
 	},
 	effort: {
-		minimal: "#40a02b",
-		low: "#1e66f5",
-		medium: "#7287fd",
-		high: "#dd7878",
-		xhigh: "#fe640b",
-		max: "#ea76cb",
+		minimal: "#148002",
+		low: "#0761ef",
+		medium: "#4564d5",
+		high: "#ae4f51",
+		xhigh: "#ca3700",
+		max: "#b03f95",
 	},
 };
 
