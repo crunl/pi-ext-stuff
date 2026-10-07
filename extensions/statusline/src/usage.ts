@@ -42,10 +42,12 @@ export function computeUsageTotals(ctx: ExtensionContext): UsageTotals {
 			add(usage);
 			const latestPrompt =
 				(usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-			totals.latestCacheHitRate =
-				latestPrompt > 0
-					? ((usage.cacheRead ?? 0) / latestPrompt) * 100
-					: undefined;
+			// Only update on a computable rate. An assistant message with no
+			// usage (interrupt, error) must not blank the last known hit rate —
+			// otherwise CH% flickers away after every interrupt.
+			if (latestPrompt > 0) {
+				totals.latestCacheHitRate = ((usage.cacheRead ?? 0) / latestPrompt) * 100;
+			}
 		} else if (
 			entry.type === "message" &&
 			entry.message.role === "toolResult" &&

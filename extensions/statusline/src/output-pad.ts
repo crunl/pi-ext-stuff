@@ -52,6 +52,8 @@ export function effectiveOutputPad(
 }
 
 interface PadCache {
+	globalPath: string;
+	projectPath: string | undefined;
 	globalMtime: number;
 	projectMtime: number;
 	pad: OutputPad;
@@ -65,8 +67,13 @@ export function getOutputPad(cwd: string, projectTrusted: boolean): OutputPad {
 	const globalMtime = mtimeMs(globalPath);
 	const projectMtime = projectPath === undefined ? -1 : mtimeMs(projectPath);
 
+	// Key on the *paths* too, not just mtimes: a missing settings file reports
+	// mtime -1, so every "trusted but no .pi/settings.json" cwd would otherwise
+	// collapse to the same (-1, -1) key and reuse another project's pad.
 	if (
 		cache !== undefined &&
+		cache.globalPath === globalPath &&
+		cache.projectPath === projectPath &&
 		cache.globalMtime === globalMtime &&
 		cache.projectMtime === projectMtime
 	) {
@@ -77,7 +84,7 @@ export function getOutputPad(cwd: string, projectTrusted: boolean): OutputPad {
 		readOutputPadFile(globalPath),
 		projectPath === undefined ? undefined : readOutputPadFile(projectPath),
 	);
-	cache = { globalMtime, projectMtime, pad };
+	cache = { globalPath, projectPath, globalMtime, projectMtime, pad };
 	return pad;
 }
 

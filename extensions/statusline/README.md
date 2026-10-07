@@ -89,16 +89,41 @@ modeleffortfolderbranch
 - 颜色直接读取公开的 `ctx.ui.theme`（完整 Theme）。
 - editor chrome（圆角盒 + mode 徽章 + autocomplete-above）由 `pi-core` 的 `registerEditorChrome` 统一安装；权限状态通过 `pi-safety:mode` 总线事件解耦接收（pi-core 订阅）。
 
+### 模块分层（宽度自适应）
+
+宽度降级的全部逻辑是**纯函数、零 pi 依赖**，因此可在 bare `node --test` 下完整单测（无需 pi 运行时）：
+
+- `src/footer.ts`：唯一接触 Pi 的薄壳。每帧从 `ctx` 采集数据（model/effort/folder/branch、cache 命中率、context usage、outputPad、statuses），注入 pi-tui 的 `visibleWidth`/`truncateToWidth` 与 `theme.fg`，然后调用 `renderFooterLines`。
+- `src/degrade.ts`：降级阶梯与整帧渲染（`buildLeftForms` / `buildRightForms` / `buildFooterCandidates` / `renderFooterLines`）。`measure`/`truncate`/`fg` 均为注入参数。
+- `src/layout.ts`：`Span`（自带实测可见宽度的字符串）原语 + `selectFitting` 选级 + `dedupeNarrowing`。`Span` 消灭了旧的 plain/colored 双轨——宽度只在构造时测一次，之后 `paint`/`join` 只做加法，着色版本永不与宽度漂移。
+
 ## 当前降级行为
 
-- footer 左右内容同时放不下时，优先保留并截断左侧；右侧统计整体隐藏
-- 没有 cache usage 时不显示 `CHxx%`
-- 没有 context usage 时不显示 context meter
+宽度不足时，footer 沿一条**全局牺牲阶梯**逐级降级（`src/degrade.ts` 的 `SHED_MOVES`）。每级都比上一级更窄、信息更少，所以「保留内容」关于可用宽度单调不减，不会逐帧闪烁。右侧按稀缺性先降，左侧随后。
+
+右侧（context 遥测）阶梯：
+
+```text
+CH66%  █████░░░░░ 80.6k/192k   全量
+       █████░░░░░ 80.6k/192k   丢 CH（过去时、无阈值、不可行动，最先牺牲）
+       ███░░ 80.6k/192k        meter 10 格 → 5 格（唯一可压缩的编码，充当缓冲）
+       80.6k/192k              丢 meter（纯冗余通道，颜色已搬到数字上）
+       42%                     tokens → 百分比（pi 自动压缩按百分比判定）
+       （阈值染色 icon）        兜底：1 列仍表达 ok/warn/compact
+                               右侧全空
+```
+
+左侧（定位信息）阶梯：powerline pill（带 icon / 圆角帽）→ 纯文本 `|` 分隔（弃 icon 与 pill 包裹，保留全部名称）→ 依次丢 branch / effort / folder → 仅剩 model。
+
+- **pill 永不被字符级截断**：字符级截断会砍掉右帽 `\uE0B4`、留下开口色块。因此左侧先整体降级为 `|` 分隔的纯文本，只有在**唯一存活段**内部才允许 `truncateToWidth`。
+- 右侧为空时**不会**触发左侧截断（显式短路 `minPadding`）。
+- 每一级宽度都用实测 `visibleWidth()` 判定，不靠公式估算（`formatTokens` 在 99999→100000 处宽度非单调）。
+- 第 2 行（其他扩展 `setStatus`）与第 1 行独立满足同一宽度红线；拼接前把 `\t`/换行折成空格并折叠连续空格（第三方 status 带 tab 是唯一的溢出崩溃路径）。
+- `usage.percent` 为 `null`（compaction 后、中断后）时渲染 `?` 并用 `dim`，**不会**误染成绿色 success。
 
 ## 已知限制
 
 - 当前每次 footer render 都可能重新遍历 session entries 计算 usage；长会话需要后续增加事件驱动缓存
-- footer 尚未实现宽度分级降级（10 格 → 5 格 → 仅 tokens）
 - provider 始终显示，不区分单 provider 和多 provider
 - 未显示内置 footer 的 `(auto)` 自动压缩标记
 - Nerd Font glyph 的最终视觉效果取决于终端字体和 fallback 配置

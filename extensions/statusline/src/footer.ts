@@ -1,48 +1,39 @@
 /**
  * Custom footer — replaces the built-in FooterComponent.
  *
- * Line 1 (powerline chain on the left, stats on the right):
+ * Line 1 (left context + right telemetry, both width-degrading):
  *   modeleffortfolderbranch     CH66%  ██░░░░░░░░ 1.0k/192k
  * Line 2 (optional): extension statuses from other extensions' setStatus()
  * (pi-lens LSP state is filtered out — the pi-lens widget surfaces it)
  *
- * Gutters follow settings.outputPad (read live from settings.json), so
- * footer lines up with chat messages without any sibling dependency.
+ * All width adaptation and line composition live in `degrade.ts` (pure, with
+ * `measure`/`truncate`/`fg` injected). This file's only job is to gather live
+ * data from ctx and hand it to `renderFooterLines`, which owns the pi-tui
+ * width invariant (a rendered line wider than the terminal throws and stops
+ * the TUI — see tui-main-screen.js).
  *
- * Model/effort live here (the editor border is owned by the core
- * extension's editor chrome).
+ * Gutters follow settings.outputPad (read live from settings.json), so the
+ * footer lines up with chat messages without any sibling dependency.
+ * Model/effort live here (the editor border is owned by the core extension's
+ * editor chrome).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import {
-	alignLine,
-	formatCwd,
-	formatTokens,
-	ICONS,
-	isHiddenExtensionStatus,
-	meterCells,
-	stripAnsi,
-} from "./format.ts";
+import { type LeftSeg, renderFooterLines } from "./degrade.ts";
+import { formatCwd, ICONS } from "./format.ts";
 import { getOutputPad } from "./output-pad.ts";
-import { effortColor, isLightThemeFrom, paletteForLight, truecolorFg } from "./palette.ts";
-import {
-	type ModelStatusInfo,
-	type PowerlineSegment,
-	powerlineChain,
-	syncPermissionsMode,
-} from "./status-mode.ts";
+import { effortColor, isLightThemeFrom, paletteForLight } from "./palette.ts";
 import { computeUsageTotals } from "./usage.ts";
 
-const METER_CELLS = 10;
-
 interface FooterTheme {
+	fg(color: string, text: string): string;
 	getFgAnsi(color: string): string;
 	getBgAnsi?(color: string): string;
 }
 
 export interface FooterOptions {
-	getModelInfo?: () => ModelStatusInfo | undefined;
+	getModelInfo?: () => { modelId: string; effort: string | undefined } | undefined;
 }
 
 export function installFooter(
@@ -54,144 +45,87 @@ export function installFooter(
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+		const th = theme as unknown as FooterTheme;
 
 		return {
 			dispose: unsubBranch,
 			invalidate() {},
 			render(width: number): string[] {
-
-				// ---- left: powerline model | effort | folder | branch ----
-				const pwd = formatCwd(
-					ctx.sessionManager.getCwd(),
-					process.env.HOME || process.env.USERPROFILE,
-				);
+				// ---- gather live data (once per frame) ----
+				const home = process.env.HOME || process.env.USERPROFILE;
 				const branch = footerData.getGitBranch();
 				const model = getModelInfo?.();
 
 				// Catppuccin latte/frappe accents; light/dark from live bg.
-				// SAFETY: theme is the live TUI theme object; FooterTheme is the
-				// structural subset isLightThemeFrom reads (getFgAnsi / bg).
-				const pal = paletteForLight(
-					isLightThemeFrom(theme as unknown as FooterTheme),
-				);
-				const segments: PowerlineSegment[] = [];
+				const pal = paletteForLight(isLightThemeFrom(th));
+
+				const leftSegments: LeftSeg[] = [];
 				if (model) {
-					segments.push({
-						text: `${ICONS.model} ${model.modelId}`,
-						ansi: truecolorFg(pal.fixed.model),
+					leftSegments.push({
+						key: "model",
+						text: model.modelId,
+						hex: pal.fixed.model,
+						icon: ICONS.model,
 					});
 					if (model.effort) {
-						segments.push({
-							text: `${ICONS.effort} ${model.effort}`,
-							ansi: truecolorFg(effortColor(model.effort, pal)),
+						leftSegments.push({
+							key: "effort",
+							text: model.effort,
+							hex: effortColor(model.effort, pal),
+							icon: ICONS.effort,
 						});
 					}
 				}
-				segments.push({
-					text: `${ICONS.folder} ${pwd}`,
-					ansi: truecolorFg(pal.fixed.folder),
+				leftSegments.push({
+					key: "folder",
+					text: formatCwd(ctx.sessionManager.getCwd(), home),
+					hex: pal.fixed.folder,
+					icon: ICONS.folder,
 				});
 				if (branch) {
-					segments.push({
-						text: `${ICONS.branch} ${branch}`,
-						ansi: truecolorFg(pal.fixed.git),
+					leftSegments.push({
+						key: "branch",
+						text: branch,
+						hex: pal.fixed.git,
+						icon: ICONS.branch,
 					});
 				}
 
-				const leftColored = powerlineChain(segments);
-				const leftPlain = stripAnsi(leftColored);
-
-				// ---- right:  cache hit + █░ usage meter + tokens/window ----
+				// Cache hit rate + context usage feed the right ladder.
 				const totals = computeUsageTotals(ctx);
-				const rightPlainParts: string[] = [];
-				const rightColoredParts: string[] = [];
-
-				if (
-					(totals.cacheRead > 0 || totals.cacheWrite > 0) &&
-					totals.latestCacheHitRate !== undefined
-				) {
-					const chText = `CH${totals.latestCacheHitRate.toFixed(1)}%`;
-					rightPlainParts.push(`${ICONS.cache} ${chText}`);
-					rightColoredParts.push(
-						theme.fg("accent", ICONS.cache) + " " + theme.fg("dim", chText),
-					);
-				}
+				const hasCache = totals.cacheRead > 0 || totals.cacheWrite > 0;
+				const cacheRate =
+					hasCache && totals.latestCacheHitRate !== undefined
+						? totals.latestCacheHitRate
+						: undefined;
 
 				const usage = ctx.getContextUsage();
-				if (usage) {
-					const pctValue = usage.percent ?? 0;
-					const meterColor: "error" | "warning" | "success" =
-						pctValue >= 75 ? "error" : pctValue >= 50 ? "warning" : "success";
+				const rightUsage = usage
+					? {
+							percent: usage.percent ?? null,
+							tokens: usage.tokens ?? null,
+							window: usage.contextWindow,
+						}
+					: undefined;
 
-					const filled = meterCells(pctValue, METER_CELLS);
-					const meterPlain = "█".repeat(filled) + "░".repeat(METER_CELLS - filled);
-					const meterColored =
-						(filled > 0 ? theme.fg(meterColor, "█".repeat(filled)) : "") +
-						(filled < METER_CELLS
-							? theme.fg("dim", "░".repeat(METER_CELLS - filled))
-							: "");
-
-					const tokText =
-						usage.tokens !== null
-							? `${formatTokens(usage.tokens)}/${formatTokens(usage.contextWindow)}`
-							: `?/${formatTokens(usage.contextWindow)}`;
-
-					rightPlainParts.push(`${ICONS.gauge} ${meterPlain} ${tokText}`);
-					rightColoredParts.push(
-						theme.fg("accent", ICONS.gauge) +
-							" " +
-							meterColored +
-							" " +
-							theme.fg(meterColor, tokText),
-					);
-				}
-
-				// ---- extension statuses (from other extensions' setStatus) ----
-				const statuses = syncPermissionsMode(
-					footerData.getExtensionStatuses(),
-				);
-				// pi-lens LSP state is dropped here (the widget surfaces it) —
-				// the footer owns presentation, upstream keeps publishing.
-				const visible = statuses.filter(([key]) => !isHiddenExtensionStatus(key));
-
-				const statsPlain = rightPlainParts.join("  ");
-				const statsColored = rightColoredParts.join("  ");
-
-				// Match chat-message gutters (settings.outputPad). Read live
-				// with an mtime cache so `/settings` changes apply on the next
-				// footer frame without a sibling dependency. Trust/cwd are
-				// read per frame so a mid-session /trust is not sticky-stale.
+				// outputPad read live with an mtime cache; trust/cwd read per frame
+				// so a mid-session /trust is not sticky-stale.
 				const pad = getOutputPad(ctx.cwd, ctx.isProjectTrusted());
-				const gutter = " ".repeat(pad);
-				const innerWidth = Math.max(0, width - pad * 2);
 
-				const { line, rightFits } = alignLine(
-					leftColored,
-					visibleWidth(leftPlain),
-					statsColored,
-					visibleWidth(statsPlain),
-					innerWidth,
+				return renderFooterLines(
+					{
+						width,
+						pad,
+						left: { segments: leftSegments },
+						right: { cacheRate, usage: rightUsage },
+						statuses: footerData.getExtensionStatuses(),
+					},
+					{
+						measure: visibleWidth,
+						truncate: (text, w, suffix) => truncateToWidth(text, w, suffix),
+						fg: (color, text) => th.fg(color, text),
+					},
 				);
-
-				const firstLine =
-					gutter +
-					(rightFits
-						? line
-						: truncateToWidth(leftColored, innerWidth, theme.fg("dim", "...")));
-
-				const lines = [firstLine];
-
-				if (visible.length > 0) {
-					const merged = visible
-						.sort(([a], [b]) => a.localeCompare(b))
-						.map(([, text]) => text.replace(/[\r\n]+/g, " "))
-						.join(" ");
-					lines.push(
-						gutter + truncateToWidth(merged, innerWidth, theme.fg("dim", "...")),
-					);
-				}
-
-				return lines;
 			},
 		};
 	});

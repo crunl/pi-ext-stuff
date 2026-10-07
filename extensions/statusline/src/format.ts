@@ -1,17 +1,16 @@
 /**
  * Pure formatting helpers for the statusline extension.
  * No ctx / tui dependencies — easy to test and reason about.
+ *
+ * ANSI handling note: nothing here strips SGR anymore. Widths are measured by
+ * the injected pi-tui `visibleWidth` (see layout.ts), which ignores SGR itself.
  */
-
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-
-/** Strip SGR sequences. Used before code-point width measurement. */
-export function stripAnsi(s: string): string {
-	return s.replace(ANSI_RE, "");
-}
 
 /** Compact token count: 999 -> "999", 12300 -> "12.3k", 1500000 -> "1.5M" */
 export function formatTokens(count: number): string {
+	// Guard non-finite inputs: NaN/Infinity would render as "NaNM"/"InfinityM"
+	// (up to 9 columns) and silently break every width prediction downstream.
+	if (!Number.isFinite(count) || count <= 0) return "0";
 	if (count < 1000) return `${count}`;
 	if (count < 1_000_000) {
 		const k = count / 1000;
@@ -22,24 +21,14 @@ export function formatTokens(count: number): string {
 }
 
 /**
- * Compose a single line: left text + padding + right text (right-aligned).
- * If both don't fit, right side is truncated first; left survives.
- * `leftWidth`/`rightWidth` are the *visible* widths (caller computes, since
- * the strings may contain ANSI color codes).
+ * Neutralize a third-party extension status before it enters the footer.
+ * pi-tui measures a tab as 3 columns but a terminal may expand it to 8, which
+ * is the one known path to an overflowing (=> crash) line; newlines would split
+ * the single footer line. Fold tabs to spaces and collapse runs, mirroring the
+ * built-in footer's sanitizeStatusText.
  */
-export function alignLine(
-	left: string,
-	leftWidth: number,
-	right: string,
-	rightWidth: number,
-	width: number,
-	minPadding = 2,
-): { line: string; rightFits: boolean } {
-	if (leftWidth + minPadding + rightWidth <= width) {
-		const pad = " ".repeat(width - leftWidth - rightWidth);
-		return { line: left + pad + right, rightFits: true };
-	}
-	return { line: left, rightFits: false };
+export function sanitizeStatusText(text: string): string {
+	return text.replace(/[\t\r\n]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
 
 /**
