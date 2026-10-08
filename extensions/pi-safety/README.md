@@ -1,5 +1,7 @@
 # pi-safety
 
+> English · 中文说明: [`README.zh-CN.md`](README.zh-CN.md)
+
 Permission modes (`auto` / `yolo`) for the pi coding agent, with sandboxed
 tool execution and an external guardian reviewer that approves risky actions
 on your behalf. Distributed as `.ts` sources — pi loads extensions directly,
@@ -16,6 +18,54 @@ so there is **no build step**.
 - **Guardian reviewer** — an external LLM judge re-examines anything the
   static policy cannot prove safe. Denied actions can be retried exactly once
   with `/approve`.
+
+## How one tool call flows
+
+Every `bash` / `write` / `edit` call walks the same pipeline. Each layer can
+only *narrow* what the next one sees — nothing downstream can widen it.
+
+```text
+ your tool call
+      │
+ ① prepare ──────────── activation + snapshot: which mode, which policy
+      │
+ ② static risk ──────── lexer → AST → segments: can we PROVE this safe?
+      │                  (unproven ≠ dangerous; it just needs a judge)
+ ③ engine admission ─── is this call shape even admissible?
+      │
+ ④ guardian review ──── external LLM judge approves what ② couldn't prove
+      │
+ ⑤ capability lease ─── sandboxed | escalated | unrestricted
+      │
+ ⑥ SRT sandbox ──────── kernel enforcement (seatbelt / bwrap)
+      │
+   the command actually runs
+```
+
+| Layer | Decides | Fails as |
+|---|---|---|
+| ① prepare | mode, policy, snapshot | `stale-invocation` |
+| ② static risk | provable-safe vs needs-review | `policy-denied` |
+| ③ admission | call shape valid | `policy-denied` |
+| ④ guardian | approve / deny | `review-denied`, retriable via `/approve` |
+| ⑤ lease | which backend executes | `enforcement-unavailable` |
+| ⑥ SRT | kernel says yes/no **while running** | command's own error, or timeout |
+
+Layers ②–⑥ are skipped entirely in `yolo` (⑥ too — nothing is sandboxed).
+Host-first tools (`read`/`grep`/`find`/`ls`) only see ① and a deny-rule check;
+foreign (MCP/custom) tools see none of it.
+
+**⑥ is the only layer that acts after the command starts.** A denial there
+looks like the command's own failure — often a hang until timeout, not a clean
+error. When that happens the footer shows `SRT diagnostic observations`, which
+are *bounded, possibly sanitized, and never authorization evidence*.
+
+The sandbox policy itself is not produced by ②–⑤: `createSandboxRuntimeConfig`
+projects `safety.json`'s `sandbox` section straight into the policy at
+activation time (session start, turn start, mode change). The guardian runs
+under its own separate read-only, zero-network policy.
+
+Full walkthrough: [`docs/pi-safety.md`](../../docs/pi-safety.md).
 
 ## Install
 
