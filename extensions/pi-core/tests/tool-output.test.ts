@@ -132,6 +132,8 @@ describe("host differential rendering", () => {
       clearScreen: vi.fn(),
       setTitle: vi.fn(),
       setProgress: vi.fn(),
+      // Required by pi-tui 1.1.0's Terminal (OSC 7501 program status).
+      setProgramStatus: vi.fn(),
     } satisfies Terminal;
     const logDirectory = mkdtempSync(join(tmpdir(), "pi-core-output-test-"));
     const tui = new TuiMainScreen(terminal, false, logDirectory);

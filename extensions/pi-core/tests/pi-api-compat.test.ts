@@ -13,13 +13,13 @@ import { applyThinkingGlance, resetThinkingGlance } from "../src/tui/thinking-gl
 import { createThinkingTimingTracker } from "../src/tui/thinking-timing.ts";
 
 /**
- * Pi 0.86.0 (validation pin) still has no public hook for moving the built-in
- * autocomplete list, replacing only fenced-code token rendering, or
- * identifying the active host selector. Keep these deliberate runtime seams
- * loud: a future Pi upgrade should fail here instead of degrading later in an
- * interactive session.
+ * Pi has no public hook (verified through the 1.1.0 validation pin) for
+ * moving the built-in autocomplete list, replacing only fenced-code token
+ * rendering, or identifying the active host selector. Keep these deliberate
+ * runtime seams loud: a future Pi upgrade should fail here instead of
+ * degrading later in an interactive session.
  */
-describe("Pi 0.86.0 compatibility seams", () => {
+describe("Pi 1.1.0 compatibility seams", () => {
   it("retains the Editor autocomplete fields used for above-editor placement", () => {
     const editor = new Editor(
       { requestRender: () => {}, terminal: { rows: 24, columns: 80 } } as never,

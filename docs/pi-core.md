@@ -166,10 +166,14 @@ sync; there is no sync script or equality test. The only guardrail is
 `extensions/pi-safety/scripts/preflight-sibling.mjs`, which fails closed when the
 shared package is missing or its subtree is dirty.
 
-`packages/shared-tool-presentation` pins `@earendil-works/*` to `0.86.0` while
-`pi-core` pins `1.0.0` (`packages/shared-tool-presentation/package.json:16-19`,
-`extensions/pi-core/package.json:48-56`). Test suites in the two trees therefore run
-against different host versions.
+`packages/shared-tool-presentation` and `pi-core` both pin
+`@earendil-works/*` devDependencies to `1.1.0`
+(`packages/shared-tool-presentation/package.json:19-20`,
+`extensions/pi-core/package.json:50-52`), so the test suites in the two trees
+run against the same host version. The shared package resolves those deps
+through its `tsconfig.json` paths into `extensions/pi-core/node_modules`
+(its own `node_modules` is a symlink to the same directory); nothing enforces
+pin alignment between the two `package.json` files either.
 
 ### Cross-jiti singletons
 
