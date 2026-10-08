@@ -12,38 +12,38 @@
 
 ## 一次工具调用如何流动
 
-每个 `bash` / `write` / `edit` 调用都走同一条流水线。每一层只能*收窄*下一层所见——下游无法把它放宽。
+每个 `bash` / `write` / `edit` 调用都走同一条流水线：六个步骤，但只有**三个决策**。其余的负责准备（①）、投影（③）或派生（⑤）——它们自己不授予也不否决权限。每一步只能*收窄*下一步所见；下游无法把它放宽。
 
 ```text
  你的工具调用
       │
- ① prepare ──────────── 激活 + 快照：哪个 mode、哪份 policy
+ ① prepare ──────────── 准备：激活 + 快照（mode、policy）
       │
- ② static risk ──────── lexer → AST → segments：能证明它安全吗？
-      │                  （无法证明 ≠ 危险；只是需要一个裁判）
- ③ engine admission ─── 这个调用形态本身可准入吗？
+ ② static risk ──────── 决策：能证明它安全吗？
+      │                  （lexer → AST → segments；无法证明 ≠ 危险）
+ ③ admission ────────── 投影：风险判定 → engine 词汇
       │
- ④ guardian review ──── 外部 LLM 裁判批准 ② 无法证明的部分
+ ④ guardian review ──── 决策：外部 LLM 裁判（仅当 ② 无法证明时）
       │
- ⑤ capability lease ─── sandboxed | escalated | unrestricted
+ ⑤ capability lease ─── 派生：sandboxed | escalated | unrestricted
       │
- ⑥ SRT sandbox ──────── 内核强制（seatbelt / bwrap）
+ ⑥ SRT sandbox ──────── 决策：内核强制（seatbelt / bwrap）
       │
    命令真正开始运行
 ```
 
-| 层 | 决定什么 | 失败形态 |
-|---|---|---|
-| ① prepare | mode、policy、snapshot | `stale-invocation` |
-| ② static risk | 可证明安全 vs 需要评审 | `policy-denied` |
-| ③ admission | 调用形态是否合法 | `policy-denied` |
-| ④ guardian | 批准 / 拒绝 | `review-denied`，可经 `/approve` 重试 |
-| ⑤ lease | 由哪个后端执行 | `enforcement-unavailable` |
-| ⑥ SRT | **运行过程中**内核说行/不行 | 命令自身的错误，或超时 |
+| 步骤 | 角色 | 决定 / 做什么 | 失败形态 |
+|---|---|---|---|
+| ① prepare | 准备 | 激活 + 快照：mode、policy（每轮一次；缓存命中零成本） | `stale-invocation` |
+| ② static risk | **决策** | 可证明安全 vs 需要评审 | `policy-denied` |
+| ③ admission | 投影 | 风险判定 → engine 词汇，外加调用形态校验——"是投影，不是授权决策" | `policy-denied` |
+| ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 根本不进 | `review-denied`，可经 `/approve` 重试 |
+| ⑤ lease | 派生 | 由哪个后端执行：sandboxed / escalated / unrestricted | `enforcement-unavailable` |
+| ⑥ SRT | **决策** | **运行过程中**内核说行/不行 | 命令自身的错误，或超时 |
 
 `yolo` 下 ②–⑥ 全部跳过（⑥ 也一样——不进沙箱）。Host-first 工具（`read`/`grep`/`find`/`ls`）只经过 ① 和一次 deny 规则检查；外部（MCP/自定义）工具一层都不经过。
 
-**⑥ 是唯一在命令启动之后才起作用的一层。** 那里被拒看起来像命令自身失败——常常是挂住直到超时，而不是一个干净的报错。发生这种情况时 footer 会显示 `SRT diagnostic observations`，它们是*有界的、可能经过脱敏的，且永远不构成授权证据*。
+**⑥ 是唯一在命令启动之后才起作用的一步。** 那里被拒看起来像命令自身失败——常常是挂住直到超时，而不是一个干净的报错。发生这种情况时 footer 会显示 `SRT diagnostic observations`，它们是*有界的、可能经过脱敏的，且永远不构成授权证据*。
 
 沙箱 policy 本身并不由 ②–⑤ 产生：`createSandboxRuntimeConfig` 在激活时（session 启动、turn 启动、mode 切换）把 `safety.json` 的 `sandbox` 段直接投影成 policy。guardian 则在它自己独立的只读、零网络 policy 下运行。
 

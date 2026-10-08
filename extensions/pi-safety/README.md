@@ -21,41 +21,43 @@ so there is **no build step**.
 
 ## How one tool call flows
 
-Every `bash` / `write` / `edit` call walks the same pipeline. Each layer can
-only *narrow* what the next one sees — nothing downstream can widen it.
+Every `bash` / `write` / `edit` call walks the same pipeline: six steps, but
+only **three decisions**. The others set up (①), project (③), or derive (⑤) —
+they never grant or withhold authority on their own. Each step can only
+*narrow* what the next one sees; nothing downstream can widen it.
 
 ```text
  your tool call
       │
- ① prepare ──────────── activation + snapshot: which mode, which policy
+ ① prepare ──────────── setup: activation + snapshot (mode, policy)
       │
- ② static risk ──────── lexer → AST → segments: can we PROVE this safe?
-      │                  (unproven ≠ dangerous; it just needs a judge)
- ③ engine admission ─── is this call shape even admissible?
+ ② static risk ──────── DECISION: can we PROVE this safe?
+      │                  (lexer → AST → segments; unproven ≠ dangerous)
+ ③ admission ────────── projection: risk verdict → engine vocabulary
       │
- ④ guardian review ──── external LLM judge approves what ② couldn't prove
+ ④ guardian review ──── DECISION: external LLM judge (only when ② can't prove)
       │
- ⑤ capability lease ─── sandboxed | escalated | unrestricted
+ ⑤ capability lease ─── derivation: sandboxed | escalated | unrestricted
       │
- ⑥ SRT sandbox ──────── kernel enforcement (seatbelt / bwrap)
+ ⑥ SRT sandbox ──────── DECISION: kernel enforcement (seatbelt / bwrap)
       │
    the command actually runs
 ```
 
-| Layer | Decides | Fails as |
-|---|---|---|
-| ① prepare | mode, policy, snapshot | `stale-invocation` |
-| ② static risk | provable-safe vs needs-review | `policy-denied` |
-| ③ admission | call shape valid | `policy-denied` |
-| ④ guardian | approve / deny | `review-denied`, retriable via `/approve` |
-| ⑤ lease | which backend executes | `enforcement-unavailable` |
-| ⑥ SRT | kernel says yes/no **while running** | command's own error, or timeout |
+| Step | Role | Decides / does | Fails as |
+|---|---|---|---|
+| ① prepare | setup | activation + snapshot: mode, policy (once per turn; cached hits are free) | `stale-invocation` |
+| ② static risk | **decision** | provable-safe vs needs-review | `policy-denied` |
+| ③ admission | projection | risk verdict → engine vocabulary, plus shape validation — "a projection, not an authorization decision" | `policy-denied` |
+| ④ guardian | **decision** | approve / deny — skipped when ② proved safe; yolo never reaches it | `review-denied`, retriable via `/approve` |
+| ⑤ lease | derivation | which backend executes: sandboxed / escalated / unrestricted | `enforcement-unavailable` |
+| ⑥ SRT | **decision** | kernel says yes/no **while running** | command's own error, or timeout |
 
-Layers ②–⑥ are skipped entirely in `yolo` (⑥ too — nothing is sandboxed).
+Steps ②–⑥ are skipped entirely in `yolo` (⑥ too — nothing is sandboxed).
 Host-first tools (`read`/`grep`/`find`/`ls`) only see ① and a deny-rule check;
 foreign (MCP/custom) tools see none of it.
 
-**⑥ is the only layer that acts after the command starts.** A denial there
+**⑥ is the only step that acts after the command starts.** A denial there
 looks like the command's own failure — often a hang until timeout, not a clean
 error. When that happens the footer shows `SRT diagnostic observations`, which
 are *bounded, possibly sanitized, and never authorization evidence*.
