@@ -1,5 +1,7 @@
 # pi-ext-stuff
 
+> English · 中文说明（看图版）: [`README.zh-CN.md`](README.zh-CN.md)
+
 Four extensions for the pi coding agent, developed together in one repo but
 loadable independently. Everything ships as `.ts` sources — pi loads extensions
 directly, so there is **no build step** in any package.
