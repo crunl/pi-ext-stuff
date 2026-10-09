@@ -26,6 +26,7 @@ import {
   type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { makeModeBadgeDecorator } from "../../../../packages/shared-tool-presentation/src/badge.ts";
 import {
   isPermissionsModeEvent,
@@ -41,6 +42,19 @@ export type PermissionsModeProvider = () =>
   | undefined;
 
 export type BadgeFgProvider = (color: "warning" | "error") => string | undefined;
+
+/**
+ * Whether a keypress should bypass the host's extension-shortcut dispatcher
+ * so it reaches the editor's own autocomplete handling. Only shift+tab while
+ * autocomplete is showing: pi-safety binds shift+tab to mode cycling and the
+ * host dispatches extension shortcuts before the editor sees any key, so
+ * without this the "move selection up" binding (keybindings.json maps
+ * shift+tab to tui.select.up) could never fire. Extracted as a pure predicate
+ * so the contract is unit-testable without a live Editor.
+ */
+export function bypassesExtensionShortcut(isShowingAutocomplete: boolean, data: string): boolean {
+  return isShowingAutocomplete && matchesKey(data, "shift+tab");
+}
 
 /**
  * Pure chrome orchestration over already-rendered editor lines: locate the
@@ -109,6 +123,28 @@ export class ModeBadgeEditor extends CustomEditor {
     private readonly getBadgeFgAnsi: BadgeFgProvider,
   ) {
     super(tui, theme, keybindings);
+  }
+
+  handleInput(data: string): void {
+    // The host dispatches extension shortcuts (CustomEditor.handleInput's
+    // first line) BEFORE the editor sees any key. pi-safety binds shift+tab
+    // to permission-mode cycling, so with autocomplete open shift+tab would
+    // cycle auto/yolo instead of moving the selection up. When autocomplete
+    // is showing, detach the dispatcher for this one key so it falls through
+    // to super.handleInput → tui.select.up (keybindings.json maps shift+tab
+    // there). Only shift+tab is bypassed; every other extension shortcut and
+    // all app/editor keys behave exactly as the host default.
+    if (bypassesExtensionShortcut(this.isShowingAutocomplete(), data)) {
+      const dispatcher = this.onExtensionShortcut;
+      this.onExtensionShortcut = undefined;
+      try {
+        super.handleInput(data);
+      } finally {
+        this.onExtensionShortcut = dispatcher;
+      }
+      return;
+    }
+    super.handleInput(data);
   }
 
   render(width: number): string[] {

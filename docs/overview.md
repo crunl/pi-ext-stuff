@@ -178,8 +178,8 @@ imported through *different* paths:
   imports `./bash-command-header.ts`).
 - `pi-core` does **not** import its own `src/tui` twins for the shared
   surface — it imports the shared package for the 3 non-duplicated
-  modules: `src/tui/editor-chrome.ts:29` (`badge.ts`,
-  `makeModeBadgeDecorator`), `src/tui/editor-chrome.ts:34`
+  modules: `src/tui/editor-chrome.ts:30` (`badge.ts`,
+  `makeModeBadgeDecorator`), `src/tui/editor-chrome.ts:35`
   (`permissions-mode.ts`), and `src/tui/border-labels.ts:7` (`badge.ts`,
   `BADGE_CAP_WIDTH`), all via
   `../../../../packages/shared-tool-presentation/src/...`. And

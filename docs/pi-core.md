@@ -31,7 +31,7 @@ registerOutputPaddingSync        extensions/pi-core/src/tui/output-padding.ts:13
 registerCodexToolRendering       extensions/pi-core/src/tui/built-in-tools.ts:35
 registerCodemodeTreeTool         extensions/pi-core/src/tui/codemode-tool.ts:54
 registerCanonicalBuiltinFallback extensions/pi-core/src/tui/canonical-tool-fallback.ts:51
-registerEditorChrome             extensions/pi-core/src/tui/editor-chrome.ts:135
+registerEditorChrome             extensions/pi-core/src/tui/editor-chrome.ts:171
 registerEffortCommand            extensions/pi-core/src/tui/effort-command.ts:28
 registerExitCommand              extensions/pi-core/src/tui/exit-command.ts:4
 registerWorkingTokenRate         extensions/pi-core/src/tui/working-token-rate.ts:41
@@ -58,11 +58,11 @@ against each other (comment `extensions/pi-core/src/register.ts:12-19`).
 (all through public Pi API surface). The former `apply*` / `install*` host-patch
 category no longer exists: pi-core does not monkey-patch any host prototype, and the
 one piece of chrome that needs custom drawing — the editor — uses the official
-`CustomEditor` subclass seam (`src/tui/editor-chrome.ts:103`, installed with
+`CustomEditor` subclass seam (`src/tui/editor-chrome.ts:117`, installed with
 `ctx.ui.setEditorComponent`).
 
 - Most pure helpers are *not* named `create*`: `buildTopBorder`
-  (`border-labels.ts:34`), `chromeEditorLines` (`editor-chrome.ts:52`),
+  (`border-labels.ts:34`), `chromeEditorLines` (`editor-chrome.ts:66`),
   `boxEditorLines` (`box-editor.ts:40`), `parseEditDiff` (`edit-diff.ts:22`),
   `toTreeView` (`codemode-contract.ts:258`), `toolResultText` (`tool-output.ts:16`),
   `estimateTokensFromChars` (`token-rate.ts:73`), `streamHealth`
@@ -143,8 +143,8 @@ to the same-named module under `extensions/pi-core/src/tui/`
 `badge.ts`, `permissions-mode.ts`, and `index.ts`, which pi-core imports back via
 relative deep paths:
 
-- `extensions/pi-core/src/tui/editor-chrome.ts:29` → `badge.ts` (`makeModeBadgeDecorator`)
-- `extensions/pi-core/src/tui/editor-chrome.ts:34` → `permissions-mode.ts`
+- `extensions/pi-core/src/tui/editor-chrome.ts:30` → `badge.ts` (`makeModeBadgeDecorator`)
+- `extensions/pi-core/src/tui/editor-chrome.ts:35` → `permissions-mode.ts`
 - `extensions/pi-core/src/tui/border-labels.ts:7` → `badge.ts` (`BADGE_CAP_WIDTH`)
 - `extensions/pi-core/standalone.ts:25` → the package index
 
@@ -337,27 +337,28 @@ step for tests. No test file currently imports `codemode-tool.ts`.
 
 ### Official seam: a `CustomEditor` subclass
 
-`ModeBadgeEditor` (`editor-chrome.ts:103`) extends the host's public `CustomEditor`
-class. Its only override is `render()` (`:114-126`): it decides boxed vs. unboxed
-from the requested width (`BOX_MIN_WIDTH = 24`, `box-editor.ts:19`), calls
-`super.render(innerWidth)`, and hands the resulting lines to a pure function. No
-host prototype is touched and no upstream `render` output is intercepted — this is
-the pattern of the host's own `examples/extensions/border-status-editor.ts`.
+`ModeBadgeEditor` (`editor-chrome.ts:117`) extends the host's public `CustomEditor`
+class. It overrides two methods — `render()` (`:150-162`) for the box/badge and
+`handleInput()` (`:128-148`) for one autocomplete key (below) — and touches no host
+prototype: `render()` decides boxed vs. unboxed from the requested width
+(`BOX_MIN_WIDTH = 24`, `box-editor.ts:19`), calls `super.render(innerWidth)`, and
+hands the resulting lines to a pure function. This is the pattern of the host's own
+`examples/extensions/border-status-editor.ts`.
 
 `chromeEditorLines(lines, innerWidth, boxed, mode, borderColor, getBadgeFgAnsi)`
-(`editor-chrome.ts:52`) is that pure function, exported so tests can drive it under
+(`editor-chrome.ts:66`) is that pure function, exported so tests can drive it under
 bare node. It mutates nothing and returns new lines:
 
 1. Locates the border rows first, including scroll-indicator rows such as
    `─── ↓ 2 more ───` (`isHorizontalBorder`, `box-editor.ts:25`) — detection has to
    happen before splicing, because a badge in the top row makes it no longer a pure
-   `─` run (`:63-73`).
+   `─` run (`:80-87`).
 2. Splices the mode badge into the top border: `buildTopBorder(innerWidth, label)`
    sizes the segments (`border-labels.ts:34`), `makeModeBadgeDecorator` colors them
-   (`:75-82`). Without a mode, or when the badge does not fit, `buildTopBorder`
+   (`:90-95`). Without a mode, or when the badge does not fit, `buildTopBorder`
    returns `undefined` and the border is left clean (`border-labels.ts:42-43`).
 3. Wraps the result in a rounded box when `boxed` and both borders were found
-   (`boxEditorLines`, `box-editor.ts:40`, called at `:84-85`). Autocomplete rows sit
+   (`boxEditorLines`, `box-editor.ts:40`, called at `:98-99`). Autocomplete rows sit
    after the bottom border and stay unboxed.
 
 Badge color follows the product rule stated in `badge.ts:1-13`: auto mode is
@@ -366,25 +367,45 @@ fallback when truecolor data is missing (`badge.ts:56`). Badge width accounting 
 `BADGE_CAP_WIDTH = 2` for the two powerline caps (`badge.ts:23`,
 `border-labels.ts:39`).
 
+### Autocomplete shift+tab bypass
+
+The host dispatches extension-registered shortcuts on the first line of
+`CustomEditor.handleInput` — before any editor-internal key handling, and with no
+awareness of autocomplete state (`interactive-mode.js` `onExtensionShortcut`).
+pi-safety registers `shift+tab` for permission-mode cycling, and the user's
+`keybindings.json` maps `shift+tab` to `tui.select.up` so the completion list can
+be navigated with tab/shift+tab. Without arbitration, shift+tab with the list open
+would cycle auto/yolo instead of moving the selection up.
+
+`ModeBadgeEditor.handleInput` (`editor-chrome.ts:128-148`) resolves this with a
+one-key, one-state bypass: when `isShowingAutocomplete()` and the key is exactly
+shift+tab, it detaches `onExtensionShortcut` for the duration of a single
+`super.handleInput(data)` call (restored in `finally`), so the key falls through to
+`tui.select.up`. The predicate is the exported pure function
+`bypassesExtensionShortcut(isShowingAutocomplete, data)` (`:55-57`), unit-tested
+without a live Editor. Everything else — other extension shortcuts, other keys
+while autocomplete is open, and shift+tab while it is closed (mode cycling keeps
+working) — takes the plain `super.handleInput` path.
+
 ### Installation and the mode bus
 
-`registerEditorChrome` (`editor-chrome.ts:135`) does two things:
+`registerEditorChrome` (`editor-chrome.ts:171`) does two things:
 
 - **Subscribes the badge state once per registration.** It owns a
-  `PermissionsModeState` and listens on the `pi-safety:mode` bus (`:139-144`),
+  `PermissionsModeState` and listens on the `pi-safety:mode` bus (`:175-180`),
   validating each payload with `isPermissionsModeEvent`
   (`packages/shared-tool-presentation/src/permissions-mode.ts:15`).
   `PermissionsModeState.applyEvent` returns whether anything changed, and only then
-  is a repaint queued; bursts coalesce through a microtask (`:159-167`). Visibility
+  is a repaint queued; bursts coalesce through a microtask (`:194-203`). Visibility
   keys off `severity`, `label` is display copy (`permissions-mode.ts:1-5`, `:31-38`).
 - **(Re)installs the editor factory on every `session_start`**, behind
-  `isInteractiveTui(ctx)` (`:146-147`), through `ctx.ui.setEditorComponent`
-  (`:156`). The factory receives `(tui, editorTheme, keybindings)` and returns
-  `new ModeBadgeEditor(...)` (`:168-185`), so `/resume` and forks get a fresh
+  `isInteractiveTui(ctx)` (`:182-183`), through `ctx.ui.setEditorComponent`
+  (`:192`). The factory receives `(tui, editorTheme, keybindings)` and returns
+  `new ModeBadgeEditor(...)` (`:204-221`), so `/resume` and forks get a fresh
   instance bound to the live TUI. The badge color accessor resolves the full
-  `Theme.getFgAnsi` off `ctx.ui.theme` (`:152-154`), because the factory's
+  `Theme.getFgAnsi` off `ctx.ui.theme` (`:185-190`), because the factory's
   `editorTheme` parameter is pi-tui's `EditorTheme` subset and carries no color
-  accessors; a throw degrades to `undefined` and hence inverse video (`:178-184`).
+  accessors; a throw degrades to `undefined` and hence inverse video (`:214-220`).
 
 Factory semantics are **replacement, not composition** — the same last-write-wins
 contract as any other consumer of `setEditorComponent` (`editor-chrome.ts:16-20`).
@@ -393,7 +414,7 @@ cross-session chain accumulates, and a later extension that installs its own
 factory simply wins. Wiring is host-supplied: `setCustomEditorComponent` copies
 `borderColor`, `paddingX`, the callbacks, and the action handlers onto the subclass
 instance (`editor-chrome.ts:6-8`), which is why `this.borderColor(...)` is available
-inside `render()` (`:123`).
+inside `render()` (`:159`).
 
 `box-editor.ts`, `border-labels.ts`, and `format-primitives.ts` are intentionally
 free of pi package imports so tests can run them under bare node
@@ -529,7 +550,7 @@ It matters at every point where pi-core touches host UI:
 | --- | --- |
 | `output-padding.ts:139-147` | Starts settings watching only in the TUI; otherwise stops the controller. |
 | `canonical-tool-fallback.ts:64` | Registers the canonical fallback only in the TUI. |
-| `editor-chrome.ts:147` | Installs the editor factory only in the TUI. |
+| `editor-chrome.ts:183` | Installs the editor factory only in the TUI. |
 | `effort-command.ts:32` | `/effort` no-ops outside the TUI before touching the model. |
 | `working-token-rate.ts:50-57`, `:72`, `:90`, `:117`, `:123` | Clears widgets, streams the rate, and swaps the waiting message only in the TUI. |
 

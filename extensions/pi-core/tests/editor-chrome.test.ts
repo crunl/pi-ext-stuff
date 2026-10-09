@@ -1,6 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { PL_LEFT, PL_RIGHT } from "../../../packages/shared-tool-presentation/src/badge.ts";
-import { chromeEditorLines, registerEditorChrome } from "../src/tui/editor-chrome.ts";
+import {
+  bypassesExtensionShortcut,
+  chromeEditorLines,
+  registerEditorChrome,
+} from "../src/tui/editor-chrome.ts";
+
+// ------------------------------------------------------- shortcut bypass rule
+
+describe("bypassesExtensionShortcut", () => {
+  // shift+tab arrives as the raw CSI sequence \x1b[Z (pi-tui keys.js).
+  const SHIFT_TAB = "\x1b[Z";
+
+  it("bypasses shift+tab only while autocomplete is showing", () => {
+    expect(bypassesExtensionShortcut(true, SHIFT_TAB)).toBe(true);
+  });
+
+  it("does not bypass shift+tab when autocomplete is closed (pi-safety mode cycling keeps working)", () => {
+    expect(bypassesExtensionShortcut(false, SHIFT_TAB)).toBe(false);
+  });
+
+  it("does not bypass other keys even while autocomplete is showing", () => {
+    expect(bypassesExtensionShortcut(true, "\t")).toBe(false); // plain tab
+    expect(bypassesExtensionShortcut(true, "\r")).toBe(false); // enter
+    expect(bypassesExtensionShortcut(true, "\x1b[A")).toBe(false); // up arrow
+    expect(bypassesExtensionShortcut(true, "x")).toBe(false); // printable
+  });
+});
 
 // ---------------------------------------------------------------- pure chrome
 
