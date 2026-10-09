@@ -1347,12 +1347,12 @@ describe("ApprovalDisposition policy gate", () => {
     });
   });
 
-  // The counter-test for the split, and the boundary it draws. `identity` decides
-  // refusal, `context` decides review, and no `GIT_*` variable reaches `Skip` —
-  // any of them means Git may read configuration this layer has not seen, which is
-  // the pre-existing rule and is unchanged here. What the split changed is that
-  // `GIT_TRACE=1 git status` no longer escalates all the way to a refusal, so the
-  // tier is pinned in both directions.
+  // The counter-test for the split, and the boundary it draws. `identity`
+  // decides refusal, `context` decides review. Since cut 2 the classifier
+  // no longer reviews an inert `GIT_*` environment on its own — but the
+  // risk-policy `unprovenGit` elevation (cut 3 territory) still lifts these
+  // to review until that goes too. Both tiers are pinned here so the cut-3
+  // diff is enumerable.
   it.each([
     ["git status", "allow", "Skip"],
     ["GIT_TRACE=1 git status", "prompt", "NeedsApproval"],
@@ -2547,8 +2547,6 @@ describe("RiskDecision residual stamps", () => {
   it("co-stamps the failed static proof beside action_review", async () => {
     const cases: [string, ResidualSignal][] = [
       ['echo "$(date)"', "substitution_unproven"],
-      ["kill 4321", "process_control"],
-      ["GIT_TRACE=1 git status", "env_context_unproven"],
     ];
     for (const [command, cause] of cases) {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-cause-"));
@@ -2570,6 +2568,17 @@ describe("RiskDecision residual stamps", () => {
     // permissions-substitution.test.ts.
     for (const command of ["cat <<A <<'B'\n$y\nA\nx\nB", "cat <<'EOF'\nx\nEOF"]) {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-heredoc-allow-"));
+      const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
+      expect(decision, command).toMatchObject({ action: "allow", risk: "Skip" });
+    }
+  });
+
+  it("allows signals (cut 2: Tier 2 is gone)", async () => {
+    // Codex alignment: codex never gated Unix signals. Inert `GIT_*`
+    // environments still prompt at this layer via the `unprovenGit`
+    // elevation — that is cut 3, pinned by the table above.
+    for (const command of ["kill 4321", "pkill -9 node"]) {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-cut2-allow-"));
       const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
       expect(decision, command).toMatchObject({ action: "allow", risk: "Skip" });
     }

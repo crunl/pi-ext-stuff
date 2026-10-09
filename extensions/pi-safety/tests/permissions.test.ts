@@ -351,30 +351,27 @@ describe("narrow static risk contract", () => {
     ["git bisect start", "Skip"],
     ["git hook list", "Skip"],
     ["git submodule status", "Skip"],
-    // A `GIT_*` assignment means Git may read configuration this layer has not
-    // seen — an alias, a hook directory, a filter — so the argv is not provable
-    // and the tier-4 review applies. This covers `GIT_AUTHOR_NAME`, which names no
-    // program and was `Skip` until the environment was examined for what it can
-    // change rather than for whether it substitutes an executable. The reviewer
-    // settles a commit whose author identity is being overridden.
-    //
-    // `EDITOR`, `VISUAL` and `PAGER` are the sharper case and are absent from this
-    // table on purpose: Git falls back to them when the `GIT_`-prefixed variable
-    // is unset, so they name a program Git runs. `EDITOR=/tmp/evil git commit` is
+    // Codex alignment, cut 2: an inert `GIT_*` assignment no longer diverts
+    // to review on its own. What the environment can change about *which
+    // program runs* (an alias, a hook directory, a filter) is still caught
+    // by the fold (`nested_git_program`) and by Tier 1 — only the
+    // surroundings-unproven review is gone.
+    ["GIT_AUTHOR_NAME=x git commit -m x", "Skip"],
+    ["GIT_TRACE=1 git status", "Skip"],
+    ["GIT_OPTIONAL_LOCKS=0 git status", "Skip"],
+    // `EDITOR`, `VISUAL` and `PAGER` are absent from this table on purpose:
+    // Git falls back to them when the `GIT_`-prefixed variable is unset, so
+    // they name a program Git runs — still `nested_git_program` review, still
     // covered in `risk-policy.test.ts`.
-    ["GIT_AUTHOR_NAME=x git commit -m x", "NeedsApproval"],
-    ["GIT_TRACE=1 git status", "NeedsApproval"],
-    ["GIT_OPTIONAL_LOCKS=0 git status", "NeedsApproval"],
-    // Process control is fully determined by its argv but is not confined by
-    // the filesystem or network policy, so it reviews rather than allowing.
-    // fx treats the same primitive as `process_or_system`
-    // (`command_effect.zig:894-906`).
-    ["kill -9 1", "NeedsApproval"],
-    ["pkill -9 node", "NeedsApproval"],
-    ["killall node", "NeedsApproval"],
-    ["timeout 1 kill -9 1", "NeedsApproval"],
-    ["sudo kill -9 1", "NeedsApproval"],
-    // A proven danger still outranks a process-control review.
+    // Codex alignment, cut 2: Unix signals escape the sandbox, but codex
+    // never gated them (`is_dangerous_command.rs` has no kill arm) and
+    // neither do we now. A proven danger still outranks everything.
+    ["kill -9 1", "Skip"],
+    ["pkill -9 node", "Skip"],
+    ["killall node", "Skip"],
+    ["timeout 1 kill -9 1", "Skip"],
+    ["sudo kill -9 1", "Skip"],
+    // A proven danger still outranks a fully determined argv.
     ["kill -9 1; rm -rf /tmp/x", "NeedsApproval"],
     // Process inspection is not process control.
     ["ps aux", "Skip"],
@@ -399,12 +396,13 @@ describe("narrow static risk contract", () => {
     ["git -C /tmp status", "Skip"],
     ["git --work-tree ../t status", "Skip"],
     ["git -c filter.blob.required=false status", "Skip"],
-    // `kill` reporting forms do not signal; a mixed form still reviews.
+    // `kill` reporting forms do not signal; since cut 2 a mixed form runs
+    // too — signaling escapes the sandbox, but codex never gated it.
     ["kill -l", "Skip"],
     ["kill -L", "Skip"],
     ["kill --version", "Skip"],
-    ["kill -l -9 1", "NeedsApproval"],
-    ["kill -TERM -1", "NeedsApproval"],
+    ["kill -l -9 1", "Skip"],
+    ["kill -TERM -1", "Skip"],
     // Read-only control-plane verbs must not be caught by the mutation table.
     ["aws s3 ls s3://bucket", "Skip"],
     ["aws ec2 describe-instances", "Skip"],
@@ -479,7 +477,9 @@ describe("narrow static risk contract", () => {
     // execution: `exec rm -f victim` removed the file.
     ["exec rm -f /tmp/victim", "NeedsApproval"],
     ["setsid rm -f /tmp/victim", "NeedsApproval"],
-    ["exec kill -9 1", "NeedsApproval"],
+    // Cut 2: the inner `kill` is no longer gated, so the wrapper delegates
+    // to an ungated command and the whole thing runs.
+    ["exec kill -9 1", "Skip"],
     // A `GIT_CONFIG_*` variable points Git at a config file this argv never
     // names, and that file can define an alias.
     ["GIT_CONFIG_GLOBAL=/tmp/gcfg git name", "NeedsApproval"],

@@ -24,10 +24,7 @@ import { resolvePolicyPath } from "../filesystem-policy.ts";
 import { isPublicNetworkHost } from "../network-host.ts";
 import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 import { normalizedSegmentsFor } from "./cd-normalize.ts";
-import {
-  invocationControlsProcesses,
-  invocationRemoteEffectUnclassified,
-} from "./command-effects.ts";
+import { invocationRemoteEffectUnclassified } from "./command-effects.ts";
 import { isDangerousWords } from "./dangerous-commands.ts";
 import type { CommandSegment, PermissionRequest, SegmentUnprovenCause } from "./rules.ts";
 import { deletionExecutables } from "./rules.ts";
@@ -309,21 +306,12 @@ export function classifyRiskWithCause(
       ...(substituted ? { dangerousSubstitution: substituted.source } : {}),
     };
   }
-  // Tier 2 — proven side-effecting: the argv is fully determined, but what it
-  // does is not confined by the filesystem or network policy (Unix signals).
-  // This is a review, not a block, matching fx `approval_required(
-  // process_or_system)`.
-  if (segments.some(invocationControlsProcesses))
-    return { disposition: "NeedsApproval", cause: "process_control" };
-  // A segment whose surroundings are unproven — an inert `GIT_` variable, a
-  // wrapper that could not be reduced — is not decomposable either, and this is
-  // where that becomes a review rather than a refusal. Refusal is the network
-  // layer's `unsafeReason`, which is about not being able to identify the program
-  // at all; here the program is identified and only its context is unproven, so
-  // tier 3 does not hold. `GIT_TRACE=1 git status` belongs: the words name git,
-  // the variable changes nothing about which binary runs, and a human settles it.
-  if (segments.some((segment) => segment.executableContextUntrusted))
-    return { disposition: "NeedsApproval", cause: "env_context_unproven" };
+  // Codex alignment, cut 2: Tier 2 is gone. Unix signals escape the
+  // sandbox, but codex never gated them (`is_dangerous_command.rs` has
+  // no kill arm) and neither do we now — a fully determined argv runs,
+  // and an unproven environment no longer diverts to review on its own.
+  // What the environment can change about *which program runs* is still
+  // caught by the fold (`nested_git_program`, Tier 4b) and by Tier 1.
   // Tier 3 — proven safe: static argv equals runtime argv for the whole
   // command, so nothing is left to prove. A rewritable argv, an unreadable
   // option grammar, or state crossing a segment boundary is not.

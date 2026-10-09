@@ -1,51 +1,19 @@
 /**
- * Command effects that outlive the process invocation itself.
+ * Command effects that outlive the process invocation itself and that the
+ * sandbox cannot contain — here, external control planes: a network grant
+ * authorises the connection, not the API semantics carried over it, so
+ * `aws s3 rm` is a deletion even though the only thing the sandbox sees
+ * is a TLS connection.
  *
- * Two kinds live here, both because the sandbox cannot contain them and both
- * because they are properties of the *command*, not of the tool call:
- *
- * - process state: Unix signals reach outside SRT's filesystem and network
- *   confinement, so a signal is a side effect even with a fully known argv;
- * - external control planes: a network grant authorises the connection, not
- *   the API semantics carried over it, so `aws s3 rm` is a deletion even
- *   though the only thing the sandbox sees is a TLS connection.
- *
- * File deletion is deliberately absent: it is a filesystem effect that SRT
- * already confines, and its targets are read by `risk-policy.ts` when it
+ * Unix signals used to live here too (codex alignment, cut 2: codex never
+ * gated them, so neither do we — see `risk.ts`). File deletion is
+ * deliberately absent: it is a filesystem effect that SRT already
+ * confines, and its targets are read by `risk-policy.ts` when it
  * checks a deletion against the sandbox write roots.
  */
 
 import type { CommandSegment } from "./rules.ts";
 import { hasTerminalInfoFlag } from "./shell-segment.ts";
-
-/**
- * Commands that act on process state rather than on files or arguments. SRT
- * confines the filesystem and the network but cannot observe Unix signals, so
- * a process-control command stays reviewable even though its argv is fully
- * determined.
- *
- * fx classifies the same primitive as `process_or_system`
- * (`command_effect.zig:894-906`). `killall` is the macOS/BSD spelling of
- * `pkill` and is not in fx's list; it is included here because leaving it next
- * to a gated `pkill` would be incoherent.
- */
-const processControlExecutables = new Set(["kill", "pkill", "killall"]);
-
-/**
- * `kill` invocations that only report: `-l` lists signal names, `--version`
- * and `--help` print and exit. None of them signal a process. Any other
- * argument form is treated as process control, so a mixed invocation such as
- * `kill -l -9 1` still reviews.
- */
-const processControlReportFlags = new Set(["-l", "--list", "-L", "--table", "--version", "--help"]);
-
-export function invocationControlsProcesses(segment: CommandSegment): boolean {
-  if (!processControlExecutables.has(segment.executable)) return false;
-  if (segment.executable !== "kill") return true;
-  // A bare `kill` names no process; it is left to the shell to reject.
-  if (segment.args.length === 0) return false;
-  return !segment.args.every((arg) => processControlReportFlags.has(arg));
-}
 
 /**
  * What the static layer can prove about one invocation's remote effect.

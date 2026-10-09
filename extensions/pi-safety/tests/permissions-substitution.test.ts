@@ -188,13 +188,14 @@ describe("inert heredoc bodies", () => {
     });
   });
 
-  it("routes a nested side-effecting body through tier 2", () => {
-    // The inner `pkill` becomes an ordinary segment, so the process-control
-    // review catches it even though the outer `echo` is harmless.
+  it("leaves a nested live body to the substitution gate (cut 2)", () => {
+    // Cut 2 removed the process-control review, but the inner `pkill`
+    // still reaches review: the outer `echo` carries a live executable
+    // substitution, which fails closed on its own. Only the cause changed.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "echo $(pkill x)" }, "/work/repo"),
     );
-    expect(review).toEqual({ disposition: "NeedsApproval", cause: "process_control" });
+    expect(review).toEqual({ disposition: "NeedsApproval", cause: "substitution_unproven" });
   });
 });
 
