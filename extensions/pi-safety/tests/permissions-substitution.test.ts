@@ -111,9 +111,12 @@ describe("live substitution extraction", () => {
         "NeedsApproval",
       );
     }
+    // Cut 3: a live but harmless substitution is no longer a review — Tier 1
+    // still screens the body, and `date` screens clean. Quoted and unquoted
+    // stay identical (both Skip), as do the dangerous twins above.
     for (const command of ['echo "$(date)"', "echo $(date)", "echo `date`"]) {
       expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo")), command).toBe(
-        "NeedsApproval",
+        "Skip",
       );
     }
   });
@@ -188,14 +191,15 @@ describe("inert heredoc bodies", () => {
     });
   });
 
-  it("leaves a nested live body to the substitution gate (cut 2)", () => {
-    // Cut 2 removed the process-control review, but the inner `pkill`
-    // still reaches review: the outer `echo` carries a live executable
-    // substitution, which fails closed on its own. Only the cause changed.
+  it("runs a nested harmless body sandboxed (cut 3)", () => {
+    // Cut 3 retired the substitution review along with Tier 4: the inner
+    // `pkill` names no dangerous argv, so the whole command runs and the
+    // sandbox owns the signal. A dangerous body still reviews — see the
+    // forced-deletion cases above.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "echo $(pkill x)" }, "/work/repo"),
     );
-    expect(review).toEqual({ disposition: "NeedsApproval", cause: "substitution_unproven" });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 });
 
@@ -254,16 +258,14 @@ describe("active heredoc body substitutions", () => {
     expect(review).toEqual({ disposition: "Skip" });
   });
 
-  it("keeps a harmless body substitution a review, not a refusal", () => {
-    // `pwd` runs but names no danger, so the command stays a review
-    // for the substitution it cannot prove.
+  it("runs a harmless body substitution sandboxed (cut 3)", () => {
+    // `pwd` runs but names no danger: no Tier-1 review, no substitution
+    // review anymore — the sandbox owns it. A dangerous body still
+    // reviews; a refusal was never on the table.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(pwd)\nEOF" }, "/w/r"),
     );
-    expect(review).toEqual({
-      disposition: "NeedsApproval",
-      cause: "substitution_unproven",
-    });
+    expect(review).toEqual({ disposition: "Skip" });
   });
 
   it("judges a dangerous substitution identically in both positions", () => {
@@ -422,18 +424,16 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     expect(skipped[1]).toEqual([forcedFile]);
   });
 
-  it("names substitution_unproven once D4 sees a mixed-queue body", () => {
-    // D4 makes `commandHasExecutableSubstitution` ask
-    // `skippedHeredocSubstitutions` after the raw scan. Before that, the
-    // mixed queue was `heredoc_unproven`: the raw scan drops an active
-    // body queued ahead of an inert one, so `$(pwd)` never became
-    // `substitution_unproven`. Both shapes are that cause now. Deleting
-    // the D4 question splits them again.
+  it("runs mixed-queue bodies sandboxed once D4 is gone (cut 3)", () => {
+    // D4 made `commandHasExecutableSubstitution` ask
+    // `skippedHeredocSubstitutions` after the raw scan. Cut 3 deletes the
+    // substitution review entirely: a live but harmless `$(pwd)` runs
+    // sandboxed, and only a dangerous body still reviews (see the
+    // forced-deletion cases above).
     for (const command of ["cat <<A\n$(pwd)\nA", "cat <<A <<'B'\n$(pwd)\nA\ny\nB"]) {
-      expect(
-        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
-        command,
-      ).toEqual({ disposition: "NeedsApproval", cause: "substitution_unproven" });
+      expect(classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")), command).toEqual(
+        { disposition: "Skip" },
+      );
     }
   });
 
@@ -482,7 +482,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "Skip" },
-      { disposition: "NeedsApproval", cause: "substitution_unproven" },
+      { disposition: "Skip" },
       { disposition: "NeedsApproval" },
       { disposition: "NeedsApproval" },
       { disposition: "Skip" },
@@ -494,7 +494,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       { disposition: "Skip" },
       { disposition: "Skip" },
       { disposition: "Skip" },
-      { disposition: "NeedsApproval", cause: "substitution_unproven" },
+      { disposition: "Skip" },
     ];
     expect(expected).toHaveLength(shapes.length);
     shapes.forEach((command, index) => {

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  causeToResidual,
   ensureNonEmptyResiduals,
   hasResiduals,
   isResidualSignal,
@@ -10,7 +9,6 @@ import {
   residualSignalsForReviewSource,
   residualsForPrompt,
 } from "../src/permissions/residual.ts";
-import type { ReviewCause } from "../src/permissions/risk.ts";
 import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
 
@@ -69,10 +67,12 @@ describe("residual closed union", () => {
   });
 });
 
-describe("static review cause co-stamp", () => {
-  // Totality lives in the compiler: `causeToResidual` has no default case, so
-  // a new `ReviewCause` member fails `check` until it is mapped here too.
-  const allCauses = [
+describe("retired static review causes (cut 3)", () => {
+  // Cut 3 deleted the Q3 proof gate with its `cause` channel
+  // (`causeToResidual`, `ReviewCause`). The retired cause names stay in
+  // `RESIDUAL_SIGNALS` as vocabulary so historical metrics keep their
+  // names — production stopped, names kept:
+  for (const retired of [
     "process_control",
     "env_context_unproven",
     "state_crosses_segments",
@@ -84,34 +84,22 @@ describe("static review cause co-stamp", () => {
     "program_reinterpreted",
     "substitution_unproven",
     "heredoc_unproven",
-    "unproven_other",
-  ] as const satisfies readonly ReviewCause[];
+  ] as const) {
+    expect(isResidualSignal(retired)).toBe(true);
+  }
 
-  it("maps every cause to a closed-vocabulary signal", () => {
-    for (const cause of allCauses) expect(isResidualSignal(causeToResidual(cause))).toBe(true);
-    // The defensive member must look like an unnamed stamp, not a new bucket.
-    expect(causeToResidual("unproven_other")).toBe("other_explicit_review");
-    expect(causeToResidual("substitution_unproven")).toBe("substitution_unproven");
-  });
-
-  it("co-stamps next to action_review without replacing a bucket", () => {
-    expect(
-      residualsForPrompt({
-        risk: "NeedsApproval",
-        actionReview: true,
-        cause: "substitution_unproven",
-      }),
-    ).toEqual(["action_review", "substitution_unproven", "risk_not_skip"]);
-    // Under escalation the cause rides along; escalation keeps its bucket.
-    expect(
-      residualsForPrompt({ risk: "NeedsApproval", escalation: true, cause: "process_control" }),
-    ).toEqual(["escalation", "process_control", "risk_not_skip"]);
-    // No cause, no change: the pre-cause arrays stay byte-identical.
-    expect(residualsForPrompt({ risk: "NeedsApproval" })).toEqual(["risk_not_skip"]);
-    expect(residualsForPrompt({ actionReview: true, risk: "NeedsApproval" })).toEqual([
+  it("stamps action_review without any cause rider", () => {
+    expect(residualsForPrompt({ risk: "NeedsApproval", actionReview: true })).toEqual([
       "action_review",
       "risk_not_skip",
     ]);
+    // Under escalation the buckets stay disjoint.
+    expect(residualsForPrompt({ risk: "NeedsApproval", escalation: true })).toEqual([
+      "escalation",
+      "risk_not_skip",
+    ]);
+    // No review input, no change: the arrays stay byte-identical.
+    expect(residualsForPrompt({ risk: "NeedsApproval" })).toEqual(["risk_not_skip"]);
   });
 });
 

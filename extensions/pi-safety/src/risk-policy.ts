@@ -8,10 +8,7 @@ import {
   type ApprovalDisposition,
   analyzeShellGitNetwork,
   classifyRiskWithCause,
-  deletionExecutables,
-  deletionTargets,
   normalizeToolCall,
-  parseCommandSegments,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { effectiveNetworkAuthority } from "./policy-primitives.ts";
@@ -305,21 +302,15 @@ export async function evaluateRiskRequest(
   // The program here is known to be Git; what is unproven is its option grammar
   // or its wrapper. `git -C DIR` and `git --git-dir DIR` only relocate the target
   // and say so in the argv, while `git -c KEY=VALUE` can install a hook directory
-  // or an alias that the same invocation then runs. A human can settle both by
-  // reading the command, so this is a review rather than a refusal, and it matches
-  // the `env -C DIR` precedent, which reached review for the same relocation.
+  // or an alias that the same invocation then runs. Cut 3 deleted the review
+  // this used to escalate to: a nested program Git is proven to run is now a
+  // static review at the classifier (`nested_git_program`), and anything less
+  // than that runs under the sandbox. The verdict below keeps the same shape
+  // so the summary and residual set are the same ones every other review gets.
   //
-  // The verdict is carried down to the shared prompt branch instead of returning
-  // here, so the summary and residual set are the same ones every other review
-  // gets. It is deliberately evaluated *after* the escalation refusal above: `-C`
-  // also makes the config that decides an implicit destination unreadable, and on
-  // an escalated action there is no connection boundary left to enforce it, so
-  // that case stays final rather than becoming a review escalation cannot honour.
   // Scoped to execute for the same reason the two checks above are: a `write` or
   // `read` input that happens to carry a `command` field was being sent to review
   // by this flag, while `classifyRisk` treats those operations as `Skip`.
-  const unprovenGitReason =
-    request.operation === "execute" ? gitNetwork?.unprovenReason : undefined;
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
     return { action: "block", risk: "Forbidden", reason: gitMetadata.reason };
@@ -383,53 +374,19 @@ export async function evaluateRiskRequest(
   // explicit additional filesystem capabilities; network egress is
   // authorized per-endpoint at the runtime NetworkBoundary (codex
   // NetworkProxy analogue), never here, so the classifier is
-  // network-agnostic. A command whose static argv cannot be shown to
-  // equal its runtime argv stays REVIEW (fail closed); a proven
+  // network-agnostic. Cut 3: the classifier answers two questions
+  // (dangerous? nested program?) and everything else runs — a proven
   // dangerous argv is a review the user settles (codex `OnRequest`
   // → `Prompt`), not a hard block.
-  const classification = classifyRiskWithCause(
-    request,
-    [],
-    filesystem.protectedWritePaths,
-    filesystem.allowWrite,
-  );
+  const classification = classifyRiskWithCause(request, filesystem.protectedWritePaths);
   let risk = classification.disposition;
-  // The proof the static layer failed to make, present exactly when the
-  // classifier itself reviewed. The later flips (uncovered write roots, the
-  // protected-path deletion carve-out) are not static-cause reviews, so they
-  // keep their own stamps and leave this undefined.
-  const staticCause = classification.cause;
+  // Kept while the write flip, carve-out and elevation go: extra write
+  // roots are a *grant*, not a proof question — the justification must be
+  // read by a reviewer before the scope widens. Deleting this line would
+  // grant additional_permissions silently.
   if (filesystemWriteRoots.length > 0 && risk === "Skip") risk = "NeedsApproval";
 
   const allowWrite = [...filesystem.allowWrite];
-  if (risk === "Skip" && request.operation === "execute" && command !== undefined) {
-    const segments = request.commandSegments ?? parseCommandSegments(command);
-    for (const segment of segments) {
-      if (!deletionExecutables.has(segment.executable)) continue;
-      const targets = deletionTargets(segment);
-      if (targets.length === 0) continue;
-      for (const target of targets) {
-        const decision = await isPathAllowed(target, {
-          cwd,
-          allowWrite,
-          denyRead: [],
-          denyWrite: filesystem.denyWrite,
-          protectedWritePaths: filesystem.protectedWritePaths,
-          operation: "write",
-        });
-        // Ordinary outside-root writes are discovered by the real sandbox and
-        // reviewed with its exact denial. Static policy only catches hard
-        // protected-path carve-outs before execution.
-        if (!decision.allowed && decision.reason !== "write path is outside allowed roots") {
-          risk = "NeedsApproval";
-          break;
-        }
-      }
-      if (risk !== "Skip") {
-        break;
-      }
-    }
-  }
   const operation = pathOperation(request.operation);
   let writeOutsideRoots = false;
   if (operation) {
@@ -444,7 +401,9 @@ export async function evaluateRiskRequest(
       });
       if (decision.allowed) continue;
       if (decision.reason === "write path is outside allowed roots") {
-        risk = risk === "Forbidden" ? "Forbidden" : "NeedsApproval";
+        // Cut 3: no longer a static review — the sandboxed file operations
+        // deny it at runtime. The flag still rides the residuals so the
+        // review packet (if any) says where the write stands.
         writeOutsideRoots = true;
         continue;
       }
@@ -462,50 +421,28 @@ export async function evaluateRiskRequest(
   }
 
   const promptedByRule = rule?.decision === "ask";
-  // An unproven Git context can only *raise* the disposition, never lower it.
-  // The elevation is scoped to `Skip`: a disposition the classifier already set
-  // — most commonly a tier-1 `NeedsApproval` for a proven-dangerous command —
-  // is left untouched, so the unproven-Git stamp never replaces the verdict or
-  // hides the tier-1 cause behind a vaguer reason. `NeedsApproval` is the
-  // strongest disposition the classifier returns for a command (a
-  // proven-dangerous argv is a review the user settles, not a hard block), so
-  // it is the value that survives here, and the tier-1 reason is kept so the
-  // cause is not hidden.
-  const unprovenGitElevates = unprovenGitReason !== undefined && risk === "Skip";
-  const reportedRisk = unprovenGitElevates ? "NeedsApproval" : risk;
-  const wouldPrompt =
-    promptedByRule || risk !== "Skip" || escalationRequested || unprovenGitElevates;
+  const wouldPrompt = promptedByRule || risk !== "Skip" || escalationRequested;
   if (wouldPrompt) {
     return {
       action: "prompt",
-      risk: reportedRisk,
+      risk,
       reason: escalationRequested
         ? "Command requires escalated sandbox permissions"
         : promptedByRule
           ? "Approval required by permissions rule"
-          : unprovenGitElevates
-            ? `Unproven Git invocation: ${unprovenGitReason}`
-            : // Unlike a review cause — a process label that only rides the
-              // metrics — this names where the dangerous argv itself was found,
-              // so it belongs in the review packet the Guardian reads.
-              classification.dangerousSubstitution !== undefined
-              ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
-              : `${risk} operation`,
+          : // This names where the dangerous argv itself was found, so it
+            // belongs in the review packet the Guardian reads.
+            classification.dangerousSubstitution !== undefined
+            ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
+            : `${risk} operation`,
       summary: summarize(tool, input),
-      // Derived from the reported disposition, not the pre-elevation one, so a
-      // consumer reading `risk` and one reading `residual_signals` cannot disagree
-      // about the same decision.
       residuals: residualsForPrompt({
         ruleAsk: promptedByRule,
         escalation: escalationRequested,
-        risk: reportedRisk,
+        risk,
         writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
         actionReview:
-          reportedRisk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
-        // Co-stamp only: rides alongside `action_review` (and under
-        // escalation), never replaces a bucket. Undefined for the flips the
-        // classifier itself did not make.
-        cause: staticCause,
+          risk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
       justification: escalation.requested

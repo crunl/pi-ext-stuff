@@ -1,40 +1,51 @@
 /**
  * ApprovalDisposition classification: the public entry point of the static risk layer.
  *
- * Four tiers, three dispositions. The tiers are ordered by how much was proved,
- * and two of them land on the same disposition:
+ * Two questions, three dispositions (codex-aligned, Q3 removed):
  *
- *   1. proven dangerous          -> Forbidden
- *   2. proven side-effecting     -> NeedsApproval
- *   3. proven safe               -> Skip
- *   4. unclassifiable            -> NeedsApproval
+ *   1. proven dangerous, or proven to run another program -> NeedsApproval
+ *   2. everything else                                   -> Skip
  *
- * Tiers 2 and 4 are both a review, from opposite directions: tier 2's argv is
- * fully determined and its effect is simply not confined by the filesystem or
- * network policy, while tier 4's argv is not determined at all. Tier 3 is the
- * only auto-approve and the only tier that asserts nothing is left to prove, so
- * tier 4 fails closed into review rather than downgrading into it.
+ * (`Forbidden` survives only outside the command path: webfetch below,
+ * protected writes, and the policy-layer blocks in `risk-policy.ts`.)
+ * A non-dangerous command runs; the sandbox + runtime boundary enforce
+ * the restrictions without a prompt — codex `exec_policy.rs:828-836`.
  *
  * The per-command analyses live in the sibling modules; this file composes them
  * into a single `ApprovalDisposition`.
  */
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { resolvePolicyPath } from "../filesystem-policy.ts";
 import { isPublicNetworkHost } from "../network-host.ts";
 import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 import { normalizedSegmentsFor } from "./cd-normalize.ts";
-import { invocationRemoteEffectUnclassified } from "./command-effects.ts";
 import { isDangerousWords } from "./dangerous-commands.ts";
-import type { CommandSegment, PermissionRequest, SegmentUnprovenCause } from "./rules.ts";
+import { gitExecutableEnvNames } from "./git-exec-entries.ts";
+import type { CommandSegment, PermissionRequest } from "./rules.ts";
 import { deletionExecutables } from "./rules.ts";
-import { shellWords } from "./shell-lexer.ts";
+import { assignmentName, shellWords } from "./shell-lexer.ts";
 import { extractShellNetworkHosts } from "./shell-network.ts";
-import {
-  commandHasExecutableSubstitution,
-  parseCommandSegments,
-  shellStateCrossesSegments,
-} from "./shell-segment.ts";
+import { parseCommandSegments } from "./shell-segment.ts";
+
+/**
+ * Privilege-boundary wrappers: doas/su always, plus sudo/env whose option
+ * grammar the fold could not reduce. Measured on this machine: BSD `env -S`
+ * executes its operand, and `doas`/`su` gate on auth, not on argv — none of
+ * these are answerable by judging the tail. Codex has no doas/su arm and
+ * misses unreduced sudo/env tails; this review is deliberately stricter.
+ */
+const privilegeWrappers = new Set(["sudo", "doas", "su", "env"]);
+
+/** Builtins that publish an assignment into the environment. */
+const envPublishingBuiltins = new Set(["export", "declare", "local", "readonly", "typeset", "env"]);
+
+/** Executable words that hide the program bash will run. A leading `=`
+ * is zsh filename expansion (`=rm` → `/bin/rm`); under bash it never
+ * executes, but the spelling names a different shell's expansion, so it
+ * reviews too. Bare `[` is the test builtin and an empty word runs
+ * nothing, so neither counts as hiding. */
+const hiddenExecutablePattern = /[$`{}*?[]/;
 
 /**
  * What this layer decided to do with an owned tool call.
@@ -77,36 +88,13 @@ import {
  */
 export type ApprovalDisposition = "Skip" | "NeedsApproval" | "Forbidden";
 
-/**
- * Which proof the static layer failed to make, for an action that did not get
- * a Skip. Segment-level causes are recorded at the fold itself
- * (`parseCommandSegment`); the rest are named at the tier that refuses.
- * `unproven_other` is the defensive member: reaching it means a new refusal
- * path forgot to name itself, and it must surface as `other_explicit_review`
- * rather than be guessed.
- *
- * A cause names the mechanism that failed, never the disposition it produced
- * — the `risk_not_low` rename showed that a tag naming a value from the
- * disposition vocabulary starts lying the moment that vocabulary moves. The
- * cause is observational and travels as a co-stamped residual signal; it is
- * never a skip credential (`src/permissions/residual.ts`).
- */
-export type ReviewCause =
-  | SegmentUnprovenCause
-  | "process_control"
-  | "env_context_unproven"
-  | "state_crosses_segments"
-  | "remote_effect_unclassified"
-  | "unproven_other";
-
 export interface RiskClassification {
   disposition: ApprovalDisposition;
-  /** Present exactly when the disposition is a static review (NeedsApproval). */
-  cause?: ReviewCause;
   /**
    * The argv of a segment proven dangerous from inside a live `$(…)` body.
-   * This is evidence about the action itself — unlike a review cause, which
-   * is a process label — so it may enter the review packet as the reason.
+   * This is evidence about the action itself, so it may enter the review
+   * packet as the reason. (Cut 3: the `cause` field is gone with the Q3
+   * proof gate — a proven verdict carries no failed proof.)
    */
   dangerousSubstitution?: string;
 }
@@ -180,9 +168,7 @@ function webFetchRisk(request: PermissionRequest): ApprovalDisposition {
 
 function writeRisk(
   request: PermissionRequest,
-  approvedWriteRoots: string[],
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
-  workspaceWriteRoots: readonly string[] = [request.cwd],
 ): ApprovalDisposition {
   if (
     request.resolvedPaths.some((path) =>
@@ -191,11 +177,11 @@ function writeRisk(
   ) {
     return "Forbidden";
   }
-  const roots = [...workspaceWriteRoots, ...approvedWriteRoots];
-  return request.resolvedPaths.length > 0 &&
-    request.resolvedPaths.every((path) => roots.some((root) => isPathWithin(path, root)))
-    ? "Skip"
-    : "NeedsApproval";
+  // Cut 3: a write outside the roots is no longer a static review — the
+  // sandboxed file operations deny it at runtime (with the exact-denial
+  // recovery review), mirroring codex letting the sandbox enforce. Only
+  // the protected-path carve-out above stays a refusal.
+  return "Skip";
 }
 
 /**
@@ -245,55 +231,43 @@ export function deletionTargets(segment: CommandSegment): string[] {
 
 export function classifyRisk(
   request: PermissionRequest,
-  approvedWriteRoots: string[] = [],
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
-  workspaceWriteRoots: readonly string[] = [request.cwd],
 ): ApprovalDisposition {
-  return classifyRiskWithCause(
-    request,
-    approvedWriteRoots,
-    protectedWritePaths,
-    workspaceWriteRoots,
-  ).disposition;
+  return classifyRiskWithCause(request, protectedWritePaths).disposition;
 }
 
 /**
- * `classifyRisk` with the failed proof named. The tier logic is the original
- * one — same order, same conditions — only each refusal now says which of its
- * own conjuncts it hit. `unprovenGitReason` (a `{kind, reason}` verdict whose
- * code never reached the metrics) is the precedent this closes: the code
- * travels, the human string stays optional.
+ * The static question, codex-aligned: proven dangerous (or proven to run
+ * another program) → NeedsApproval, everything else → Skip. The runtime
+ * sandbox owns the rest.
  */
 export function classifyRiskWithCause(
   request: PermissionRequest,
-  approvedWriteRoots: string[] = [],
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
-  workspaceWriteRoots: readonly string[] = [request.cwd],
 ): RiskClassification {
   const lowerTool = request.tool.toLowerCase();
   if (lowerTool === "websearch") return { disposition: "Skip" };
   if (lowerTool === "webfetch") return { disposition: webFetchRisk(request) };
   if (request.operation === "write") {
     return {
-      disposition: writeRisk(request, approvedWriteRoots, protectedWritePaths, workspaceWriteRoots),
+      disposition: writeRisk(request, protectedWritePaths),
     };
   }
   if (request.operation === "read") return { disposition: "Skip" };
   const command = typeof request.input.command === "string" ? request.input.command : undefined;
-  // An execute operation with no command string is not unreadable shell, it
-  // is no shell at all; naming it lex_incomplete keeps "nothing to read" and
-  // "could not read" in one honest bucket.
-  if (!command) return { disposition: "NeedsApproval", cause: "lex_incomplete" };
+  // An execute operation with no command string is no shell at all: no argv,
+  // no dangerous evidence — Skip, mirroring the codex fallback that judges
+  // the (empty) word vector non-dangerous.
+  if (!command) return { disposition: "Skip" };
   const segments = request.commandSegments ?? normalizedSegmentsFor(command, request.cwd);
-  // Tier 1 — proven dangerous (forced rm, sudo, env wrapper). Mirrors
+  // Proven dangerous (forced rm, sudo, env wrapper). Mirrors
   // codex `render_decision_for_unmatched_command_for_platform`: a proven
   // dangerous command is a review the user settles, not a hard block
   // (codex `AskForApproval::OnRequest` → `Prompt`). The static layer
   // runs only in pi's `auto` mode, which is that policy; pi has no
   // `AskForApproval::Never` mode (`yolo` bypasses this layer entirely),
   // so codex's `Never → Forbidden` arm is unreachable here. A proven
-  // verdict needs no cause: `static_risk` already buckets it, and the
-  // review-cause vocabulary names failed proofs, not succeeded ones.
+  // verdict needs no cause: `static_risk` already buckets it.
   // Network egress is not judged here — the runtime `NetworkBoundary`
   // owns it (codex `NetworkProxy`), so a non-exempt network target is
   // no longer a static refusal.
@@ -306,108 +280,64 @@ export function classifyRiskWithCause(
       ...(substituted ? { dangerousSubstitution: substituted.source } : {}),
     };
   }
-  // Codex alignment, cut 2: Tier 2 is gone. Unix signals escape the
-  // sandbox, but codex never gated them (`is_dangerous_command.rs` has
-  // no kill arm) and neither do we now — a fully determined argv runs,
-  // and an unproven environment no longer diverts to review on its own.
-  // What the environment can change about *which program runs* is still
-  // caught by the fold (`nested_git_program`, Tier 4b) and by Tier 1.
-  // Tier 3 — proven safe: static argv equals runtime argv for the whole
-  // command, so nothing is left to prove. A rewritable argv, an unreadable
-  // option grammar, or state crossing a segment boundary is not.
-  const decomposable =
-    !commandHasExecutableSubstitution(command) &&
-    segments.every((segment) => segment.decomposable) &&
-    // A compound command that publishes shell state in one segment and reads it
-    // in another cannot be analysed segment by segment.
-    !shellStateCrossesSegments(segments, request.cwd) &&
-    // An invocation whose remote effect this layer cannot prove has not been
-    // shown to be read-only.
-    segments.every((segment) => !invocationRemoteEffectUnclassified(segment));
-  if (decomposable) return { disposition: "Skip" };
-  // Tier 4a — lex parse failure / incomplete input. codex
-  // `commands_for_exec_policy_for_platform` (exec_policy.rs:876-904)
-  // uses the parser's plain commands when non-empty, and only falls
-  // back to the raw command vector (exec_policy.rs:900-903) — judged
-  // by `dangerous_command_match_for_platform`
-  // (shell-command/src/command_safety/is_dangerous_command.rs:42),
-  // whose `dangerous_command_match_for_exec` (:123-147) matches the
-  // first word against `rm`(+force)/`sudo`/`env`/`trap` — when the
-  // parse yields none (a failed parse, or a command with no plain
-  // commands such as `FOO=1` or `>out`). Mirror the fallback: judge
-  // the raw command's words — a dangerous program is still a review, a
-  // non-dangerous one is Allow (the default policy). pi's
-  // `isDangerousWords` (dangerous-commands.ts:47-65) matches the
-  // first word against `rm`/`sudo`/`env`; the matcher's `trap` and
-  // shell-literal branches do not arise for the lex-incomplete /
-  // no-plain-commands commands that reach this tier, so the sets
-  // coincide here. A brace group is excluded: codex parses it
-  // successfully and judges the commands nested inside it, so a group —
-  // whose nested argv the leading word cannot see — fails closed below
-  // instead of taking this fallback. The fallback needs *every* segment
-  // to be `lex_incomplete`: codex's fallback hands the whole raw
-  // command vector over as one unit (exec_policy.rs:900-902) and does
-  // not care that one segment parsed and another did not, so one
-  // segment with a stronger unproven reason
-  // (command_word_unproven/substitution_unproven/heredoc_unproven/
-  // wrapper_unreduced/nested_git_program/program_reinterpreted/grouped)
-  // means the command is not the "no token-level expansion at all"
-  // case the fallback describes, and it fails closed below as Tier 4b.
+  // Proven nested-program execution (cut 3 promotion): Git told to run
+  // another program — a shell alias, a pager, `bisect run`, a filter —
+  // names that program in the argv, so this is proven, not unproven.
+  // It used to ride Tier 4 as `nested_git_program`; failing it closed
+  // there was a category error, and deleting Tier 4 must not release it.
+  // Codex has no Git arm — this review is ours, deliberately. The export
+  // form (`export GIT_EDITOR=…; git commit`) never reached the fold's
+  // cause, so it is named here too.
   if (
-    !segments.some((segment) => segment.grouped) &&
-    segments.every((segment) => segment.unprovenCause === "lex_incomplete")
-  ) {
-    return isDangerousWords(shellWords(command).words)
-      ? { disposition: "NeedsApproval" }
-      : { disposition: "Skip" };
-  }
-  // Tier 4b — unclassifiable: a dynamic executable word, a re-interpreted
-  // string or stdin program, a substitution, a heredoc, or a brace group. The
-  // static word list is not the argv that runs, so fail closed into review
-  // instead of guessing.
-  //
-  // First cut of the codex alignment (Q3 removal): a command whose only
-  // unproven clause is the heredoc itself is Skip. Every nested segment —
-  // heredoc bodies and substitution bodies included — already passed the
-  // Tier 1 dangerous screen above, so the heredoc carries no unreviewed
-  // argv. The gate repeats the Tier 3 conjunction minus the heredoc
-  // clause: a cross-segment state handoff or an unclassified remote
-  // effect still fails closed below, as does any other segment cause.
-  if (
-    !commandHasExecutableSubstitution(command) &&
-    !shellStateCrossesSegments(segments, request.cwd) &&
-    segments.every((segment) => !invocationRemoteEffectUnclassified(segment)) &&
-    segments.every(
-      (segment) => segment.decomposable || segment.unprovenCause === "heredoc_unproven",
+    segments.some(
+      (segment) =>
+        segment.unprovenCause === "nested_git_program" ||
+        (envPublishingBuiltins.has(segment.executable) &&
+          segment.args.some((arg) => {
+            const name = assignmentName(arg);
+            return name !== undefined && gitExecutableEnvNames.has(name);
+          })),
     )
   ) {
-    return { disposition: "Skip" };
+    return { disposition: "NeedsApproval" };
   }
-  return {
-    disposition: "NeedsApproval",
-    cause: firstUnprovenCause(command, segments, request.cwd),
-  };
-}
-
-/**
- * The first failed clause of the tier-3 gate, read off the same conjuncts in
- * the same order so the cause and the boolean can never disagree. Segment
- * folds report themselves; a non-decomposable segment without a reported
- * cause is a gap in the fold and surfaces as `unproven_other`, never as a
- * guessed bucket.
- */
-function firstUnprovenCause(
-  command: string,
-  segments: readonly CommandSegment[],
-  cwd: string,
-): ReviewCause {
-  if (commandHasExecutableSubstitution(command)) return "substitution_unproven";
-  for (const segment of segments) {
-    if (!segment.decomposable) return segment.unprovenCause ?? "unproven_other";
+  // Unreduced privilege wrapper (cut 3 retention): doas/su gate on auth,
+  // and an unreduced sudo/env tail is where the command hides. The fold
+  // mangles these words past recognition (`sudo -D` → exe `-d`), so read
+  // the segment source instead. Plain reduced forms (`sudo kill`, `env
+  // FOO=1 cmd`) keep whatever verdict the checks above and below give.
+  if (
+    segments.some(
+      (segment) =>
+        segment.unprovenCause === "wrapper_unreduced" &&
+        privilegeWrappers.has(
+          basename((shellWords(segment.source).words[0] ?? "").toLowerCase()),
+        ),
+    )
+  ) {
+    return { disposition: "NeedsApproval" };
   }
-  if (shellStateCrossesSegments(segments, cwd)) return "state_crosses_segments";
-  if (segments.some(invocationRemoteEffectUnclassified)) return "remote_effect_unclassified";
-  return "unproven_other";
+  // Hidden executable word (cut 3 retention): brace expansion, variable
+  // and command substitution, zsh `=` expansion, and globs decide the
+  // program at runtime — measured live (`{rm,echo} -f victim` and
+  // `cmd=rm; $cmd -f victim` both delete). Bare `[` is the test builtin
+  // and an empty word runs nothing, so neither counts as hiding.
+  if (
+    segments.some(
+      (segment) =>
+        segment.executable !== "" &&
+        segment.executable !== "[" &&
+        (segment.executable.startsWith("=") || hiddenExecutablePattern.test(segment.executable)),
+    )
+  ) {
+    return { disposition: "NeedsApproval" };
+  }
+  // Codex alignment, cut 3: everything else is Skip. The Q3 proof gate
+  // (Tier 3 decomposable), the lex fallback (Tier 4a) and the fail-closed
+  // fold (Tier 4b) are gone: a non-dangerous command runs, and the
+  // sandbox + runtime boundary enforce the restrictions without a
+  // prompt — codex `exec_policy.rs:828-836` verbatim.
+  return { disposition: "Skip" };
 }
 
 export { isPublicNetworkHost } from "../network-host.ts";

@@ -215,7 +215,6 @@ describe("narrow static risk contract", () => {
     expect(
       classifyRisk(
         normalizeToolCall("write", { path: "/opt/pi/extensions/pi-safety/config.json" }, "/work"),
-        [],
         ["/opt/pi/extensions/pi-safety/config.json"],
       ),
     ).toBe("Forbidden");
@@ -248,7 +247,7 @@ describe("narrow static risk contract", () => {
     ["cat README.md &", "Skip"],
     ["cat README.md\npwd", "Skip"],
     ["cat README.md > copy.txt", "Skip"],
-    ["cat $(pwd)", "NeedsApproval"],
+    ["cat $(pwd)", "Skip"],
     ["bash -c 'pwd'", "Skip"],
     ["rm -rf build", "NeedsApproval"],
     ["rm --force build", "NeedsApproval"],
@@ -281,11 +280,11 @@ describe("narrow static risk contract", () => {
     ["su root -c 'rm -rf /tmp/x'", "NeedsApproval"],
     ["doas rm -rf /tmp/x", "NeedsApproval"],
     // A wrapper with no provable command operand names no runtime program.
-    ["timeout", "NeedsApproval"],
-    ["nice", "NeedsApproval"],
-    ["timeout --help", "NeedsApproval"],
+    ["timeout", "Skip"],
+    ["nice", "Skip"],
+    ["timeout --help", "Skip"],
     ["time", "Skip"],
-    ["time -f", "NeedsApproval"],
+    ["time -f", "Skip"],
     ["nohup", "Skip"],
     ["command", "Skip"],
     ["sudo -u", "NeedsApproval"],
@@ -297,9 +296,9 @@ describe("narrow static risk contract", () => {
     ["sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
     ["sudo -R / rm -rf /tmp/x", "NeedsApproval"],
     ["sudo -T 1 rm -rf /tmp/x", "NeedsApproval"],
-    ["timeout 1e3 rm -rf /tmp/x", "NeedsApproval"],
-    ["timeout 0x1 rm -rf /tmp/x", "NeedsApproval"],
-    ["timeout 1.2.3 rm -rf /tmp/x", "NeedsApproval"],
+    ["timeout 1e3 rm -rf /tmp/x", "Skip"],
+    ["timeout 0x1 rm -rf /tmp/x", "Skip"],
+    ["timeout 1.2.3 rm -rf /tmp/x", "Skip"],
     // GNU `nice` accepts a bare adjustment operand; it must not become the
     // executable.
     ["nice +5 rm -rf /tmp/x", "NeedsApproval"],
@@ -418,19 +417,19 @@ describe("narrow static risk contract", () => {
     ['sh -c "rm -f x"', "NeedsApproval"],
     // `trap ACTION SIGNAL` stores shell code to run later, so the action is a
     // program the static argv never showed: unclassifiable, hence REVIEW.
-    ["trap 'ls' EXIT", "NeedsApproval"],
-    ["php -r 'system(\"ls\");'", "NeedsApproval"],
-    ["deno eval 'console.log(1)'", "NeedsApproval"],
-    ["perl -wE 'say 1'", "NeedsApproval"],
-    ["php -dr 'system(\"ls\");'", "NeedsApproval"],
+    ["trap 'ls' EXIT", "Skip"],
+    ["php -r 'system(\"ls\");'", "Skip"],
+    ["deno eval 'console.log(1)'", "Skip"],
+    ["perl -wE 'say 1'", "Skip"],
+    ["php -dr 'system(\"ls\");'", "Skip"],
     // Stripping a delegating wrapper must not disturb ordinary wrapped reads.
     ["timeout 1 ls -la", "Skip"],
     ["nice -n 5 git status", "Skip"],
     // A word after a value-taking option is that option's value, and a bare `-`
     // is the stdin sentinel: the program comes from a pipe, not the argv.
-    ["bash -o pipefail", "NeedsApproval"],
-    ["python -X utf8", "NeedsApproval"],
-    ["deno run -", "NeedsApproval"],
+    ["bash -o pipefail", "Skip"],
+    ["python -X utf8", "Skip"],
+    ["deno run -", "Skip"],
     // The operand behind an option's value is still read: a fixed argv.
     ["bash -o pipefail script.sh", "Skip"],
     ["php -d memory_limit=1G script.php", "Skip"],
@@ -468,10 +467,10 @@ describe("narrow static risk contract", () => {
     ["git -c includeIf.hasconfig:remote.*.path=/tmp/gcfg x", "NeedsApproval"],
     // A named module is not a script path: what runs is the module's
     // `__main__`, whose contents are not in argv.
-    ["python3 -m pip install requests", "NeedsApproval"],
-    ["python3 -m pytest", "NeedsApproval"],
+    ["python3 -m pip install requests", "Skip"],
+    ["python3 -m pytest", "Skip"],
     // The attached spelling runs the same module.
-    ["python3 -mfoo main.py", "NeedsApproval"],
+    ["python3 -mfoo main.py", "Skip"],
     // `exec` and `setsid` are delegating wrappers like `nohup`; both were
     // missing, so the nested command was never inspected. Verified by
     // execution: `exec rm -f victim` removed the file.
@@ -529,7 +528,7 @@ describe("narrow static risk contract", () => {
 
     // Same shape in the interpreter analysis: `-W` takes the value, and python
     // goes on to run the program it is handed.
-    ["python3 -W --help", "NeedsApproval"],
+    ["python3 -W --help", "Skip"],
     // An attached value cannot shift an operand, so it needs no table entry.
     ["kubectl -n=default get pods", "Skip"],
     ["git -c user.email=a@b status", "Skip"],
@@ -594,7 +593,7 @@ describe("narrow static risk contract", () => {
     // Skip; only classic `yarn` actually runs `install` and stays reviewed.
     ["npm", "Skip"],
     ["pnpm", "Skip"],
-    ["yarn", "NeedsApproval"],
+    ["yarn", "Skip"],
     // `env -C DIR` moves the working directory, so operands resolve against a
     // root the request never named. The reference implementation sends the whole
     // `env` invocation to review rather than parsing the option.
@@ -623,19 +622,19 @@ describe("narrow static risk contract", () => {
     ["cd /work/repo && pwd", "Skip"],
     ["cd /tmp && cat README.md", "Skip"],
     ["cd repo && head -5 README.md", "Skip"],
-    ["cd .. && cat README.md", "NeedsApproval"],
-    ["cd a/../b && cat README.md", "NeedsApproval"],
-    ["cd - && cat README.md", "NeedsApproval"],
-    ["cd a b && cat README.md", "NeedsApproval"],
-    ['cd "$DIR" && cat README.md', "NeedsApproval"],
-    ["cd ~ && cat README.md", "NeedsApproval"],
-    ["cd /tmp/* && cat README.md", "NeedsApproval"],
-    ["cd /tmp && git status", "NeedsApproval"],
-    ["cd /tmp && export FOO=1 && printenv FOO", "NeedsApproval"],
-    ["cd /tmp && node -e 'console.log(1)'", "NeedsApproval"],
-    ["cd /tmp && npm test", "NeedsApproval"],
+    ["cd .. && cat README.md", "Skip"],
+    ["cd a/../b && cat README.md", "Skip"],
+    ["cd - && cat README.md", "Skip"],
+    ["cd a b && cat README.md", "Skip"],
+    ['cd "$DIR" && cat README.md', "Skip"],
+    ["cd ~ && cat README.md", "Skip"],
+    ["cd /tmp/* && cat README.md", "Skip"],
+    ["cd /tmp && git status", "Skip"],
+    ["cd /tmp && export FOO=1 && printenv FOO", "Skip"],
+    ["cd /tmp && node -e 'console.log(1)'", "Skip"],
+    ["cd /tmp && npm test", "Skip"],
     ["cd /tmp && rm -rf x", "NeedsApproval"],
-    ["cd /tmp && rmdir x", "NeedsApproval"],
+    ["cd /tmp && rmdir x", "Skip"],
   ] as const)("folds a known-cwd cd in sandboxed Bash %s to %s", (command, expected) => {
     expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(expected);
   });
@@ -658,9 +657,10 @@ describe("narrow static risk contract", () => {
     for (const length of [20, 25, 40, 80]) {
       const command = `stdbuf -o${"a".repeat(length)}! rm -rf build`;
       const started = performance.now();
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(
-        "NeedsApproval",
-      );
+      // Cut 3: a malformed delegating-wrapper option fails safe (stdbuf
+      // errors, the command never runs), so this is Skip now. The perf
+      // assertion — the point of the test — is unchanged.
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("Skip");
       expect(performance.now() - started).toBeLessThan(500);
     }
   });
@@ -707,22 +707,23 @@ describe("cd normalization admission lists", () => {
   const directoryChangerFloor = ["pushd", "popd"];
 
   it.each(deletionFloor)("does not fold a cd before the deletion executable %s", (executable) => {
+    // Cut 3: the deletion carve-out is gone, so the verdict moved to the
+    // runtime sandbox (which enforces with the actual post-cd cwd — more
+    // exact than the static guess). The fold itself is unchanged.
     const next = executable === "truncate" ? "-s 0 victim" : "victim";
-    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} ${next}`))).not.toBe(
-      "Skip",
-    );
+    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} ${next}`))).toBe("Skip");
   });
 
   it.each(stateSetterFloor)("does not fold a cd before the state setter %s", (executable) => {
-    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} NAME=1`))).not.toBe("Skip");
+    // Cut 3: cross-segment state no longer reviews; the sandbox runs it.
+    expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} NAME=1`))).toBe("Skip");
   });
 
   it.each(directoryChangerFloor)(
     "does not fold a cd before the second directory changer %s",
     (executable) => {
-      expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} /other`))).not.toBe(
-        "Skip",
-      );
+      // Cut 3: relocation reviews are gone; the runtime owns the cwd.
+      expect(classifyRisk(request("bash", `cd /elsewhere && ${executable} /other`))).toBe("Skip");
     },
   );
 

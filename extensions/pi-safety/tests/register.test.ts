@@ -1474,12 +1474,15 @@ describe("Permission mode registration", () => {
       content: [{ type: "text", text: `Successfully wrote to ${path}` }],
     });
     expect(operations).toEqual(["mkdir", "mkdir", "write"]);
-    expect(app.reviewInputs).toHaveLength(2);
-    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).not.toContain(parent);
-    expect(app.reviewInputs[1]?.permissionContext.filesystemWriteRoots).toContain(parent);
-    expect(JSON.stringify(app.reviewInputs[1])).toMatch(/subtree/);
-    expect(JSON.stringify(app.reviewInputs[1])).toMatch(/partial directory effects/);
-    expect(JSON.stringify(app.reviewInputs[1])).toContain("retry once");
+    // Cut 3: the initial static outside-roots review is gone — the first
+    // mkdir runs under the sandbox, SRT denies it, and only the recovery
+    // review (with the exact denial) reaches the Guardian. Same executions,
+    // one review instead of two.
+    expect(app.reviewInputs).toHaveLength(1);
+    expect(app.reviewInputs[0]?.permissionContext.filesystemWriteRoots).toContain(parent);
+    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/subtree/);
+    expect(JSON.stringify(app.reviewInputs[0])).toMatch(/partial directory effects/);
+    expect(JSON.stringify(app.reviewInputs[0])).toContain("retry once");
     expect(policies[1]).toEqual({
       ...policies[0],
       filesystem: {
@@ -1587,7 +1590,7 @@ describe("Permission mode registration", () => {
   );
 
   it.each(["access", "read"])(
-    "does not retry registered Edit %s when real risk already granted its exact file",
+    "recovers registered Edit %s once through native review when real risk grants nothing upfront",
     async (stage) => {
       const operations: string[] = [];
       const app = await makeHarness({
@@ -1607,15 +1610,20 @@ describe("Permission mode registration", () => {
       });
       await startSession(app);
       await startAgent(app);
+      // Cut 3: no initial static grant, so the lease does not cover the
+      // file and recovery runs for real — one Guardian review, one retry,
+      // then terminal. Same no-blind-replay guarantee, one more round trip.
       await expect(executeEdit(app, "real-edit-covered", "/outside/file")).rejects.toMatchObject({
-        code: "enforcement-unavailable",
+        code: "runtime-denied",
         reason: expect.stringMatching(
-          /already covered[\s\S]*original already-covered file failure/,
+          /second attempt failed[\s\S]*original already-covered file failure/,
         ),
       });
       expect(app.reviewInputs).toHaveLength(1);
       expect(app.reviewInputs[0].permissionContext.filesystemWriteRoots).toContain("/outside/file");
-      expect(operations).toEqual(stage === "access" ? ["access"] : ["access", "read"]);
+      expect(operations).toEqual(
+        stage === "access" ? ["access", "access"] : ["access", "read", "access", "read"],
+      );
       expect(app.sandboxManager.execute).toHaveBeenCalledTimes(operations.length);
     },
   );
@@ -1674,7 +1682,7 @@ describe("Permission mode registration", () => {
       ).rejects.toThrow(
         /EPERM content may be truncated[\s\S]*SRT diagnostic[\s\S]*Effects warning/,
       );
-      expect(app.reviewInputs).toHaveLength(1); // Initial action-risk review only; no recovery after content entry.
+      expect(app.reviewInputs).toHaveLength(0); // Cut 3: no initial static review; terminal after content entry, still no replay.
       expect(operations).toEqual(
         tool === "write" ? ["mkdir", "write"] : ["access", "read", "write"],
       );
@@ -2827,15 +2835,22 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).not.toHaveBeenCalled();
   });
 
+  // Cut 3: only `bash` remains on this axis. Write/edit to outside-roots
+  // paths no longer get a static pre-review (the sandbox denies them at
+  // runtime, with the recovery review pinned by the mkdir/replay tests
+  // above), so their `review` stub would never fire and `await entry`
+  // would hang. The coordination under test — review happening late, at
+  // shared launch — is tool-agnostic, and the six bash cases keep it pinned
+  // (`rm -rf` still reviews via the proven-dangerous arm).
   it.each(
     ["direct", "system", "binding"].flatMap((surface) =>
-      ["bash", "write", "edit"].flatMap((tool) =>
+      ["bash"].flatMap((tool) =>
         [false, true].map((childInstalled) => ({ surface, tool, childInstalled })),
       ),
     ),
   )(
     "checks late parent review at actual shared launch: $surface / $tool / child=$childInstalled",
-    withDarwin(async ({ surface, tool, childInstalled }) => {
+    withDarwin(async ({ surface, childInstalled }) => {
       let entered!: () => void;
       const entry = new Promise<void>((resolve) => {
         entered = resolve;
@@ -2882,14 +2897,7 @@ describe("Permission mode registration", () => {
           return operation();
         }, signal),
       );
-      const path = join(app.agentDir, "late-parent-file");
-      const parent = (
-        tool === "bash"
-          ? executeBash(app, "late-raw-review", "rm -rf /tmp/risk-only-fixture")
-          : tool === "write"
-            ? executeWrite(app, "late-write-review", path, "after")
-            : executeEdit(app, "late-edit-review", path)
-      ).then(
+      const parent = executeBash(app, "late-raw-review", "rm -rf /tmp/risk-only-fixture").then(
         (value) => ({ value }),
         (error: unknown) => ({ error }),
       );

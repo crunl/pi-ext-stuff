@@ -102,6 +102,10 @@ describe("env -- terminator (codex-aligned, known gap)", () => {
       classifyRiskWithCause(
         normalizeToolCall("bash", { command: "env =foo rm -f /tmp/x" }, "/work/repo")
       ),
-    ).toEqual({ disposition: "NeedsApproval", cause: "command_word_unproven" });
+    ).toEqual({ disposition: "NeedsApproval" });
+    // Cut 3 keeps `=`-leading executables in review even though bash never
+    // executes them ("No such file"): the spelling is zsh filename
+    // expansion, and `zsh -c '=rm …'` shares it exactly — statically
+    // indistinguishable without a PATH lookup, so both review.
   });
 });

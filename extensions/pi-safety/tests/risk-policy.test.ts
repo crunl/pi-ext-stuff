@@ -4,7 +4,6 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
-import type { ResidualSignal } from "../src/permissions/residual.ts";
 import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
 import {
   evaluateHostFirstRulesOnly,
@@ -318,9 +317,11 @@ describe("ApprovalDisposition policy gate", () => {
   it("prompts for external writes and Codex-dangerous commands", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 
+    // Cut 3: outside-roots writes run and the sandboxed file operations
+    // deny them at runtime (recovery review on exact denial).
     await expect(
       evaluateRiskRequest("write", { path: "/var/tmp/out.txt", content: "x" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm -rf build" }, cwd, config()),
     ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
@@ -348,10 +349,10 @@ describe("ApprovalDisposition policy gate", () => {
     }
   });
 
-  it("reviews deletion targets hidden behind control-flow keywords", async () => {
-    // parseCommandSegment normalizes the reserved word at the parse boundary,
-    // so the deletion consumer sees the real executable and checks `.git/HEAD`
-    // against the protected write roots instead of skipping the segment.
+  it("leaves protected bash deletions to the runtime sandbox", async () => {
+    // Cut 3 deleted the deletion carve-out: `rm .git/HEAD` runs and SRT
+    // denies it via the protected write roots (audit: sandboxed
+    // enforcement). Forced rm still reviews via Tier 1.
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     for (const command of [
       "for i in a; do rm .git/HEAD; done",
@@ -359,8 +360,8 @@ describe("ApprovalDisposition policy gate", () => {
       "time rm .git/HEAD",
     ]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "NeedsApproval",
+        action: "allow",
+        risk: "Skip",
       });
     }
   });
@@ -411,69 +412,21 @@ describe("ApprovalDisposition policy gate", () => {
     }
   });
 
-  // "Unclassifiable" is one predicate — the static argv is not the argv that
-  // runs — closed over mechanisms (string→command re-execution, string
-  // synthesis), not over command names. Such a command cannot be proven safe,
-  // so it is REVIEW (fail closed): never HARD (nothing was proven dangerous)
-  // and never a silent LOW. Enumerating `eval` bodies or blacklisting
-  // constructs (`$IFS`, `base64 | sh`) is deliberately not attempted.
+  // Cut 3: only executable-hiding shapes stay review. A hidden program
+  // string (`eval`, `python -c`, `sh` stdin, `find -exec`, `xargs`) runs
+  // sandboxed like codex — the sandbox, not a guessing reviewer, owns
+  // what it cannot see. What stays: a hidden executable WORD (the shell
+  // decides the program at runtime) and dangerous bodies Tier 1 screens.
+  // Each deleted row below was verified Skip with a live or codex-parity
+  // reason; the sandbox + runtime boundary is the backstop.
   it.each([
-    "eval 'rm -f /'",
-    "source ./x.sh",
-    ". ./x.sh",
-    "echo 'rm -rf /' | sh",
-    "sh < script.sh",
-    "sh <<< 'rm -rf /'",
     "$(echo rm) -rf /",
-    "function f { rm -rf /; }; f",
-    "echo / | xargs rm -rf",
-    "find . -exec rm -rf {} +",
-    "find -exec rm -rf",
-    "python -c \"import os; os.system('rm -rf /')\"",
-    "node -e \"require('fs').rmSync('/')\"",
-    "perl -we 'system(\"rm -rf /\")'",
-    "php -r 'system(\"rm -rf /\");'",
-    "deno eval 'Deno.readTextFile(\"/etc/passwd\")'",
-    // `trap ACTION SIGNAL` stores shell code to run later: the action string is
-    // a program the static argv never showed.
-    'trap "$CMD" EXIT',
-    "trap 'ls' EXIT",
     'bash -c "$CMD -rf /"',
-    // The substitution is inert for the parent shell but live for the body.
-    "bash -c 'cat $(pwd)'",
-    // (First cut: pure-heredoc shapes left this table — `cat <<A <<'B'…`
-    // is allow now, covered by "allows a command whose only unproven
-    // clauses are heredocs".)
-    // The word after a value-taking option is that option's value, not a script
-    // operand: `bash -o pipefail` / `python -X utf8` read the program from the
-    // pipe in front of them, so no word in the argv names it.
-    "printf 'rm -rf /tmp/x\\n' | bash -o pipefail",
-    "echo 'import os;os.system(\"rm -rf /\")' | python -X utf8",
-    "python -X utf8",
-    "bash -o pipefail",
-    // `-s` makes a shell read the program from stdin; later words are $0/$1…,
-    // not the program (`bash -s name` / `bash -s name script.sh`).
-    "bash -s foo",
-    "bash -s foo script.sh",
-    // A bare `-` is the stdin sentinel, and for `deno` the mode word `run` is
-    // not the script operand either.
-    "deno run -",
-    "python -",
-    // A variable in argv position decides the argv at runtime. The executable
-    // being known does not make the words known, and the substituted word is
-    // where a flag lives: `git commit "${FLAG:--S}"` decides between a plain
-    // commit and a GPG-signing one without naming either. Single quotes are the
-    // exemption, not the rule — see the decomposable table below, where
-    // `cat '$(pwd)'` and `awk '{ print $1 }'` still auto-run.
-    "ls $DIR",
-    "ls ${DIR:-/tmp}",
-    // The variable executable arrives on its own segment
-    // (`command_word_unproven`), so the mixed reasons keep this out of the
-    // whole-vector fallback (`risk.ts` tier 4a needs every segment to be
-    // `lex_incomplete`) and it stays a review. Letting it Skip would let
-    // `$cmd` decide at runtime whether `rm` runs with `-rf`.
+    // The variable executable arrives on its own segment, so letting it
+    // Skip would let `$cmd` decide at runtime whether `rm` runs with `-rf`
+    // (measured live: the victim deletes).
     "cmd=rm; $cmd -rf /tmp/x",
-  ])("reviews unclassifiable Bash command %s", async (command) => {
+  ])("reviews hidden-executable-word Bash command %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
@@ -530,13 +483,13 @@ describe("ApprovalDisposition policy gate", () => {
     'git commit "${FLAG:--S}" -m update',
     'git diff "${OPT:---ext-diff}"',
     'git fetch "$REMOTE"',
-  ])("sends a Git invocation with an expanded argument to review in %s", async (command) => {
+  ])("runs a Git invocation with an expanded argument sandboxed in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-unclassifiable-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
+      action: "allow",
+      risk: "Skip",
     });
   });
 
@@ -1233,23 +1186,37 @@ describe("ApprovalDisposition policy gate", () => {
   // An unrecognised global option sits in the second class for the same reason:
   // it does not install anything, and git rejects it outright.
   it.each([
-    // Installs a program the same invocation then runs.
+    // Installs a program the same invocation then runs: still review
+    // (cut-3 promotion — proven nested-program execution, not unproven
+    // surroundings). Codex has no Git arm; this review is ours.
     "git -c core.hooksPath=/tmp/hooks commit -am update",
     "git --config-env=core.hooksPath=HOOKS commit -am update",
     "git -c alias.probe=!touch /tmp/p commit -am update",
-    // Relocates the target, and says so.
-    "git -C child commit -am update",
-    "git --git-dir ../repo.git commit -am update",
-    "git --work-tree ../tree commit -am update",
-    // Unrecognised grammar is not evidence of harmlessness.
-    "git --unknown-global commit -am update",
-  ])("sends an unproven Git global option to review in %s", async (command) => {
+  ])("reviews a Git global option that installs a program in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
       action: "prompt",
       risk: "NeedsApproval",
+    });
+  });
+
+  // Cut 3: relocation-only and unknown-grammar options run sandboxed —
+  // the sandbox owns the cwd and the command fails safe (git rejects
+  // unknown globals outright).
+  it.each([
+    "git -C child commit -am update",
+    "git --git-dir ../repo.git commit -am update",
+    "git --work-tree ../tree commit -am update",
+    "git --unknown-global commit -am update",
+  ])("runs a relocating Git global option sandboxed in %s", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(join(cwd, ".git"));
+
+    await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
+      action: "allow",
+      risk: "Skip",
     });
   });
 
@@ -1337,27 +1304,27 @@ describe("ApprovalDisposition policy gate", () => {
   it.each([
     "GIT_DIR=/tmp/repo.git git add README.md",
     "env GIT_WORK_TREE=/tmp/tree git add README.md",
-  ])("sends a Git mutation that only relocates the repository to review in %s", async (command) => {
+  ])("runs a Git mutation that only relocates the repository sandboxed in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
+      action: "allow",
+      risk: "Skip",
     });
   });
 
   // The counter-test for the split, and the boundary it draws. `identity`
-  // decides refusal, `context` decides review. Since cut 2 the classifier
-  // no longer reviews an inert `GIT_*` environment on its own — but the
-  // risk-policy `unprovenGit` elevation (cut 3 territory) still lifts these
-  // to review until that goes too. Both tiers are pinned here so the cut-3
-  // diff is enumerable.
+  // decides refusal, `context` decides review — and since cut 3 neither an
+  // inert `GIT_*` environment nor an unproven global option reaches review
+  // on its own. What the environment can change about which program runs
+  // is still caught by the fold (`nested_git_program`, promoted to a
+  // static review) and by Tier 1.
   it.each([
     ["git status", "allow", "Skip"],
-    ["GIT_TRACE=1 git status", "prompt", "NeedsApproval"],
-    ["GIT_OPTIONAL_LOCKS=0 git status", "prompt", "NeedsApproval"],
-    ["GIT_AUTHOR_NAME=Ada git commit -am update", "prompt", "NeedsApproval"],
+    ["GIT_TRACE=1 git status", "allow", "Skip"],
+    ["GIT_OPTIONAL_LOCKS=0 git status", "allow", "Skip"],
+    ["GIT_AUTHOR_NAME=Ada git commit -am update", "allow", "Skip"],
   ])("keeps %s at the tier its environment impact earns", async (command, action, risk) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
@@ -1378,13 +1345,13 @@ describe("ApprovalDisposition policy gate", () => {
     "cd /tmp && git push origin main",
     "pushd /tmp; git status",
     "cd ../other && git commit -am update",
-  ])("sends a relocated compound Git command to review in %s", async (command) => {
+  ])("runs a relocated compound Git command sandboxed in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
+      action: "allow",
+      risk: "Skip",
     });
   });
 
@@ -1464,14 +1431,16 @@ describe("ApprovalDisposition policy gate", () => {
   // Everything the fold cannot prove stays a review. A VCS command after `cd` is
   // the sharpest case: implicit remotes are read from the request cwd, so a
   // folded cd would bind the wrong repository.
-  it("does not fold a literal cd followed by a VCS command", async () => {
+  // Cut 3: relocation reviews are gone — the runtime enforces with the
+  // actual post-cd cwd, which is more exact than the static guess.
+  it("runs a literal cd followed by a VCS command sandboxed", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
 
     for (const command of [`cd ${target} && git status`, `cd ${target} && git log --oneline -1`]) {
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "NeedsApproval",
+        action: "allow",
+        risk: "Skip",
       });
     }
   });
@@ -1489,12 +1458,12 @@ describe("ApprovalDisposition policy gate", () => {
     ["cd /tmp && export FOO=1 && echo $FOO"],
     ["cd /tmp && node -e 'console.log(1)'"],
     ['cd /tmp && bash -c "cd /etc && cat passwd"'],
-  ])("does not fold a cd whose relocation is not provable in %s", async (command) => {
+  ])("runs a cd whose relocation is not provable sandboxed in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
+      action: "allow",
+      risk: "Skip",
     });
   });
 
@@ -1512,12 +1481,12 @@ describe("ApprovalDisposition policy gate", () => {
     ["direnv allow"],
     ["eval x"],
     ["source x"],
-  ])("does not fold a cd followed by context-dependent %s", async (rest) => {
+  ])("runs a cd followed by context-dependent commands sandboxed in %s", async (rest) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
 
     await expect(
       evaluateRiskRequest("bash", { command: `cd /tmp && ${rest}` }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   // A deletion executable after `cd` must not be folded even when it looks
@@ -1534,23 +1503,25 @@ describe("ApprovalDisposition policy gate", () => {
     ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
   });
 
+  // Cut 3: the deletion carve-out is gone, so an unforced deletion after
+  // `cd` runs and the sandbox denies out-of-root targets at runtime with
+  // the actual post-cd cwd. A forced `rm` is caught by tier 1 and stays
+  // at review.
   it.each(["rmdir x", "shred x", "unlink x", "truncate -s 0 x"])(
-    "does not fold a deletion executable after a literal cd in %s",
+    "runs a deletion executable after a literal cd sandboxed in %s",
     async (rest) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
       const target = await mkdtemp(join(tmpdir(), "pi-safety-cd-"));
 
       await expect(
         evaluateRiskRequest("bash", { command: `cd ${target} && ${rest}` }, cwd, config()),
-      ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+      ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     },
   );
 
-  // Only a single leading `cd` folds. A contiguous chain would be consumed by
-  // the leading-cd loop before `shellStateCrossesSegments` could observe the
-  // second changer, so the rest of the line would be decided under a directory
-  // change that is still live.
-  it("does not fold a second cd in cd <a> && cd <b> && cat x", async () => {
+  // Cut 3: the second-changer review is gone with cross-segment state —
+  // the runtime runs the chain under the real cwd.
+  it("runs a second cd sandboxed in cd <a> && cd <b> && cat x", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     const first = await mkdtemp(join(tmpdir(), "pi-safety-cd-a-"));
     const second = await mkdtemp(join(tmpdir(), "pi-safety-cd-b-"));
@@ -1562,7 +1533,7 @@ describe("ApprovalDisposition policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   // Program identity has to survive the wrapper that hosts the command. The inner
@@ -1588,7 +1559,7 @@ describe("ApprovalDisposition policy gate", () => {
   // `GIT_DIR` does not change which binary runs, so the body keeps a trusted
   // program and inherits only the unproven surroundings. The relocation is
   // visible in the words and a human settles it.
-  it("inherits only the unproven surroundings for a relocating host in env GIT_DIR=/tmp/other.git /bin/bash -c 'git push origin main'", async () => {
+  it("runs a relocating host sandboxed in env GIT_DIR=/tmp/other.git /bin/bash -c 'git push origin main'", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(join(cwd, ".git"));
 
@@ -1599,7 +1570,7 @@ describe("ApprovalDisposition policy gate", () => {
         cwd,
         config(),
       ),
-    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
   });
 
   // A `remote.<name>.url` is not an inert setting: `ext::…` selects the external
@@ -1623,14 +1594,14 @@ describe("ApprovalDisposition policy gate", () => {
   // A `-c` whose value has no `=` is a form git itself rejects. A spelling the
   // parser cannot read is not a spelling it can clear.
   it.each(["git -c user.name push origin main", "git --config-env user.name push origin main"])(
-    "sends a malformed config assignment to review in %s",
+    "runs a malformed config assignment sandboxed in %s",
     async (command) => {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
       await createGitDirectory(join(cwd, ".git"));
 
       await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-        action: "prompt",
-        risk: "NeedsApproval",
+        action: "allow",
+        risk: "Skip",
       });
     },
   );
@@ -1781,14 +1752,14 @@ describe("ApprovalDisposition policy gate", () => {
     'git add "$(printf README.md)"',
     'git add "$' + '{ touch .git/hooks/pre-commit; }"',
     'git add "$' + '{| touch .git/hooks/pre-commit; }"',
-  ])("reviews a substituted Git operand in %s", async (command) => {
+  ])("runs a substituted Git operand sandboxed in %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await mkdir(join(cwd, ".git"));
     await writeFile(join(cwd, ".git", "config"), "");
 
     await expect(evaluateRiskRequest("bash", { command }, cwd, config())).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
+      action: "allow",
+      risk: "Skip",
     });
   });
 
@@ -2284,11 +2255,14 @@ describe("ApprovalDisposition policy gate", () => {
 
   it("summarizes requests without including write content", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    // Cut 3: an outside-roots write no longer prompts on its own, so drive
+    // the prompt through a rules-ask — the anti-leak property belongs to
+    // `summarize`, not to any particular review trigger.
     const decision = await evaluateRiskRequest(
       "write",
       { path: "/var/tmp/out.txt", content: "DO_NOT_RENDER_THIS_SECRET" },
       cwd,
-      config(),
+      config({ rules: [{ action: "ask", tool: "write" }] }),
     );
 
     expect(decision.action).toBe("prompt");
@@ -2333,11 +2307,13 @@ describe("deletion sandbox boundary (stage 3)", () => {
     }
   });
 
-  it("escalates protected metadata deletion but not ordinary workspace files", async () => {
+  it("leaves protected metadata deletion to the runtime sandbox", async () => {
+    // Cut 3: the deletion carve-out is gone, so `rm .git/HEAD` runs and
+    // SRT denies it via the protected write roots. Ordinary files run too.
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-del-"));
     await expect(
       evaluateRiskRequest("bash", { command: "rm .git/HEAD" }, cwd, config()),
-    ).resolves.toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
     await expect(
       evaluateRiskRequest("bash", { command: "rm .env" }, cwd, config()),
     ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
@@ -2544,19 +2520,17 @@ describe("RiskDecision residual stamps", () => {
     });
   });
 
-  it("co-stamps the failed static proof beside action_review", async () => {
-    const cases: [string, ResidualSignal][] = [
-      ['echo "$(date)"', "substitution_unproven"],
-    ];
-    for (const [command, cause] of cases) {
+  it("allows the last substitution shape (cut 3: no cause channel)", async () => {
+    // Cut 3 deleted the substitution review with Tier 4: a live but
+    // harmless `$(date)` runs sandboxed. Only a dangerous body still
+    // reviews (dangerousSubstitution cases above).
+    const cases = ['echo "$(date)"'];
+    for (const command of cases) {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-cause-"));
       const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
       expect(decision, command).toMatchObject({
-        action: "prompt",
-        risk: "NeedsApproval",
-        // Exact array: the cause co-stamps next to `action_review` and
-        // replaces nothing.
-        residuals: ["action_review", cause, "risk_not_skip"],
+        action: "allow",
+        risk: "Skip",
       });
     }
   });
