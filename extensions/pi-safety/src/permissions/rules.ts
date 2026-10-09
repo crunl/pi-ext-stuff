@@ -5,6 +5,25 @@
  */
 export const deletionExecutables = new Set(["rm", "rmdir", "unlink", "shred", "truncate"]);
 
+/**
+ * Positional targets of a deletion command, honoring `--` (everything after
+ * it is a target, even if it looks like an option). Lives here with the
+ * executable set so consumers never route through the classifier module.
+ */
+export function deletionTargets(segment: CommandSegment): string[] {
+  const targets: string[] = [];
+  let afterDashDash = false;
+  for (const arg of segment.args) {
+    if (arg === "--") {
+      afterDashDash = true;
+      continue;
+    }
+    if (!afterDashDash && arg.startsWith("-")) continue;
+    targets.push(arg);
+  }
+  return targets;
+}
+
 export interface PermissionRule {
   action: "allow" | "ask" | "deny";
   tool: string;

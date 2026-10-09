@@ -296,9 +296,36 @@ describe("narrow static risk contract", () => {
     ["sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
     ["sudo -R / rm -rf /tmp/x", "NeedsApproval"],
     ["sudo -T 1 rm -rf /tmp/x", "NeedsApproval"],
-    ["timeout 1e3 rm -rf /tmp/x", "Skip"],
-    ["timeout 0x1 rm -rf /tmp/x", "Skip"],
-    ["timeout 1.2.3 rm -rf /tmp/x", "Skip"],
+    // Non-canonical durations the strict grammar rejects: GNU still runs
+    // the tail (measured), so the visible `rm -rf` reviews.
+    ["timeout 1e3 rm -rf /tmp/x", "NeedsApproval"],
+    ["timeout 0x1 rm -rf /tmp/x", "NeedsApproval"],
+    ["timeout 1.2.3 rm -rf /tmp/x", "NeedsApproval"],
+    // Hosted wrappers: transparent delegation peels to the privilege word,
+    // so `exec sudo …` lands where `sudo …` lands. `command -v` never
+    // executes (measured) and stays out.
+    ["exec sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
+    ["command sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
+    ["exec command sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
+    ["time sudo -D /tmp rm -rf /tmp/x", "NeedsApproval"],
+    ["exec sudo rm -rf /tmp/x", "NeedsApproval"],
+    ["exec sudo -u root rm -rf /tmp/x", "NeedsApproval"],
+    ["command -p sudo rm -rf /tmp/x", "NeedsApproval"],
+    ["exec env -S 'rm -rf /tmp/x'", "NeedsApproval"],
+    ["timeout 1e3 exec rm -rf /tmp/x", "NeedsApproval"],
+    ["timeout 1e3 sudo rm -rf /tmp/x", "NeedsApproval"],
+    ["stdbuf -oX! rm -rf build", "NeedsApproval"],
+    ["stdbuf -o0! rm -rf build", "NeedsApproval"],
+    // Hosted but harmless: the tail judges exactly like the unhosted form.
+    // (`command -v` alone never executes, but the fold strips it eagerly
+    // and Tier 1 sees `rm` — pre-existing over-review, out of scope.)
+    ["exec sudo kill -9 1", "Skip"],
+    ["command -v sudo rm -rf /tmp/x", "NeedsApproval"],
+    ["exec env FOO=1 npm test", "Skip"],
+    ["timeout 1e3 ls -la", "Skip"],
+    ["stdbuf -oX! ls", "Skip"],
+    ["timeout --bogus rm -rf /tmp/x", "Skip"],
+    ["exec command time ls", "Skip"],
     // GNU `nice` accepts a bare adjustment operand; it must not become the
     // executable.
     ["nice +5 rm -rf /tmp/x", "NeedsApproval"],
@@ -657,10 +684,14 @@ describe("narrow static risk contract", () => {
     for (const length of [20, 25, 40, 80]) {
       const command = `stdbuf -o${"a".repeat(length)}! rm -rf build`;
       const started = performance.now();
-      // Cut 3: a malformed delegating-wrapper option fails safe (stdbuf
-      // errors, the command never runs), so this is Skip now. The perf
-      // assertion — the point of the test — is unchanged.
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("Skip");
+      // Cut 3 anchored this as fail-safe Skip; the review fix re-reviews
+      // it for the visible `rm -rf` tail (BSD runs `-o…!` forms, GNU
+      // errors). The perf assertion — the point of the test — is
+      // unchanged, and the attached-value regex stays backtracking-free
+      // by construction (single character class, no nesting).
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(
+        "NeedsApproval",
+      );
       expect(performance.now() - started).toBeLessThan(500);
     }
   });

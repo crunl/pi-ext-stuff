@@ -14,28 +14,18 @@
  * The per-command analyses live in the sibling modules; this file composes them
  * into a single `ApprovalDisposition`.
  */
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { resolvePolicyPath } from "../filesystem-policy.ts";
 import { isPublicNetworkHost } from "../network-host.ts";
 import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 import { normalizedSegmentsFor } from "./cd-normalize.ts";
-import { isDangerousWords } from "./dangerous-commands.ts";
+import { isDangerousWords, visibleDelegatedDanger } from "./dangerous-commands.ts";
 import { gitExecutableEnvNames } from "./git-exec-entries.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
-import { deletionExecutables } from "./rules.ts";
 import { assignmentName, shellWords } from "./shell-lexer.ts";
 import { extractShellNetworkHosts } from "./shell-network.ts";
 import { parseCommandSegments } from "./shell-segment.ts";
-
-/**
- * Privilege-boundary wrappers: doas/su always, plus sudo/env whose option
- * grammar the fold could not reduce. Measured on this machine: BSD `env -S`
- * executes its operand, and `doas`/`su` gate on auth, not on argv — none of
- * these are answerable by judging the tail. Codex has no doas/su arm and
- * misses unreduced sudo/env tails; this review is deliberately stricter.
- */
-const privilegeWrappers = new Set(["sudo", "doas", "su", "env"]);
 
 /** Builtins that publish an assignment into the environment. */
 const envPublishingBuiltins = new Set(["export", "declare", "local", "readonly", "typeset", "env"]);
@@ -208,25 +198,18 @@ function isDangerousSegment(segment: CommandSegment, depth = 0): boolean {
   return words.length > 0 && isDangerousWords(words);
 }
 
-/** Deletion commands whose targets are checked against the sandbox write roots. */
-export { deletionExecutables };
-
 /**
- * Positional targets of a deletion command, honoring `--` (everything after
- * it is a target, even if it looks like an option).
+ * Whether an unreduced wrapper segment hides a dangerous command. The fold
+ * mangles these words past recognition (`sudo -D` → exe `-d`), so re-read
+ * the segment source. Kept private here (not on the fold): the fold owns
+ * mechanism, this file owns the verdict, and the strategy set stays with
+ * the verdict.
  */
-export function deletionTargets(segment: CommandSegment): string[] {
-  const targets: string[] = [];
-  let afterDashDash = false;
-  for (const arg of segment.args) {
-    if (arg === "--") {
-      afterDashDash = true;
-      continue;
-    }
-    if (!afterDashDash && arg.startsWith("-")) continue;
-    targets.push(arg);
-  }
-  return targets;
+function unreducedWrapperHidesDanger(segment: CommandSegment): boolean {
+  return (
+    segment.unprovenCause === "wrapper_unreduced" &&
+    visibleDelegatedDanger(shellWords(segment.source).words)
+  );
 }
 
 export function classifyRisk(
@@ -301,20 +284,16 @@ export function classifyRiskWithCause(
   ) {
     return { disposition: "NeedsApproval" };
   }
-  // Unreduced privilege wrapper (cut 3 retention): doas/su gate on auth,
-  // and an unreduced sudo/env tail is where the command hides. The fold
-  // mangles these words past recognition (`sudo -D` → exe `-d`), so read
-  // the segment source instead. Plain reduced forms (`sudo kill`, `env
-  // FOO=1 cmd`) keep whatever verdict the checks above and below give.
-  if (
-    segments.some(
-      (segment) =>
-        segment.unprovenCause === "wrapper_unreduced" &&
-        privilegeWrappers.has(
-          basename((shellWords(segment.source).words[0] ?? "").toLowerCase()),
-        ),
-    )
-  ) {
+  // Delegated danger (review fix): the fold anchors unreduced wrappers
+  // instead of reducing them, so Tier 1 cannot see the tail. Re-read the
+  // segment source: peel transparent delegation (`exec sudo …` lands where
+  // `sudo …` lands), then judge privilege tails and timeout/nice/stdbuf
+  // operands permissively. Unknown flags fail safe (GNU rejects them);
+  // degenerate spellings fail open like codex. Reduced forms (`sudo
+  // kill`, `env FOO=1 cmd`) never reach here — the fold gave them no
+  // `wrapper_unreduced` cause, so they keep whatever verdict the checks
+  // above and below give.
+  if (segments.some(unreducedWrapperHidesDanger)) {
     return { disposition: "NeedsApproval" };
   }
   // Hidden executable word (cut 3 retention): brace expansion, variable

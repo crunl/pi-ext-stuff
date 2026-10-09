@@ -22,10 +22,10 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   classifyRiskWithCause,
-  deletionTargets,
   normalizeToolCall,
   parseCommandSegments,
 } from "../src/permissions/risk.ts";
+import { deletionTargets } from "../src/permissions/rules.ts";
 import type { CommandSegment } from "../src/permissions/rules.ts";
 import {
   analyzeCommandWithAst,
