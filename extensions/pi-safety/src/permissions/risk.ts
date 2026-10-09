@@ -377,6 +377,24 @@ export function classifyRiskWithCause(
   // string or stdin program, a substitution, a heredoc, or a brace group. The
   // static word list is not the argv that runs, so fail closed into review
   // instead of guessing.
+  //
+  // First cut of the codex alignment (Q3 removal): a command whose only
+  // unproven clause is the heredoc itself is Skip. Every nested segment —
+  // heredoc bodies and substitution bodies included — already passed the
+  // Tier 1 dangerous screen above, so the heredoc carries no unreviewed
+  // argv. The gate repeats the Tier 3 conjunction minus the heredoc
+  // clause: a cross-segment state handoff or an unclassified remote
+  // effect still fails closed below, as does any other segment cause.
+  if (
+    !commandHasExecutableSubstitution(command) &&
+    !shellStateCrossesSegments(segments, request.cwd) &&
+    segments.every((segment) => !invocationRemoteEffectUnclassified(segment)) &&
+    segments.every(
+      (segment) => segment.decomposable || segment.unprovenCause === "heredoc_unproven",
+    )
+  ) {
+    return { disposition: "Skip" };
+  }
   return {
     disposition: "NeedsApproval",
     cause: firstUnprovenCause(command, segments, request.cwd),

@@ -441,7 +441,9 @@ describe("ApprovalDisposition policy gate", () => {
     'bash -c "$CMD -rf /"',
     // The substitution is inert for the parent shell but live for the body.
     "bash -c 'cat $(pwd)'",
-    "cat <<A <<'B'\n$y\nA\nx\nB",
+    // (First cut: pure-heredoc shapes left this table — `cat <<A <<'B'…`
+    // is allow now, covered by "allows a command whose only unproven
+    // clauses are heredocs".)
     // The word after a value-taking option is that option's value, not a script
     // operand: `bash -o pipefail` / `python -X utf8` read the program from the
     // pipe in front of them, so no word in the argv names it.
@@ -2545,7 +2547,6 @@ describe("RiskDecision residual stamps", () => {
   it("co-stamps the failed static proof beside action_review", async () => {
     const cases: [string, ResidualSignal][] = [
       ['echo "$(date)"', "substitution_unproven"],
-      ["cat <<A <<'B'\n$y\nA\nx\nB", "heredoc_unproven"],
       ["kill 4321", "process_control"],
       ["GIT_TRACE=1 git status", "env_context_unproven"],
     ];
@@ -2559,6 +2560,18 @@ describe("RiskDecision residual stamps", () => {
         // replaces nothing.
         residuals: ["action_review", cause, "risk_not_skip"],
       });
+    }
+  });
+
+  it("allows a command whose only unproven clauses are heredocs (first cut)", async () => {
+    // Codex alignment Q3 removal, cut 1: heredoc bodies already passed the
+    // Tier 1 dangerous screen, so the heredoc itself is not a review. Mixed
+    // shapes (heredoc + substitution) still fail closed — see
+    // permissions-substitution.test.ts.
+    for (const command of ["cat <<A <<'B'\n$y\nA\nx\nB", "cat <<'EOF'\nx\nEOF"]) {
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-heredoc-allow-"));
+      const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
+      expect(decision, command).toMatchObject({ action: "allow", risk: "Skip" });
     }
   });
 
