@@ -16,7 +16,7 @@
 
 | 扩展 | 一句话 | 目录 |
 |---|---|---|
-| **pi-core** | Codex 风格工具呈现、实时 token 速率、edit-diff 预览、TUI 打磨 | [`extensions/pi-core`](extensions/pi-core) |
+| **pi-core** | Codex 风格工具呈现、实时 token 速率、edit-diff 预览、带 mode 徽章的方框编辑器 | [`extensions/pi-core`](extensions/pi-core) |
 | **pi-safety** | 权限模式（`auto` / `yolo`）+ 沙箱执行 + guardian 裁判 | [`extensions/pi-safety`](extensions/pi-safety) |
 | **statusline** | 方框编辑器框，带 token / 模型 / effort 信息 | [`extensions/statusline`](extensions/statusline) |
 | **tool-result-budget** | 每轮工具输出限重，超出部分落到 spill 文件 | [`extensions/tool-result-budget`](extensions/tool-result-budget) |

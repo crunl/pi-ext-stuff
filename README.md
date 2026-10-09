@@ -9,7 +9,7 @@ directly, so there is **no build step** in any package.
 ## Packages
 
 - **[`pi-core`](extensions/pi-core)** — Codex-style tool presentation, live
-  token rate, edit-diff previews, TUI polish.
+  token rate, edit-diff previews, boxed editor with mode badge.
 - **[`pi-safety`](extensions/pi-safety)** — permission modes (`auto` / `yolo`)
   with sandboxed tool execution and a guardian reviewer.
 - **[`statusline`](extensions/statusline)** — boxed editor frame carrying

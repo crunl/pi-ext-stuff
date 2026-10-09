@@ -2,81 +2,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  AssistantMessageComponent,
-  SettingsManager,
-  SettingsSelectorComponent,
-} from "@earendil-works/pi-coding-agent";
-import { Editor, Markdown, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { applyThinkingGlance, resetThinkingGlance } from "../src/tui/thinking-glance.ts";
-import { createThinkingTimingTracker } from "../src/tui/thinking-timing.ts";
 
 /**
- * Pi has no public hook (verified through the 1.1.0 validation pin) for
- * moving the built-in autocomplete list, replacing only fenced-code token
- * rendering, or identifying the active host selector. Keep these deliberate
- * runtime seams loud: a future Pi upgrade should fail here instead of
- * degrading later in an interactive session.
+ * Pi has no public hook (verified through the 1.1.0 validation pin) for the
+ * seams canonical-tool-fallback relies on: recreating the host SettingsManager
+ * and identifying Pi's canonical bash/write/edit owners by their source marker.
+ * Keep those deliberate runtime seams loud: a future Pi upgrade should fail
+ * here instead of degrading later in an interactive session.
+ *
+ * The former autocomplete / Markdown renderToken / AssistantMessageComponent /
+ * settings-selector pins guarded TUI prototype patches that have since been
+ * removed in favour of stock host rendering; they are gone with the patches.
  */
 describe("Pi 1.1.0 compatibility seams", () => {
-  it("retains the Editor autocomplete fields used for above-editor placement", () => {
-    const editor = new Editor(
-      { requestRender: () => {}, terminal: { rows: 24, columns: 80 } } as never,
-      { borderColor: (text: string) => text, selectList: {} } as never,
-    );
-    const runtime = editor as unknown as Record<string, unknown>;
-
-    expect(typeof editor.isShowingAutocomplete).toBe("function");
-    expect(Object.hasOwn(runtime, "autocompleteList")).toBe(true);
-    // autocomplete-above mirrors the base Editor's padding math to align panels
-    expect(typeof editor.getPaddingX).toBe("function");
-  });
-
-  it("retains Markdown's token renderer and instance theme", () => {
-    const markdown = new Markdown("", 0, 0, {} as never);
-    const runtime = markdown as unknown as Record<string, unknown>;
-    const prototype = Markdown.prototype as unknown as Record<string, unknown>;
-
-    expect(typeof prototype.renderToken).toBe("function");
-    expect(Object.hasOwn(runtime, "theme")).toBe(true);
-  });
-
-  it("retains AssistantMessageComponent.updateContent for thinking glance patch", () => {
-    const proto = AssistantMessageComponent.prototype as unknown as Record<string, unknown>;
-    expect(typeof proto.updateContent).toBe("function");
-    expect(typeof proto.setHiddenThinkingLabel).toBe("function");
-  });
-
-  it("keeps hidden thinking glance replaceable after host updateContent", () => {
-    // Behavioral snapshot: hideThinkingBlock=true renders a tree glance row
-    // (pi-core patch) rather than only the host "Thinking..." label.
-    applyThinkingGlance(createThinkingTimingTracker());
-    try {
-      const component = new AssistantMessageComponent(undefined, true);
-      component.updateContent(
-        {
-          role: "assistant",
-          content: [{ type: "thinking", thinking: "hello" }],
-          stopReason: "stop",
-        } as never,
-        false,
-      );
-      const text = (component as unknown as { render(width: number): string[] })
-        .render(80)
-        .map((line) => stripTerminalSequences(line))
-        .join("\n");
-      expect(text).toContain("└ ");
-      expect(text).not.toContain("▶");
-    } finally {
-      resetThinkingGlance();
-    }
-  });
-
-  it("retains the exported settings-selector constructor identity", () => {
-    expect(SettingsSelectorComponent.name).toBe("SettingsSelectorComponent");
-  });
-
   it("retains SettingsManager.create for the canonical bash fallback", () => {
     // canonical-tool-fallback recreates the host settings to feed Pi's
     // canonical shell configuration into createBashToolDefinition.

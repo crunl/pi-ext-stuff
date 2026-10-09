@@ -214,12 +214,13 @@ pi-core”，递归读取 `src/` 下所有 `.ts`，断言内容不含 `"pi-core"
   `standalone.ts` 也 re-export 同一个包（`extensions/pi-core/standalone.ts:15-25`）。两者共享的是
   这个展示层包，不是 pi-core 本身。
 - statusline 与 pi-core 之间确实存在**运行期/视觉**协作：editor 圆角盒与顶部 mode 徽章由 pi-core 的
-  `registerEditorChrome`（`extensions/pi-core/src/register.ts:25`；定义于
-  `extensions/pi-core/src/tui/editor-chrome.ts:28`）安装，pi-core 订阅 `pi-safety:mode` 总线事件
-  （`extensions/pi-core/src/tui/editor-chrome.ts:32`）；statusline 只负责 footer。这是 README 所述的
+  `registerEditorChrome`（`extensions/pi-core/src/register.ts:24`；定义于
+  `extensions/pi-core/src/tui/editor-chrome.ts:135`，官方 `CustomEditor` 子类经
+  `setEditorComponent` 安装，非 prototype patch）安装，pi-core 订阅 `pi-safety:mode` 总线事件
+  （`extensions/pi-core/src/tui/editor-chrome.ts:139`）；statusline 只负责 footer。这是 README 所述的
   “editor chrome 由 pi-core 负责、本扩展只接管 footer”，属于扩展间约定而非 import 依赖。
 - statusline 会读取别的扩展发布的状态：`pi-safety` 通过 `ctx.ui.setStatus("pi-safety", ...)` 发布
-  （`extensions/pi-safety/src/register.ts:417`），statusline 用 `syncPermissionsMode` 把它从第二行里
+  （`extensions/pi-safety/src/register.ts:445`），statusline 用 `syncPermissionsMode` 把它从第二行里
   剔除（见 2.3）。
 
 ### 2.9 配置项

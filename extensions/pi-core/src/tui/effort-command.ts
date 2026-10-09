@@ -1,18 +1,16 @@
 /**
  * /effort — open the host's thinking-level panel (Settings → Thinking level).
  *
- * Uses ctx.ui.custom (editor-slot swap, same path as built-in selectors) so
- * selector-tab-nav and selector-float apply. The panel itself is pi's own
- * ThinkingSelectorComponent, and level availability comes from pi-ai's
- * getSupportedThinkingLevels — search filter, descriptions, and level
- * filtering all stay in the host, so this command cannot drift from
+ * Uses ctx.ui.custom (editor-slot swap, same path as built-in selectors). The
+ * panel itself is pi's own ThinkingSelectorComponent, and level availability
+ * comes from pi-ai's getSupportedThinkingLevels — search filter, descriptions,
+ * and level filtering all stay in the host, so this command cannot drift from
  * Settings the way a mirrored local copy would.
  */
 
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ThinkingSelectorComponent } from "@earendil-works/pi-coding-agent";
-import { markFloatableSelector } from "./selector-float.ts";
 import { isInteractiveTui } from "./ui-guard.ts";
 
 interface EffortChoice {
@@ -50,7 +48,7 @@ export function registerEffortCommand(pi: ExtensionAPI): void {
           () => done(undefined),
           (level) => done({ level, asDefault: true }),
         );
-        return markFloatableSelector(component);
+        return component;
       });
 
       if (chosen === undefined) return;

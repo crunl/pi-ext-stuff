@@ -1,7 +1,6 @@
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, ThinkingSelectorComponent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { registerEffortCommand } from "../src/tui/effort-command.ts";
-import { isAllowlistedSelector } from "../src/tui/selector-float.ts";
 import { fakeTheme as theme } from "./helpers/effort-fixtures.ts";
 
 interface TuiContextDouble {
@@ -123,7 +122,9 @@ describe("registerEffortCommand", () => {
     initTheme();
     const done = vi.fn();
     const component = factory({}, theme, {}, done);
-    expect(isAllowlistedSelector(component)).toBe(true);
+    // Returned unwrapped now: the float allowlist is gone with selector-float,
+    // so the panel renders in the host's own editor-slot path.
+    expect(component).toBeInstanceOf(ThinkingSelectorComponent);
 
     // Drive the host panel's own select/cancel outlets: our closures must
     // translate them into the EffortChoice the handler understands.

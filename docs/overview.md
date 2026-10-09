@@ -40,12 +40,12 @@ It contains four pi extensions and one internal shared library.
 | Member | Purpose | src | tests |
 | --- | --- | --- | --- |
 | `extensions/pi-safety` | Permission modes, sandbox, guardian reviewer | 64 files / 24,901 lines | 54 files / 27,162 lines |
-| `extensions/pi-core` | Codex-style tool presentation, TUI polish | 37 files / 5,114 lines + 44 entry lines | 36 files / 5,929 lines |
+| `extensions/pi-core` | Codex-style tool presentation, TUI polish | 27 files / 3,727 lines + 43 entry lines | 26 files / 4,423 lines |
 | `packages/shared-tool-presentation` | Pure presentation specs/renderers (shared lib) | 15 files / 2,090 lines | 3 files / 182 lines |
 | `extensions/statusline` | Boxed footer: token/model/effort/usage | 8 files / 725 lines + 2 entry lines | 5 files / 341 lines |
 | `extensions/tool-result-budget` | Per-turn tool-result size limit with spill files | 1 file / 180 lines | none |
 
-`pi-safety` dominates the codebase: it is roughly 4.7× the source of
+`pi-safety` dominates the codebase: it is roughly 6.7× the source of
 `pi-core` and 11× `shared-tool-presentation`, and its test suite is
 ~27,000 lines — by far the largest in the repo.
 
@@ -71,15 +71,18 @@ runtime `dependencies` (`@anthropic-ai/sandbox-runtime`,
 ### `extensions/pi-core`
 
 An opinionated core pack: Codex-style tool rendering, a live working
-token rate in the footer spinner, edit-diff previews, floating
-overlays, output-padding sync, and markdown code framing
-(`extensions/pi-core/README.md:1-7`). Tool registration is
+token rate in the footer spinner, edit-diff previews, a boxed editor
+carrying the permissions-mode badge (`extensions/pi-core/README.md:3-5`),
+and output-padding sync (`:27-28`). Everything else renders with Pi's
+stock components — user messages, thinking blocks, markdown code fences,
+autocomplete placement, and selector panels all follow host defaults
+(`:30-33`). Tool registration is
 first-wins; pi-core registers `read`/`grep`/`find`/`ls` with Codex
 rendering and conditionally decorates canonical `bash`/`write`/`edit`
 in interactive TUI when no extension owns them
-(`extensions/pi-core/AGENTS.md` "Who registers what"). Its
+(`extensions/pi-core/AGENTS.md` "Cross-extension contract"). Its
 `src/register.ts` is an orchestration facade that calls every
-`register*` once, in order (`extensions/pi-core/src/register.ts:15-28`).
+`register*` once, in order (`extensions/pi-core/src/register.ts:20-27`).
 Node ≥ 22.19.0 (`extensions/pi-core/package.json:40-42`).
 
 ### `packages/shared-tool-presentation`
@@ -168,16 +171,17 @@ imported through *different* paths:
   `./shell-command-highlight.ts`, `./tool-output.ts`, `./tool-renderer.ts`,
   `./write-preview.ts`). `src/register.ts` drives this local graph
   (`registerOutputPaddingSync` from `./tui/output-padding.ts`,
-  `extensions/pi-core/src/register.ts:9,16`).
+  `extensions/pi-core/src/register.ts:8,20`).
 - `shared-tool-presentation/src/*` is the same 12 files plus the barrel
   and the two statusline-facing modules, wired the same way internally
   (e.g. `packages/shared-tool-presentation/src/tool-renderer.ts:7`
   imports `./bash-command-header.ts`).
 - `pi-core` does **not** import its own `src/tui` twins for the shared
   surface — it imports the shared package for the 3 non-duplicated
-  modules: `src/tui/model-editor.ts:26`,
-  `src/tui/editor-chrome.ts:18`, and `src/tui/border-labels.ts:7`
-  import `badge.ts` / `permissions-mode.ts` via
+  modules: `src/tui/editor-chrome.ts:29` (`badge.ts`,
+  `makeModeBadgeDecorator`), `src/tui/editor-chrome.ts:34`
+  (`permissions-mode.ts`), and `src/tui/border-labels.ts:7` (`badge.ts`,
+  `BADGE_CAP_WIDTH`), all via
   `../../../../packages/shared-tool-presentation/src/...`. And
   `standalone.ts:25` re-exports the whole shared barrel from
   `../../packages/shared-tool-presentation/src/index.ts`.
@@ -202,7 +206,7 @@ copies.
   `createCodexToolRendering` from
   `../../../packages/shared-tool-presentation/src/index.ts`.
 - `extensions/pi-core/standalone.ts:25` — re-exports the shared barrel.
-- `extensions/pi-core/src/tui/{model-editor,editor-chrome,border-labels}.ts` —
+- `extensions/pi-core/src/tui/{editor-chrome,border-labels}.ts` —
   `badge.ts` / `permissions-mode.ts` deep imports.
 - `extensions/statusline/src/status-mode.ts:1` and
   `extensions/statusline/src/palette.ts:23` — `badge.ts` deep imports.
@@ -261,16 +265,16 @@ tool-result-budget   (standalone: no cross-package imports)
   `node:path`, and `@earendil-works/pi-coding-agent`).
 
 **What `pi-core/standalone.ts` exports and who imports it.**
-`standalone.ts` (27 lines) is documented as "the side-effect-free
+`standalone.ts` (26 lines) is documented as "the side-effect-free
 cross-extension surface of pi-core"
 (`extensions/pi-core/standalone.ts:1-13`). It re-exports nine names
 from the shared barrel — `codexBashToolSpec`, `codexEditToolSpec`,
 `codexWriteToolSpec`, `colorizeEditDiffSummary`,
 `compactBashStatusSpacing`, `createCodexToolRendering`,
 `createEditDiffBox`, `summarizeEditDiff`, `withCodexToolPresentation`
-(`extensions/pi-core/standalone.ts:15-25`) — plus `applyAutocompleteAbove`
-and `markToolCall` from pi-core's own `src/tui`
-(`extensions/pi-core/standalone.ts:26-27`). `index.ts` re-exports
+(`extensions/pi-core/standalone.ts:15-25`) — plus `markToolCall` and
+`type ToolCallMark` from pi-core's own `src/tui`
+(`extensions/pi-core/standalone.ts:26`). `index.ts` re-exports
 `standalone.ts` (`extensions/pi-core/index.ts:17`) so existing
 `../../pi-core/index.ts` imports keep working, while steering new
 consumers to `standalone.ts` to avoid loading the register graph

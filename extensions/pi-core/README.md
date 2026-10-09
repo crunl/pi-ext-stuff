@@ -2,8 +2,9 @@
 
 An opinionated personal core extension pack for the pi coding agent:
 Codex-style tool rendering, a live token rate in the working indicator,
-edit-diff previews, and assorted TUI polish. Distributed as `.ts` sources —
-pi loads extensions directly, so there is **no build step**.
+edit-diff previews, and a boxed editor carrying the permissions-mode badge.
+Distributed as `.ts` sources — pi loads extensions directly, so there is
+**no build step**.
 
 ## Features
 
@@ -17,22 +18,25 @@ pi loads extensions directly, so there is **no build step**.
   current output speed (`⠋ Working  50 tok/s`). Uses the provider's
   reported usage when available; falls back to a CJK-aware character
   estimate (marked with `≈`) otherwise.
-- **Autocomplete above the editor** — completion list floats above the input
-  area; Shift+Tab anchors selector navigation.
+- **Boxed editor with mode badge** — the editor sits in a rounded box whose
+  top border carries the permissions-mode badge (`auto` / `yolo`), colored by
+  severity from pi-safety's `pi-safety:mode` bus event. Implemented as an
+  official `CustomEditor` subclass via `setEditorComponent` — no host
+  prototype patching.
 - **Edit diff summary** — colorized `+/-` summaries for `edit` tool results.
 - **Output padding sync** — keeps the tool-output viewport aligned with the
   editor layout.
-- **Markdown code blocks** — pure syntax-highlighted content (Codex-aligned:
-  no fence, language label, or indent), so selection copies just the code.
-- **User message bar** — Crush-style left rail (`▌`) plus a content
-  background band (`userMessageBg`); one blank banded row above and below
-  keeps a 3-row minimum for single-line turns.
+
+Everything else renders with Pi's stock components: user messages, thinking
+blocks, markdown code fences, autocomplete placement, and selector panels all
+follow host defaults. (Earlier revisions patched those prototypes; the patches
+were removed in favour of stock rendering wherever Pi exposes no public hook.)
 
 ## Requirements
 
 - Node.js ≥ 22.19.0 (the minimum required by Pi 0.84.1).
-- Pi 0.84.1. The host supplies the peer packages; development dependencies are
-  pinned to 0.84.1 so API checks are reproducible.
+- Pi 1.1.0. The host supplies the peer packages; development dependencies are
+  pinned to 1.1.0 so API checks are reproducible.
 - **No third-party runtime dependencies** — only the pi core packages
   (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, provided by
   the host) and Node built-ins. No external executables are invoked.
@@ -72,8 +76,8 @@ non-file-backed tool configuration should set it to `off`.
   and pulling the register graph into their jiti instance.
 - `src/register.ts` — orchestration facade; calls every `register*` once,
   in order.
-- Module naming in `src/tui/*`: `create*` = pure factories, `apply*` /
-  `install*` = host patches, `register*` = extension hooks.
+- Module naming in `src/tui/*`: `create*` = pure factories, `register*` =
+  extension hooks. No `apply*`/`install*` host patches remain.
 
 See [`docs/pi-core.md`](../../docs/pi-core.md) for the full module map.
 

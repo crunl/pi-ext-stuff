@@ -87,7 +87,7 @@ modeleffortfolderbranch
 实现入口 `src/index.ts`（根 `index.ts` 仅转发，符合 pi 自动发现规则）。
 - `ctx.ui.setFooter()`：实现自定义底部栏。
 - 颜色直接读取公开的 `ctx.ui.theme`（完整 Theme）。
-- editor chrome（圆角盒 + mode 徽章 + autocomplete-above）由 `pi-core` 的 `registerEditorChrome` 统一安装；权限状态通过 `pi-safety:mode` 总线事件解耦接收（pi-core 订阅）。
+- editor chrome（圆角盒 + mode 徽章）由 `pi-core` 的 `registerEditorChrome` 统一安装（官方 `CustomEditor` 子类经 `setEditorComponent`，非 prototype patch）；权限状态通过 `pi-safety:mode` 总线事件解耦接收（pi-core 订阅）。
 
 ### 模块分层（宽度自适应）
 
