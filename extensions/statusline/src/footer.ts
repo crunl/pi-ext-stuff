@@ -29,7 +29,7 @@ import { createUsageCache } from "./usage.ts";
 interface FooterTheme {
 	fg(color: string, text: string): string;
 	getFgAnsi(color: string): string;
-	getBgAnsi?(color: string): string;
+	readonly appearance?: "dark" | "light";
 }
 
 export interface FooterOptions {
@@ -50,6 +50,9 @@ export function installFooter(
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
+		// SAFETY: the host Theme implements fg/getFgAnsi and (pi >= 1.0) `appearance`;
+		// FooterTheme is the structural subset used here, declared locally so the
+		// statusline does not depend on the host's Theme export.
 		const th = theme as unknown as FooterTheme;
 
 		return {
@@ -61,7 +64,7 @@ export function installFooter(
 				const branch = footerData.getGitBranch();
 				const model = getModelInfo?.();
 
-				// Catppuccin latte/frappe accents; light/dark from live bg.
+				// Catppuccin latte/frappe accents; light/dark from theme.appearance.
 				const pal = paletteForLight(isLightThemeFrom(th));
 
 				const leftSegments: LeftSeg[] = [];

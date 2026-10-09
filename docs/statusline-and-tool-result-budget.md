@@ -160,15 +160,15 @@ settings 文件：
   否则重读。这样 `/settings` 写入后下一帧即生效，无需 watch 定时器。
 - `resetOutputPadCache`（`src/output-pad.ts:82-85`）是测试用的清缓存接口。
 
-### 2.7 调色板系统（`src/palette.ts`，113 行）
+### 2.7 调色板系统（`src/palette.ts`，112 行）
 
 双主题 Catppuccin，按终端明暗选择：
 
-- `PALETTE_DARK` = Frappé（`src/palette.ts:54-68`，注释称对应 live theme `catppuccin-frappe`）。
+- `PALETTE_DARK` = Frappé（`src/palette.ts:52-66`，注释称对应 live theme `catppuccin-frappe`）。
   - fixed：model `#ca9ee6`（mauve）、folder `#99d1db`（sky）、git `#e5c890`（yellow）。
   - effort：minimal `#a6d189`（green）→ low `#8caaee`（blue）→ medium `#f2d5cf`（rosewater）→
     high `#eebebe`（flamingo）→ xhigh `#ef9f76`（peach）→ max `#f4b8e4`（pink）。
-- `PALETTE_LIGHT` = Latte（`src/palette.ts:71-85`；提交 `880d6de` 起同色相压深，见下）。
+- `PALETTE_LIGHT` = Latte（`src/palette.ts:69-83`；提交 `880d6de` 起同色相压深，见下）。
   - fixed：model `#8839ef`（mauve，不变）→ folder `#00787f`（深青）→ git `#a25c00`（深赭）。
   - effort：minimal `#148002`（深绿）→ low `#0761ef`（深蓝）→ medium `#4564d5`（深宝石蓝）→
     high `#ae4f51`（砖红）→ xhigh `#ca3700`（深橙红）→ max `#b03f95`（深品红）。
@@ -178,19 +178,18 @@ settings 文件：
   直至同时满足"前景 vs 底 ≥4.5 且白字 vs 块 ≥4.5"；压深后 YIQ 全 <128，白字是既有
   `contrastTextFor` 规则的自然输出，无需改规则。model `#8839ef` 本已达标故不动。
   此前的 rosewater/lavender 选色分析见第五节第 1、6 条的后续注记（已被本轮取代）。
-- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:40-46`）。
+- `EffortLevel` 类型为 `"minimal" | "low" | "medium" | "high" | "xhigh" | "max"`（`src/palette.ts:38-44`）。
 
-明暗检测（`isLightThemeFrom`，`src/palette.ts:82-94`）：
+明暗检测（`isLightThemeFrom`，`src/palette.ts:89-93`）：
 
-- pi 对自定义主题没有 `isLight` API，因此读 live theme 的 `userMessageBg` 背景 ANSI：
-  `theme?.getBgAnsi?.("userMessageBg")`（`src/palette.ts:100`），用 `parseTruecolor` 解析为 RGB。
-- 判据是 YIQ 亮度 `(299r + 587g + 114b) / 1000 >= 128`（`src/palette.ts:104`）。
-- 解析不到颜色或抛错时返回 `false`（即按 dark 处理）（`src/palette.ts:102`、`src/palette.ts:105-107`）。
-  注释给出参照值：Latte 的 `userMessageBg`（mantle）约 232 luma，Frappé 约 42（`src/palette.ts:93-94`）。
+- 直接读 live theme 的 `appearance`（pi ≥ 1.0 的 `Theme` getter：优先取主题 JSON 声明的值，
+  否则由 pi 按主题颜色检测），`theme?.appearance === "light"` 即亮色，其余（含 `theme` 缺失、
+  旧版 pi 无该字段）按 dark 处理。`src/footer.ts` 的 `FooterTheme` 为此声明了 `appearance` 字段。
+- 旧实现读 `userMessageBg` 背景 ANSI 并以 YIQ 亮度 ≥128 判定；已被 `appearance` 取代。
 
-其余导出：`paletteForLight(isLight)`（`src/palette.ts:87-89`）；`effortColor(level, palette)`
-（`src/palette.ts:110-118`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
-（`src/palette.ts:117`）；`truecolorFg(hex)`（`src/palette.ts:121-127`）把 hex 转成
+其余导出：`paletteForLight(isLight)`（`src/palette.ts:85-87`）；`effortColor(level, palette)`
+（`src/palette.ts:95-103`）在 level 合法时返回对应色，否则回退 `palette.effort.medium`
+（`src/palette.ts:102`）；`truecolorFg(hex)`（`src/palette.ts:106-112`）把 hex 转成
 `\x1b[38;2;r;g;bm` 前景序列，可被 `badge.parseTruecolor` 解析。
 
 颜色本身只作为“前景色”传入段落，真正作为背景渲染由 2.3 的 `powerlineChain` 完成。

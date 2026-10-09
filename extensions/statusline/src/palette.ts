@@ -30,11 +30,9 @@
  *   (ΔE here = CIE76; adjacent effort levels are comfortably distinguishable
  *   and keep a lightness order under deuteranopia.)
  *
- * Light/dark is detected from the live theme's userMessageBg luminance
- * (no Pi isLight API for custom themes).
+ * Light/dark comes from the live theme's `appearance` (declared in the theme
+ * JSON, or detected by Pi from the terminal's reported colors).
  */
-
-import { parseTruecolor } from "../../../packages/shared-tool-presentation/src/badge.ts";
 
 export type PaletteKey = "model" | "folder" | "git";
 export type EffortLevel =
@@ -88,23 +86,10 @@ export function paletteForLight(isLight: boolean): PowerlinePalette {
 	return isLight ? PALETTE_LIGHT : PALETTE_DARK;
 }
 
-/**
- * Detect a light terminal from the live theme. Pi has no reliable isLight
- * for custom themes; userMessageBg (mantle) is ~232 luma on latte and ~42
- * on frappe.
- */
 export function isLightThemeFrom(
-	theme: { getBgAnsi?(color: string): string } | undefined,
+	theme: { appearance?: "dark" | "light" } | undefined,
 ): boolean {
-	try {
-		const ansi = theme?.getBgAnsi?.("userMessageBg");
-		const rgb = ansi ? parseTruecolor(ansi) : null;
-		if (!rgb) return false;
-		const [r, g, b] = rgb;
-		return (299 * r + 587 * g + 114 * b) / 1000 >= 128;
-	} catch {
-		return false;
-	}
+	return theme?.appearance === "light";
 }
 
 export function effortColor(

@@ -62,17 +62,9 @@ test("paletteForLight switches sets", () => {
 	assert.equal(paletteForLight(true), PALETTE_LIGHT);
 });
 
-test("isLightThemeFrom uses userMessageBg luminance", () => {
-	// latte mantle ~ #e6e9ef
-	const latte = {
-		getBgAnsi: () => "\x1b[48;2;230;233;239m",
-	};
-	// frappe mantle ~ #292c3c
-	const frappe = {
-		getBgAnsi: () => "\x1b[48;2;41;44;60m",
-	};
-	assert.equal(isLightThemeFrom(latte), true);
-	assert.equal(isLightThemeFrom(frappe), false);
+test("isLightThemeFrom reads theme.appearance", () => {
+	assert.equal(isLightThemeFrom({ appearance: "light" }), true);
+	assert.equal(isLightThemeFrom({ appearance: "dark" }), false);
 	assert.equal(isLightThemeFrom(undefined), false);
 	assert.equal(isLightThemeFrom({}), false);
 });
