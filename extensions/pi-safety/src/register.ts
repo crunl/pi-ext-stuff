@@ -2785,12 +2785,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (beganDuringActiveTurn) {
       // Desired-mode only. The applied snapshot and SRT stay put until the
       // next turn_start (or preparePermissionExecution safety drain).
+      // No shortcut-availability check here: the host arbitrates shift+tab
+      // at dispatch (a reserved built-in binding skips this handler
+      // entirely), so by the time this runs the key is ours. The known
+      // collision is app.thinking.cycle; see shortcut-config.ts.
       const generation = session.getGeneration();
       try {
-        if ((await shiftTabAvailability(agentDir)) !== "available") {
-          ctx.ui.notify(renderPermissionNotice({ kind: "shortcut-conflict" }), "warning");
-          return;
-        }
         let runtime = modeRuntime;
         if (!runtime) {
           const initial = await activateConfig(ctx, false, undefined, undefined, generation);
@@ -2821,11 +2821,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     try {
       await session.runModeMutation(async (generation) => {
         try {
-          if ((await shiftTabAvailability(agentDir)) !== "available") {
-            ctx.ui.notify(renderPermissionNotice({ kind: "shortcut-conflict" }), "warning");
-            settleModeTransitionBarrier(transitionBarrier, true);
-            return;
-          }
           invalidatePermissions(PERMISSION_MODE_CHANGED_REASON);
           invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
           let runtime = modeRuntime;
@@ -2863,6 +2858,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
   };
 
+  // Unconditional registration: the host arbitrates shift+tab at dispatch
+  // (ExtensionRunner.getShortcuts skips this entry when a reserved built-in
+  // such as app.thinking.cycle binds the same key), so no availability probe
+  // is needed here. The session_start notice below is the only remaining
+  // keybindings.json read — one per session, purely informational.
   pi.registerShortcut("shift+tab", {
     description: "Cycle permission mode",
     handler: cyclePermissionMode,
