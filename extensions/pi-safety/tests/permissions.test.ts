@@ -784,7 +784,7 @@ describe("segment unproven cause", () => {
     ["git -c core.pager=cat log", "nested_git_program"],
     ["trap 'ls' EXIT", "program_reinterpreted"],
     ['echo "$(date)"', "substitution_unproven"],
-    ["cat <<A <<'B'\n$y\nA\nx\nB", "heredoc_unproven"],
+    ["cat <<A <<'B'\n$y\nA\nx\nB", "ast_unmodelled"],
   ] as const)("names the failed clause of %s", (command, cause) => {
     const segments = parseCommandSegments(command);
     expect(segments.some((segment) => segment.unprovenCause === cause)).toBe(true);

@@ -23,9 +23,10 @@ import { normalizedSegmentsFor } from "./cd-normalize.ts";
 import { isDangerousWords, visibleDelegatedDanger } from "./dangerous-commands.ts";
 import { gitExecutableEnvNames } from "./git-exec-entries.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
-import { assignmentName, shellWords } from "./shell-lexer.ts";
+import { assignmentName } from "./shell-tokens.ts";
 import { extractShellNetworkHosts } from "./shell-network.ts";
 import { parseCommandSegments } from "./shell-segment.ts";
+import { analyzeCommandWithAst } from "./shell-ast.ts";
 
 /** Builtins that publish an assignment into the environment. */
 const envPublishingBuiltins = new Set(["export", "declare", "local", "readonly", "typeset", "env"]);
@@ -201,15 +202,17 @@ function isDangerousSegment(segment: CommandSegment, depth = 0): boolean {
 /**
  * Whether an unreduced wrapper segment hides a dangerous command. The fold
  * mangles these words past recognition (`sudo -D` → exe `-d`), so re-read
- * the segment source. Kept private here (not on the fold): the fold owns
- * mechanism, this file owns the verdict, and the strategy set stays with
- * the verdict.
+ * the segment source through the grammar: the AST names the wrapper tail
+ * whole, and an unreadable tail fails closed. Kept private here (not on the
+ * fold): the fold owns mechanism, this file owns the verdict, and the
+ * strategy set stays with the verdict.
  */
 function unreducedWrapperHidesDanger(segment: CommandSegment): boolean {
-  return (
-    segment.unprovenCause === "wrapper_unreduced" &&
-    visibleDelegatedDanger(shellWords(segment.source).words)
-  );
+  if (segment.unprovenCause !== "wrapper_unreduced") return false;
+  const analysis = analyzeCommandWithAst(segment.source);
+  const words = analysis?.segments[0]?.words;
+  if (words === undefined) return true;
+  return visibleDelegatedDanger(words);
 }
 
 export function classifyRisk(

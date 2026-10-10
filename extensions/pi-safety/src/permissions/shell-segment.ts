@@ -1,7 +1,7 @@
 /**
  * Command semantics: wrapper reduction, interpreter re-execution detection,
- * and the construction of `CommandSegment` records. Consumes the lexer and
- * answers "is the static argv the argv that runs".
+ * and the construction of `CommandSegment` records. Consumes the tree-sitter
+ * front end and answers "is the static argv the argv that runs".
  */
 import { basename } from "node:path";
 
@@ -12,13 +12,7 @@ import {
 } from "./git-exec-entries.ts";
 import type { CommandSegment, SegmentUnprovenCause } from "./rules.ts";
 import { analyzeCommandWithAst, type SegmentFacts, shellAstParserInstalled } from "./shell-ast.ts";
-import {
-  assignmentName,
-  isEnvAssignmentToken,
-  scanShellSyntax,
-  skippedHeredocSubstitutions,
-  splitShellText,
-} from "./shell-lexer.ts";
+import { assignmentName, isEnvAssignmentToken } from "./shell-tokens.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
 
@@ -850,36 +844,13 @@ export function parseCommandSegments(command: string): CommandSegment[] {
 }
 
 /**
- * Whether a command's argv is not fixed, at command-line scale.
- *
- * `risk.ts` uses this to refuse tier 3 and to name the tier 4 cause, so the question it
- * answers is "can any segment of this command line hide argv behind an expansion". The
- * V1 text scan is the floor and is never retired here: a `$` the grammar happens to read
- * as an ordinary character still counts, and a front end that abstains must not buy a
- * relaxation with its silence. The AST is consulted per segment, on the statement's own
- * span, where the text scan cannot tell a quoted `|` from an operator.
- */
-export function commandHasExecutableSubstitution(command: string): boolean {
-  if (scanShellSyntax(command).hasExecutableSubstitution) return true;
-  const facts = astSegmentFacts(command);
-  if (facts?.some((segment) => segment.hasExecutableSubstitution)) {
-    return true;
-  }
-  return skippedHeredocSubstitutions(command).some((bodies) => bodies.length > 0);
-}
-
-/**
  * The AST front end's facts for a whole command line, or `undefined` when it abstains.
  *
- * Sole-interpreter (step 1): the AST is authoritative — no partition or argv
- * alignment against the lexer. Two abstentions only:
+ * Sole-interpreter: the AST is authoritative. Two abstentions only:
  *
  *  - **No parser installed.** WASM bridge failed or never activated.
- *  - **Outside the model.** Control-flow/subshell/`!`/unknown node/throw.
- *
- * Anything else trusts the grammar's segments directly. Heredoc skipped-body
- * merging still comes from the splitter in `parseSegmentsAtDepth` until step 3
- * removes the lexer file.
+ *  - **Outside the model.** A broken heredoc queue, an unknown node, or a
+ *    parse that threw.
  */
 function astSegmentFacts(command: string): SegmentFacts[] | undefined {
   if (!shellAstParserInstalled()) return undefined;
@@ -945,43 +916,18 @@ function astUnmodelledSegment(command: string): CommandSegment {
 
 function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] {
   // Sole-interpreter: AST at every depth, including `bash -c` / `$(…)` bodies.
-  // No lexer fallback — abstention is fail-closed (review), per product decision.
-  const ast = astSegmentFacts(command);
-  if (ast === undefined) {
+  // No text fallback — abstention is fail-closed (review), per product decision.
+  // Active heredoc bodies arrive inside the facts themselves
+  // (`collectHeredocBodies`), so no second walk merges anything.
+  const facts = astSegmentFacts(command);
+  if (facts === undefined) {
     return [
       shellAstParserInstalled()
         ? astUnmodelledSegment(command)
         : astUnavailableSegment(command),
     ];
   }
-  // Heredoc skipped-body merge (step-1 compat): the splitter still owns the
-  // active-body walk until step 3. Merge by index only when the partition
-  // happens to align; otherwise trust the AST alone.
-  let facts: SegmentFacts[] = ast;
-  try {
-    const { skippedBodies: heredocSubstitutions, heredocExpansionRisk } =
-      splitShellText(command);
-    if (heredocSubstitutions.length === ast.length || heredocExpansionRisk.length === ast.length) {
-      facts = ast.map((frontEnd, index) => {
-        const skipped = heredocSubstitutions[index];
-        const risk = heredocExpansionRisk[index] === true;
-        const withRisk =
-          risk && !frontEnd.heredocExpansionRisk
-            ? { ...frontEnd, heredocExpansionRisk: true }
-            : frontEnd;
-        if (skipped === undefined || skipped.length === 0) return withRisk;
-        return {
-          ...withRisk,
-          bodies: [...new Set([...withRisk.bodies, ...skipped])],
-        };
-      });
-    }
-  } catch {
-    facts = ast;
-  }
   const segments = facts.map((fact) => {
-    // `foldSegment` is the whole verdict, and it is the same call on both paths: the
-    // AST can change a fact, never a rule.
     return foldSegment(fact);
   });
   const nested = segments.flatMap((segment, index) => {
@@ -1008,25 +954,22 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
           ? { ...nestedSegment, executableContextUntrusted: true }
           : nestedSegment
         : { ...nestedSegment, executableTrusted: false, executableContextUntrusted: true };
-    // The body is shell code, so a substitution or heredoc in it is live even
-    // when outer quoting made it inert for the parent shell: `bash -c 'cat
-    // $(pwd)'` runs the substitution. The char segmenter drops the `(`, so the
-    // body text itself is what proves the inner argv is not static — and the
-    // body's own words are what make its dangerous argv a plain segment that
-    // tier 1 can see, whether it came from a `-c` argument or from a live
-    // `$(…)` that the splitter only ever shredded by accident.
+    // The body is shell code, so a substitution in it is live even when
+    // outer quoting made it inert for the parent shell: `bash -c 'cat
+    // $(pwd)'` runs the substitution. The body's own words are what make
+    // its dangerous argv a plain segment the fold can see, whether it came
+    // from a `-c` argument or from a live `$(…)`.
     const expandBody = (
       body: string,
       nestedFrom: "shell_body" | "substitution",
     ): CommandSegment[] => {
-      const syntax = scanShellSyntax(body);
-      // Only a live substitution rewrites the body's argv. A bare `<<`
-      // alone must not flip `hasHereDocument` into a forced
-      // decomposable:false + heredoc_unproven for the nested body:
-      // the direct scanShellSyntax(body) call already sees active-body
-      // `$`/backtick chars and sets hasExecutableSubstitution for them,
-      // and inert bodies never expand at all.
-      const bodyRewritesArgv = syntax.hasExecutableSubstitution;
+      // Only a live substitution rewrites the body's argv. The test is a
+      // character test on purpose (over-approximate): a quoted `$` that
+      // never expands still forces the unproven label, which changes no
+      // verdict — a dangerous body reviews through its own argv either
+      // way, and a harmless one Skips either way. Missing a live `$`
+      // would be the fail-open direction, so the test must not miss one.
+      const bodyRewritesArgv = /[$`]/.test(body);
       return parseSegmentsAtDepth(body, depth + 1).map((nestedSegment) => {
         const inherited = { ...inherit(nestedSegment), nestedFrom };
         return bodyRewritesArgv

@@ -10,7 +10,7 @@
  * so a shell alias or a `bisect run` payload reaches the sandbox with no nested
  * inspection upstream.
  */
-import { assignmentName } from "./shell-lexer.ts";
+import { assignmentName } from "./shell-tokens.ts";
 
 /**
  * The final dotted segment of a config key whose value is a setting rather

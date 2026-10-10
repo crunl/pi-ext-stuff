@@ -12,7 +12,7 @@
  */
 import { basename } from "node:path";
 
-import { isEnvAssignmentToken } from "./shell-lexer.ts";
+import { isEnvAssignmentToken } from "./shell-tokens.ts";
 
 const MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH = 8;
 

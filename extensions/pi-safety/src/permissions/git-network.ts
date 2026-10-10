@@ -4,7 +4,6 @@
  */
 import { parseGitRemoteTarget } from "../network-host.ts";
 import type { CommandSegment } from "./rules.ts";
-import { scanShellSyntax } from "./shell-lexer.ts";
 import { parseCommandSegments } from "./shell-segment.ts";
 
 const gitNetworkSubcommands = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
@@ -536,7 +535,6 @@ export interface ShellGitNetworkAnalysis {
 
 export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis {
   const segments = parseCommandSegments(command);
-  const syntax = scanShellSyntax(command);
   const invocations = parsedGitInvocations(command);
   const remotes = invocations.flatMap((invocation) => {
     return parsedGitRemotes(invocation).map((remote) => ({ invocation, remote }));
@@ -553,7 +551,10 @@ export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis
   const directImplicitPurpose =
     segments.length === 1 &&
     direct?.remote.kind === "implicit" &&
-    !syntax.hasActiveControl &&
+    // The single segment must BE the command: any wrapper the grammar peeled
+    // (`(git push)`, `git push |`) leaves the source longer than the span,
+    // and only the bare spelling earns the fast path.
+    segments[0]?.source.trim() === command.trim() &&
     !direct.invocation.segment.hasRedirect &&
     !direct.invocation.segment.hasSubstitution &&
     !direct.invocation.segment.nestedShell

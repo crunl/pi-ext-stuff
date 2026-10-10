@@ -1,12 +1,10 @@
 /**
- * tree-sitter-bash AST front end.
+ * tree-sitter-bash AST front end: the sole shell interpreter.
  *
- * Phase 1 of the Shell AST migration. This module turns a parsed `bash` syntax tree
- * into the same per-segment input the segment fold in `shell-segment.ts` consumes
- * from the hand-written lexer: a source span, the argv words the shell would build,
- * and the lexical facts that decide whether the segment can be trusted. The fold then
- * makes every verdict, so "V1 and V2 agree on a segment" is decided by shared code
- * rather than by two copies that can drift.
+ * This module turns a parsed `bash` syntax tree into the per-segment input
+ * the fold in `shell-segment.ts` consumes: a source span, the argv words the
+ * shell would build, and the facts that decide whether the segment can be
+ * trusted. The fold makes every verdict.
  *
  * It holds no privileged I/O. The tree arrives through the injected
  * {@link ShellAstParser} because `tests/structure-invariants.test.ts` forbids
@@ -16,23 +14,16 @@
  *
  * Two rules govern every branch below.
  *
- *  - **Never looser than the lexer.** The facts are the union of what the AST says and
- *    what `scanShellSyntax` says over the segment's own span, minus the two places
- *    the AST is provably better informed (an assignment value is not argv, an inert
- *    heredoc body is not live). Retiring the text scan is later-phase work, gated on
- *    the differential suite proving it redundant.
- *  - **Unmodelled syntax is not a judgement.** Anything this adapter cannot express as
- *    segments - a loop, a subshell, a `!` negation, a node type it does not know -
- *    returns `undefined` and the caller runs the lexer, which is the shipped
- *    behaviour. An ERROR node is different: it is modelled, and it fails closed.
+ *  - **The grammar is the answer.** Word lists are built from the grammar's
+ *    own nodes (quote/escape processing per word, never re-splitting), and
+ *    liveness from the grammar's expansion nodes. There is no text scan to
+ *    union with: what the tree does not say is not claimed.
+ *  - **Unmodelled syntax is not a judgement.** Anything this adapter cannot
+ *    express as segments returns `undefined` and the caller fails the command
+ *    closed to review. An ERROR node is different: it is modelled, and its
+ *    span reviews as incomplete text.
  */
-import {
-  outermostSubstitutionBodies,
-  scanShellSyntax,
-  shellWords,
-  splitShellSegments,
-  splitShellText,
-} from "./shell-lexer.ts";
+import { outermostSubstitutionBodies } from "./shell-tokens.ts";
 
 /**
  * The frozen read-only view of a tree-sitter node that this adapter needs.
@@ -66,16 +57,13 @@ export interface ShellAstParser {
 }
 
 /**
- * What a front end must tell the fold about one segment.
+ * What the interpreter must tell the fold about one segment: the source span,
+ * the argv the shell would build (quotes stripped, redirects removed), and
+ * the facts that decide whether the segment can be trusted.
  *
- * This is the only shape shared between the two front ends, and it is deliberately the
- * lexer's shape rather than the grammar's: the AST has to answer the same questions the
- * hand-written path answers, and nothing more, so `shell-segment.ts` needs no
- * front-end-specific knowledge in the fold.
- *
- * `lexIncomplete` collapses the lexer's `error`/`incomplete` pair — the fold only ever
- * asks "is this the whole word list" — and the AST sets it for a tree that carried an
- * error node, which is the same claim about the same text.
+ * `lexIncomplete` is the fold's only "is this the whole word list" question:
+ * the adapter sets it for a tree that carried an error node inside the
+ * statement's own span.
  */
 export interface SegmentFacts {
   /** The raw command text this segment covers, delimiters trimmed. */
@@ -83,10 +71,9 @@ export interface SegmentFacts {
   /** The argv the shell would build: quotes stripped, redirects removed. */
   words: string[];
   /**
-   * The text that ran is not the text that was read: the lexer's own
-   * `error`/`incomplete` pair, an error region the grammar marked inside
-   * the statement's tree, or a span recovered from an ERROR node. The
-   * fold only ever asks "is this the whole word list".
+   * The text that ran is not the text that was read: an error region the
+   * grammar marked inside the statement's tree, or a span recovered from an
+   * ERROR node. The fold only ever asks "is this the whole word list".
    */
   lexIncomplete: boolean;
   hasExecutableSubstitution: boolean;
@@ -146,6 +133,41 @@ const COMPOSITION_NODES = new Set([
   "case_item",
   "function_definition",
 ]);
+
+/** Node types that run as commands no matter where they sit. */
+const EXECUTABLE_STRUCTURE_NODES = new Set([
+  "command",
+  "pipeline",
+  "list",
+  "compound_statement",
+  "subshell",
+  "command_group",
+  "negated_command",
+  "for_statement",
+  "while_statement",
+  "until_statement",
+  "if_statement",
+  "function_definition",
+]);
+
+function redirectHidesExecutable(redirect: ShellAstNode): boolean {
+  for (const child of redirect.children) {
+    // Substitutions surface through the bodies path (`collectSubstitutions`
+    // walks non-heredoc redirects), so their insides are owned there — only
+    // structure that runs AS a command counts here.
+    if (
+      child.type === "command_substitution" ||
+      child.type === "process_substitution" ||
+      EXPANSION_NODES.has(child.type)
+    ) {
+      continue;
+    }
+    if (EXECUTABLE_STRUCTURE_NODES.has(child.type) || redirectHidesExecutable(child)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Node types that carry argv. A named command child of any other type is outside the model. */
 const ARGV_NODES = new Set([
@@ -269,42 +291,45 @@ export function analyzeShellAst(source: string, parser: ShellAstParser): AstAnal
     const out: AnalysisOutput = { statements: [], errors: [], comments: [] };
     if (!collectStatements(source, root, out)) return undefined;
     const hadError = root.hasError || root.childCount === 0;
-    // A heredoc opener the grammar could not read whole (ERROR inside the
-    // redirect — e.g. a queued `<<B` misparsed as `<` + file redirect) means
-    // the grammar's body queue is untrustworthy: it invents commands from
-    // body data. The character splitter queues heredocs correctly, so this
-    // narrow class keeps its facts; everything else stays on the grammar.
-    // (Step-3 work: a heredoc-aware pass over the AST so this partition can
-    // retire with the lexer.)
-    if (out.statements.some(statementHasBrokenHeredoc)) {
-      return {
-        segments: splitShellText(source).segments.map(lexFallbackFacts),
-        hadError,
-      };
+    // A heredoc redirect the grammar could not read whole (ERROR inside it)
+    // means the body queue is untrustworthy: error recovery invents commands
+    // from body data, and no span past the opener can be proven code. The
+    // command abstains and reviews. ERROR elsewhere does NOT abstain: a
+    // known command with an error region (`git add "${…;}"`, whose bad
+    // substitution bash itself rejects) still collects, and its statement
+    // reads incomplete via `statementHasError` — nothing runs, so it Skips
+    // instead of reviewing a command the shell refuses.
+    if (
+      out.statements.some((statement) =>
+        statement.redirects.some(
+          (redirect) => redirect.type === "heredoc_redirect" && subtreeIsError(redirect),
+        ),
+      )
+    ) {
+      return undefined;
     }
-    // Heredoc bodies are data, never commands. Error recovery can materialize
-    // body lines (or delimiter fragments) as statements — drop any statement
-    // starting inside a body span. A non-bare delimiter line (`EOF && git
-    // push`) never closes in real bash: the body runs to end of source, so
-    // everything after the opener is data and is dropped, and the opener is
-    // incomplete by construction.
+    // An ERROR span holding a heredoc opener without its end is an unclosed
+    // heredoc (`cat <<2X` whose `2X` line never comes): the body runs to end
+    // of source, so the span shreds no commands and nothing collected past
+    // the opener line is code. Without this the body data after a digit-led
+    // (or otherwise missed) delimiter becomes segments and a deletion the
+    // shell never runs reviews.
+    suppressUnclosedHeredocErrors(source, out);
     dropHeredocBodyStatements(source, out);
     const ordered: OrderedSegment[] = [];
     for (const statement of out.statements) {
       const segment = buildSegment(source, statement);
       if (segment) ordered.push({ order: statement.start, segment });
     }
-    // A comment is content the lexer hands to the fold as its own segment. Emitting it
-    // here is what keeps the two front ends agreeing on `# lead` + `echo hi`; dropping
-    // it would shorten the segment list, and the caller's alignment check treats a
-    // shortened list as an abstention rather than as a command with less in it.
+    // A comment on a line of its own is a segment of nothing but itself;
+    // a trailing comment already joined its statement's span above.
     for (const comment of out.comments) {
       const text = comment.text.trim();
-      if (text) ordered.push({ order: comment.startIndex, segment: lexSegment(text) });
+      if (text) ordered.push({ order: comment.startIndex, segment: commentFacts(text) });
     }
     if (hadError) addErrorSegments(out.errors, out.statements, ordered);
     if (hadError && !ordered.length && source.trim()) {
-      ordered.push({ order: 0, segment: lexSegment(source.trim()) });
+      ordered.push({ order: 0, segment: errorFacts(source.trim()) });
     }
     ordered.sort((left, right) => left.order - right.order);
     return { segments: ordered.map((entry) => entry.segment), hadError };
@@ -376,9 +401,11 @@ function collectStatements(source: string, node: ShellAstNode, out: AnalysisOutp
       }
       const last = statements[statements.length - 1];
       if (!last) return false;
-      last.redirects.push(
-        ...node.namedChildren.filter((child) => REDIRECT_NODES.has(child.type)),
-      );
+      const attached = node.namedChildren.filter((child) => REDIRECT_NODES.has(child.type));
+      // A redirect the grammar nested a pipeline inside (`<<'EOF' | $(…)`)
+      // runs code the argv walk never visits: abstain, don't drop it.
+      if (attached.some(redirectHidesExecutable)) return false;
+      last.redirects.push(...attached);
       last.end = node.endIndex;
       return true;
     }
@@ -388,9 +415,13 @@ function collectStatements(source: string, node: ShellAstNode, out: AnalysisOutp
     return true;
   }
   if (!hasModelledArgv(node)) return false;
+  const redirects = redirectChildren(node);
+  // Same executable-structure rule as `redirectedStatement`: a redirect
+  // hiding a pipeline runs code the argv walk never visits.
+  if (redirects.some(redirectHidesExecutable)) return false;
   statements.push({
     command: node,
-    redirects: redirectChildren(node),
+    redirects,
     start: node.startIndex,
     end: node.endIndex,
   });
@@ -401,48 +432,57 @@ function sameLine(source: string, from: number, to: number): boolean {
   return !source.slice(from, to).includes("\n");
 }
 
-/** Whether a statement's heredoc queue is untrustworthy (grammar error recovery). */
-function statementHasBrokenHeredoc(statement: StatementInfo): boolean {
-  return (
-    statement.command?.hasError === true ||
-    statement.redirects.some(
-      (redirect) => redirect.type === "heredoc_redirect" && redirect.hasError,
-    )
-  );
+function subtreeHas(node: ShellAstNode, type: string): boolean {
+  if (node.type === type) return true;
+  return node.children.some((child) => subtreeHas(child, type));
+}
+
+/** Whether the subtree holds an ERROR node (MISSING nodes don't count). */
+function subtreeIsError(node: ShellAstNode): boolean {
+  if (node.isError) return true;
+  return node.children.some((child) => subtreeIsError(child));
+}
+
+function heredocStartEnd(node: ShellAstNode): number | undefined {
+  if (node.type === "heredoc_start") return node.endIndex;
+  for (const child of node.children) {
+    const found = heredocStartEnd(child);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
 
 /**
- * Splitter facts for one chunk, used only by the broken-heredoc fallback
- * above: the splitter owns the heredoc body queue, so its chunks are the
- * argv the shell runs. Identical in shape to what `buildSegment` produces
- * for a clean statement, minus grammar attribution.
+ * An ERROR span is an unclosed heredoc when its subtree holds an opener
+ * without an end: the grammar saw `<<DELIM` but no delimiter line. The body
+ * then runs to end of source — every word past the opener line is data.
  */
-function lexFallbackFacts(source: string): SegmentFacts {
-  const lexed = shellWords(source);
-  const syntax = scanShellSyntax(source);
-  return {
-    source,
-    words: lexed.words,
-    lexIncomplete: lexed.error !== undefined || lexed.incomplete !== undefined,
-    hasExecutableSubstitution: syntax.hasExecutableSubstitution,
-    hasActiveRedirect: syntax.hasActiveRedirect,
-    hasHereDocument: syntax.hasHereDocument,
-    heredocExpansionRisk: false,
-    // Outermost only — deeper levels surface through recursion (see above).
-    bodies: outermostSubstitutionBodies(source),
-  };
+function errorIsUnclosedHeredoc(node: ShellAstNode): boolean {
+  return subtreeHas(node, "heredoc_start") && !subtreeHas(node, "heredoc_end");
+}
+
+function suppressUnclosedHeredocErrors(source: string, out: AnalysisOutput): void {
+  const unclosed = out.errors.filter(errorIsUnclosedHeredoc);
+  if (unclosed.length === 0) return;
+  const cuts = unclosed.map((node) => {
+    const openerEnd = heredocStartEnd(node) ?? node.startIndex;
+    const newline = source.indexOf("\n", openerEnd);
+    return newline === -1 ? source.length : newline + 1;
+  });
+  const cutFrom = Math.min(...cuts);
+  out.statements = out.statements.filter((statement) => statement.start < cutFrom);
+  out.comments = out.comments.filter((comment) => comment.startIndex < cutFrom);
+  out.errors = out.errors.filter((node) => !unclosed.includes(node));
 }
 
 /**
  * Drop statements the grammar recovered from heredoc body data, in place.
  *
- * Two shapes. A body span (`heredoc_body` through its delimiter line) owns
- * its lines: any *other* statement starting inside one is data, not code.
- * And a delimiter line that is not the bare delimiter never closes in real
- * bash — the body runs to end of source — so every statement after the opener
- * is data, and the opener is marked by extending its end to end-of-source
- * (its span then covers the data, and `buildSegment` reads the words from
- * the grammar's argv, not from the body text).
+ * A body span (`heredoc_body` through its delimiter line) owns its lines:
+ * any *other* statement starting inside one is data, not code. And a
+ * delimiter line that is not the bare delimiter never closes in real bash —
+ * the body runs to end of source — so every statement after the opener is
+ * data, and the opener is marked by extending its end to end-of-source.
  */
 function dropHeredocBodyStatements(source: string, out: AnalysisOutput): void {
   interface BodySpan {
@@ -536,6 +576,9 @@ function redirectedStatement(node: ShellAstNode): StatementInfo | undefined {
   const redirects: ShellAstNode[] = [];
   for (const child of node.namedChildren) {
     if (REDIRECT_NODES.has(child.type)) {
+      // A redirect the grammar nested a pipeline inside (`<<'EOF' | $(…)`)
+      // runs code the argv walk never visits: abstain, don't drop it.
+      if (redirectHidesExecutable(child)) return undefined;
       redirects.push(child);
       continue;
     }
@@ -577,135 +620,251 @@ function addErrorSegments(
       )
     )
       continue;
-    for (const piece of splitShellSegments(text)) {
+    for (const piece of errorPieces(text)) {
       ordered.push({
         order: node.startIndex,
         // An error region is text the grammar could not read, so
-        // the segment is incomplete by construction, however
-        // cleanly the lexer tokenizes it: `$(` names an
-        // unclosed substitution the word scan does not model as
-        // a lex defect.
-        segment: { ...lexSegment(piece), lexIncomplete: true },
+        // the segment is incomplete by construction: `$(` names an
+        // unclosed substitution no word scan models as complete.
+        segment: { ...errorFacts(piece), lexIncomplete: true },
       });
     }
   }
 }
 
 /**
- * A segment rendered by the lexer rather than the AST, for text the AST does not
- * model: a recovered error span or an out-of-model comment.
- *
- * Heredoc body lines are not among those spans. The heredoc-aware splitter keeps a
- * body inside the opener's segment, and this front end reads a body only in
- * `collectSubstitutions`'s `heredoc_body` branch. Whether body text is reviewed as
- * its own payload is still a phase-2 decision; none of the call sites here receive
- * a body line.
+ * Cut an error span into pieces on composition operators, quote-aware.
+ * Error text is unreadable by definition, so this is deliberately crude next
+ * to the grammar: splitting can only add segments (more inspection, never
+ * less), while one span for the whole text would mash separate commands'
+ * words into one argv and could hide a dangerous executable.
  */
-function lexSegment(source: string): SegmentFacts {
-  const lexed = shellWords(source);
-  const syntax = scanShellSyntax(source);
+function errorPieces(text: string): string[] {
+  const pieces: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? "";
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      current += character;
+      quote = character;
+      continue;
+    }
+    if (
+      character === ";" ||
+      character === "&" ||
+      character === "|" ||
+      character === "\n" ||
+      character === "(" ||
+      character === ")"
+    ) {
+      if (current.trim()) pieces.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (current.trim()) pieces.push(current.trim());
+  return pieces;
+}
+
+/**
+ * Facts for text the grammar could not read: a recovered error span or a
+ * whole command behind a failed parse. Words are whitespace-separated and
+ * quote-stripped best-effort — enough that `"rm` still names `rm` for the
+ * danger check — and liveness is a character test: an unread span cannot
+ * prove its `$` inert.
+ */
+function errorFacts(source: string): SegmentFacts {
+  const words = source
+    .split(/\s+/)
+    .filter((word) => word !== "")
+    .flatMap(dequoteWord);
   return {
     source,
-    words: lexed.words,
-    lexIncomplete: lexed.error !== undefined || lexed.incomplete !== undefined,
-    hasExecutableSubstitution: syntax.hasExecutableSubstitution,
-    hasActiveRedirect: syntax.hasActiveRedirect,
-    hasHereDocument: syntax.hasHereDocument,
-    // Never computed by a span-local scan: liveness runs over the chunk's
-    // pending heredocs and their bodies, which only the command-line walk
-    // (`splitShellText`) owns. `parseSegmentsAtDepth` stamps it on.
+    words,
+    lexIncomplete: true,
+    hasExecutableSubstitution: /[$`]/.test(source),
+    hasActiveRedirect: /[<>]/.test(source),
+    hasHereDocument: source.includes("<<"),
     heredocExpansionRisk: false,
-    bodies: syntax.liveSubstitutions,
+    bodies: outermostSubstitutionBodies(source),
+  };
+}
+
+/**
+ * Facts for a comment on a line of its own. A comment never runs, so its
+ * words name no program: the executable slot reads `#`, and liveness is
+ * never attributed (a `$(…)` inside a comment is text, not source).
+ */
+function commentFacts(source: string): SegmentFacts {
+  const words = source.split(/\s+/).filter((word) => word !== "");
+  return {
+    source,
+    words,
+    lexIncomplete: false,
+    hasExecutableSubstitution: false,
+    hasActiveRedirect: false,
+    hasHereDocument: false,
+    heredocExpansionRisk: false,
+    bodies: [],
   };
 }
 
 /**
  * The segment for one statement: text, argv, and facts.
  *
- * `source` is the statement's own span, so the text scan sees exactly this command
- * rather than the whole line - which is why a `|` inside quotes no longer shreds a
- * segment, and why `cd '${D}' && git push` keeps the `cd` target literal instead of
- * reading the quotes as shell syntax.
+ * Words come from the grammar's own nodes: each argv child dequotes to whole
+ * words (a substitution spelling is one argv word, exactly as the shell
+ * passes it), and a line continuation joining two children joins their words.
+ * A `|` inside quotes never shreds a segment, and `cd '${D}'` keeps its
+ * target literal — because the tree, not a character scan, cut the words.
  */
 function buildSegment(source: string, statement: StatementInfo): SegmentFacts | undefined {
   const text = source.slice(statement.start, statement.end).trim();
   if (!text) return undefined;
-  const words: string[] = [];
-  const command = statement.command;
-  if (command) {
-    if (
-      command.type === "declaration_command" ||
-      command.type === "test_command" ||
-      command.type === "variable_assignment"
-    ) {
-      // Anonymous nodes the per-child walk would shred: the declaration
-      // builtin (`export`), the test brackets, and the `=` inside an
-      // assignment (`FOO=1` split into `FOO` + `1` names a program `foo`).
-      // The statement text here is the command alone (redirects are siblings),
-      // so the lexer's own word split names the argv exactly.
-      words.push(...dequote(command.text));
-    } else if (
-      command.type === "command" &&
-      !command.children.some(
-        (child) => child.isNamed && REDIRECT_NODES.has(child.type),
-      )
-    ) {
-      // Whole-text split so a line continuation (`r\` + newline + `m` = `rm`,
-      // which the shell joins before word-splitting) is not shredded at the
-      // grammar's child boundary into `r` + `m` — a missed forced deletion.
-      // Redirect-bearing commands keep the per-child walk so operators never
-      // leak into argv.
-      words.push(...dequote(command.text));
-    } else {
-      for (const child of command.children) {
-        if (!child.isNamed || child.isError || child.isMissing) continue;
-        if (REDIRECT_NODES.has(child.type) || child.type === "comment") continue;
-        words.push(...dequote(child.text));
-      }
-    }
-  }
+  const words = statement.command ? commandWords(source, statement.command) : [];
   for (const redirect of statement.redirects) words.push(...redirectWords(redirect));
-  if (statement.comment) words.push(...dequote(statement.comment.text));
+  if (statement.comment) words.push(...commentTailWords(statement.comment.text));
   if (words.length > MAX_SEGMENT_WORDS) return undefined;
-  const lexed = shellWords(text);
-  const baseline = scanShellSyntax(text);
   const substitutions = collectSubstitutions(statement);
   // Active heredoc bodies run their substitutions (the shell re-reads the
   // body), so their live bodies join the expansion set directly from the
-  // grammar — no splitter merge needed, at any nesting depth or queue
-  // position. Inert (quoted/escaped-delimiter) bodies are literal text.
+  // grammar, at any nesting depth or queue position. Inert
+  // (quoted/escaped-delimiter) bodies are literal text.
   const heredoc = collectHeredocBodies(statement);
   const bodies = [...new Set([...substitutions.bodies, ...heredoc.bodies])];
   return {
     source: text,
     words,
-    // The statement's own scan, plus the one thing that scan cannot
-    // see: an error region the grammar marked inside the statement's
-    // own tree. Both mean the text that ran is not the text that was
-    // read, however cleanly the lexer tokenizes the span.
-    lexIncomplete:
-      lexed.error !== undefined || lexed.incomplete !== undefined || statementHasError(statement),
+    // An error region the grammar marked inside the statement's own tree
+    // means the text that ran is not the text that was read.
+    lexIncomplete: statementHasError(statement),
     hasExecutableSubstitution:
-      baseline.hasExecutableSubstitution ||
-      substitutions.substitution ||
-      heredoc.substitution ||
-      liveAssignments(command),
-    hasActiveRedirect: baseline.hasActiveRedirect || statement.redirects.length > 0,
-    hasHereDocument: baseline.hasHereDocument || hereDocuments(statement.redirects),
+      substitutions.substitution || heredoc.substitution || liveAssignments(statement.command),
+    hasActiveRedirect: statement.redirects.length > 0,
+    hasHereDocument: hereDocuments(statement.redirects),
     heredocExpansionRisk: heredoc.expansionRisk,
     bodies,
   };
 }
 
 /**
+ * The argv words of one command node.
+ *
+ * Each argv child yields whole words via {@link dequoteWord}: the grammar
+ * already split words, so re-splitting would shred one argv word (a `<(…)`
+ * spelling, a quoted space) into several. Anonymous leading text names the
+ * executable the named walk would skip: the declaration builtin (`export`),
+ * the test brackets (`[[`), and nothing for a bare assignment (which starts
+ * with its named variable). A backslash-newline between two children joins
+ * them (`r\\` + newline + `m` runs `rm`): the gap is read off source offsets,
+ * so a backslash that is truly the last character still fails visibly.
+ */
+function commandWords(source: string, command: ShellAstNode): string[] {
+  const words: string[] = [];
+  const named = command.children.filter(
+    (child) => child.isNamed && !child.isError && !child.isMissing,
+  );
+  const leading = named.length > 0 ? source.slice(command.startIndex, named[0]?.startIndex ?? 0) : "";
+  const builtin = leading.trim();
+  if (builtin !== "") words.push(builtin);
+  let previous: ShellAstNode | undefined;
+  for (const child of named) {
+    if (REDIRECT_NODES.has(child.type) || child.type === "comment") {
+      previous = child;
+      continue;
+    }
+    const prior = previous;
+    previous = child;
+    const current = dequoteWord(child.text);
+    if (
+      prior &&
+      words.length > 0 &&
+      isLineContinuation(source.slice(prior.endIndex, child.startIndex))
+    ) {
+      words[words.length - 1] = (words[words.length - 1] ?? "") + (current.shift() ?? "");
+    }
+    words.push(...current);
+  }
+  return words;
+}
+
+/** Whether the source gap between two children is a line continuation. */
+function isLineContinuation(gap: string): boolean {
+  return /^\\\r?\n$/.test(gap);
+}
+
+/**
+ * One grammar word with the quotes the shell would remove. Returns whole
+ * words only — never splits: the caller walks one node per word already, and
+ * splitting here would shred a single argv word (`<(echo hi)`, `"a b"`) the
+ * way the retired character splitter did. Unbalanced quotes strip
+ * best-effort rather than failing: error text still has to name `rm`.
+ */
+function dequoteWord(text: string): string[] {
+  let out = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] ?? "";
+    if (escaped) {
+      // A backslash-newline is a continuation: removed before word
+      // splitting, so it joins rather than escapes.
+      if (character !== "\n" && character !== "\r") out += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      else out += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    out += character;
+  }
+  // A trailing lone backslash escapes nothing; the character is kept rather
+  // than dropped, so no word silently vanishes.
+  if (escaped) out += "\\";
+  return [out];
+}
+
+/** A trailing comment's words: split only, never dequoted or scanned. */
+function commentTailWords(text: string): string[] {
+  return text.split(/\s+/).filter((word) => word !== "");
+}
+
+/**
  * The live substitution bodies inside a statement's own active heredoc
  * bodies, plus whether any active body carries expansion characters.
  *
- * Mirrors the splitter's active/inert rule on the grammar's nodes: a quoted
+ * Mirrors the shell's active/inert rule on the grammar's nodes: a quoted
  * or escaped delimiter (`<<'X'`, `<<"X"`, `<<\X`) makes the body literal;
  * a bare delimiter re-reads it. `heredoc_start` text carries the quotes, so
- * the first character decides — the same shapes `heredocDelimiterAt`
- * distinguishes, read off the parse instead of re-derived from text.
+ * the first character decides.
  */
 function collectHeredocBodies(statement: StatementInfo): {
   substitution: boolean;
@@ -748,7 +907,7 @@ function collectHeredocBodies(statement: StatementInfo): {
  * opposite shape: `&&`, `||` or `|` at the end of a line (`;` or `|` at
  * its start) recovers as an empty-span ERROR node that is a sibling of the
  * command and lies inside no statement's subtree, so no statement reports
- * an error and the fold answers exactly the way the lexer does.
+ * an error and the fold reads the clean argv as-is.
  */
 function statementHasError(statement: StatementInfo): boolean {
   return (
@@ -756,11 +915,6 @@ function statementHasError(statement: StatementInfo): boolean {
     statement.redirects.some((redirect) => redirect.hasError) ||
     statement.comment?.hasError === true
   );
-}
-
-/** Word text with the quotes the shell would remove, using the lexer's own rules. */
-function dequote(chunk: string): string[] {
-  return shellWords(chunk).words;
 }
 
 /**
@@ -776,8 +930,6 @@ function dequote(chunk: string): string[] {
 function redirectWords(redirect: ShellAstNode): string[] {
   // Heredoc bodies are the command's input data, never argv: `cat <<EOF\nrm
   // -rf /\nEOF` runs `cat`, and the body must not leak into the word list.
-  // (The old slice(1) kept body/end words — a false-positive forced deletion
-  // on every heredoc whose body named `rm`.)
   if (redirect.type === "heredoc_redirect" || redirect.type === "herestring_redirect")
     return [];
   const operator = redirectOperator(redirect);
@@ -785,9 +937,10 @@ function redirectWords(redirect: ShellAstNode): string[] {
   const targets = redirect.namedChildren.filter(
     (child) => child.type !== "file_descriptor" && !child.isError && !child.isMissing,
   );
-  // `heredoc_start` names the file the body is written from, and the body and its
-  // delimiter line are text: the statement span already stopped at the operator.
-  return targets.slice(1).flatMap((child) => dequote(child.text));
+  // The first target is the file the shell writes; any word behind it is an
+  // argument the redirect swallowed. Each target dequotes whole: targets are
+  // single words by construction.
+  return targets.slice(1).flatMap((child) => dequoteWord(child.text));
 }
 
 function redirectOperator(redirect: ShellAstNode): string | undefined {
@@ -799,19 +952,18 @@ function hereDocuments(redirects: readonly ShellAstNode[]): boolean {
 }
 
 /**
- * Whether a statement's assignments expand, so their text is argv-bearing content the
- * lexer counted and the AST must not subtract.
- *
- * `FOO=$(whoami) bar` and `FOO="a b" bar` both set the variable from word splitting -
- * the value is argv - while `FOO='$(pwd)' bar` never expands, which is the one
- * subtraction this adapter makes from the lexer's facts.
+ * Whether a statement's assignments expand: `FOO=$(whoami) bar` and
+ * `FOO="a b" bar` both hand the later words a value the static argv never
+ * named, while `FOO='$(pwd)' bar` never expands. Read off the value node's
+ * own subtree — a substitution node, or a `$`/backtick the grammar left as
+ * word text — rather than re-scanning characters.
  */
 function liveAssignments(command: ShellAstNode | undefined): boolean {
   if (!command) return false;
   return command.children.some((child) => {
     if (child.type !== "variable_assignment") return false;
     const value = child.children.find((inner) => inner.isNamed && inner.type !== "variable_name");
-    return value !== undefined && scanShellSyntax(value.text).hasExecutableSubstitution;
+    return value !== undefined && scanExpansions(value).literal;
   });
 }
 
@@ -823,10 +975,10 @@ interface SubstitutionScan {
 /**
  * The live expansions of a statement, in source order.
  *
- * Inert by the shell's own rules - a single-quoted region and a heredoc body behind a
- * quoted or escaped delimiter - is skipped, and an assignment value is included, because
- * `FOO=$(whoami) bar` does run that substitution. A body is reported once for the
- * statement, matching what the lexer's scan handed the expander.
+ * Inert by the shell's own rules — a single-quoted region — is skipped, and
+ * an assignment value is included, because `FOO=$(whoami) bar` does run that
+ * substitution. A body is reported once for the statement; deeper levels
+ * surface through the expander's recursion.
  */
 function collectSubstitutions(statement: StatementInfo): SubstitutionScan {
   const nodes: ShellAstNode[] = [];
@@ -867,7 +1019,9 @@ function scanExpansions(node: ShellAstNode): ExpansionScan {
   if (node.isError || node.isMissing) return { literal: false, expansions: [] };
   if (node.type === "raw_string") return { literal: false, expansions: [] };
   if (node.type === "heredoc_body" || node.type === "heredoc_end") {
-    // An unquoted delimiter means the body expands, exactly as the lexer's scan said.
+    // Reached only through a redirect child the caller kept (heredoc
+    // redirects are owned by `collectHeredocBodies` instead): a `$` here is
+    // live shell source.
     return { literal: hasLiveExpansionCharacter(node.text), expansions: [] };
   }
   if (node.type === "command_substitution" || node.type === "process_substitution") {
@@ -908,9 +1062,7 @@ function scanExpansions(node: ShellAstNode): ExpansionScan {
 /**
  * Whether unquoted word text holds an expansion the shell will perform.
  * A backslash escapes the next character, which is what makes `echo a\$b` a literal
- * `a$b` rather than an unproven word. The shipped scan reads the same escape, so this
- * is the difference between the two front ends agreeing on argv and the AST inventing a
- * review for text that names its own value.
+ * `a$b` rather than an unproven word.
  */
 function hasLiveExpansionCharacter(text: string): boolean {
   for (let index = 0; index < text.length; index += 1) {

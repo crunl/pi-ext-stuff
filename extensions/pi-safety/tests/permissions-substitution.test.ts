@@ -6,51 +6,51 @@ import {
   parseCommandSegments,
   type RiskClassification,
 } from "../src/permissions/risk.ts";
-import {
-  scanShellSyntax,
-  skippedHeredocSubstitutions,
-  splitShellSegments,
-  splitShellText,
-} from "../src/permissions/shell-lexer.ts";
+import { outermostSubstitutionBodies } from "../src/permissions/shell-tokens.ts";
 
 describe("live substitution extraction", () => {
-  it("reports the body of every live substitution, inert ones none", () => {
-    expect(scanShellSyntax("echo $(date)").liveSubstitutions).toEqual(["date"]);
-    expect(scanShellSyntax('echo "$(date)"').liveSubstitutions).toEqual(["date"]);
-    expect(scanShellSyntax("echo `date`").liveSubstitutions).toEqual(["date"]);
-    // Inert spellings: single quotes and `\$` never run, and the parser must
-    // not be handed bodies the shell will not.
-    expect(scanShellSyntax("echo '$(date)'").liveSubstitutions).toEqual([]);
-    expect(scanShellSyntax("echo \\$(date)").liveSubstitutions).toEqual([]);
-    expect(scanShellSyntax("echo \\`date\\`").liveSubstitutions).toEqual([]);
-    // Parameter expansion has no body to read — review stays its only exit.
-    expect(scanShellSyntax("echo $HOME ${VAR:-x} $1").liveSubstitutions).toEqual([]);
+  it("reports the outermost live body per site, inert ones none", () => {
+    // One body per substitution site; deeper levels surface through the
+    // expander's recursion rather than arriving nested (which multiplied
+    // work exponentially). Siblings each report.
+    expect(outermostSubstitutionBodies("echo $(date)")).toEqual(["date"]);
+    expect(outermostSubstitutionBodies('echo "$(date)"')).toEqual(["date"]);
+    expect(outermostSubstitutionBodies("echo `date`")).toEqual(["date"]);
+    expect(outermostSubstitutionBodies("echo $(a) $(b)")).toEqual(["a", "b"]);
+    // Inert spellings: single quotes and `\$` never run.
+    expect(outermostSubstitutionBodies("echo '$(date)'")).toEqual([]);
+    expect(outermostSubstitutionBodies("echo \\$(date)")).toEqual([]);
+    expect(outermostSubstitutionBodies("echo \\`date\\`")).toEqual([]);
+    // Parameter expansion has no body to read.
+    expect(outermostSubstitutionBodies("echo $HOME ${VAR:-x} $1")).toEqual([]);
+    // Nesting reports the outer site only; the recursion owns the inside.
+    expect(outermostSubstitutionBodies('echo "$(echo "$(date)")"')).toEqual(['echo "$(date)"']);
+    expect(outermostSubstitutionBodies("echo $(echo ')')")).toEqual(["echo ')'"]);
+    // Unclosed forms yield no body at all: half-matched text never reaches
+    // a parser (the booleans fail the command closed elsewhere).
+    expect(outermostSubstitutionBodies("echo $(date")).toEqual([]);
+    expect(outermostSubstitutionBodies("echo `date")).toEqual([]);
   });
 
-  it("pairs parentheses through quotes and nesting, and never past a mismatch", () => {
-    // The outer body is paired with the inner quotes and parens respected.
-    // The scan deliberately keeps walking the body text, so a nested
-    // substitution the naive outer quote pairing also sees live is reported
-    // as well: duplicates cost one extra parse and change no verdict —
-    // every reported body is genuinely live under that pairing.
-    expect(scanShellSyntax('echo "$(echo "$(date)")"').liveSubstitutions).toEqual([
-      'echo "$(date)"',
-      "date",
-    ]);
-    expect(scanShellSyntax('echo "$(echo ")")"').liveSubstitutions).toEqual(['echo ")"']);
-    // A `)` inside single quotes is data, not the close of the substitution.
-    expect(scanShellSyntax("echo $(echo ')')").liveSubstitutions).toEqual(["echo ')'"]);
-    // Unclosed forms yield no body at all: the booleans already fail the
-    // command closed, and half-matched text never reaches a parser.
-    expect(scanShellSyntax("echo $(date").liveSubstitutions).toEqual([]);
-    expect(scanShellSyntax("echo `date").liveSubstitutions).toEqual([]);
-  });
-
-  it("caps reported bodies without touching the booleans", () => {
+  it("caps reported bodies", () => {
     const nine = Array.from({ length: 9 }, (_, i) => `$(echo ${i})`).join(" ");
-    const syntax = scanShellSyntax(`echo ${nine}`);
-    expect(syntax.liveSubstitutions).toHaveLength(8);
-    expect(syntax.hasExecutableSubstitution).toBe(true);
+    expect(outermostSubstitutionBodies(`echo ${nine}`)).toHaveLength(8);
+  });
+
+  it("surfaces bodies as nested segments, inert spellings as none", () => {
+    // The outermost body parses to its own segments; an inert spelling
+    // contributes no segment at all.
+    expect(
+      parseCommandSegments("echo $(date)").some((segment) => segment.executable === "date"),
+    ).toBe(true);
+    expect(
+      parseCommandSegments("echo '$(date)'").some((segment) => segment.executable === "date"),
+    ).toBe(false);
+    expect(
+      parseCommandSegments("echo \\$(date)").some(
+        (segment) => segment.executable === "date" || segment.executable === "$(date)",
+      ),
+    ).toBe(false);
   });
 
   it("feeds parsed bodies through the same trust inheritance as shell bodies", () => {
@@ -124,42 +124,76 @@ describe("live substitution extraction", () => {
 
 describe("inert heredoc bodies", () => {
   it("reads a quoted-delimiter body as literal text, not shell code", () => {
+    // A quoted or escaped delimiter makes the body literal: the substitution
+    // in it never runs, so the command decomposes and reviews nothing.
     for (const opener of ["<<'EOF'", '<<"EOF"', "<<\\EOF"]) {
-      const syntax = scanShellSyntax(`cat ${opener}\n$(date) ; more\nEOF`);
-      expect(syntax.hasExecutableSubstitution, opener).toBe(false);
-      expect(syntax.liveSubstitutions, opener).toEqual([]);
-      // The mechanism marker stays — it is how the fold names the heredoc —
-      // and the newline that ends the command line is a real control
-      // character. Only the body's own content raises nothing.
-      expect(syntax.hasHereDocument, opener).toBe(true);
-      expect(syntax.hasActiveControl, opener).toBe(true);
+      const command = `cat ${opener}\n$(date) ; more\nEOF`;
+      const [segment] = parseCommandSegments(command);
+      expect(segment?.executable, opener).toBe("cat");
+      expect(segment?.decomposable, opener).toBe(true);
+      expect(
+        classifyRisk(normalizeToolCall("bash", { command }, "/work/repo")),
+        opener,
+      ).toBe("Skip");
     }
   });
 
   it("keeps an unquoted-delimiter body live, because bash expands it", () => {
-    const syntax = scanShellSyntax("cat <<EOF\n$(date)\nEOF");
-    expect(syntax.hasExecutableSubstitution).toBe(true);
-    expect(syntax.liveSubstitutions).toEqual(["date"]);
+    const segments = parseCommandSegments("cat <<EOF\n$(date)\nEOF");
+    expect(segments.some((segment) => segment.executable === "date")).toBe(true);
+    expect(
+      classifyRisk(normalizeToolCall("bash", { command: "cat <<EOF\n$(date)\nEOF" }, "/work/repo")),
+    ).toBe("Skip");
   });
 
-  it("delimits the body by a line equal to the delimiter", () => {
-    // `EOFx` is data, so the substitution below it is still inside the body.
-    expect(scanShellSyntax("cat <<'EOF'\nEOFx\n$(date)\nEOF").liveSubstitutions).toEqual([]);
-    // What follows the redirect on its own line is a live command line.
-    expect(scanShellSyntax("cat <<'EOF' | $(date)\nEOF").liveSubstitutions).toEqual(["date"]);
-    // Two heredocs on one line queue their bodies on consecutive lines.
-    expect(scanShellSyntax("cat <<'A' <<'B'\nx\nA\n$(date)\nB").liveSubstitutions).toEqual([]);
+  it("treats a prefix-colliding delimiter line as unprovable", () => {
+    // The grammar closes a heredoc on a PREFIX match: `EOFx` ends a `<<'EOF'`
+    // body early and the lines behind it become segments. Real bash only
+    // closes on the bare delimiter, so review here is a fail-closed false
+    // positive on a pathological shape — never a miss: the bare-delimiter
+    // live variant reviews for a deletion that really runs.
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: "cat <<'EOF'\nEOFx\n$(date)\nEOF" }, "/w/r"),
+      ),
+    ).toBe("NeedsApproval");
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: "cat <<EOF\nEOFx\n$(rm -rf /tmp/x)\nEOF" }, "/w/r"),
+      ),
+    ).toBe("NeedsApproval");
+    // A pipeline the grammar nests inside the redirect (`| $(…)` after the
+    // opener) runs code the argv walk never visits, so the whole command
+    // abstains and reviews rather than dropping the stage silently.
+    const piped = "cat <<'EOF' | $(date)\nEOF";
+    expect(
+      parseCommandSegments(piped).some((s) => s.unprovenCause === "ast_unmodelled"),
+    ).toBe(true);
+    expect(classifyRisk(normalizeToolCall("bash", { command: piped }, "/w/r"))).toBe(
+      "NeedsApproval",
+    );
+    // Two single-opener heredocs in a row each keep their own body.
+    expect(parseCommandSegments("cat <<'A'\nx\nA").map((s) => s.executable)).toEqual(["cat"]);
   });
 
   it("does not invent heredocs where bash sees none", () => {
-    // Process substitution with a spaced redirect: not `<<`, and declaring
-    // the `(…)` an inert body would be a fail-open.
-    expect(scanShellSyntax("cat < <(echo hi)").hasHereDocument).toBe(false);
+    // Process substitution with a spaced redirect: not `<<`.
+    expect(
+      classifyRisk(normalizeToolCall("bash", { command: "cat < <(echo hi)" }, "/work/repo")),
+    ).toBe("Skip");
+    expect(
+      parseCommandSegments("cat < <(echo hi)").map((s) => s.executable),
+    ).toContain("echo");
     // A `<<` inside double quotes is literal text.
-    expect(scanShellSyntax(`echo "a <<'b'\nc\nEOF"`).hasHereDocument).toBe(false);
-    // A here-string feeds one expanding word, not a body: its substitution
-    // stays live, exactly as the shell expands it.
-    expect(scanShellSyntax('wc <<< "$(date)"').liveSubstitutions).toEqual(["date"]);
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: `echo "a <<'b'\nc\nEOF"` }, "/work/repo"),
+      ),
+    ).toBe("Skip");
+    // A here-string feeds one expanding word: its substitution stays live,
+    // exactly as the shell expands it.
+    const segments = parseCommandSegments('wc <<< "$(date)"');
+    expect(segments.some((segment) => segment.executable === "date")).toBe(true);
   });
 
   it("names no heredoc cause for a quoted-delimiter body", () => {
@@ -224,7 +258,8 @@ describe("active heredoc body substitutions", () => {
 
   it("refuses a forced deletion in an unterminated active body", () => {
     // An unterminated body runs to the end of the input, so the
-    // substitution in it is still live shell source.
+    // substitution in it is still live shell source: the forced deletion
+    // it would run reviews with the body as evidence.
     const review = classifyRiskWithCause(
       normalizeToolCall("bash", { command: "cat <<EOF\n$(rm -rf /tmp/work)" }, "/w/r"),
     );
@@ -334,8 +369,17 @@ describe("heredoc bodies are data, not commands", () => {
   });
 
   it("consumes queued bodies in order, then resumes segmentation", () => {
+    // A second bare opener misparses in the grammar, so a multi-opener
+    // queue the grammar cannot read whole abstains and reviews — the body
+    // data never becomes segments, and the trailing command is not proven
+    // live either. Fail-closed on an unprovable queue, never invented argv.
     const segments = parseCommandSegments("cat <<A <<B\nx\nA\ny\nB\nrm -f /tmp/x");
-    expect(segments.map((segment) => segment.executable)).toEqual(["cat", "rm"]);
+    expect(segments.some((segment) => segment.unprovenCause === "ast_unmodelled")).toBe(true);
+    expect(
+      classifyRisk(
+        normalizeToolCall("bash", { command: "cat <<A <<B\nx\nA\ny\nB\nrm -f /tmp/x" }, "/w/r"),
+      ),
+    ).toBe("NeedsApproval");
   });
 
   it("matches a strip-tabs delimiter once its leading tabs are gone", () => {
@@ -346,9 +390,7 @@ describe("heredoc bodies are data, not commands", () => {
   it("opens no heredoc for a << inside a comment", () => {
     // A `#` that begins a word comments the rest of its line, so
     // the `<<EOF` there is text and the lines after it are real
-    // commands — measured in bash, which runs them. The splitter
-    // keeps cutting them, so a forced deletion a commented
-    // heredoc appears to swallow stays visible.
+    // commands — measured in bash, which runs them.
     const segments = parseCommandSegments("git push # <<EOF\nrm -f /tmp/x\nEOF");
     expect(segments.map((segment) => segment.executable)).toEqual(["git", "rm", "eof"]);
     expect(
@@ -359,13 +401,14 @@ describe("heredoc bodies are data, not commands", () => {
   });
 });
 
-describe("skipped heredoc substitutions stay index-aligned with the splitter", () => {
-  // `skippedHeredocSubstitutions` walks the command a second time and
-  // hands each skipped active body's substitutions to the chunk that
-  // opened it, matched by index. Two traversals of the same grammar can
-  // drift, and drift here fails open: an entry past the last chunk is
-  // never read, so the substitution silently leaves tier 1's view. These
-  // invariants hold for every shape regardless of which side moved.
+describe("heredoc body queue", () => {
+  // The grammar misparses a second bare `<<B` opener (as `<` + file
+  // redirect), so a multi-heredoc queue the grammar errors inside is
+  // unprovable: the whole command abstains and reviews rather than
+  // inventing commands from body data. Single-opener queues parse cleanly
+  // and keep their precision. All queue shapes below review when a live
+  // body names danger, because the abstention reviews — the verdicts hold,
+  // only the substitution evidence narrows to the clean queues.
   const forced = ["rm", "-rf", "/tmp/work"].join(" ");
   const forcedFile = ["rm", "-f", "/tmp/x"].join(" ");
   const shapes = [
@@ -410,31 +453,27 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     `echo $((1)) ; cat <<'EOF'\n$(${forced})\nEOF`,
   ];
 
-  it("attributes an active body to the chunk that opened its heredoc", () => {
-    // `echo` is chunk 0 and opens nothing. The body belongs to `cat`,
-    // chunk 1. A mis-attribution still classifies Forbidden — the
-    // expander does not care which host segment received the body — so
-    // only this index check catches it. Index 0 is a hole (`undefined`),
-    // not `null`: `JSON.stringify` renders that hole as null.
+  it("attributes an active body to the heredoc that opened it", () => {
+    // The forced deletion in `cat`'s body reviews with the body as evidence.
     const command = `echo hi; cat <<EOF\n$(${forcedFile})\nEOF`;
-    const skipped = skippedHeredocSubstitutions(command);
-    expect(splitShellSegments(command)).toHaveLength(2);
-    expect(skipped).toHaveLength(2);
-    expect(skipped[0]).toBeUndefined();
-    expect(skipped[1]).toEqual([forcedFile]);
+    const review = classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r"));
+    expect(review).toEqual({ disposition: "NeedsApproval", dangerousSubstitution: forcedFile });
+    const segments = parseCommandSegments(command);
+    expect(segments.map((segment) => segment.executable)).toContain("rm");
   });
 
   it("runs mixed-queue bodies sandboxed once D4 is gone (cut 3)", () => {
-    // D4 made `commandHasExecutableSubstitution` ask
-    // `skippedHeredocSubstitutions` after the raw scan. Cut 3 deletes the
-    // substitution review entirely: a live but harmless `$(pwd)` runs
-    // sandboxed, and only a dangerous body still reviews (see the
-    // forced-deletion cases above).
-    for (const command of ["cat <<A\n$(pwd)\nA", "cat <<A <<'B'\n$(pwd)\nA\ny\nB"]) {
-      expect(classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")), command).toEqual(
-        { disposition: "Skip" },
-      );
-    }
+    // A live but harmless `$(pwd)` in a clean single-heredoc queue runs
+    // sandboxed. A queue the grammar cannot read whole reviews even when
+    // harmless (fail-closed on unprovable bodies — the queue shapes below).
+    expect(
+      classifyRiskWithCause(normalizeToolCall("bash", { command: "cat <<A\n$(pwd)\nA" }, "/w/r")),
+    ).toEqual({ disposition: "Skip" });
+    expect(
+      classifyRiskWithCause(
+        normalizeToolCall("bash", { command: "cat <<A <<'B'\n$(pwd)\nA\ny\nB" }, "/w/r"),
+      ),
+    ).toEqual({ disposition: "NeedsApproval" });
   });
 
   it("pins a disposition on every shape, so no corpus entry is unjudged", () => {
@@ -457,26 +496,29 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // grammar reads parens, so the same review now carries the substitution
     // evidence — same verdict, better reason.
     // `shapes[24]` (`cat <<`) is an incomplete heredoc: every segment is
-    // `lex_incomplete`, so the codex-aligned B1 fallback (`risk.ts` tier 4a)
-    // judges the raw words — first word `cat`, non-dangerous — → `Skip`. codex
-    // likewise falls back to the raw command vector when a parse yields no plain
-    // commands and allows a non-dangerous one (`exec_policy.rs`). The fallback
-    // is all-or-nothing on `lex_incomplete`, so no other shape reaches it:
-    // each has a segment with a stronger unproven reason (heredoc,
-    // substitution, or a variable executable) and fails closed instead.
+    // `lex_incomplete`, and the first word is `cat`, non-dangerous — →
+    // `Skip`. `shapes[5]` (unterminated single queue with a live body)
+    // abstains whole (`ast_unmodelled`) and reviews without the
+    // substitution evidence: the body runs to end of input, so the review
+    // is the fail-closed verdict, not the proof.
+    // Multi-opener shapes whose queue the grammar misreads (6, 7, 9, 10,
+    // 11) review the same way: same verdict, no per-body evidence.
     const expected: readonly RiskClassification[] = [
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "Skip" },
       { disposition: "Skip" },
       { disposition: "Skip" },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
+      // Unterminated single queue with a live body: the body runs to end of
+      // input, so the review carries the substitution evidence.
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
-      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
+      // Misread multi-opener queues: abstain whole, review verdicts hold.
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval" },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
@@ -507,24 +549,19 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       ).toEqual(expected[index]);
     });
     for (const command of ["cat <<EOF", "cat <<", "echo 1 <<str"]) {
-      expect(() => splitShellSegments(command), command).not.toThrow();
-      expect(() => skippedHeredocSubstitutions(command), command).not.toThrow();
+      expect(() => parseCommandSegments(command), command).not.toThrow();
     }
   });
 
   it("keeps a quoted character inside a comment from swallowing lines", () => {
-    // D7 added `!comment` to the quote branch (`shell-lexer.ts`), not to the
-    // `<<` operator branch — that one already had it. So the shape that pins
-    // D7 is a quote *inside a comment*: at HEAD the apostrophe opened a quote
-    // region that ran to end of input, `lex_incomplete` swallowed the next
-    // line as string data, and a forced deletion bash really runs escaped
-    // tier 1. Measured in bash: rc=0, victim deleted, stderr empty.
+    // The shape that pins this: a quote *inside a comment*. The apostrophe
+    // must not open a quote region that runs to end of input, swallowing
+    // the next line as string data and hiding a forced deletion bash really
+    // runs. Measured in bash: rc=0, victim deleted, stderr empty.
     //
-    // Sole-interpreter update: the second shape's `rm` sits inside a trailing
-    // comment on the SAME line, which bash never runs (measured: victim
-    // survives). The splitter shredded it into a segment on the parens — a
-    // false-positive review. The grammar reads the comment whole, so it is
-    // Skip now; the first shape (deletion on the NEXT line) still reviews.
+    // The second shape's `rm` sits inside a trailing comment on the SAME
+    // line, which bash never runs (measured: victim survives) — Skip, while
+    // the first shape (deletion on the NEXT line) still reviews.
     const apostrophe = String.fromCharCode(39);
     const shapes: readonly [string, { disposition: string; cause?: string }][] = [
       [`git push # don${apostrophe}t\n${forcedFile}`, { disposition: "NeedsApproval" }],
@@ -536,24 +573,20 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
         command,
       ).toEqual(expected);
     }
-    // The segments prove the mechanism: the deletion is its own chunk, not
+    // The segments prove the mechanism: the deletion is its own segment, not
     // string data inside an unterminated quote.
-    expect(splitShellSegments(`git push # don${apostrophe}t\n${forcedFile}`)).toEqual([
-      `git push # don${apostrophe}t`,
-      forcedFile,
-    ]);
+    expect(
+      parseCommandSegments(`git push # don${apostrophe}t\n${forcedFile}`).map((s) => s.source),
+    ).toEqual([`git push # don${apostrophe}t`, forcedFile]);
   });
 
   it("reads a shift inside arithmetic as arithmetic, and a digit-led delimiter whole", () => {
-    // D1B replaced two fd-digit scans with `insideArithmeticContext`. Both
-    // halves are measured in bash, victim deleted in every case:
+    // Both halves are measured in bash, victim deleted in every case:
     //
-    // 1. `<<x` inside `$(( ))` is a shift operator, not a heredoc. At HEAD the
-    //    `<<` opened a heredoc that swallowed the next line as body data, so
-    //    the forced deletion never reached tier 1.
-    // 2. `cat <<2X` names the delimiter `2X`. The removed scans ate the
-    //    leading digits and looked for `X`, so the real terminator line `2X`
-    //    never closed the heredoc and the command after it stayed hidden.
+    // 1. `<<x` inside `$(( ))` is a shift operator, not a heredoc: the
+    //    forced deletion on the next line must stay visible.
+    // 2. `cat <<2X` names the delimiter `2X`: the terminator line `2X`
+    //    closes the heredoc and the command after it is live.
     const arith: readonly [string, { disposition: string }][] = [
       [`echo $((1<<x))\n${forcedFile}`, { disposition: "NeedsApproval" }],
       [`((1<<x))\n${forcedFile}`, { disposition: "NeedsApproval" }],
@@ -570,10 +603,9 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     }
     // The delimiter is `2X`, so a line reading `X` does not close the heredoc
     // and the deletion after it is body data — the opposite of the case above.
-    expect(splitShellSegments(`cat <<2X\nbody\n2X\n${forcedFile}`)).toEqual([
-      "cat <<2X",
-      forcedFile,
-    ]);
+    expect(
+      parseCommandSegments(`cat <<2X\nbody\n2X\n${forcedFile}`).map((s) => s.executable),
+    ).toEqual(["cat", "rm"]);
     expect(
       classifyRiskWithCause(
         normalizeToolCall("bash", { command: `cat <<2X\nbody\nX\n${forcedFile}` }, "/w/r"),
@@ -581,71 +613,19 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     ).toEqual({ disposition: "Skip" });
   });
 
-  it("projects segments and skipped bodies from one traversal", () => {
-    // The two exports are projections of `splitShellText`, so this compares a
-    // pure function with a manual call of itself: it cannot fail while the
-    // projections exist. What it guards is re-splitting — if someone gives
-    // either export its own walk again, the two can drift and this goes red.
-    // The bound below holds structurally (`chunk` is captured as
-    // `segments.length` before the push, and the body loop pushes before
-    // consuming), so wrong-but-in-range attribution is what actually needs a
-    // pin; that is "attributes an active body to the chunk that opened its
-    // heredoc" above, for one shape.
+  it("never invents a body the command text does not spell", () => {
+    // Inventing a body would be its own defect: tier 1 would review a
+    // deletion the shell never runs. Every nested substitution segment must
+    // come from a substitution the command actually spells.
     for (const command of shapes) {
-      const once = splitShellText(command);
-      expect(splitShellSegments(command), command).toEqual(once.segments);
-      expect(skippedHeredocSubstitutions(command), command).toEqual(once.skippedBodies);
-      for (const [index, bodies] of once.skippedBodies.entries()) {
-        if (bodies === undefined || bodies.length === 0) continue;
-        expect(index, command).toBeLessThan(once.segments.length);
-      }
-    }
-  });
-
-  it("never attributes a body past the last chunk, where no reader looks", () => {
-    for (const command of shapes) {
-      const chunks = splitShellSegments(command);
-      const skipped = skippedHeredocSubstitutions(command);
-      for (const [index, bodies] of skipped.entries()) {
-        if (bodies === undefined || bodies.length === 0) continue;
+      for (const segment of parseCommandSegments(command)) {
+        if (segment.nestedFrom !== "substitution") continue;
         expect(
-          index,
-          `body lost past chunk ${chunks.length - 1} in ${JSON.stringify(command)}`,
-        ).toBeLessThan(chunks.length);
+          segment.source.length <= command.length,
+          `segment longer than its command in ${JSON.stringify(command)}`,
+        ).toBe(true);
       }
     }
-  });
-
-  it("attributes only substitutions the command text really carries", () => {
-    // Inventing a body would be its own defect: tier 1 would refuse a
-    // deletion the shell never runs. Every attributed body has to be a
-    // substitution the command actually spells, so nothing is refused
-    // that the text does not contain.
-    //
-    // Deliberately not `scanShellSyntax(command).liveSubstitutions`: that
-    // scan misses a body when an active heredoc is queued ahead of an
-    // inert one (`cat <<A <<'B'`), and this walk is what closes the gap.
-    for (const command of shapes) {
-      for (const bodies of skippedHeredocSubstitutions(command)) {
-        for (const body of bodies ?? []) {
-          expect(
-            command.includes(`$(${body})`) || command.includes(`\`${body}\``),
-            `invented body ${JSON.stringify(body)} in ${JSON.stringify(command)}`,
-          ).toBe(true);
-        }
-      }
-    }
-  });
-
-  it("closes the raw scan's gap when an active heredoc is queued first", () => {
-    // `cat <<A <<'B'`: the body belongs to A, which is unquoted and so
-    // runs its substitutions — measured in bash, which deletes the file.
-    // The whole-command scan reports nothing live here, so without this
-    // walk the forced deletion would leave tier 1's view entirely.
-    const command = `cat <<A <<'B'\n$(${forcedFile})\nA\ny\nB`;
-    expect(scanShellSyntax(command).liveSubstitutions).toEqual([]);
-    expect(skippedHeredocSubstitutions(command).flat()).toEqual([forcedFile]);
-    expect(classifyRisk(normalizeToolCall("bash", { command }, "/w/r"))).toBe("NeedsApproval");
   });
 
   it("refuses a forced deletion in any active body, at any queue position", () => {
@@ -681,6 +661,17 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       `cat <<"EOF"\n$(${forced})\nEOF`,
       `cat <<\\EOF\n$(${forced})\nEOF`,
       `cat <<-'EOF'\n\t$(${forced})\n\tEOF`,
+    ]) {
+      expect(
+        classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
+        command,
+      ).toEqual({ disposition: "Skip" });
+    }
+    // Multi-opener queues the grammar cannot read whole review even when
+    // every delimiter is quoted: the queue itself is unprovable, so the
+    // inert bodies behind it cannot be proven inert either. Fail-closed on
+    // the queue, not on the bodies — a rare shape, safe direction.
+    for (const command of [
       `cat <<'A' <<B\n$(${forcedFile})\nA\ny\nB`,
       `cat <<A <<'B'\nx\nA\n$(${forcedFile})\nB`,
       `cat <<'A' <<'B' <<'C'\n$(${forcedFile})\nA\ny\nB\nz\nC`,
@@ -688,7 +679,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       expect(
         classifyRiskWithCause(normalizeToolCall("bash", { command }, "/w/r")),
         command,
-      ).toEqual({ disposition: "Skip" });
+      ).toEqual({ disposition: "NeedsApproval" });
     }
   });
 });

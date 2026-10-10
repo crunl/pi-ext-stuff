@@ -2540,10 +2540,21 @@ describe("RiskDecision residual stamps", () => {
     // Tier 1 dangerous screen, so the heredoc itself is not a review. Mixed
     // shapes (heredoc + substitution) still fail closed — see
     // permissions-substitution.test.ts.
-    for (const command of ["cat <<A <<'B'\n$y\nA\nx\nB", "cat <<'EOF'\nx\nEOF"]) {
+    //
+    // Step 3: the mixed-queue shape reviews. Its queue is unprovable to the
+    // grammar (a second bare opener misparses), so the whole command
+    // abstains — even though the $y body is harmless. Fail-closed on the
+    // queue, not on the bodies; the clean single-heredoc shape still Skips.
+    for (const command of ["cat <<'EOF'\nx\nEOF"]) {
       const cwd = await mkdtemp(join(tmpdir(), "pi-safety-heredoc-allow-"));
       const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
       expect(decision, command).toMatchObject({ action: "allow", risk: "Skip" });
+    }
+    {
+      const command = "cat <<A <<'B'\n$y\nA\nx\nB";
+      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-heredoc-allow-"));
+      const decision = await evaluateRiskRequest("bash", { command }, cwd, config());
+      expect(decision, command).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
     }
   });
 
