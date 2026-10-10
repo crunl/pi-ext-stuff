@@ -151,11 +151,7 @@ import {
 } from "./shell-permissions.ts";
 import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
-import {
-  activateTreeSitterShellParser,
-  treeSitterParserEnabled,
-  treeSitterShellFailure,
-} from "./tree-sitter/shell-backend.ts";
+import { activateTreeSitterShellParser, treeSitterShellFailure } from "./tree-sitter/shell-backend.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 function policyDeniedError(reason: string): Error {
@@ -1312,17 +1308,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const preparePermissionExecution = async (
     ctx: ExtensionContext,
   ): Promise<PreparedPermissionExecution> => {
-    // The Shell AST migration's ready barrier. Off by default, and a no-op await once
-    // it has resolved, so the four tool paths below all see the same front-end state
-    // before a command is classified. A failure here leaves the lexer in charge; it
-    // cannot block a request, because nothing in the bridge throws. The session_start
-    // prewarm attempts the same activation earlier; both share the once-guard in
-    // reportShellParserActivationFailure, so a failure is said exactly once.
-    if (
-      treeSitterParserEnabled() &&
-      !shellParserFailureReported &&
-      !(await activateTreeSitterShellParser())
-    ) {
+    // Sole-interpreter ready barrier: always on, memoized. A failure leaves every
+    // bash command failing closed to review; it cannot block a request.
+    if (!shellParserFailureReported && !(await activateTreeSitterShellParser())) {
       reportShellParserActivationFailure(ctx);
     }
     // Host turns apply at turn_start. Direct tool-hook paths without lifecycle
@@ -2493,24 +2481,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const generation = session.getGeneration();
     // Prewarm the Shell AST bridge off the request path. The first command's
     // barrier awaits the same memoized activation, so this only moves the
-    // one-time grammar load earlier; a failure surfaces here instead of at the
-    // first command. Fire-and-forget by design: the barrier in
-    // preparePermissionExecution remains the single enforcement point that no
-    // command is classified before the front end settles.
-    if (treeSitterParserEnabled()) {
-      void (async () => {
-        try {
-          if (!(await activateTreeSitterShellParser())) {
-            if (session.isCurrentGeneration(generation)) {
-              reportShellParserActivationFailure(ctx);
-            }
+    // one-time grammar load earlier. Fire-and-forget by design: the barrier in
+    // preparePermissionExecution remains the single enforcement point.
+    void (async () => {
+      try {
+        if (!(await activateTreeSitterShellParser())) {
+          if (session.isCurrentGeneration(generation)) {
+            reportShellParserActivationFailure(ctx);
           }
-        } catch {
-          // The bridge never throws by contract; a detached prewarm must still not
-          // surface as an unhandled rejection if that ever changes.
         }
-      })();
-    }
+      } catch {
+        // The bridge never throws by contract; a detached prewarm must still not
+        // surface as an unhandled rejection if that ever changes.
+      }
+    })();
     let candidate: LoadedSafetyConfig;
     try {
       candidate = await loadSafetyConfig(agentDir);

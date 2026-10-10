@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzeShellAst,
+  installShellAstParser,
   type ShellAstParser,
   type ShellAstTree,
 } from "../src/permissions/shell-ast.ts";
@@ -105,12 +106,18 @@ describe("tree-sitter shell bridge", () => {
     expect(result.map((segment) => segment.executable)).toEqual(["git", "ls"]);
   });
 
-  it("stays on the lexer when no parser is installed", () => {
+  it("fails closed to review when no parser is installed", async () => {
     resetTreeSitterShellBackend();
     expect(shellAstParser()).toBeUndefined();
-    // Uninitialized or broken, the shipped path is untouched and still answers.
+    // Uninitialized or broken, the layer is blind: the command reviews
+    // instead of answering from an argv it cannot see. Clear the pure
+    // layer's slot too (the bridge reset does not touch it), then restore
+    // the suite install so later tests keep their parser.
+    installShellAstParser(undefined);
     const segments = parseCommandSegments("git push");
-    expect(segments.map((segment) => segment.executable)).toEqual(["git"]);
+    expect(segments.some((segment) => segment.unprovenCause === "ast_unavailable")).toBe(true);
+    await ensureTreeSitterReady();
+    installShellAstParser(shellAstParser() ?? undefined);
   });
 
   it("swallows a parser that throws instead of failing the request", () => {

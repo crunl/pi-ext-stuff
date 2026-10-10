@@ -234,35 +234,38 @@ function markBroken(reason: unknown): void {
 }
 
 /**
- * The switch that turns the AST front end on.
- *
- * Read here, in the host, rather than in `src/permissions/`: the propose layer must stay
- * a pure function of its inputs, so it learns whether the migration is live only from
- * whether a parser was injected. `1` is the only value that enables it; anything else,
- * including an unset variable, leaves the shipped lexer in charge.
+ * Test seam: fail the bridge without touching the filesystem. The `node:fs`
+ * mocks a test file declares do not intercept reads the shared setup already
+ * performed, so a failure reached through I/O mocks is order-dependent;
+ * this seam makes the broken state deterministic.
+ */
+export function simulateTreeSitterShellFailure(message: string): void {
+  markBroken(new Error(message));
+}
+
+/**
+ * Sole-interpreter (step 1): the flag is retired — the AST is the only front end.
+ * Kept as a constant for test compat; `treeSitterParserEnabled` always returns true.
  */
 export const TREE_SITTER_PARSER_ENV_FLAG = "PI_SAFETY_TREE_SITTER_PARSER";
 
-export function treeSitterParserEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[TREE_SITTER_PARSER_ENV_FLAG] === "1";
+export function treeSitterParserEnabled(_env: NodeJS.ProcessEnv = process.env): boolean {
+  return true;
 }
 
 /** The activation the host awaits, memoized so the barrier costs one promise forever. */
 let activation: Promise<boolean> | undefined;
 
 /**
- * Bring the grammar up and hand it to the pure layer, when the host asked for it.
+ * Bring the grammar up and hand it to the pure layer, unconditionally.
  *
- * Three outcomes, and only the first changes how a command is read: flag off, so nothing
- * is loaded and nothing is injected; flag on and the grammar usable, so the parser is
- * installed; flag on and the grammar broken, so the lexer keeps running and
- * {@link treeSitterShellFailure} says why. Never throws, because a command still has to
- * be classified either way.
+ * Two outcomes: grammar usable so the parser is installed; grammar broken so
+ * every bash command fails closed to review and {@link treeSitterShellFailure}
+ * says why. Never throws, because a command still has to be classified either way.
  */
 export async function activateTreeSitterShellParser(
-  env: NodeJS.ProcessEnv = process.env,
+  _env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  if (!treeSitterParserEnabled(env)) return false;
   activation ??= (async () => {
     await ensureTreeSitterReady();
     const parser = shellAstParser();

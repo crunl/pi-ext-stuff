@@ -16,9 +16,7 @@ import {
   assignmentName,
   isEnvAssignmentToken,
   scanShellSyntax,
-  shellWords,
   skippedHeredocSubstitutions,
-  splitShellSegments,
   splitShellText,
 } from "./shell-lexer.ts";
 
@@ -767,37 +765,6 @@ function reExecutesString(
   );
 }
 
-/**
- * Above this the fold refuses an argv as untrustworthy. The AST adapter enforces the
- * same bound on its side; repeating it here is what stops a front end from handing the
- * fold a word list the danger scan would never finish reading.
- */
-const MAX_SEGMENT_WORDS = 1024;
-
-/**
- * The V1 front end's facts for one segment: the hand-written lexer's word list plus
- * the raw-text syntax scan.
- *
- * Redirections are shell syntax, not words: `>out rm -f x` runs `rm`, and the lexer has
- * already dropped the operator and its target, so the word list here is the argv the
- * command actually receives. Nothing downstream has to know that a redirect existed —
- * `hasRedirect` and `hasHereDocument` come from a separate scan of the raw text.
- */
-function segmentLexFacts(source: string): SegmentFacts {
-  const lexed = shellWords(source);
-  const syntax = scanShellSyntax(source);
-  return {
-    source,
-    words: lexed.words,
-    lexIncomplete: lexed.error !== undefined || lexed.incomplete !== undefined,
-    hasExecutableSubstitution: syntax.hasExecutableSubstitution,
-    hasActiveRedirect: syntax.hasActiveRedirect,
-    hasHereDocument: syntax.hasHereDocument,
-    heredocExpansionRisk: false,
-    bodies: syntax.liveSubstitutions,
-  };
-}
-
 function foldSegment(facts: SegmentFacts): CommandSegment {
   const { source, words } = facts;
   // Reserved words are structural only in command position, which the char
@@ -904,61 +871,21 @@ export function commandHasExecutableSubstitution(command: string): boolean {
 /**
  * The AST front end's facts for a whole command line, or `undefined` when it abstains.
  *
- * Three abstentions, in the order they are checked.
+ * Sole-interpreter (step 1): the AST is authoritative — no partition or argv
+ * alignment against the lexer. Two abstentions only:
  *
- *  - **No parser installed.** The host never enabled the migration, or the WASM bridge
- *    failed to load. This is the default state of the shipped extension.
- *  - **Outside the model.** The adapter returns nothing for a control-flow form, a
- *    subshell, a `!` negation, a pipeline behind a redirect, a node type it does not
- *    know, or a parse that threw.
- *  - **Not the same partition, or not the same argv.** The segments have to land on the
- *    exact byte spans the character splitter cut, and each span's word list has to be
- *    the list the lexer builds, after the grammar-correction zones below are settled.
+ *  - **No parser installed.** WASM bridge failed or never activated.
+ *  - **Outside the model.** Control-flow/subshell/`!`/unknown node/throw.
  *
- * The third rule is what makes "V2 is never looser than V1" a property of the code
- * rather than of a test suite. A richer syntax tree can disagree with the lexer in two
- * ways, and both of them are relaxations: re-segmenting the line changes which argv
- * belong to which command, and a shorter word list for one span removes argv from the
- * danger check. Where the AST is *more* complete than the lexer, the divergence is a
- * fail-closed loss of the AST path, never a quieter verdict. Retiring the lexer's
- * partition is later-phase work, gated on the differential suite.
+ * Anything else trusts the grammar's segments directly. Heredoc skipped-body
+ * merging still comes from the splitter in `parseSegmentsAtDepth` until step 3
+ * removes the lexer file.
  */
 function astSegmentFacts(command: string): SegmentFacts[] | undefined {
   if (!shellAstParserInstalled()) return undefined;
   const analysis = analyzeCommandWithAst(command);
   if (analysis === undefined) return undefined;
-  const chunks = splitShellSegments(command);
-  if (analysis.segments.length !== chunks.length) return undefined;
-  const facts: SegmentFacts[] = [];
-  for (let index = 0; index < chunks.length; index++) {
-    const chunk = chunks[index] ?? "";
-    const segment = analysis.segments[index];
-    if (segment === undefined || segment.source !== chunk) return undefined;
-    const lexed = segmentLexFacts(chunk);
-    if (!argvAligned(lexed, segment)) return undefined;
-    facts.push({
-      source: chunk,
-      // The lexer's list is used once agreement is proven, rather than the AST's copy:
-      // it is the same list, and reading it from one owner keeps the fold's argv exactly
-      // the argv the danger scan saw before the migration.
-      words: lexed.words,
-      // The front end attributes incompleteness to the span it
-      // belongs to — the lexer's own scan of the span, or an
-      // error region the grammar marked inside the span's
-      // statement — so an error elsewhere in the line cannot
-      // tighten a span the front end read whole.
-      lexIncomplete: lexed.lexIncomplete || segment.lexIncomplete,
-      hasExecutableSubstitution:
-        lexed.hasExecutableSubstitution || segment.hasExecutableSubstitution,
-      hasActiveRedirect: lexed.hasActiveRedirect || segment.hasActiveRedirect,
-      hasHereDocument: lexed.hasHereDocument || segment.hasHereDocument,
-      heredocExpansionRisk: lexed.heredocExpansionRisk || segment.heredocExpansionRisk,
-      // A body either front end saw gets expanded. The AST can name a substitution the
-      // text scan shredded; the scan can name one the grammar hid inside a construct.
-      bodies: [...new Set([...lexed.bodies, ...segment.bodies])],
-    });
-  }
-  return facts;
+  return analysis.segments;
 }
 
 /**
@@ -972,28 +899,6 @@ export function astFrontEndEngaged(command: string): boolean {
 }
 
 /**
- * Whether the two front ends name the same argv for the same span.
- *
- * `shellWords` keeps a `VAR=value` prefix word — only the redirect path
- * drops words — and the fold's `executableContext` consumes those words by
- * advancing its index, so the assignment has to be present for the wrapper
- * reduction to see the program behind it (`FOO=1 rm -f x` must keep `FOO=1`
- * for `rm` to be found). The AST's word list must therefore equal the
- * lexer's word for word: a shorter list on either side removes argv from the
- * danger check, and any disagreement sends the whole command line to the
- * lexer.
- */
-function argvAligned(lexed: SegmentFacts, ast: SegmentFacts): boolean {
-  if (lexed.words.length > MAX_SEGMENT_WORDS || ast.words.length > MAX_SEGMENT_WORDS) {
-    return false;
-  }
-  return (
-    lexed.words.length === ast.words.length &&
-    lexed.words.every((word, index) => word === (ast.words[index] ?? ""))
-  );
-}
-
-/**
  * Substitution bodies nest; expansion stops at the same depth bound the
  * dangerous-wrapper walk uses (`MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH` in
  * dangerous-commands.ts). A command that hides its argv under more than
@@ -1002,41 +907,78 @@ function argvAligned(lexed: SegmentFacts, ast: SegmentFacts): boolean {
  */
 const MAX_SUBSTITUTION_NESTING = 8;
 
+function astUnavailableSegment(command: string): CommandSegment {
+  const source = command.trim() === "" ? command : command.trim();
+  return {
+    source,
+    executableToken: "",
+    executable: "",
+    executableTrusted: false,
+    executableContextUntrusted: true,
+    args: [],
+    hasRedirect: false,
+    hasSubstitution: false,
+    nestedShell: false,
+    decomposable: false,
+    grouped: false,
+    unprovenCause: "ast_unavailable",
+  };
+}
+
+function astUnmodelledSegment(command: string): CommandSegment {
+  const source = command.trim() === "" ? command : command.trim();
+  return {
+    source,
+    executableToken: "",
+    executable: "",
+    executableTrusted: false,
+    executableContextUntrusted: true,
+    args: [],
+    hasRedirect: false,
+    hasSubstitution: false,
+    nestedShell: false,
+    decomposable: false,
+    grouped: false,
+    unprovenCause: "ast_unmodelled",
+  };
+}
+
 function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] {
-  // Only the top-level line is a candidate for the AST. A body the expander pulled out
-  // of `bash -c '…'` or `$(…)` is already text whose quoting the outer front end
-  // resolved, and re-parsing it with a second grammar would compare spans that were
-  // never comparable. The lexer owns those.
-  const ast = depth === 0 ? astSegmentFacts(command) : undefined;
-  // One walk: segments and the skipped-body lists are projections of
-  // it. A second walk can store a body past the last segment, and
-  // that entry is never read.
-  const {
-    segments: chunks,
-    skippedBodies: heredocSubstitutions,
-    heredocExpansionRisk,
-  } = splitShellText(command);
-  // Substitutions inside an active heredoc body run, but the body is
-  // data the splitter never lets become a chunk, so no per-chunk scan
-  // can see them. They belong to the chunk that opened the heredoc,
-  // and the expander below treats them exactly like a substitution in
-  // that chunk's own text — the same `bodies` -> `expandBody` path an
-  // inline substitution takes, so the danger check and its
-  // `dangerousSubstitution` attribution apply unchanged.
-  const facts = chunks.map((source, index) => {
-    const frontEnd = ast?.[index] ?? segmentLexFacts(source);
-    const skipped = heredocSubstitutions[index];
-    const risk = heredocExpansionRisk[index] === true;
-    const withRisk =
-      risk && !frontEnd.heredocExpansionRisk
-        ? { ...frontEnd, heredocExpansionRisk: true }
-        : frontEnd;
-    if (skipped === undefined || skipped.length === 0) return withRisk;
-    return {
-      ...withRisk,
-      bodies: [...new Set([...withRisk.bodies, ...skipped])],
-    };
-  });
+  // Sole-interpreter: AST at every depth, including `bash -c` / `$(…)` bodies.
+  // No lexer fallback — abstention is fail-closed (review), per product decision.
+  const ast = astSegmentFacts(command);
+  if (ast === undefined) {
+    return [
+      shellAstParserInstalled()
+        ? astUnmodelledSegment(command)
+        : astUnavailableSegment(command),
+    ];
+  }
+  // Heredoc skipped-body merge (step-1 compat): the splitter still owns the
+  // active-body walk until step 3. Merge by index only when the partition
+  // happens to align; otherwise trust the AST alone.
+  let facts: SegmentFacts[] = ast;
+  try {
+    const { skippedBodies: heredocSubstitutions, heredocExpansionRisk } =
+      splitShellText(command);
+    if (heredocSubstitutions.length === ast.length || heredocExpansionRisk.length === ast.length) {
+      facts = ast.map((frontEnd, index) => {
+        const skipped = heredocSubstitutions[index];
+        const risk = heredocExpansionRisk[index] === true;
+        const withRisk =
+          risk && !frontEnd.heredocExpansionRisk
+            ? { ...frontEnd, heredocExpansionRisk: true }
+            : frontEnd;
+        if (skipped === undefined || skipped.length === 0) return withRisk;
+        return {
+          ...withRisk,
+          bodies: [...new Set([...withRisk.bodies, ...skipped])],
+        };
+      });
+    }
+  } catch {
+    facts = ast;
+  }
   const segments = facts.map((fact) => {
     // `foldSegment` is the whole verdict, and it is the same call on both paths: the
     // AST can change a fact, never a rule.
@@ -1107,12 +1049,22 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
     const shellBody = commandIndex >= 0 ? segment.args[commandIndex + 1] : undefined;
     if (shellBody !== undefined && shellBody !== "")
       results.push(...expandBody(shellBody, "shell_body"));
-    // Substitution bodies go unexpanded only below the nesting bound: the
-    // words there still set every boolean on their own segment's scan, so the
-    // command still fails closed; just the extra inspection stops.
+    // Substitution bodies go unexpanded only below the nesting bound. Past it
+    // the bodies are uninspected argv hiding behind depth the static layer
+    // cannot see through, so the host segment fails closed with the bound as
+    // its cause: a 12-deep nest hides `rm` exactly as well as an unreduced
+    // wrapper hides its tail. (The old comment claimed the scan's own flags
+    // fail this closed; since cut 3 they do not — an unproven flag alone is
+    // Skip — so the bound names itself.)
     if (depth < MAX_SUBSTITUTION_NESTING) {
       for (const body of facts[index]?.bodies ?? []) {
         results.push(...expandBody(body, "substitution"));
+      }
+    } else if ((facts[index]?.bodies.length ?? 0) > 0) {
+      const host = segments[index];
+      if (host) {
+        host.decomposable = false;
+        host.unprovenCause = "expansion_bound";
       }
     }
     return results;

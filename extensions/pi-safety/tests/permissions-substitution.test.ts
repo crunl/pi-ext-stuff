@@ -449,10 +449,13 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // heredocs whose bodies bash never re-reads: no `heredoc_unproven` anymore,
     // so they decompose to `Skip`. `shapes[19]`, `shapes[23]` and `shapes[25]`
     // are bare delimiters whose (possibly unterminated) bodies carry no `$` or
-    // backtick, so no expansion risk and no review either. `shapes[21]` and
-    // `shapes[22]` are NeedsApproval *without* `dangerousSubstitution` because the
-    // `$(` there is shredded by an operator or sits in a comment, so it is not
-    // `nestedFrom === "substitution"` (`risk.ts`) — that asymmetry is intended.
+    // backtick, so no expansion risk and no review either. `shapes[22]` is
+    // NeedsApproval *without* `dangerousSubstitution` because the `rm` there
+    // is its own line behind a comment, not inside a substitution
+    // (`risk.ts`) — that asymmetry is intended. `shapes[21]` used to share
+    // that shape (the splitter shredded its `$(` on the parens), but the
+    // grammar reads parens, so the same review now carries the substitution
+    // evidence — same verdict, better reason.
     // `shapes[24]` (`cat <<`) is an incomplete heredoc: every segment is
     // `lex_incomplete`, so the codex-aligned B1 fallback (`risk.ts` tier 4a)
     // judges the raw words — first word `cat`, non-dangerous — → `Skip`. codex
@@ -483,7 +486,7 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
       { disposition: "NeedsApproval", dangerousSubstitution: forced },
       { disposition: "Skip" },
       { disposition: "Skip" },
-      { disposition: "NeedsApproval" },
+      { disposition: "NeedsApproval", dangerousSubstitution: forcedFile },
       { disposition: "NeedsApproval" },
       { disposition: "Skip" },
       { disposition: "Skip" },
@@ -516,10 +519,16 @@ describe("skipped heredoc substitutions stay index-aligned with the splitter", (
     // region that ran to end of input, `lex_incomplete` swallowed the next
     // line as string data, and a forced deletion bash really runs escaped
     // tier 1. Measured in bash: rc=0, victim deleted, stderr empty.
+    //
+    // Sole-interpreter update: the second shape's `rm` sits inside a trailing
+    // comment on the SAME line, which bash never runs (measured: victim
+    // survives). The splitter shredded it into a segment on the parens — a
+    // false-positive review. The grammar reads the comment whole, so it is
+    // Skip now; the first shape (deletion on the NEXT line) still reviews.
     const apostrophe = String.fromCharCode(39);
     const shapes: readonly [string, { disposition: string; cause?: string }][] = [
       [`git push # don${apostrophe}t\n${forcedFile}`, { disposition: "NeedsApproval" }],
-      [`echo hi # ${apostrophe}$(${forcedFile})`, { disposition: "NeedsApproval" }],
+      [`echo hi # ${apostrophe}$(${forcedFile})`, { disposition: "Skip" }],
     ];
     for (const [command, expected] of shapes) {
       expect(

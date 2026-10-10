@@ -33,8 +33,8 @@ const envPublishingBuiltins = new Set(["export", "declare", "local", "readonly",
 /** Executable words that hide the program bash will run. A leading `=`
  * is zsh filename expansion (`=rm` → `/bin/rm`); under bash it never
  * executes, but the spelling names a different shell's expansion, so it
- * reviews too. Bare `[` is the test builtin and an empty word runs
- * nothing, so neither counts as hiding. */
+ * reviews too. Bare `[` and `[[` are the test builtins and an empty word runs
+ * nothing, so none counts as hiding. */
 const hiddenExecutablePattern = /[$`{}*?[]/;
 
 /**
@@ -306,7 +306,24 @@ export function classifyRiskWithCause(
       (segment) =>
         segment.executable !== "" &&
         segment.executable !== "[" &&
+        segment.executable !== "[[" &&
         (segment.executable.startsWith("=") || hiddenExecutablePattern.test(segment.executable)),
+    )
+  ) {
+    return { disposition: "NeedsApproval" };
+  }
+  // Sole-interpreter fail-closed (step 1): parser unavailable or syntax outside
+  // the AST model reviews. WASM missing = blind = review, per product decision.
+  // Compound structures land here until step 2 expands them recursively.
+  // `expansion_bound` is the same idea at depth: bodies past the nesting bound
+  // are uninspected argv, so the host reviews rather than the unseen tail
+  // deciding nothing.
+  if (
+    segments.some(
+      (segment) =>
+        segment.unprovenCause === "ast_unavailable" ||
+        segment.unprovenCause === "ast_unmodelled" ||
+        segment.unprovenCause === "expansion_bound",
     )
   ) {
     return { disposition: "NeedsApproval" };

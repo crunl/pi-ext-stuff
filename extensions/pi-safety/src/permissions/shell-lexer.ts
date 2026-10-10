@@ -549,6 +549,68 @@ function heredocBodySpan(
 }
 
 /**
+ * The outermost live substitution bodies of a text: one body per substitution
+ * site at depth 0, in source order, capped. Inner levels are NOT reported —
+ * the expander parses each body recursively, so eager nesting multiplies work
+ * exponentially (20-deep `echo "$($(…))"` produced 250k segments). Siblings
+ * are all kept; depth is the recursion's job, not the list's.
+ *
+ * Quoting mirrors `scanShellSyntax`: single-quoted and escaped sites are
+ * inert, double-quoted sites are live. Backtick bodies do not nest.
+ */
+export function outermostSubstitutionBodies(source: string): string[] {
+  const bodies: string[] = [];
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  // Skip the inside of a substitution once reported: the recursion owns it.
+  let skipUntil = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    if (index < skipUntil) continue;
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    // A single quote is literal inside a double-quoted string (mirrors
+    // `scanShellSyntax`): opening a region here would swallow the closing
+    // `"`, hiding every substitution behind it.
+    if (character === "'" && quote === undefined) {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      quote = quote === '"' ? undefined : '"';
+      continue;
+    }
+    // Only the single-quoted region above is inert (it continued); a `"`
+    // region falls through: double-quoted substitutions run.
+    if (character === "`") {
+      const body = matchBacktickSubstitution(source, index + 1);
+      if (body !== undefined && bodies.length < MAX_LIVE_SUBSTITUTIONS) bodies.push(body);
+      // A backtick body never nests, but its text is consumed either way: a
+      // second opener inside would pair with the wrong closer.
+      const close = source.indexOf("`", index + 1);
+      if (close !== -1) skipUntil = close + 1;
+    } else if (character === "$" && source[index + 1] === "(") {
+      const body = matchParenSubstitution(source, index + 2);
+      if (body !== undefined) {
+        if (bodies.length < MAX_LIVE_SUBSTITUTIONS) bodies.push(body);
+        skipUntil = index + 2 + body.length + 1;
+      }
+    }
+  }
+  return bodies;
+}
+
+/**
  * Match a `$(…)` body from just after the opening paren: parentheses count
  * only when unquoted, quotes and escapes track the inner shell's own rules.
  * Returns undefined when the paren never closes — fail closed to "no body",

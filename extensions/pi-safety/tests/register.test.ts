@@ -24,14 +24,9 @@ import {
   activateTreeSitterShellParser,
   resetTreeSitterShellActivation,
   resetTreeSitterShellBackend,
+  simulateTreeSitterShellFailure,
   TREE_SITTER_PARSER_ENV_FLAG,
 } from "../src/tree-sitter/shell-backend.ts";
-
-/** Grammar read state shared with the node:fs mock below. */
-const wasmReads = vi.hoisted(() => ({
-  failGrammarReads: false,
-  paths: [] as Array<string | URL | Buffer>,
-}));
 
 /**
  * Actions handed to the facade's Engine submit seam. Yolo Bash must not
@@ -53,22 +48,10 @@ vi.mock("../src/pi-safety.ts", async (importOriginal) => {
   return actual;
 });
 
-// The Shell AST cases below need the grammar read to fail on demand
-// (the once-notification case). Every other read passes through
-// untouched, so the rest of this file sees the real filesystem.
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    readFileSync: ((path: string | URL | Buffer, options?: unknown) => {
-      wasmReads.paths.push(path);
-      if (wasmReads.failGrammarReads && String(path).includes("tree-sitter-bash")) {
-        throw new Error("simulated corrupt grammar");
-      }
-      return actual.readFileSync(path, options as never);
-    }) as typeof actual.readFileSync,
-  };
-});
+// (No `node:fs` mock: the shared suite setup performs the real grammar reads
+// before this file's mocks would install, so an I/O failure here would be
+// order-dependent. The once-notification case fails the bridge through the
+// deterministic `simulateTreeSitterShellFailure` seam instead.)
 
 type RiskOverride = (
   tool: string,
@@ -4922,8 +4905,6 @@ describe("Shell AST parser prewarm and ready barrier", () => {
     resetTreeSitterShellActivation();
     resetTreeSitterShellBackend();
     delete process.env[TREE_SITTER_PARSER_ENV_FLAG];
-    wasmReads.failGrammarReads = false;
-    wasmReads.paths.length = 0;
   });
 
   it("prewarms the grammar at session_start so the first command is covered", async () => {
@@ -4953,15 +4934,19 @@ describe("Shell AST parser prewarm and ready barrier", () => {
   });
 
   it("reports a failed activation exactly once across prewarm and barrier", async () => {
-    process.env[TREE_SITTER_PARSER_ENV_FLAG] = "1";
-    wasmReads.failGrammarReads = true;
+    // Reset the suite-wide installed parser first: the shared setup installs
+    // it for every file, so without this the activation below would resolve
+    // from the already-ready bridge. The failure comes through the
+    // deterministic seam rather than the `node:fs` mock: the shared setup
+    // already performed the real reads before this file's mocks installed.
+    installShellAstParser(undefined);
+    resetTreeSitterShellActivation();
+    resetTreeSitterShellBackend();
+    simulateTreeSitterShellFailure("simulated corrupt grammar");
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
-    // Settle the memoized activation the prewarm started: the grammar
-    // read fails through the node:fs mock above.
-    await expect(
-      activateTreeSitterShellParser({ [TREE_SITTER_PARSER_ENV_FLAG]: "1" }),
-    ).resolves.toBe(false);
+    // The prewarm already settled broken; the barrier reuses the memo.
+    await expect(activateTreeSitterShellParser()).resolves.toBe(false);
     await startAgent(app);
     await executeBash(app, "failed-bash", "printf failed");
     const failures = app.notify.mock.calls.filter(([message]) =>
@@ -4971,12 +4956,16 @@ describe("Shell AST parser prewarm and ready barrier", () => {
     expect(shellAstParserInstalled()).toBe(false);
   });
 
-  it("reads no grammar while the flag is off", async () => {
+  it("reads the grammar eagerly: the sole interpreter is always on", async () => {
+    // Flag retired (step 1): activation no longer consults the environment.
+    // Reset the suite-wide install first so this test observes its own read.
+    installShellAstParser(undefined);
+    resetTreeSitterShellActivation();
+    resetTreeSitterShellBackend();
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
     await startAgent(app);
-    await executeBash(app, "flag-off-bash", "printf off");
-    expect(shellAstParserInstalled()).toBe(false);
-    expect(wasmReads.paths.filter((path) => String(path).includes("tree-sitter-bash"))).toEqual([]);
+    await executeBash(app, "always-on-bash", "printf on");
+    expect(shellAstParserInstalled()).toBe(true);
   });
 });

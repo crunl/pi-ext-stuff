@@ -54,7 +54,10 @@ export type SegmentUnprovenCause =
   | "command_word_unproven"
   | "program_reinterpreted"
   | "substitution_unproven"
-  | "heredoc_unproven";
+  | "heredoc_unproven"
+  | "ast_unavailable"
+  | "ast_unmodelled"
+  | "expansion_bound";
 
 export interface CommandSegment {
   source: string;

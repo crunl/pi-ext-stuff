@@ -1,50 +1,17 @@
 /**
- * Activation failure path: the host sets `PI_SAFETY_TREE_SITTER_PARSER=1`
- * but the grammar cannot be read. The bridge must report the failure,
- * install nothing, and leave every verdict on the lexer — the shipped
- * path — rather than blocking a request or answering with a half-loaded
- * front end.
+ * Activation failure path: the grammar cannot be read (missing package,
+ * corrupt WASM, mid-session trap). The bridge reports the failure, installs
+ * nothing, and every bash verdict fails closed to review (`ast_unavailable`)
+ * rather than blocking the request or answering blind.
  *
- * The `node:fs` mock throws only for the grammar's `.wasm`; everything
- * else (including `web-tree-sitter`'s own module load) reads through to
- * the real filesystem, so the failure exercised here is exactly the one
- * a corrupt or missing grammar produces.
+ * The failure is driven through the deterministic
+ * `simulateTreeSitterShellFailure` seam: the `node:fs`/`node:module` mocks the
+ * previous revision used cannot intercept reads the shared suite setup
+ * already performed, which made the failure order-dependent. What matters
+ * here is the broken STATE (reported reason, no install, fail-closed
+ * verdicts), not which I/O call produced it.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    readFileSync: ((path: string | URL | Buffer, options?: unknown) => {
-      if (String(path).includes("tree-sitter-bash")) {
-        throw new Error("simulated corrupt grammar");
-      }
-      return actual.readFileSync(path, options as never);
-    }) as typeof actual.readFileSync,
-  };
-});
-
-/** Set by the resolution-failure case below; read by the node:module mock. */
-const resolutionFailure = vi.hoisted(() => ({ fail: false }));
-
-vi.mock("node:module", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:module")>();
-  return {
-    ...actual,
-    createRequire: ((specifier: string | URL) => {
-      const require = actual.createRequire(specifier);
-      return {
-        resolve: ((id: string, options?: unknown) => {
-          if (resolutionFailure.fail && id === "tree-sitter-bash/package.json") {
-            throw new Error("Cannot find module 'tree-sitter-bash/package.json'");
-          }
-          return require.resolve(id, options as never);
-        }) as typeof require.resolve,
-      };
-    }) as typeof actual.createRequire,
-  };
-});
+import { afterEach, describe, expect, it } from "vitest";
 
 import { classifyRiskWithCause, normalizeToolCall } from "../src/permissions/risk.ts";
 import { installShellAstParser, shellAstParserInstalled } from "../src/permissions/shell-ast.ts";
@@ -53,60 +20,68 @@ import {
   activateTreeSitterShellParser,
   resetTreeSitterShellActivation,
   resetTreeSitterShellBackend,
-  TREE_SITTER_PARSER_ENV_FLAG,
+  shellAstParser,
+  simulateTreeSitterShellFailure,
   treeSitterShellFailure,
 } from "../src/tree-sitter/shell-backend.ts";
 
-describe("tree-sitter activation failure fails closed to the lexer", () => {
+describe("tree-sitter activation failure fails closed to review", () => {
   afterEach(() => {
     installShellAstParser(undefined);
     resetTreeSitterShellActivation();
     resetTreeSitterShellBackend();
-    resolutionFailure.fail = false;
   });
 
   it("reports the reason, installs nothing, and never throws", async () => {
-    await expect(
-      activateTreeSitterShellParser({ [TREE_SITTER_PARSER_ENV_FLAG]: "1" }),
-    ).resolves.toBe(false);
+    // Reset the suite-wide install first so this observes its own state.
+    installShellAstParser(undefined);
+    resetTreeSitterShellActivation();
+    resetTreeSitterShellBackend();
+    simulateTreeSitterShellFailure("simulated corrupt grammar");
+    await expect(activateTreeSitterShellParser()).resolves.toBe(false);
     expect(shellAstParserInstalled()).toBe(false);
+    expect(shellAstParser()).toBeUndefined();
     const failure = treeSitterShellFailure();
     expect(failure).toBeDefined();
     expect(failure?.message).toBe("simulated corrupt grammar");
   });
 
-  it("leaves the shipped lexer in charge of every verdict", async () => {
-    await activateTreeSitterShellParser({
-      [TREE_SITTER_PARSER_ENV_FLAG]: "1",
-    });
-    // A plain command stays decomposable, and the shapes the AST front end
-    // tightens stay on the lexer's own verdicts: the broken bridge leaks
-    // no partial front-end state into the fold.
-    const plain = parseCommandSegments("rm -f /tmp/work");
-    expect(plain[0]?.decomposable).toBe(true);
-    expect(plain[0]?.unprovenCause).toBeUndefined();
-    const truncated = parseCommandSegments("rm -f /tmp/work &&");
-    expect(truncated[0]?.decomposable).toBe(true);
-    expect(truncated[0]?.unprovenCause).toBeUndefined();
-    // The forced-deletion review is untouched: it does not depend
-    // on the front end.
+  it("reviews every bash command while the bridge is broken", async () => {
+    installShellAstParser(undefined);
+    resetTreeSitterShellActivation();
+    resetTreeSitterShellBackend();
+    simulateTreeSitterShellFailure("simulated corrupt grammar");
+    await activateTreeSitterShellParser();
+    // Plain commands review: with no parser the layer is blind, and blind
+    // is a review, per product decision — never a silent Skip.
+    for (const command of ["pwd", "ls -la", "rm -f /tmp/work", "rm -f /tmp/work &&"]) {
+      const segments = parseCommandSegments(command);
+      expect(segments.some((segment) => segment.unprovenCause === "ast_unavailable"), command).toBe(
+        true,
+      );
+      const review = classifyRiskWithCause(normalizeToolCall("bash", { command }, "/work/repo"));
+      expect(review.disposition, command).toBe("NeedsApproval");
+    }
+    // The forced-deletion review is unchanged in disposition (it was already
+    // a review), now carried by the blind cause instead of the danger proof.
     const request = normalizeToolCall("bash", { command: "rm -rf /" }, "/work/repo");
-    const review = classifyRiskWithCause(request);
-    expect(review.disposition).toBe("NeedsApproval");
+    expect(classifyRiskWithCause(request).disposition).toBe("NeedsApproval");
   });
 
-  it("fails closed when the grammar package root cannot be resolved", async () => {
-    resolutionFailure.fail = true;
-    await expect(
-      activateTreeSitterShellParser({ [TREE_SITTER_PARSER_ENV_FLAG]: "1" }),
-    ).resolves.toBe(false);
-    expect(shellAstParserInstalled()).toBe(false);
-    const failure = treeSitterShellFailure();
-    expect(failure).toBeDefined();
-    expect(failure?.message).toContain("could not be resolved");
-    // The lexer stays in charge of every verdict, synchronously.
-    const truncated = parseCommandSegments("rm -f /tmp/x &&");
-    expect(truncated[0]?.decomposable).toBe(true);
-    expect(truncated[0]?.unprovenCause).toBeUndefined();
+  it("a parser that throws mid-session fails that command closed, not the suite", async () => {
+    // The pure layer's slot still holds the object it was given when the
+    // bridge drops it, so a throwing parse must fall back per command.
+    installShellAstParser({
+      parse(): never {
+        throw new Error("wasm trap");
+      },
+    });
+    expect(() => parseCommandSegments("pwd")).not.toThrow();
+    const segments = parseCommandSegments("pwd");
+    expect(segments.some((segment) => segment.unprovenCause === "ast_unmodelled")).toBe(true);
+    const review = classifyRiskWithCause(
+      normalizeToolCall("bash", { command: "pwd" }, "/work/repo"),
+    );
+    expect(review.disposition).toBe("NeedsApproval");
   });
 });

@@ -26,7 +26,13 @@
  *    returns `undefined` and the caller runs the lexer, which is the shipped
  *    behaviour. An ERROR node is different: it is modelled, and it fails closed.
  */
-import { scanShellSyntax, shellWords, splitShellSegments } from "./shell-lexer.ts";
+import {
+  outermostSubstitutionBodies,
+  scanShellSyntax,
+  shellWords,
+  splitShellSegments,
+  splitShellText,
+} from "./shell-lexer.ts";
 
 /**
  * The frozen read-only view of a tree-sitter node that this adapter needs.
@@ -105,17 +111,52 @@ export interface AstAnalysis {
   hadError: boolean;
 }
 
-/** Statement node types that become segments. Anything else sends the command to the lexer. */
-const STATEMENT_NODES = new Set(["command", "variable_assignment", "redirected_statement"]);
+/** Statement node types that become segments. Anything else abstains (fail-closed). */
+const STATEMENT_NODES = new Set([
+  "command",
+  "variable_assignment",
+  "redirected_statement",
+  "declaration_command",
+  "test_command",
+]);
+
+/**
+ * Composition nodes whose command children run: descending is equivalent to
+ * sequencing, so every inner command becomes its own segment (codex-style AST
+ * descent). Non-command leaves (loop variables, test expressions, case words)
+ * are skipped, never abstained on: they name no program.
+ */
+const COMPOSITION_NODES = new Set([
+  "program",
+  "list",
+  "pipeline",
+  "compound_statement",
+  "subshell",
+  "command_group",
+  "negated_command",
+  "for_statement",
+  "while_statement",
+  "until_statement",
+  "if_statement",
+  "elif_clause",
+  "else_clause",
+  "then_clause",
+  "do_group",
+  "case_statement",
+  "case_item",
+  "function_definition",
+]);
 
 /** Node types that carry argv. A named command child of any other type is outside the model. */
 const ARGV_NODES = new Set([
   "command_name",
   "variable_assignment",
+  "variable_name",
   "word",
   "number",
   "string",
   "raw_string",
+  "ansi_c_string",
   "string_content",
   "concatenation",
   "simple_expansion",
@@ -124,6 +165,10 @@ const ARGV_NODES = new Set([
   "process_substitution",
   "arithmetic_expansion",
   "comment",
+  "test_operator",
+  "unary_expression",
+  "binary_expression",
+  "parenthesized_expression",
 ]);
 
 const REDIRECT_NODES = new Set(["file_redirect", "heredoc_redirect", "herestring_redirect"]);
@@ -224,6 +269,26 @@ export function analyzeShellAst(source: string, parser: ShellAstParser): AstAnal
     const out: AnalysisOutput = { statements: [], errors: [], comments: [] };
     if (!collectStatements(source, root, out)) return undefined;
     const hadError = root.hasError || root.childCount === 0;
+    // A heredoc opener the grammar could not read whole (ERROR inside the
+    // redirect — e.g. a queued `<<B` misparsed as `<` + file redirect) means
+    // the grammar's body queue is untrustworthy: it invents commands from
+    // body data. The character splitter queues heredocs correctly, so this
+    // narrow class keeps its facts; everything else stays on the grammar.
+    // (Step-3 work: a heredoc-aware pass over the AST so this partition can
+    // retire with the lexer.)
+    if (out.statements.some(statementHasBrokenHeredoc)) {
+      return {
+        segments: splitShellText(source).segments.map(lexFallbackFacts),
+        hadError,
+      };
+    }
+    // Heredoc bodies are data, never commands. Error recovery can materialize
+    // body lines (or delimiter fragments) as statements — drop any statement
+    // starting inside a body span. A non-bare delimiter line (`EOF && git
+    // push`) never closes in real bash: the body runs to end of source, so
+    // everything after the opener is data and is dropped, and the opener is
+    // incomplete by construction.
+    dropHeredocBodyStatements(source, out);
     const ordered: OrderedSegment[] = [];
     for (const statement of out.statements) {
       const segment = buildSegment(source, statement);
@@ -251,13 +316,11 @@ export function analyzeShellAst(source: string, parser: ShellAstParser): AstAnal
 /**
  * Walk the structural nodes and collect statements.
  *
- * `program`, `list` and `pipeline` are composition only: `;`, `&&`, `||` and `|`
- * break the text into the same segments the character splitter produces, so descending
- * is equivalent to splitting - except with correct quoting, since a `|` inside `'…'`
- * never became a child operator. Every control-flow node stays unsupported, and a
- * redirect whose statement is anything but a `command` or `variable_assignment` is
- * refused by `redirectedStatement`; `STATEMENT_NODES` has no pipeline form either, which
- * is what keeps a pipeline behind a redirect out of the model.
+ * Composition nodes (`;`, `&&`, `||`, `|`, braces, subshells, control flow)
+ * descend: every inner command becomes its own segment. Non-command leaves
+ * (loop variables, test operands, case words) are skipped, never abstained
+ * on. A redirect whose statement is anything but a modelled command form is
+ * refused by `redirectedStatement`.
  */
 function collectStatements(source: string, node: ShellAstNode, out: AnalysisOutput): boolean {
   const { statements, errors, comments } = out;
@@ -265,13 +328,12 @@ function collectStatements(source: string, node: ShellAstNode, out: AnalysisOutp
     errors.push(node);
     return true;
   }
-  if (node.type === "program" || node.type === "list" || node.type === "pipeline") {
+  if (COMPOSITION_NODES.has(node.type)) {
     for (const child of node.children) {
       if (!child.isNamed) continue;
       if (child.type === "comment") {
-        // `echo hi # tail` is one segment to the lexer; `# lead` on its own line is a
-        // segment of nothing but itself. Both are reproduced, so a comment can never
-        // be dropped along with the command text that follows it.
+        // A trailing comment joins the previous statement's span; a leading
+        // one is a segment of nothing but itself.
         const previous = statements[statements.length - 1];
         if (previous && sameLine(source, previous.end, child.startIndex)) {
           previous.comment = child;
@@ -281,12 +343,45 @@ function collectStatements(source: string, node: ShellAstNode, out: AnalysisOutp
         comments.push(child);
         continue;
       }
-      if (!collectStatements(source, child, out)) return false;
+      if (STATEMENT_NODES.has(child.type) || COMPOSITION_NODES.has(child.type)) {
+        if (!collectStatements(source, child, out)) return false;
+        continue;
+      }
+      if (child.isError || child.isMissing) {
+        errors.push(child);
+      }
+      // Otherwise a loop variable, test operand, case word or function name:
+      // no program, skipped by falling off the loop end.
     }
     return true;
   }
   if (!STATEMENT_NODES.has(node.type)) return false;
   if (node.type === "redirected_statement") {
+    // `A && B >out` parses as one redirected statement around a list: the
+    // redirect feeds the last command, so the inner composition becomes its
+    // own segments and the redirect lands on the final one. (`A && B <<EOF`
+    // is shape 31's form.)
+    const inner = node.namedChildren.filter((child) => !REDIRECT_NODES.has(child.type));
+    if (inner.some((child) => COMPOSITION_NODES.has(child.type))) {
+      for (const child of inner) {
+        if (STATEMENT_NODES.has(child.type) || COMPOSITION_NODES.has(child.type)) {
+          if (!collectStatements(source, child, out)) return false;
+          continue;
+        }
+        if (child.isError || child.isMissing) {
+          errors.push(child);
+          continue;
+        }
+        return false;
+      }
+      const last = statements[statements.length - 1];
+      if (!last) return false;
+      last.redirects.push(
+        ...node.namedChildren.filter((child) => REDIRECT_NODES.has(child.type)),
+      );
+      last.end = node.endIndex;
+      return true;
+    }
     const statement = redirectedStatement(node);
     if (!statement) return false;
     statements.push(statement);
@@ -306,6 +401,115 @@ function sameLine(source: string, from: number, to: number): boolean {
   return !source.slice(from, to).includes("\n");
 }
 
+/** Whether a statement's heredoc queue is untrustworthy (grammar error recovery). */
+function statementHasBrokenHeredoc(statement: StatementInfo): boolean {
+  return (
+    statement.command?.hasError === true ||
+    statement.redirects.some(
+      (redirect) => redirect.type === "heredoc_redirect" && redirect.hasError,
+    )
+  );
+}
+
+/**
+ * Splitter facts for one chunk, used only by the broken-heredoc fallback
+ * above: the splitter owns the heredoc body queue, so its chunks are the
+ * argv the shell runs. Identical in shape to what `buildSegment` produces
+ * for a clean statement, minus grammar attribution.
+ */
+function lexFallbackFacts(source: string): SegmentFacts {
+  const lexed = shellWords(source);
+  const syntax = scanShellSyntax(source);
+  return {
+    source,
+    words: lexed.words,
+    lexIncomplete: lexed.error !== undefined || lexed.incomplete !== undefined,
+    hasExecutableSubstitution: syntax.hasExecutableSubstitution,
+    hasActiveRedirect: syntax.hasActiveRedirect,
+    hasHereDocument: syntax.hasHereDocument,
+    heredocExpansionRisk: false,
+    // Outermost only — deeper levels surface through recursion (see above).
+    bodies: outermostSubstitutionBodies(source),
+  };
+}
+
+/**
+ * Drop statements the grammar recovered from heredoc body data, in place.
+ *
+ * Two shapes. A body span (`heredoc_body` through its delimiter line) owns
+ * its lines: any *other* statement starting inside one is data, not code.
+ * And a delimiter line that is not the bare delimiter never closes in real
+ * bash — the body runs to end of source — so every statement after the opener
+ * is data, and the opener is marked by extending its end to end-of-source
+ * (its span then covers the data, and `buildSegment` reads the words from
+ * the grammar's argv, not from the body text).
+ */
+function dropHeredocBodyStatements(source: string, out: AnalysisOutput): void {
+  interface BodySpan {
+    start: number;
+    end: number;
+    owner: StatementInfo;
+    unclosed: boolean;
+  }
+  const spans: BodySpan[] = [];
+  for (const statement of out.statements) {
+    for (const redirect of statement.redirects) {
+      if (redirect.type !== "heredoc_redirect") continue;
+      const body = redirect.namedChildren.find((child) => child.type === "heredoc_body");
+      const end = redirect.namedChildren.find((child) => child.type === "heredoc_end");
+      if (!end) {
+        // No delimiter at all: unclosed, body runs to end of source.
+        const openLine = source.indexOf("\n", redirect.startIndex);
+        spans.push({
+          start: openLine === -1 ? source.length : openLine + 1,
+          end: source.length,
+          owner: statement,
+          unclosed: true,
+        });
+        continue;
+      }
+      const lineStart = source.lastIndexOf("\n", end.startIndex - 1) + 1;
+      let lineEnd = source.indexOf("\n", end.endIndex);
+      lineEnd = lineEnd === -1 ? source.length : lineEnd;
+      const bare = source.slice(lineStart, lineEnd).trim() === end.text.trim();
+      if (!bare) {
+        // Never closes: everything after the opener line is data.
+        const openLine = source.indexOf("\n", redirect.startIndex);
+        spans.push({
+          start: openLine === -1 ? source.length : openLine + 1,
+          end: source.length,
+          owner: statement,
+          unclosed: true,
+        });
+        continue;
+      }
+      const bodyStart = body?.startIndex ?? lineEnd;
+      spans.push({ start: bodyStart, end: lineEnd, owner: statement, unclosed: false });
+    }
+  }
+  if (spans.length === 0) return;
+  out.statements = out.statements.filter((statement) => {
+    for (const span of spans) {
+      if (span.owner === statement) continue;
+      if (statement.start >= span.start && statement.start < span.end) return false;
+      if (span.unclosed && statement.start >= span.start) return false;
+    }
+    return true;
+  });
+  out.comments = out.comments.filter((comment) => {
+    for (const span of spans) {
+      if (comment.startIndex >= span.start && comment.startIndex < span.end) return false;
+      if (span.unclosed && comment.startIndex >= span.start) return false;
+    }
+    return true;
+  });
+  // An unclosed body makes the opener's own text unread whole: it runs to end
+  // of source, so extend the span to cover the data it swallowed.
+  for (const span of spans) {
+    if (span.unclosed) span.owner.end = source.length;
+  }
+}
+
 /** Whether every named child of a command is argv, a redirect, or an error region. */
 function hasModelledArgv(node: ShellAstNode): boolean {
   for (const child of node.children) {
@@ -323,14 +527,9 @@ function redirectChildren(node: ShellAstNode): ShellAstNode[] {
 
 /**
  * A `redirected_statement` is a command with redirects attached as siblings, so the
- * redirects do not name the executable.
- *
- * The span is the whole statement text, redirect operators and targets included, because
- * that is the chunk the character splitter hands the fold: a segment named for less text
- * than its chunk is a segment the caller cannot align, and every redirect in the corpus
- * would abstain. The argv instead comes from {@link redirectWords}, which is where the
- * grammar's own account of the operator is used — the shell writes to the first target
- * and passes the rest along, and `git > push origin` is exactly that.
+ * redirects do not name the executable. A bare redirect (`>out`) has no command:
+ * it truncates/creates a file, which the sandbox owns — modelled as a nameless
+ * statement, exactly like the fold's nameless branch.
  */
 function redirectedStatement(node: ShellAstNode): StatementInfo | undefined {
   let command: ShellAstNode | undefined;
@@ -340,14 +539,18 @@ function redirectedStatement(node: ShellAstNode): StatementInfo | undefined {
       redirects.push(child);
       continue;
     }
-    if (child.type === "command" || child.type === "variable_assignment") {
+    if (
+      child.type === "command" ||
+      child.type === "variable_assignment" ||
+      child.type === "declaration_command" ||
+      child.type === "test_command"
+    ) {
       if (command || !hasModelledArgv(child)) return undefined;
       command = child;
       continue;
     }
     return undefined;
   }
-  if (!command) return undefined;
   return { command, redirects, start: node.startIndex, end: node.endIndex };
 }
 
@@ -430,10 +633,35 @@ function buildSegment(source: string, statement: StatementInfo): SegmentFacts | 
   const words: string[] = [];
   const command = statement.command;
   if (command) {
-    for (const child of command.children) {
-      if (!child.isNamed || child.isError || child.isMissing) continue;
-      if (REDIRECT_NODES.has(child.type) || child.type === "comment") continue;
-      words.push(...dequote(child.text));
+    if (
+      command.type === "declaration_command" ||
+      command.type === "test_command" ||
+      command.type === "variable_assignment"
+    ) {
+      // Anonymous nodes the per-child walk would shred: the declaration
+      // builtin (`export`), the test brackets, and the `=` inside an
+      // assignment (`FOO=1` split into `FOO` + `1` names a program `foo`).
+      // The statement text here is the command alone (redirects are siblings),
+      // so the lexer's own word split names the argv exactly.
+      words.push(...dequote(command.text));
+    } else if (
+      command.type === "command" &&
+      !command.children.some(
+        (child) => child.isNamed && REDIRECT_NODES.has(child.type),
+      )
+    ) {
+      // Whole-text split so a line continuation (`r\` + newline + `m` = `rm`,
+      // which the shell joins before word-splitting) is not shredded at the
+      // grammar's child boundary into `r` + `m` — a missed forced deletion.
+      // Redirect-bearing commands keep the per-child walk so operators never
+      // leak into argv.
+      words.push(...dequote(command.text));
+    } else {
+      for (const child of command.children) {
+        if (!child.isNamed || child.isError || child.isMissing) continue;
+        if (REDIRECT_NODES.has(child.type) || child.type === "comment") continue;
+        words.push(...dequote(child.text));
+      }
     }
   }
   for (const redirect of statement.redirects) words.push(...redirectWords(redirect));
@@ -442,6 +670,12 @@ function buildSegment(source: string, statement: StatementInfo): SegmentFacts | 
   const lexed = shellWords(text);
   const baseline = scanShellSyntax(text);
   const substitutions = collectSubstitutions(statement);
+  // Active heredoc bodies run their substitutions (the shell re-reads the
+  // body), so their live bodies join the expansion set directly from the
+  // grammar — no splitter merge needed, at any nesting depth or queue
+  // position. Inert (quoted/escaped-delimiter) bodies are literal text.
+  const heredoc = collectHeredocBodies(statement);
+  const bodies = [...new Set([...substitutions.bodies, ...heredoc.bodies])];
   return {
     source: text,
     words,
@@ -452,12 +686,56 @@ function buildSegment(source: string, statement: StatementInfo): SegmentFacts | 
     lexIncomplete:
       lexed.error !== undefined || lexed.incomplete !== undefined || statementHasError(statement),
     hasExecutableSubstitution:
-      baseline.hasExecutableSubstitution || substitutions.substitution || liveAssignments(command),
+      baseline.hasExecutableSubstitution ||
+      substitutions.substitution ||
+      heredoc.substitution ||
+      liveAssignments(command),
     hasActiveRedirect: baseline.hasActiveRedirect || statement.redirects.length > 0,
     hasHereDocument: baseline.hasHereDocument || hereDocuments(statement.redirects),
-    heredocExpansionRisk: false,
-    bodies: substitutions.bodies,
+    heredocExpansionRisk: heredoc.expansionRisk,
+    bodies,
   };
+}
+
+/**
+ * The live substitution bodies inside a statement's own active heredoc
+ * bodies, plus whether any active body carries expansion characters.
+ *
+ * Mirrors the splitter's active/inert rule on the grammar's nodes: a quoted
+ * or escaped delimiter (`<<'X'`, `<<"X"`, `<<\X`) makes the body literal;
+ * a bare delimiter re-reads it. `heredoc_start` text carries the quotes, so
+ * the first character decides — the same shapes `heredocDelimiterAt`
+ * distinguishes, read off the parse instead of re-derived from text.
+ */
+function collectHeredocBodies(statement: StatementInfo): {
+  substitution: boolean;
+  expansionRisk: boolean;
+  bodies: string[];
+} {
+  let substitution = false;
+  let expansionRisk = false;
+  const bodies: string[] = [];
+  for (const redirect of statement.redirects) {
+    if (redirect.type !== "heredoc_redirect") continue;
+    const start = redirect.namedChildren.find((child) => child.type === "heredoc_start");
+    const body = redirect.namedChildren.find((child) => child.type === "heredoc_body");
+    if (!body) continue;
+    const delimiter = start?.text ?? "";
+    if (delimiter.startsWith("'") || delimiter.startsWith('"') || delimiter.startsWith("\\")) {
+      continue;
+    }
+    if (/[$`]/.test(body.text)) {
+      substitution = true;
+      expansionRisk = true;
+      // Outermost sites only (see `outermostSubstitutionBodies`): deeper
+      // levels surface through the expander's recursion.
+      for (const live of outermostSubstitutionBodies(body.text)) {
+        if (bodies.length >= MAX_SUBSTITUTION_BODIES) break;
+        bodies.push(live);
+      }
+    }
+  }
+  return { substitution, expansionRisk, bodies };
 }
 
 /**
@@ -496,6 +774,12 @@ function dequote(chunk: string): string[] {
  * descriptor rather than a file or an argument.
  */
 function redirectWords(redirect: ShellAstNode): string[] {
+  // Heredoc bodies are the command's input data, never argv: `cat <<EOF\nrm
+  // -rf /\nEOF` runs `cat`, and the body must not leak into the word list.
+  // (The old slice(1) kept body/end words — a false-positive forced deletion
+  // on every heredoc whose body named `rm`.)
+  if (redirect.type === "heredoc_redirect" || redirect.type === "herestring_redirect")
+    return [];
   const operator = redirectOperator(redirect);
   if (operator && DESCRIPTOR_REDIRECTS.has(operator)) return [];
   const targets = redirect.namedChildren.filter(
@@ -547,7 +831,14 @@ interface SubstitutionScan {
 function collectSubstitutions(statement: StatementInfo): SubstitutionScan {
   const nodes: ShellAstNode[] = [];
   if (statement.command) nodes.push(statement.command);
-  nodes.push(...statement.redirects);
+  // An inert heredoc body (quoted/escaped delimiter) is literal text the shell
+  // never re-reads: scanning it reports a `$` the shell never expands — the
+  // false-positive review shape 31 pins (`<<'EOF'` + `$(rm…)` must stay Skip).
+  // Active bodies are owned by `collectHeredocBodies`, not by this walk.
+  for (const redirect of statement.redirects) {
+    if (redirect.type === "heredoc_redirect") continue;
+    nodes.push(redirect);
+  }
   if (statement.comment) nodes.push(statement.comment);
   let substitution = false;
   const bodies: string[] = [];
@@ -580,14 +871,14 @@ function scanExpansions(node: ShellAstNode): ExpansionScan {
     return { literal: hasLiveExpansionCharacter(node.text), expansions: [] };
   }
   if (node.type === "command_substitution" || node.type === "process_substitution") {
+    // Outermost only: the inner text is parsed recursively by the expander,
+    // which surfaces deeper levels. Eagerly nesting here multiplied work
+    // exponentially (20-deep produced 250k segments); siblings are unaffected
+    // because each site reports its own body through its own parent.
     const inner = substitutionBody(node);
-    const nested = node.children.map(scanExpansions);
     return {
       literal: true,
-      expansions: [
-        ...(inner === undefined ? [] : [inner]),
-        ...nested.flatMap((scan) => scan.expansions),
-      ],
+      expansions: inner === undefined ? [] : [inner],
     };
   }
   if (EXPANSION_NODES.has(node.type)) {

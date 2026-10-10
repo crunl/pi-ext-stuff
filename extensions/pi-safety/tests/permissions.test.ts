@@ -476,7 +476,10 @@ describe("narrow static risk contract", () => {
     ["cat *.md", "Skip"],
     ["cat {README,LICENSE}", "Skip"],
     ["cat #comment", "Skip"],
-    ["cat (README.md)", "Skip"],
+    // A subshell in argument position is a bash syntax error (`bash: syntax
+    // error near unexpected token `('`), so the grammar cannot name an argv
+    // and the command fails closed to review — not a `cat` of a file.
+    ["cat (README.md)", "NeedsApproval"],
     ["cat ~/README.md", "Skip"],
     ["cat !README.md", "Skip"],
     ["cat ?README.md", "Skip"],
@@ -515,8 +518,11 @@ describe("narrow static risk contract", () => {
     // against the verb table and `install` was never seen.
     ["npm --prefix /tmp install lodash", "Skip"],
     ["npm install lodash", "Skip"],
-    // `[` is the one glob metacharacter that is also a real builtin.
+    // `[`/`[[` are the test builtins (the one glob metacharacters that are
+    // also real builtins), so neither counts as a hidden executable.
     ["[ -f README.md ]", "Skip"],
+    ["[[ -f README.md ]]", "Skip"],
+    ["[[ $x == 1 ]]", "Skip"],
     // zsh expands a leading `=` to the full path of the command, so `=rm` is
     // rm. Verified in a real zsh.
     ["zsh -c '=rm -f /tmp/x'", "NeedsApproval"],
@@ -768,7 +774,10 @@ describe("cd normalization admission lists", () => {
 describe("segment unproven cause", () => {
   it.each([
     ['echo "unterminated', "lex_incomplete"],
-    ["{ ls; }", "lex_incomplete"],
+    // Sole-interpreter: brace groups are transparent now (the grammar descends
+    // into `compound_statement`), so `{ ls; }` is just `ls` — see the
+    // compound-transparency test below. The mixed heredoc queue is a grammar
+    // error-recovery shape, so its cause is the error, not the heredoc flag.
     ["su -c ls", "wrapper_unreduced"],
     ["env -C /tmp ls", "wrapper_unreduced"],
     ["$PROG ls", "command_word_unproven"],
@@ -779,6 +788,32 @@ describe("segment unproven cause", () => {
   ] as const)("names the failed clause of %s", (command, cause) => {
     const segments = parseCommandSegments(command);
     expect(segments.some((segment) => segment.unprovenCause === cause)).toBe(true);
+  });
+
+  it("reads brace groups and subshells as the commands inside them", () => {
+    // Step-2 expansion: control flow and grouping are descended, not abstained.
+    for (const command of [
+      "{ ls; }",
+      "(ls)",
+      "for i in 1; do echo $i; done",
+      "if true; then ls; fi",
+      "! ls",
+    ]) {
+      const segments = parseCommandSegments(command);
+      expect(
+        segments.some((segment) => segment.executable === "ls" || segment.executable === "echo"),
+        command,
+      ).toBe(true);
+      expect(
+        segments.some((segment) => segment.unprovenCause === "ast_unmodelled"),
+        command,
+      ).toBe(false);
+    }
+    // And the dangerous body inside is still a review.
+    expect(classifyRisk(request("bash", "{ rm -rf /tmp/x; }"))).toBe("NeedsApproval");
+    expect(classifyRisk(request("bash", "if true; then rm -rf /tmp/x; fi"))).toBe(
+      "NeedsApproval",
+    );
   });
 
   it("keeps the fold and the cause one fact", () => {
