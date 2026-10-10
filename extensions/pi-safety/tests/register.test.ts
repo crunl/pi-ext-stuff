@@ -850,7 +850,7 @@ describe("Permission mode registration", () => {
   // mode. A mid-turn shift+tab flips desired to yolo but enforcement stays
   // auto until the step boundary — the footer and badge must keep reporting
   // the enforced mode, or yolo→auto would claim protection that isn't live.
-  it("shows the applied mode, not the desired mode, during a mid-turn cycle", async () => {
+  it("shows the desired mode with a pending marker during a mid-turn cycle", async () => {
     const app = await makeHarness();
     await startSession(app);
     await startAgent(app);
@@ -858,13 +858,17 @@ describe("Permission mode registration", () => {
     if (!shortcut) throw new Error("missing shift+tab shortcut");
     await shortcut.handler(app.context); // auto -> yolo desired, applied still auto
 
-    expect(app.setStatus).toHaveBeenLastCalledWith("pi-safety", "Approve for me");
+    // Display leads with intent; enforcement stays truthful: the label names
+    // the desired mode with a pending marker, while the event's `mode` is
+    // still the applied one.
+    expect(app.setStatus).toHaveBeenLastCalledWith("pi-safety", "Bypass permissions (pending)");
     const modeEvents = app.emit.mock.calls.filter(([name]) => name === "pi-safety:mode") as [
       string,
-      { mode: string },
+      { mode: string; pending?: string },
     ][];
     expect(modeEvents.length).toBeGreaterThan(0);
     expect(modeEvents.at(-1)?.[1].mode).toBe("auto");
+    expect(modeEvents.at(-1)?.[1].pending).toBe("yolo");
   });
 
   it("publishes the new mode once the step boundary applies it", async () => {
@@ -874,14 +878,15 @@ describe("Permission mode registration", () => {
     const shortcut = app.shortcuts.get("shift+tab");
     if (!shortcut) throw new Error("missing shift+tab shortcut");
     await shortcut.handler(app.context); // desired yolo, applied auto
-    await startTurn(app, 1); // step boundary applies yolo
+    await startTurn(app, 1); // step boundary applies yolo, pending marker clears
 
     expect(app.setStatus).toHaveBeenLastCalledWith("pi-safety", "Bypass permissions");
     const modeEvents = app.emit.mock.calls.filter(([name]) => name === "pi-safety:mode") as [
       string,
-      { mode: string },
+      { mode: string; pending?: string },
     ][];
     expect(modeEvents.at(-1)?.[1].mode).toBe("yolo");
+    expect(modeEvents.at(-1)?.[1].pending).toBeUndefined();
   });
 
   it("reports sandbox activation failure without mislabeling it as a config error", async () => {

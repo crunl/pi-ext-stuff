@@ -10,6 +10,13 @@ export interface PermissionsModeEvent {
   mode: string;
   label: string;
   severity: ModeSeverity;
+  /**
+   * Desired mode not yet applied (mid-turn cycle: enforcement stays on
+   * `mode` until the step boundary). Absent when display matches
+   * enforcement. Consumers may ignore it; the label already carries a
+   * pending marker in that case.
+   */
+  pending?: string;
 }
 
 export function isPermissionsModeEvent(data: unknown): data is PermissionsModeEvent {

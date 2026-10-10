@@ -273,6 +273,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   let guardianInvalidationAfterModeChange = false;
   /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
   let pendingModeRefresh = false;
+  /**
+   * The desired mode a mid-turn cycle asked for while enforcement stays on the
+   * old snapshot. Shown in the TUI immediately (with a pending marker) so the
+   * display tracks intent; enforcement still flips only at the step boundary.
+   * Cleared everywhere `pendingModeRefresh` is.
+   */
+  let pendingMode: PermissionMode | undefined;
   /** Report one activation failure per registration, on whichever ctx learns of it first. */
   const reportShellParserActivationFailure = (ctx: ExtensionContext): void => {
     if (shellParserFailureReported) return;
@@ -425,16 +432,22 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
-    // Display derives from the *applied* execution snapshot — the same mode
-    // enforcement uses — never from the desired modeRuntime alone. During a
-    // mid-turn cycle the two diverge until the step boundary applies it;
-    // showing desired would claim protection (or bypass) that isn't live yet.
+    // Display leads with intent, enforcement stays truthful: `mode` and
+    // `severity` always describe the applied snapshot (what is live), while
+    // the label names the desired mode with a pending marker until the step
+    // boundary applies it. A bare desired label would claim protection (or
+    // bypass) that isn't live yet; a bare applied label hides the user's own
+    // keypress until the next turn.
     const appliedMode =
       session.currentExecutionSnapshot()?.mode ??
       session.getExecutionSnapshot()?.mode ??
       modeRuntime?.mode ??
       "auto";
-    const label = permissionModeLabel(appliedMode);
+    const pending =
+      pendingModeRefresh && pendingMode !== undefined && pendingMode !== appliedMode
+        ? pendingMode
+        : undefined;
+    const label = pending ? `${permissionModeLabel(pending)} (pending)` : permissionModeLabel(appliedMode);
     // Parity with PermissionModeRuntime.statusSeverity: warning marks
     // guardian-reviewed execution, error marks unreviewed execution.
     const severity = appliedMode === "auto" ? "warning" : "error";
@@ -442,7 +455,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // Structured mode event for status consumers (e.g. statusline). The
     // string published via setStatus above stays as the built-in-footer
     // fallback; consumers should key off `mode`/`severity`, never the label.
-    pi.events.emit("pi-safety:mode", { mode: appliedMode, label, severity });
+    // `pending` carries the not-yet-applied desired mode, if any.
+    pi.events.emit("pi-safety:mode", {
+      mode: appliedMode,
+      label,
+      severity,
+      ...(pending ? { pending } : {}),
+    });
   };
 
   const invalidatePermissionContext = (_reason: string): void => {
@@ -468,6 +487,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     guardianInvalidationAfterModeChange = false;
     session.resetTurn();
     pendingModeRefresh = false;
+    pendingMode = undefined;
     invalidatePermissionContext(reason);
   };
 
@@ -1229,6 +1249,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const targetMode = modeRuntime.mode;
     if (snapshot.mode === targetMode) {
       pendingModeRefresh = false;
+      pendingMode = undefined;
       return;
     }
 
@@ -1284,6 +1305,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       // Mode actually applied at this step boundary: retire deferred Guardian trunk.
       pendingModeRefresh = false;
+      pendingMode = undefined;
       if (guardianInvalidationAfterModeChange) {
         guardianInvalidationAfterModeChange = false;
         invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
@@ -2778,6 +2800,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         const targetMode = nextMode(runtime.mode);
         runtime.activate(targetMode, { preserveAutoTransientState: true });
         pendingModeRefresh = true;
+        pendingMode = targetMode;
         deferGuardianInvalidationForModeChange(true);
         setDefaultStatus(ctx);
       } catch (error: unknown) {
