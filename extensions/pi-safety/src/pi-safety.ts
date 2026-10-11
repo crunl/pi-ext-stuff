@@ -266,6 +266,10 @@ const NO_ACTIVE_TURN: PermissionError = {
 };
 
 function reviewUi(context: ExtensionContext | undefined): ReviewUi | undefined {
+  // Review presentation (transient status/fallback notify) is TUI-only by
+  // contract — pinned by "does not apply review UI presentation outside TUI
+  // mode". Interactive selection (/approve) does not flow through here; it
+  // takes ctx.ui directly behind a hasUI guard, so RPC select is unaffected.
   if (context?.mode !== "tui" || !context.hasUI) return undefined;
   return context.ui;
 }

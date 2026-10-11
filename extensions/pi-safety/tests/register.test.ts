@@ -138,6 +138,8 @@ interface Harness {
       description?: string;
       parameters?: unknown;
       prepareArguments?: (args: unknown) => unknown;
+      annotations?: Record<string, unknown>;
+      outputSchema?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >;
@@ -259,6 +261,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       description?: string;
       parameters?: unknown;
       prepareArguments?: (args: unknown) => unknown;
+      annotations?: Record<string, unknown>;
+      outputSchema?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }
   >();
@@ -456,6 +460,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       description?: string;
       parameters?: unknown;
       prepareArguments?: (args: unknown) => unknown;
+      annotations?: Record<string, unknown>;
+      outputSchema?: unknown;
       execute: (...args: unknown[]) => Promise<unknown>;
     }) => tools.set(tool.name, tool),
     appendEntry,
@@ -2360,6 +2366,8 @@ describe("Permission mode registration", () => {
     await downshift;
     expect(await amendment).toMatchObject({
       content: [{ text: expect.stringContaining("Bypass permissions is already active") }],
+      // No grant was recorded, so the structured view reports an empty grant.
+      structuredContent: { granted: false, networkAll: false, hosts: [], writeRoots: [] },
     });
     expect(app.abort).not.toHaveBeenCalled();
     await endAgent(app);
@@ -3448,7 +3456,16 @@ describe("Permission mode registration", () => {
     });
     await startSession(app);
     await startAgent(app);
-    await executeRequestPermissions(app, "one-private", target.host);
+    const grant = (await executeRequestPermissions(app, "one-private", target.host)) as {
+      structuredContent?: Record<string, unknown>;
+    };
+    // Codemode contract: the grant is data, so scripts read it structured.
+    expect(grant.structuredContent).toEqual({
+      granted: true,
+      networkAll: false,
+      hosts: ["10.1.2.3"],
+      writeRoots: [],
+    });
     await executeBash(app, "private-covered", "printf yes");
     target.host = "10.1.2.4";
     await expect(executeBash(app, "private-uncovered", "printf no")).rejects.toMatchObject({
@@ -4223,6 +4240,27 @@ describe("Permission mode registration", () => {
         app.context,
       ),
     ).rejects.toMatchObject({ code: "policy-denied" });
+  });
+
+  it("declares tool metadata for downstream consumers without enforcement use", async () => {
+    const app = await makeHarness({ useRealPermissionRuntime: true });
+    await startSession(app);
+    // Declarative hints: host surfaces them via getAllTools for external
+    // permission extensions and codemode; pi-safety enforcement never reads
+    // annotations. write/edit always overwrite, so destructive is accurate.
+    expect(app.tools.get("write")?.annotations).toEqual({ destructiveHint: true });
+    expect(app.tools.get("edit")?.annotations).toEqual({ destructiveHint: true });
+    // bash destructiveness depends on arguments, not the tool, so it declares
+    // nothing; request_permissions stays at the MCP-default (non-read-only,
+    // possibly destructive) posture so external reviewers treat a privilege
+    // grant as a confirmation-worthy call.
+    expect(app.tools.get("bash")?.annotations).toBeUndefined();
+    expect(app.tools.get("request_permissions")?.annotations).toBeUndefined();
+    const outputSchema = JSON.stringify(app.tools.get("request_permissions")?.outputSchema);
+    expect(outputSchema).toContain('"granted"');
+    expect(outputSchema).toContain('"networkAll"');
+    expect(outputSchema).toContain('"hosts"');
+    expect(outputSchema).toContain('"writeRoots"');
   });
 
   it.each([

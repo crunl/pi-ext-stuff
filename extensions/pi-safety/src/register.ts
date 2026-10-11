@@ -355,7 +355,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       baseSandboxPolicy,
     });
 
-  const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui">): void => {
+  const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui" | "hasUI">): void => {
     // Display leads with intent, enforcement stays truthful: `mode` and
     // `severity` always describe the applied snapshot (what is live), while
     // the label names the desired mode with a pending marker until the step
@@ -377,7 +377,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // Parity with PermissionModeRuntime.statusSeverity: warning marks
     // guardian-reviewed execution, error marks unreviewed execution.
     const severity = appliedMode === "auto" ? "warning" : "error";
-    ctx.ui.setStatus("pi-safety", label);
+    // setStatus is a UI affordance; the structured event below is the
+    // mode channel and must fire in every host mode.
+    if (ctx.hasUI) ctx.ui.setStatus("pi-safety", label);
     // Structured mode event for status consumers (e.g. statusline). The
     // string published via setStatus above stays as the built-in-footer
     // fallback; consumers should key off `mode`/`severity`, never the label.
@@ -832,7 +834,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     baseSandboxConfig = candidateSandbox;
     sandboxState = nextSandboxState;
     setDefaultStatus(ctx);
-    if (candidateSandbox?.network.macosTls === "system") {
+    if (candidateSandbox?.network.macosTls === "system" && ctx.hasUI) {
       try {
         ctx.ui.notify(
           "WARNING: configured system TLS accepts startup trustd/helper-mediated egress outside proxy destination/ticket enforcement. Explicit ungranted attempts remain strict restricted; authorized proxy attempts may enable helpers before spawn (inline mode: before future connection review). Application private checks still apply. This is not a TLS-success guarantee or a network permission grant. Guardian stays independently strict.",
@@ -1195,10 +1197,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       // applied unrestricted authorization; keep pending so a later step
       // can still catch up if desired mode changed again.
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(
-        renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
-        "error",
-      );
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
+          "error",
+        );
+      }
     }
   };
 
@@ -2081,6 +2085,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseWrite,
     ...addReviewResultRenderer(adoptHostTheme(codexWriteToolSpec)),
     executionMode: "sequential",
+    // Declarative only (host surfaces via getAllTools); enforcement never
+    // reads this. Write always overwrites, so destructive is accurate.
+    annotations: { destructiveHint: true },
     execute: executePermissionedWrite,
   });
 
@@ -2088,6 +2095,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseEdit,
     ...addReviewResultRenderer(adoptHostTheme(codexEditToolSpec)),
     executionMode: "sequential",
+    // Same contract as write above.
+    annotations: { destructiveHint: true },
     execute: executePermissionedEdit,
   });
 
@@ -2116,6 +2125,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       plainReviewResultRenderer,
       "overlay",
     ) as unknown as NonNullable<ToolDefinition<TSchema>["renderResult"]>,
+    // Machine-readable grant for codemode callers; the model still receives
+    // `content` text. Deliberately no readOnlyHint: a permission grant is a
+    // privilege-escalation entry point and must keep the MCP-default
+    // "not read-only, may be destructive" posture toward external reviewers.
+    outputSchema: Type.Object({
+      granted: Type.Boolean(),
+      networkAll: Type.Boolean(),
+      hosts: Type.Array(Type.String()),
+      writeRoots: Type.Array(Type.String()),
+    }),
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (!isSupportedPermissionRequestShape(params)) {
         const reason =
@@ -2223,7 +2242,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                     },
                   ],
                   details: undefined,
-                },
+                  // Host forwards unknown result fields to tool_result
+                  // (agent-session spread); AgentToolResult omits the field
+                  // by type, same as the host bash tool's own literal.
+                  structuredContent: {
+                    granted: false,
+                    networkAll: false,
+                    hosts: [],
+                    writeRoots: [],
+                  },
+                } as WriteResult,
               };
             }
             if (mode !== "sandboxed" || !policy) {
@@ -2246,7 +2274,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                   },
                 ],
                 details: undefined,
-              },
+                // Same host-forwarding contract as the bypass branch above.
+                structuredContent: {
+                  granted: true,
+                  networkAll: decision.networkAll ?? false,
+                  hosts: grantedHosts,
+                  writeRoots: grantedRoots,
+                },
+              } as WriteResult,
             };
           } catch (error: unknown) {
             return { kind: "failed", error };
@@ -2517,10 +2552,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
       const runtime = ensureModeRuntime(result.config);
       if (runtime.mode !== "auto") {
-        ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-mode" }), "warning");
+        if (ctx.hasUI) {
+          ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-mode" }), "warning");
+        }
         return;
       }
       if (!ctx.hasUI) {
+        // Host contract (runner.js): without a UI, ctx.ui is noOpUIContext,
+        // never undefined — this notify is a safe no-op documenting the
+        // requirement for log/telemetry consumers.
         ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-ui" }), "warning");
         return;
       }
@@ -2579,10 +2619,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (!session.isCurrentGeneration(generation)) return;
         const message = error instanceof Error ? error.message : String(error);
         setDefaultStatus(ctx);
-        ctx.ui.notify(
-          renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
-          "error",
-        );
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
+            "error",
+          );
+        }
       }
       return;
     }
@@ -2619,10 +2661,12 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           if (!session.isCurrentGeneration(generation)) return;
           const message = error instanceof Error ? error.message : String(error);
           setDefaultStatus(ctx);
-          ctx.ui.notify(
-            renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
-            "error",
-          );
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              renderPermissionNotice({ kind: "mode-change-failed", reason: message }),
+              "error",
+            );
+          }
         }
       });
     } finally {
@@ -2687,7 +2731,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           },
           note: "Call identity freezes at invocation capture; network authority freezes at execution-attempt creation after review, before the backend queue. Review evidence is a plan, not a guarantee that an invocation still awaiting review cannot see intervening turn grants. Attempt plans are not proof of spawn, native enforcement or TLS success. Pending connection approvals are AllowOnce, not future exemptions. Turn grants expire at turn end; approval does not imply execution success. System TLS accepts helper-mediated egress outside proxy destination/ticket enforcement. Guardian remains independently strict, zero-write and zero-authorizable-network.",
         };
-        ctx.ui.notify(`Permission status (read-only)\n${JSON.stringify(state, null, 2)}`, "info");
+        if (ctx.hasUI) {
+          ctx.ui.notify(`Permission status (read-only)\n${JSON.stringify(state, null, 2)}`, "info");
+        }
         return;
       }
       return session.runModeMutation(async (generation) => {
@@ -2727,16 +2773,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           // turn-local mode toggle; fail closed if it narrows a live YOLO run.
           if (previousMode === "yolo" && runtime.mode !== "yolo") abortLiveTurn(ctx);
           if (runtime.mode === "yolo") {
-            ctx.ui.notify(
-              renderPermissionSummary({
-                mode: runtime.mode,
-                sandbox: "sandbox off",
-                autoReviewAvailable: false,
-                ruleCount: config.rules.length,
-                writeRoots: config.sandbox.filesystem.allowWrite,
-              }),
-              "info",
-            );
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                renderPermissionSummary({
+                  mode: runtime.mode,
+                  sandbox: "sandbox off",
+                  autoReviewAvailable: false,
+                  ruleCount: config.rules.length,
+                  writeRoots: config.sandbox.filesystem.allowWrite,
+                }),
+                "info",
+              );
+            }
             return;
           }
           const sandboxSummary =
@@ -2760,24 +2808,26 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             lastGuardianSelection.configFingerprint === configFingerprint
               ? lastGuardianSelection.guardian
               : undefined;
-          ctx.ui.notify(
-            renderPermissionSummary({
-              mode: runtime.mode,
-              sandbox: sandboxSummary + networkSummary,
-              reviewer: activeReviewer
-                ? {
-                    kind: "active",
-                    reference: `${activeReviewer.provider}/${activeReviewer.model}`,
-                  }
-                : config.reviewer
-                  ? { kind: "preference", reference: config.reviewer.model }
-                  : undefined,
-              autoReviewAvailable: !runtime.autoState.paused,
-              ruleCount: config.rules.length,
-              writeRoots: config.sandbox.filesystem.allowWrite,
-            }),
-            "info",
-          );
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              renderPermissionSummary({
+                mode: runtime.mode,
+                sandbox: sandboxSummary + networkSummary,
+                reviewer: activeReviewer
+                  ? {
+                      kind: "active",
+                      reference: `${activeReviewer.provider}/${activeReviewer.model}`,
+                    }
+                  : config.reviewer
+                    ? { kind: "preference", reference: config.reviewer.model }
+                    : undefined,
+                autoReviewAvailable: !runtime.autoState.paused,
+                ruleCount: config.rules.length,
+                writeRoots: config.sandbox.filesystem.allowWrite,
+              }),
+              "info",
+            );
+          }
         } catch (error: unknown) {
           if (!session.isCurrentGeneration(generation)) return;
           if (!candidateLoaded) {
