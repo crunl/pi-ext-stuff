@@ -95,11 +95,11 @@ function retainClosedSchemaValue(schema: unknown, value: unknown): unknown {
   return next;
 }
 
-export type AdditionalWriteRootsResult =
+type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
   | { ok: false; reason: string };
 
-export interface EscalatedCommandRequest {
+interface EscalatedCommandRequest {
   readonly requested: boolean;
   readonly justification?: string;
 }

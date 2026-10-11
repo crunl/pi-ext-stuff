@@ -10,7 +10,7 @@ export interface PermissionAmendment {
   writeRoots: string[];
 }
 
-export type NormalizePermissionAmendmentResult =
+type NormalizePermissionAmendmentResult =
   | { ok: true; amendment: PermissionAmendment }
   | { ok: false; reason: string };
 

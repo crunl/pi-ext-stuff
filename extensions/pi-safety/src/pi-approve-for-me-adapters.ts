@@ -66,7 +66,7 @@ type PromptRiskDecision = Extract<RiskDecision, { action: "prompt" }>;
 const INVALID_GUARDIAN_IDENTITY =
   "pi-safety: reviewer event identity does not match Engine invocation";
 
-export function toolCallEventMetadata(event: ToolCallEvent): Record<string, unknown> | undefined {
+function toolCallEventMetadata(event: ToolCallEvent): Record<string, unknown> | undefined {
   const metadata: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(event)) {
     if (key === "type" || key === "toolCallId" || key === "toolName" || key === "input") continue;

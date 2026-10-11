@@ -39,7 +39,7 @@ export type RuntimeDenialOutcome = Extract<PiActionOutcome<never>, { kind: "capa
  * code field, so the captured status rides along as an extra key; the host
  * passes tool details through to the `tool_result` event unchanged.
  */
-export type BashOutcomeDetails = BashToolDetails & { exitCode: number | null };
+type BashOutcomeDetails = BashToolDetails & { exitCode: number | null };
 
 /**
  * A completed command's result — the shape Pi's bash execute returns.
@@ -47,7 +47,7 @@ export type BashOutcomeDetails = BashToolDetails & { exitCode: number | null };
  * Pi 0.86 hardcodes returned results to `isError: false`, so the
  * `tool_result` hook re-marks the outcome there.
  */
-export type BashOutcome = {
+type BashOutcome = {
   content: Array<{ type: "text"; text: string }>;
   details: BashOutcomeDetails;
   readonly isError: true;
@@ -124,7 +124,7 @@ export function commandExitCode(details: unknown): number | null | undefined {
  * itself the proof the command ran and reported a status, so — unlike
  * the thrown path — no message validation is needed.
  */
-export type ReturnedBashFailure = {
+type ReturnedBashFailure = {
   readonly exitCode: number;
   readonly content: Array<{ type: "text"; text: string }>;
   readonly details: BashToolDetails | undefined;

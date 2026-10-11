@@ -92,7 +92,7 @@ export interface SegmentFacts {
   bodies: string[];
 }
 
-export interface AstAnalysis {
+interface AstAnalysis {
   segments: SegmentFacts[];
   /** True when the tree carried an ERROR or MISSING node anywhere. */
   hadError: boolean;

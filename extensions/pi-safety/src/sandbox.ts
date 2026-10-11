@@ -216,7 +216,7 @@ export interface SandboxedCommandResult {
   exitCode: number | null;
 }
 
-export type GuardianReadOnlyExecutable = "node" | "bash";
+type GuardianReadOnlyExecutable = "node" | "bash";
 
 const GUARDIAN_COMMAND_MAX_STDOUT_BYTES = 5 * 1024 * 1024;
 const GUARDIAN_COMMAND_MAX_STDERR_BYTES = 64 * 1024;
@@ -556,12 +556,12 @@ type GuardianFileOperation =
   | "readdir"
   | "list";
 
-export interface SandboxedGuardianDirectoryListing {
+interface SandboxedGuardianDirectoryListing {
   entries: string[];
   entryLimitReached: boolean;
 }
 
-export interface SandboxedGuardianTextRead {
+interface SandboxedGuardianTextRead {
   content: string;
   outputLines: number;
   outputBytes: number;
@@ -573,7 +573,7 @@ export interface SandboxedGuardianTextRead {
   totalLines?: number;
 }
 
-export interface SandboxedGuardianFileOperations {
+interface SandboxedGuardianFileOperations {
   read: ReadOperations;
   grep: GrepOperations;
   find: Pick<FindOperations, "exists">;
@@ -734,7 +734,7 @@ async function runSandboxedFileOperation(
   return result.stdout;
 }
 
-export type SandboxedFileOperations = WriteOperations & EditOperations;
+type SandboxedFileOperations = WriteOperations & EditOperations;
 
 export function createSandboxedFileOperations(
   manager: SandboxManagerLike,

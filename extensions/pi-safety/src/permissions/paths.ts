@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 
-export interface PathPolicy {
+interface PathPolicy {
   cwd: string;
   allowWrite: string[];
   denyRead: string[];
@@ -12,7 +12,7 @@ export interface PathPolicy {
   operation: "read" | "write";
 }
 
-export type PathDecision =
+type PathDecision =
   | { allowed: true; canonicalPath: string }
   | { allowed: false; canonicalPath: string; reason: string };
 

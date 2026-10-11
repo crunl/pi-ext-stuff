@@ -79,7 +79,7 @@ function leadingOperands(args: readonly string[]): string[] | undefined {
   return operands;
 }
 
-export function invocationUsesNetwork(segment: CommandSegment): boolean {
+function invocationUsesNetwork(segment: CommandSegment): boolean {
   const args = segment.args.map((arg) => arg.toLowerCase());
   if (directNetworkExecutables.has(segment.executable)) {
     // `--version`/`--help` ends the invocation only when it is actually parsed

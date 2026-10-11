@@ -6,9 +6,9 @@ type Waiter = {
   onAbort?: () => void;
 };
 
-export type DetachedAbortHandler = () => Error | undefined;
+type DetachedAbortHandler = () => Error | undefined;
 
-export type SrtFaultReason = "initialization" | "reset" | "cleanup" | "restore" | "drain-timeout";
+type SrtFaultReason = "initialization" | "reset" | "cleanup" | "restore" | "drain-timeout";
 
 /**
  * The deadline is an internal lifecycle budget for a cancelled operation. It

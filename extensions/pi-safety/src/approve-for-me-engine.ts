@@ -22,12 +22,11 @@ import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.
 export { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
-export type { ResidualSignal } from "./permissions/residual.ts";
 
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
-export type AdmissionRisk = "Skip" | "NeedsApproval" | "Forbidden";
-export type CommandExecutionMode = "escalated";
+type AdmissionRisk = "Skip" | "NeedsApproval" | "Forbidden";
+type CommandExecutionMode = "escalated";
 
 /** Ownership says which external execution Adapter is authoritative. */
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
@@ -243,14 +242,14 @@ export interface GuardianAdapter<ReviewContext = undefined> {
   ): Promise<GuardianDecision>;
 }
 
-export interface PermissionPolicyCheck {
+interface PermissionPolicyCheck {
   call: InvocationCall;
   ownership: InvocationOwnership;
   requested: readonly CapabilityRequest[];
   phase: "preview" | "runtime" | "permission-amendment";
 }
 
-export type PermissionPolicyDecision = { kind: "allow" } | { kind: "deny"; reason: string };
+type PermissionPolicyDecision = { kind: "allow" } | { kind: "deny"; reason: string };
 
 type PolicyCheckResult = PermissionPolicyDecision | { kind: "error"; reason: string };
 
@@ -264,7 +263,7 @@ export interface RetryHandle {
   readonly __brand: "pi-safety-retry-handle";
 }
 
-export interface ApprovalOverride {
+interface ApprovalOverride {
   readonly denialId: string;
   readonly actionFingerprint: string;
 }
@@ -310,7 +309,7 @@ export type ReviewEvent =
       readonly metrics?: GuardianDecisionMetrics & { durationMs: number };
     };
 
-export type PermissionErrorCode =
+type PermissionErrorCode =
   | "aborted"
   | "no-active-turn"
   | "stale-invocation"
@@ -348,7 +347,7 @@ export interface DenialNotice {
   readonly handle: RetryHandle;
 }
 
-export interface ApproveForMeEngineOptions<ReviewContext = undefined> {
+interface ApproveForMeEngineOptions<ReviewContext = undefined> {
   guardian?: GuardianAdapter<ReviewContext>;
   policy?: PermissionPolicy;
   onDenial?: (notice: DenialNotice) => void;

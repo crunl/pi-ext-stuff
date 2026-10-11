@@ -39,11 +39,11 @@ import type { SandboxPolicy } from "./sandbox-policy.ts";
  * Pi's ingress vocabulary. The Engine remains an implementation detail of
  * this module; register.ts only deals in actions and execution contexts.
  */
-export type PiActionKind = "sandbox" | "host" | "permission-amendment";
+type PiActionKind = "sandbox" | "host" | "permission-amendment";
 
-export type PiCapabilityRequest = EngineCapabilityRequestInput;
+type PiCapabilityRequest = EngineCapabilityRequestInput;
 
-export interface PiPermissionRequest {
+interface PiPermissionRequest {
   reason?: string;
 }
 
@@ -58,7 +58,7 @@ export interface PiPermissionRequest {
  */
 export type PiTurnSnapshot = TurnSnapshot;
 
-export interface PiActionCall<Input = unknown> {
+interface PiActionCall<Input = unknown> {
   readonly id: string;
   readonly tool: string;
   readonly input: Input;
@@ -69,7 +69,7 @@ export interface PiActionCall<Input = unknown> {
 const CAPTURED_ACTION = Symbol("pi-safety-captured-action");
 
 /** Opaque proof that the complete action identity was cloned at Pi ingress. */
-export interface PiCapturedAction<Input = unknown> {
+interface PiCapturedAction<Input = unknown> {
   readonly call: PiActionCall<Input>;
   readonly [CAPTURED_ACTION]: true;
 }
@@ -115,7 +115,7 @@ export interface PiAction<Result, ReviewContext = undefined, Input = unknown> {
   readonly execute: (attempt: PiExecutionAttempt<Input>) => Promise<PiActionOutcome<Result>>;
 }
 
-export interface PiPermissionError {
+interface PiPermissionError {
   readonly code: PermissionError["code"];
   readonly reason: string;
   readonly request?: PiCapabilityRequest;
@@ -199,7 +199,7 @@ function intentForAction(
   };
 }
 
-export interface ExactRetryDispatch {
+interface ExactRetryDispatch {
   readonly denialId: string;
   readonly tool: string;
   readonly serializedInput: string;
@@ -211,7 +211,7 @@ export type RecoverDeniedActionResult =
   | { readonly kind: "armed"; readonly dispatch: ExactRetryDispatch }
   | { readonly kind: "empty" | "cancelled" | "stale" };
 
-export interface PiSafetyOptions<ReviewContext = undefined> {
+interface PiSafetyOptions<ReviewContext = undefined> {
   guardian?: GuardianAdapter<ReviewContext>;
   policy?: PermissionPolicy;
   reviewEventSink?: (event: ReviewEvent) => void;
@@ -222,7 +222,7 @@ export interface PiSafetyOptions<ReviewContext = undefined> {
   ) => void;
 }
 
-export interface PiSafety<ReviewContext = undefined> {
+interface PiSafety<ReviewContext = undefined> {
   beginTurn(snapshot: PiTurnSnapshot, context: ExtensionContext): void;
   /**
    * Open an isolated child turn for a delegated subagent. The child runs on

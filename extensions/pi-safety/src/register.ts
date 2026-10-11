@@ -180,7 +180,7 @@ function agentPermissionError(
   return Object.assign(new Error(renderPermissionErrorForAgent(permissionError)), permissionError);
 }
 
-export type GuardianPolicySource = (context: {
+type GuardianPolicySource = (context: {
   cwd: string;
   configFingerprint: string;
 }) => string | undefined;

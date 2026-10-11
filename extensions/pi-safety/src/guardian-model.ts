@@ -4,7 +4,7 @@ import type { AutoReviewerContext } from "./auto-review-request.ts";
 import { parseReviewerModel } from "./config.ts";
 import { AutoReviewerFailure } from "./guardian/errors.ts";
 
-export interface GuardianModelSelection {
+interface GuardianModelSelection {
   model: Model<Api>;
   source: "configured" | "active" | "active-fallback";
   fallbackNotice?: "configured-reviewer-unavailable";

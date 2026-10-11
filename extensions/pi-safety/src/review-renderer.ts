@@ -5,12 +5,12 @@
  */
 import { REVIEW_STATUS_ICON } from "./review-presenter.ts";
 
-export interface ReviewComponent {
+interface ReviewComponent {
   render(width: number): string[];
   invalidate(): void;
 }
 
-export interface ReviewTheme {
+interface ReviewTheme {
   fg?(color: string, text: string): string;
 }
 
@@ -46,10 +46,10 @@ interface WrappedComponent extends ReviewComponent {
  * Host tool-result details payload. Deliberately opaque: this module bridges
  * host renderer values across SDK versions and must not assume their shape.
  */
-export type ReviewDetailsPayload = ReviewPartialResult["details"];
+type ReviewDetailsPayload = ReviewPartialResult["details"];
 
 /** Host renderer component payload; opaque for the same reason as above. */
-export type ReviewComponentPayload = Partial<ReviewComponent> | undefined;
+type ReviewComponentPayload = Partial<ReviewComponent> | undefined;
 function isDecoratedDetails(value: unknown): value is DecoratedDetails {
   return typeof value === "object" && value !== null && REVIEW_DETAILS in value;
 }
@@ -65,7 +65,7 @@ export function decorateReviewDetails(details: unknown, status: string): Decorat
   return Object.freeze({ [REVIEW_DETAILS]: true as const, base: details, status });
 }
 
-export function unwrapReviewDetails(details: unknown): ReviewDetailsPayload {
+function unwrapReviewDetails(details: unknown): ReviewDetailsPayload {
   return isDecoratedDetails(details) ? details.base : details;
 }
 
@@ -73,7 +73,7 @@ export function reviewStatusFromDetails(details: unknown): string | undefined {
   return isDecoratedDetails(details) ? details.status : undefined;
 }
 
-export function unwrapReviewComponent(component: unknown): ReviewComponentPayload {
+function unwrapReviewComponent(component: unknown): ReviewComponentPayload {
   if (!isWrappedComponent(component)) return component as ReviewComponentPayload;
   return component.base as ReviewComponentPayload;
 }
@@ -202,7 +202,7 @@ export const plainReviewResultRenderer: ReviewRenderResult = (result) => ({
   invalidate() {},
 });
 
-export type ReviewRendererMode = "header-icon" | "overlay";
+type ReviewRendererMode = "header-icon" | "overlay";
 
 /**
  * Wrap one existing Pi renderResult without changing its base rendering.

@@ -25,7 +25,7 @@ import { errorMessage } from "../unknown-value.ts";
 import { SandboxConnectGuard, shouldBypassParentProxy } from "./connect-guard.ts";
 import { srtProcessCoordinator } from "./srt-coordinator.ts";
 
-export const SRT_ACTIVATION_TIMEOUT_MS = 15_000;
+const SRT_ACTIVATION_TIMEOUT_MS = 15_000;
 
 const DEFAULT_STDOUT_BOUND = 16 * 1024 * 1024;
 const DEFAULT_STDERR_BOUND = 1 * 1024 * 1024;

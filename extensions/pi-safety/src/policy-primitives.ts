@@ -79,7 +79,7 @@ export function validateNetworkAccess(input: unknown): NetworkAccess {
 }
 
 /** Codex `network_access` analogue: whole TCP network including private/loopback/bind. */
-export type EffectiveNetworkAuthority = {
+type EffectiveNetworkAuthority = {
   wholeNetwork: boolean;
   privateTargets: boolean;
   localBinding: boolean;

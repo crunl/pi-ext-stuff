@@ -2,7 +2,7 @@ import type { ReviewEvent } from "../approve-for-me-engine.ts";
 import type { AutoReviewerFailureKind } from "./errors.ts";
 
 /** Codex-aligned terminal_status vocabulary. */
-export type GuardianTerminalStatus =
+type GuardianTerminalStatus =
   | "approved"
   | "denied"
   | "aborted"
@@ -10,16 +10,16 @@ export type GuardianTerminalStatus =
   | "failed_closed";
 
 /** Codex-aligned failure_reason vocabulary. */
-export type GuardianFailureReason =
+type GuardianFailureReason =
   | "timeout"
   | "cancelled"
   | "session_error"
   | "parse_error"
   | "none";
 
-export type GuardianSessionKind = "trunk_new" | "trunk_reused" | "ephemeral_forked";
+type GuardianSessionKind = "trunk_new" | "trunk_reused" | "ephemeral_forked";
 
-export type GuardianActionTag =
+type GuardianActionTag =
   | "shell"
   | "write"
   | "edit"
@@ -27,12 +27,12 @@ export type GuardianActionTag =
   | "request_permissions"
   | "host_tool";
 
-export type GuardianRequestSource = "main_turn" | "delegated_subagent";
+type GuardianRequestSource = "main_turn" | "delegated_subagent";
 
-export type GuardianOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
+type GuardianOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
 
 /** One JSONL record per review terminal state. Enums and numbers only. */
-export interface GuardianMetricsRecord {
+interface GuardianMetricsRecord {
   readonly schema: 1;
   readonly reviewId: string;
   readonly timestamp: string;
@@ -163,7 +163,7 @@ export function mapActionTag(tool: string): GuardianActionTag {
 }
 
 /** Low-cardinality sanitize; Codex sanitize_metric_tag_value equivalent. */
-export function sanitizeMetricTag(value: string | undefined): string {
+function sanitizeMetricTag(value: string | undefined): string {
   if (!value) return "none";
   const cleaned = value.replace(/[^a-zA-Z0-9._:-]/g, "_").slice(0, 120);
   return cleaned.length > 0 ? cleaned : "none";

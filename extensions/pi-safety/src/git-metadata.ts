@@ -3,11 +3,11 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { parseGitRemoteTarget, unquoteGitConfigValue } from "./network-host.ts";
 
-export type GitMetadataResult =
+type GitMetadataResult =
   | { ok: true; configPath: string; writeRoots: string[] }
   | { ok: false; reason: string };
 
-export type GitMetadataProtectionResult =
+type GitMetadataProtectionResult =
   | { ok: true; roots: string[] }
   | { ok: false; reason: string };
 
@@ -327,7 +327,7 @@ export async function discoverGitMetadataProtectionRoots(
 
 export type GitRemotePurpose = "fetch" | "push";
 
-export type GitRemoteHostsResult = { ok: true; hosts: string[] } | { ok: false; reason: string };
+type GitRemoteHostsResult = { ok: true; hosts: string[] } | { ok: false; reason: string };
 
 export async function readRepositoryRemoteHosts(
   configPath: string | undefined,

@@ -31,7 +31,7 @@ export function isValidNetworkCidr(value: string): boolean {
   return family !== 0 && Number.isInteger(prefix) && prefix >= 0 && prefix <= maximum;
 }
 
-export type GitRemoteTarget =
+type GitRemoteTarget =
   | { kind: "host"; host: string }
   | { kind: "local" }
   | { kind: "unsafe"; reason: string };

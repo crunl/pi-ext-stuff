@@ -277,7 +277,7 @@ type SandboxedRgRunner = (
   signal?: AbortSignal,
 ) => Promise<SandboxedCommandResult>;
 
-export interface SandboxedGuardianToolRuntimeOptions {
+interface SandboxedGuardianToolRuntimeOptions {
   resolveRgPath?: () => string | undefined;
   /** Trusted host home used only for resolving Guardian's `~` paths. */
   trustedHome?: string;
@@ -913,7 +913,7 @@ export function createSandboxedGuardianToolRuntime(
   return createGuardianToolRuntime(cwd, () => tools);
 }
 
-export interface IsolatedGuardianToolRuntimeOptions extends GuardianWorkerClientOptions {
+interface IsolatedGuardianToolRuntimeOptions extends GuardianWorkerClientOptions {
   resolveRgPath?: () => string | undefined;
   /** Trusted host home used only for resolving Guardian's `~` paths. */
   trustedHome?: string;

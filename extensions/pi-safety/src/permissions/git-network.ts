@@ -172,8 +172,7 @@ function gitRemoteNetworkOperands(invocation: GitInvocation): string[] | null | 
 /**
  * A `git` invocation with its subcommand and payload separated from Git's
  * global options. Only `git` is modelled here: `gh` is a different tool with
- * its own network and mutation semantics, handled in `shell-network.ts` and
- * `command-effects.ts`.
+ * its own network and mutation semantics, handled in `shell-network.ts`.
  */
 interface GitInvocation {
   segment: CommandSegment;

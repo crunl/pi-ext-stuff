@@ -708,7 +708,7 @@ export function hasTerminalInfoFlag(args: readonly string[]): boolean {
  * Both the executable parse and the nested-segment expansion read the program
  * through this one function so the two cannot disagree about where it is.
  */
-export function inlineProgramOptionIndex(args: readonly string[]): number {
+function inlineProgramOptionIndex(args: readonly string[]): number {
   return args.findIndex((arg) => arg === "--command" || /^-[A-Za-z]*c[A-Za-z]*$/.test(arg));
 }
 

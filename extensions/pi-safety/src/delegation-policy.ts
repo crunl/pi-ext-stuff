@@ -36,7 +36,7 @@ export interface DelegationScope {
   readonly allowsReDelegate: boolean;
 }
 
-export type DelegatedSpawnVerdict = { blocked: true; reason: string } | { blocked: false };
+type DelegatedSpawnVerdict = { blocked: true; reason: string } | { blocked: false };
 
 /**
  * Remaining delegation levels below the current (possibly nested) turn.

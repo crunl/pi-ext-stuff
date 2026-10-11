@@ -186,7 +186,7 @@ function adaptTree(tree: WasmTree): ShellAstTree {
 }
 
 /** Why the bridge is unusable, reduced to what a caller can report without owning an `unknown`. */
-export interface ShellBridgeFailure {
+interface ShellBridgeFailure {
   name: string;
   message: string;
 }
@@ -244,14 +244,10 @@ export function simulateTreeSitterShellFailure(message: string): void {
 }
 
 /**
- * Sole-interpreter (step 1): the flag is retired — the AST is the only front end.
- * Kept as a constant for test compat; `treeSitterParserEnabled` always returns true.
+ * Sole-interpreter: the flag is retired — the AST is the only front end.
+ * Kept as a constant for test compat.
  */
 export const TREE_SITTER_PARSER_ENV_FLAG = "PI_SAFETY_TREE_SITTER_PARSER";
-
-export function treeSitterParserEnabled(_env: NodeJS.ProcessEnv = process.env): boolean {
-  return true;
-}
 
 /** The activation the host awaits, memoized so the barrier costs one promise forever. */
 let activation: Promise<boolean> | undefined;

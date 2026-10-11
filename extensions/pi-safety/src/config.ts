@@ -78,7 +78,7 @@ export interface SafetyConfig {
   };
 }
 
-export type SafetyConfigSource = "new" | "default";
+type SafetyConfigSource = "new" | "default";
 
 export interface LoadedSafetyConfig {
   config: SafetyConfig;
@@ -88,7 +88,7 @@ export interface LoadedSafetyConfig {
   sourcePath?: string;
 }
 
-export type SafetyConfigOverlay = {
+type SafetyConfigOverlay = {
   version?: 1;
   reviewer?: SafetyConfig["reviewer"];
   sandbox?: {
@@ -163,7 +163,7 @@ const efforts = new Set<NonNullable<SafetyConfig["reviewer"]>["reasoningEffort"]
 const actions = new Set<SafetyConfig["rules"][number]["action"]>(["allow", "ask", "deny"]);
 
 /** A `reviewer.model` reference resolved into the two parts `find()` takes. */
-export interface ReviewerModelRef {
+interface ReviewerModelRef {
   provider: string;
   model: string;
 }

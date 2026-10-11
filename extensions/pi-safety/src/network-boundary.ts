@@ -12,16 +12,16 @@ import type { SandboxNetworkEndpoint } from "./sandbox-policy.ts";
 /** Codex's network runtime gives DNS resolution a two-second budget. */
 export const DEFAULT_NETWORK_RESOLUTION_TIMEOUT_MS = 2_000;
 
-export type NetworkEndpointDecision =
+type NetworkEndpointDecision =
   | { readonly kind: "allow"; readonly endpoint: SandboxNetworkEndpoint }
   | { readonly kind: "deny"; readonly reason: string };
 
-export interface NetworkBoundaryOptions {
+interface NetworkBoundaryOptions {
   resolveHost?: (host: string) => Promise<readonly string[]>;
   resolutionTimeoutMs?: number;
 }
 
-export interface NetworkEndpointResolutionOptions {
+interface NetworkEndpointResolutionOptions {
   /** Explicit high-privilege Codex-compatible local/private allowance. */
   allowLocalBinding?: boolean;
   /** Independent outbound private/special eligibility; no bind/inbound authority. */
@@ -54,7 +54,7 @@ function parseTrustedRanges(ranges: readonly string[]): BlockList {
   return blockList;
 }
 
-export function isTrustedFakeIp(address: string, ranges: readonly string[]): boolean {
+function isTrustedFakeIp(address: string, ranges: readonly string[]): boolean {
   const family = isIP(address);
   if (!family) return false;
   return parseTrustedRanges(ranges).check(address, family === 4 ? "ipv4" : "ipv6");

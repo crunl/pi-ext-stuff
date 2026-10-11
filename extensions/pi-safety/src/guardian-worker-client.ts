@@ -13,10 +13,10 @@ import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox
  * made while the main tool is holding that coordinator.
  */
 
-export const DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS = 30_000;
-export const GUARDIAN_WORKER_MAX_FRAME_BYTES = MAX_FRAME_BYTES;
-export const GUARDIAN_WORKER_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
-export const GUARDIAN_WORKER_MAX_STDERR_BYTES = MAX_STDERR_BYTES;
+const DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS = 30_000;
+const GUARDIAN_WORKER_MAX_FRAME_BYTES = MAX_FRAME_BYTES;
+const GUARDIAN_WORKER_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
+const GUARDIAN_WORKER_MAX_STDERR_BYTES = MAX_STDERR_BYTES;
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL("./guardian-worker.mjs", import.meta.url));
 const WORKER_TERMINATE_WAIT_MS = 1_000;
@@ -57,12 +57,12 @@ function isWorkerFailure(value: unknown): value is GuardianWorkerFailure {
   );
 }
 
-export interface GuardianWorkerProgram {
+interface GuardianWorkerProgram {
   executable: string;
   args: readonly string[];
 }
 
-export interface GuardianWorkerExecutionRequest {
+interface GuardianWorkerExecutionRequest {
   program: GuardianWorkerProgram;
   cwd: string;
   signal?: AbortSignal;
@@ -73,7 +73,7 @@ export interface GuardianWorkerExecutionRequest {
   maxStderrBytes?: number;
 }
 
-export interface GuardianWorkerExecutionResult {
+interface GuardianWorkerExecutionResult {
   stdout: Buffer;
   stderr: Buffer;
   exitCode: number | null;
@@ -86,7 +86,7 @@ export interface GuardianWorkerClientOptions {
   spawnProcess?: GuardianWorkerSpawn;
 }
 
-export type GuardianWorkerSpawn = (
+type GuardianWorkerSpawn = (
   command: string,
   args: readonly string[],
   options: SpawnOptions,

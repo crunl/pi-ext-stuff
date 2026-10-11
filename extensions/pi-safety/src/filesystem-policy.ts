@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { SafetyConfig } from "./config.ts";
 import { defaultAgentDir, defaultSafetyConfigPath } from "./policy-primitives.ts";
 
-export interface ResolvedFilesystemPolicy {
+interface ResolvedFilesystemPolicy {
   allowWrite: string[];
   denyRead: string[];
   denyWrite: string[];

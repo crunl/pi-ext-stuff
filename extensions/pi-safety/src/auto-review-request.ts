@@ -14,8 +14,8 @@ import type { RiskDecision } from "./risk-policy.ts";
 import type { NetworkPolicyView } from "./sandbox-policy.ts";
 import { isRecord } from "./unknown-value.ts";
 
-export type AutoReviewRisk = GuardianRiskLevel;
-export type AutoReviewUserAuthorization = GuardianUserAuthorization;
+type AutoReviewRisk = GuardianRiskLevel;
+type AutoReviewUserAuthorization = GuardianUserAuthorization;
 
 export interface AutoReviewResult {
   decision: "approve" | "deny";

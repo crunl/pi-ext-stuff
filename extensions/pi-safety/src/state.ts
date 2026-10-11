@@ -17,7 +17,7 @@ type StateEntry = {
   data?: unknown;
 };
 
-export function isPermissionMode(value: unknown): value is PermissionMode {
+function isPermissionMode(value: unknown): value is PermissionMode {
   return value === "auto" || value === "yolo";
 }
 

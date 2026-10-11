@@ -24,12 +24,12 @@ export interface GuardianSessionKey {
   toolFingerprint: string;
 }
 
-export interface GuardianTranscriptCursor {
+interface GuardianTranscriptCursor {
   epoch: number;
   seenCount: number;
 }
 
-export interface GuardianReviewLease {
+interface GuardianReviewLease {
   readonly context: Context;
   readonly sessionId: string;
   readonly cursorUsed: GuardianTranscriptCursor | undefined;
@@ -165,7 +165,7 @@ function createLeaseContext(
   return createContext(messages, tools, systemPrompt);
 }
 
-export interface GuardianTranscriptMeta {
+interface GuardianTranscriptMeta {
   epoch: number;
   rawEntries: readonly GuardianTranscriptEntry[];
   /** Action + permission context for the Delta prompt body. */

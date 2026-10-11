@@ -94,7 +94,7 @@ function isAdmissibleFollowingSegment(segment: CommandSegment): boolean {
  * independent of the working directory. Returns the original segment list
  * unchanged when the command is not admissible.
  */
-export function normalizeKnownCwdDirectory(
+function normalizeKnownCwdDirectory(
   segments: readonly CommandSegment[],
   cwd: string,
 ): CommandSegment[] {

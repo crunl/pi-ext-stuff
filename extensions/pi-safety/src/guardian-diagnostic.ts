@@ -29,7 +29,7 @@ type DiagnosticComplete = (
   options?: ProviderStreamOptions,
 ) => Promise<AssistantMessage>;
 
-export type GuardianDiagnosticPhase =
+type GuardianDiagnosticPhase =
   | "diagnostic.start"
   | "reviewer.tool-request"
   | "guardian.evidence-received"
@@ -37,7 +37,7 @@ export type GuardianDiagnosticPhase =
   | "diagnostic.complete"
   | "diagnostic.failed";
 
-export type GuardianDiagnosticFailure =
+type GuardianDiagnosticFailure =
   | GuardianWorkerFailure
   | { readonly stage: "review"; readonly code: AutoReviewerFailureKind | "failed" };
 
@@ -51,7 +51,7 @@ export interface GuardianDiagnosticEvent {
   failure?: GuardianDiagnosticFailure;
 }
 
-export interface GuardianDiagnosticResult {
+interface GuardianDiagnosticResult {
   exitCode: 0 | 1;
   failure?: GuardianDiagnosticFailure;
 }

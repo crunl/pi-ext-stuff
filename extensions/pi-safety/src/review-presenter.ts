@@ -34,7 +34,7 @@ function compact(value: string): string {
   return `${normalized.slice(0, MAX_STATUS_DETAIL_LENGTH - 1)}…`;
 }
 
-export function reviewStatusText(detail: string): string {
+function reviewStatusText(detail: string): string {
   return `${REVIEW_STATUS_ICON} Reviewing approval request · ${compact(detail)}`;
 }
 

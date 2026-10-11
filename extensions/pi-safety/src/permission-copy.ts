@@ -1,7 +1,7 @@
 import type { PermissionError } from "./approve-for-me-engine.ts";
 import type { PermissionMode } from "./state.ts";
 
-export type ReviewStatus = "reviewing" | "approved" | "denied" | "aborted" | "timed-out" | "failed";
+type ReviewStatus = "reviewing" | "approved" | "denied" | "aborted" | "timed-out" | "failed";
 
 /**
  * The copy layer deliberately ignores review identity.  Identity is owned by
@@ -16,7 +16,7 @@ export interface ReviewPresentationEvent {
   readonly reason?: string;
 }
 
-export type ReviewPresentation =
+type ReviewPresentation =
   | { kind: "silent" }
   | {
       kind: "notify";
@@ -24,7 +24,7 @@ export type ReviewPresentation =
       severity: "warning";
     };
 
-export type PermissionNotice =
+type PermissionNotice =
   | {
       kind: "review-circuit-interrupted";
       consecutiveDenials: number;
@@ -51,7 +51,7 @@ export type PermissionNotice =
   | { kind: "mode-change-failed"; reason: string }
   | { kind: "shell-parser-activation-failed"; reason: string };
 
-export interface PermissionSummary {
+interface PermissionSummary {
   mode: PermissionMode;
   sandbox: string;
   reviewer?: {

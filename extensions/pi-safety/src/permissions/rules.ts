@@ -24,7 +24,7 @@ export function deletionTargets(segment: CommandSegment): string[] {
   return targets;
 }
 
-export interface PermissionRule {
+interface PermissionRule {
   action: "allow" | "ask" | "deny";
   tool: string;
   pattern?: string;
@@ -113,7 +113,7 @@ export interface CommandSegment {
   unprovenCause?: SegmentUnprovenCause;
 }
 
-export interface RuleMatch {
+interface RuleMatch {
   decision: PermissionRule["action"];
   rule: PermissionRule;
 }

@@ -16,12 +16,12 @@ function functionalState(state: PermissionSessionState): PermissionSessionState 
   return normalized;
 }
 
-export interface PermissionModeActivationOptions {
+interface PermissionModeActivationOptions {
   preserveAutoTransientState?: boolean;
 }
 
 /** Engine-owned breaker state accepted at the persistence seam. */
-export interface AutoStateInput {
+interface AutoStateInput {
   consecutiveDenials: number;
   paused: boolean;
   recentDenials?: number;

@@ -82,7 +82,7 @@ const transparentDelegators = new Set(["exec", "command", "nohup", "setsid", "ti
  * `command -v`/`-V` only print a path and never execute (measured).
  * Bounded: absurd nesting fails open like codex rather than hanging.
  */
-export function landTransparentDelegation(words: readonly string[]): string[] | null {
+function landTransparentDelegation(words: readonly string[]): string[] | null {
   let current = [...words];
   for (let i = 0; i <= MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH; i += 1) {
     const first = basename(current[0] ?? "").toLowerCase();

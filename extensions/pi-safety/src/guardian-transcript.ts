@@ -1,5 +1,3 @@
-export type GuardianTranscriptRole = "user" | "assistant" | "tool";
-
 export type GuardianTranscriptEntry =
   | {
       role: "user" | "assistant";
@@ -22,7 +20,7 @@ const TRUNCATION_MARKER = "[...]";
 // Raw-log hard cap. When exceeded the head is dropped and the caller must
 // bump its epoch so the next review falls back to Full.
 export const MAX_RAW_TRANSCRIPT_ENTRIES = 500;
-export const MAX_RAW_TRANSCRIPT_CHARACTERS = 200_000;
+const MAX_RAW_TRANSCRIPT_CHARACTERS = 200_000;
 
 function truncateContent(content: string, limit: number): string {
   if (limit <= 0) return "";

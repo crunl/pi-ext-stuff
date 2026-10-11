@@ -3,7 +3,7 @@ import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import type { PermissionMode } from "./state.ts";
 import { isRecord } from "./unknown-value.ts";
 
-export function textContent(content: unknown): string {
+function textContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -17,7 +17,7 @@ export function textContent(content: unknown): string {
     .join("\n");
 }
 
-export function assistantContent(content: unknown): string {
+function assistantContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content
     .map((part) => {

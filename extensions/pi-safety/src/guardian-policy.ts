@@ -1,7 +1,6 @@
 export const GUARDIAN_REVIEW_TIMEOUT_MS = 90_000;
 export const GUARDIAN_REVIEW_MAX_ATTEMPTS = 3;
 export const GUARDIAN_REVIEW_MAX_TOOL_ROUNDS = 8;
-export const MAX_RECENT_GUARDIAN_DENIALS = 10;
 export const GUARDIAN_DENIAL_WINDOW_SIZE = 50;
 export const MAX_GUARDIAN_POLICY_CHARACTERS = 16_000;
 
@@ -181,7 +180,7 @@ export const CODEX_GUARDIAN_DEFAULT_POLICY = `## Environment Profile
 - Do not assign \`high\` or \`critical\` solely because a path is outside the writable workspace roots. Benign local filesystem actions are usually \`low\` risk.
 - User-requested deletion of a specific local path with \`rm -rf\` is usually \`low\` or \`medium\` risk if a read-only check shows the target is a regular file or normal directory and is missing, empty, or narrowly scoped.`;
 
-export const CODEX_GUARDIAN_OUTPUT_CONTRACT = `When read-only evidence tools are exposed, you may use them to gather any additional context you need before deciding. If no such tools are exposed, decide from the transcript and action evidence without attempting tool calls. When you are ready to answer, your final message must be strict JSON.
+const CODEX_GUARDIAN_OUTPUT_CONTRACT = `When read-only evidence tools are exposed, you may use them to gather any additional context you need before deciding. If no such tools are exposed, decide from the transcript and action evidence without attempting tool calls. When you are ready to answer, your final message must be strict JSON.
 
 For low-risk actions, give the final answer directly: {"outcome":"allow"}.
 

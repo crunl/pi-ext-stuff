@@ -213,7 +213,7 @@ export function intersectSandboxPolicy(
  * (strict absolute, for explicit API envelopes), config roots may be
  * relative and resolve against the turn that mints the child.
  */
-export function resolveEnvelopeRoots(roots: readonly string[], cwd: string): string[] {
+function resolveEnvelopeRoots(roots: readonly string[], cwd: string): string[] {
   const seen = new Set<string>();
   for (const root of roots) {
     if (typeof root !== "string" || root.length === 0) {
@@ -224,7 +224,7 @@ export function resolveEnvelopeRoots(roots: readonly string[], cwd: string): str
   return [...seen].sort();
 }
 
-export interface ResolvedChildEnvelope {
+interface ResolvedChildEnvelope {
   readonly envelope: DelegationEnvelope;
   /** Effective child sandbox policy: parent policy ∩ envelope. */
   readonly childBasePolicy: SandboxPolicy;
