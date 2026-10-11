@@ -4,8 +4,8 @@
 Codex-style tool presentation, the boxed editor chrome carrying the
 permissions-mode badge, the working token-rate widget, and output-padding sync.
 It imports nothing back from the other
-extensions (`extensions/pi-core/../pi-safety`, `../statusline`,
-`../tool-result-budget` do not appear in its import graph).
+extensions (`extensions/pi-core/../pi-safety`, `../statusline`
+do not appear in its import graph).
 
 Everything ships as `.ts` sources loaded directly by pi through jiti; there is no
 build step (`extensions/pi-core/AGENTS.md:16-17`).
@@ -112,7 +112,6 @@ returns zero import statements. The real edges are:
 | --- | --- |
 | `pi-safety` | `extensions/pi-safety/src/register.ts:27` imports `codexBashToolSpec`, `codexEditToolSpec`, `codexWriteToolSpec`, `createCodexToolRendering as createPiCoreCodexToolRendering` from `../../../packages/shared-tool-presentation/src/index.ts`. |
 | `statusline` | `extensions/statusline/src/palette.ts:23` and `extensions/statusline/src/status-mode.ts:1` import from `../../../packages/shared-tool-presentation/src/badge.ts`. |
-| `tool-result-budget` | No cross-package imports; Node builtins and the extension API only (`extensions/tool-result-budget/index.ts:23-25`). |
 
 `extensions/pi-safety/tests/structure-invariants.test.ts` pins both facts: the
 host-package edges test asserts `sharedPresentation` has exactly
@@ -623,7 +622,7 @@ stay green (`extensions/pi-core/AGENTS.md:94-95`).
 
 Note that this is the **only** workflow in the repository — there is no root
 `.github/` directory — so it is what runs for the monorepo, but it installs and tests
-the `pi-core` workspace only. `pi-safety`, `statusline`, and `tool-result-budget`
+the `pi-core` workspace only. `pi-safety` and `statusline`
 have no CI of their own.
 
 ## Where to change what

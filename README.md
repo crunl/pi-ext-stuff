@@ -2,7 +2,7 @@
 
 > English · 中文说明（看图版）: [`README.zh-CN.md`](README.zh-CN.md)
 
-Four extensions for the pi coding agent, developed together in one repo but
+Three extensions for the pi coding agent, developed together in one repo but
 loadable independently. Everything ships as `.ts` sources — pi loads extensions
 directly, so there is **no build step** in any package.
 
@@ -14,8 +14,6 @@ directly, so there is **no build step** in any package.
   with sandboxed tool execution and a guardian reviewer.
 - **[`statusline`](extensions/statusline)** — boxed editor frame carrying
   token, model, and effort info.
-- **[`tool-result-budget`](extensions/tool-result-budget)** — per-turn
-  tool-result size limit with spill files.
 
 Each package README covers install, config, and usage — start there.
 
@@ -24,7 +22,6 @@ Each package README covers install, config, and usage — start there.
 ```text
 [pi-core]──standalone.ts──┬──> [pi-safety] ──mode/review──> [statusline]
                           └──> [statusline]
-[tool-result-budget] standalone (no cross-package imports)
 ```
 
 `pi-core` is required by `pi-safety` and `statusline`; it imports nothing back.
@@ -35,7 +32,6 @@ Each package README covers install, config, and usage — start there.
 pi install ~/path/to/pi-ext-stuff/extensions/pi-core
 pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 pi install ~/path/to/pi-ext-stuff/extensions/statusline
-pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
 ```
 
 Not installable as a git package (no subdirectory support — use a local

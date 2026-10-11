@@ -15,8 +15,7 @@
     "extensions": [
       "./extensions/pi-safety/index.ts",
       "./extensions/pi-core/index.ts",
-      "./extensions/statusline/index.ts",
-      "./extensions/tool-result-budget/index.ts"
+      "./extensions/statusline/index.ts"
     ]
   },
   "scripts": {

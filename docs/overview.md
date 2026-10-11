@@ -18,7 +18,7 @@ It contains four pi extensions and one internal shared library.
 - **All private / unpublished.** Every member sets `"private": true`.
   The root is the npm package (`package.json:2-4`); the four
   extensions are separate npm packages (e.g. `pi-core`,
-  `pi-safety`, `statusline`, `tool-result-budget`) installed by local
+  `pi-safety`, `statusline`) installed by local
   path, not published.
 - **Peer dependencies.** The root declares
   `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and
@@ -35,7 +35,7 @@ It contains four pi extensions and one internal shared library.
   `test` = `npm run --workspaces --if-present test`
   (`package.json:22-25`).
 
-## The five members
+## The four members
 
 | Member | Purpose | src | tests |
 | --- | --- | --- | --- |
@@ -43,7 +43,6 @@ It contains four pi extensions and one internal shared library.
 | `extensions/pi-core` | Codex-style tool presentation, TUI polish | 27 files / 3,727 lines + 43 entry lines | 26 files / 4,423 lines |
 | `packages/shared-tool-presentation` | Pure presentation specs/renderers (shared lib) | 15 files / 2,090 lines | 3 files / 182 lines |
 | `extensions/statusline` | Boxed footer: token/model/effort/usage | 8 files / 725 lines + 2 entry lines | 5 files / 341 lines |
-| `extensions/tool-result-budget` | Per-turn tool-result size limit with spill files | 1 file / 180 lines | none |
 
 `pi-safety` dominates the codebase: it is roughly 6.7× the source of
 `pi-core` and 11× `shared-tool-presentation`, and its test suite is
@@ -101,21 +100,9 @@ written in Chinese). It installs via `ctx.ui.setFooter()` on every
 `session_start` and toggles with the `/statusline` command
 (`extensions/statusline/src/index.ts:38-70`). It is the only member
 with no `version` field (`extensions/statusline/package.json:1-8`); all
-five members carry `private: true`. It also declares neither a `files`
+four members carry `private: true`. It also declares neither a `files`
 nor an `exports` map — a distinction it shares with `pi-safety`, the only
 other member lacking both.
-
-### `extensions/tool-result-budget`
-
-A single 180-line file that bounds how many characters one turn may
-add to context via tool results (default 60,000/turn, never shrink a
-result under 4,000); overflow is written whole to a spill file under
-`~/.pi/agent/tool-spill/` and replaced with head + tail + a pointer
-(`extensions/tool-result-budget/index.ts:1-180`, header comment
-lines 1-33). It never compacts, never aborts, and never touches pi's
-compaction or goal accounting. Standalone: Node builtins plus the
-extension API only, no cross-package imports
-(`extensions/tool-result-budget/README.md` "Relationship").
 
 ## `packages/shared-tool-presentation` — the shared library
 
@@ -232,8 +219,6 @@ shared-tool-presentation  (pure leaf, no extension imports)
         |                              |
         |                              +──> statusline (via pi-safety:mode bus event)
         +──────────────────────────────┘  (statusline also imports shared badge directly)
-
-tool-result-budget   (standalone: no cross-package imports)
 ```
 
 - `pi-core` imports nothing back from `pi-safety` or `statusline`
@@ -260,9 +245,6 @@ tool-result-budget   (standalone: no cross-package imports)
   `pi-safety` code; it receives pi-safety's mode via the
   `pi-safety:mode` bus event, which pi-core subscribes to
   (`extensions/statusline/README.md` "接线与组合").
-- `tool-result-budget` has no cross-package imports
-  (`extensions/tool-result-budget/index.ts` imports only `node:fs`,
-  `node:path`, and `@earendil-works/pi-coding-agent`).
 
 **What `pi-core/standalone.ts` exports and who imports it.**
 `standalone.ts` (26 lines) is documented as "the side-effect-free
@@ -289,9 +271,9 @@ out-of-repo and legacy consumers.
 Each extension is a package whose `package.json` carries a
 `"pi": { "extensions": [...] }` array naming its entry file(s) —
 e.g. `extensions/pi-core/package.json:20-24` lists `"./index.ts"`.
-The root `package.json:14-21` aggregates all four in one array:
+The root `package.json:14-21` aggregates all three in one array:
 `./extensions/pi-safety/index.ts`, `./extensions/pi-core/index.ts`,
-`./extensions/statusline/index.ts`, `./extensions/tool-result-budget/index.ts`.
+`./extensions/statusline/index.ts`.
 pi discovers the entry files from these arrays.
 
 Each `index.ts` is a thin default-export shim over the real module:
@@ -302,8 +284,6 @@ Each `index.ts` is a thin default-export shim over the real module:
   `export * from "./standalone.ts"`.
 - `extensions/statusline/index.ts:1` — `export { default } from "./src/index.ts"`
   (auto-discovery shim).
-- `extensions/tool-result-budget/index.ts:87-178` — the whole
-  implementation, default-exporting the `pi => {…}` function.
 
 **Load-once constraint.** Install each extension exactly once: a
 symlink *and* a settings entry pointing at the same package causes pi
@@ -323,7 +303,6 @@ Install is by local path, from a checkout of this monorepo
 pi install ~/path/to/pi-ext-stuff/extensions/pi-core
 pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 pi install ~/path/to/pi-ext-stuff/extensions/statusline
-pi install ~/path/to/pi-ext-stuff/extensions/tool-result-budget
 ```
 
 It is not installable as a git package (pi's source parser has no
@@ -364,8 +343,6 @@ to every workspace with `npm run --workspaces --if-present`.
   built-in runner, no vitest).
 - `shared-tool-presentation` (`packages/shared-tool-presentation/package.json:10-13`):
   `check` = `tsc --noEmit`, `test` = `npx vitest --run`.
-- `tool-result-budget`: no scripts at all
-  (`extensions/tool-result-budget/package.json` has no `scripts` key).
 
 **`preflight:sibling`.** `scripts/preflight-sibling.mjs` checks the
 sibling `packages/shared-tool-presentation` checkout: it fails closed
@@ -412,9 +389,8 @@ removed. Companion files written concurrently:
 - `docs/pi-core.md` — the pi-core member: the TUI module map
   (`src/tui/*`), the register facade, and the `standalone.ts`
   cross-extension surface.
-- `docs/statusline-and-tool-result-budget.md` — the two small members:
-  the statusline footer layout/palette and the tool-result-budget
-  clipping/spill behaviour.
+- `docs/statusline.md` — the small member:
+  the statusline footer layout/palette.
 
 The per-package READMEs remain in-tree (`extensions/*/README.md`,
 `extensions/pi-core/README.md` points at `docs/pi-core.md`).
