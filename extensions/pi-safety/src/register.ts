@@ -200,6 +200,14 @@ const guardianFallbackNoticeKeys = new Set<string>();
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
+  // Guide lifecycle contract (extensions.md:58-60) forbids load-time
+  // processes/sockets/watchers/timers, not object allocation: every
+  // constructor below is pure field assignment. The only process-lifetime
+  // resource (SandboxConnectGuard listener) is a module singleton that
+  // starts in activate(), driven by session_start/activateConfig — so the
+  // contract is satisfied without deferring `new`. Lazy ensureX() would be
+  // strictly worse: /permissions, /approve and shift+tab legally touch the
+  // managers before any session_start.
   const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
   const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
@@ -2382,7 +2390,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     });
   });
 
+  // Guide contract (extensions.md:262-263): shutdown cleanup must be
+  // idempotent because cancel/reload/replacement/exit paths converge here.
+  // The host emits at most once per runner, but a settled flag costs one
+  // boolean and stops relying on that; it is deliberately not shared with
+  // the tree handlers — a tree switch is invalidation + restore, not
+  // teardown, and must leave SRT usable for the restored branch.
+  let shutdownSettled = false;
   pi.on("session_shutdown", async () => {
+    if (shutdownSettled) return;
+    shutdownSettled = true;
     invalidatePermissions("session shutdown");
     session.bumpGeneration();
     cancelInFlightModeTransition();
@@ -2391,7 +2408,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     invalidatePermissionContext("session shutdown");
     await sandboxLifecycleLease.runExclusive(async () => {
       sandboxState = { kind: "pending" };
-      await sandboxManager.reset();
+      try {
+        await sandboxManager.reset();
+      } catch {
+        // Fail closed: sandboxState stays pending so any racing activation
+        // refuses. Swallowing here does not clear the SRT poison latch; the
+        // host already reports handler errors via its own listener.
+      }
     });
   });
 

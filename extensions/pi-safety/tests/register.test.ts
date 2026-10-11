@@ -688,6 +688,26 @@ describe("Permission mode registration", () => {
     }
   });
 
+  it("makes session_shutdown idempotent and swallows a throwing reset", async () => {
+    // Guide contract (extensions.md:262-263): shutdown cleanup is idempotent
+    // because cancel/reload/replacement/exit converge on it. A second
+    // dispatch must not double-bump generation or re-run reset; a throwing
+    // reset must fail closed (pending sandboxState) instead of rejecting.
+    const app = await makeHarness({ sandboxResetErrorAfter: 2 });
+    await startSession(app);
+    await startAgent(app);
+    // Startup's activation already consumed reset ordinal 1 successfully.
+    expect(app.sandboxManager.reset).toHaveBeenCalledOnce();
+
+    // First shutdown: reset throws, handler still resolves (swallowed).
+    await expect(invoke(app, "session_shutdown")).resolves.toBeUndefined();
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(2);
+
+    // Second dispatch is a no-op: settled flag short-circuits before reset.
+    await invoke(app, "session_shutdown");
+    expect(app.sandboxManager.reset).toHaveBeenCalledTimes(2);
+  });
+
   it("registers Auto status and initializes the sandbox on session_start", async () => {
     const app = await makeHarness();
 
