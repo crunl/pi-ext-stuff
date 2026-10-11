@@ -149,7 +149,6 @@ import {
   permissionedBashParameters,
   preparePermissionedBashArguments,
 } from "./shell-permissions.ts";
-import { shiftTabAvailability } from "./shortcut-config.ts";
 import type { PermissionMode } from "./state.ts";
 import { activateTreeSitterShellParser, treeSitterShellFailure } from "./tree-sitter/shell-backend.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
@@ -259,25 +258,34 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const managedRiskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
+  // Cluster A (activation): written by commitActivation/activateWithSandbox/
+  // activateConfigUnlocked, read by every tool's prepare + snapshot. The
+  // sandbox pair below is the split bottleneck: activation writes, per-tool
+  // reads (prepare, snapshot, escalation health) — never separate them.
   let loaded: LoadedSafetyConfig | undefined;
   let loadedKey: string | undefined;
   let configFailure: Error | undefined;
   let activationFailure: { key: string; error: Error } | undefined;
   let modeRuntime: PermissionModeRuntime | undefined;
-  let shortcutWarningShown = false;
+  // Cluster C (review evidence): Guardian transcript dual-track + activation
+  // notice. shellParserFailureReported is activation/startup, not review.
   /** One Shell AST parser activation failure notice per registration. */
   let shellParserFailureReported = false;
   let guardianTranscript: GuardianTranscriptEntry[] = [];
   let guardianTranscriptEpoch = 0;
   let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
   let guardianInvalidationAfterModeChange = false;
+  // Cluster B (turn enforcement): cycle writes intent, turn_start/prepare/
+  // agent_start apply it. pendingModeRefresh is the flag, pendingMode the
+  // value; they clear together everywhere EXCEPT agent_start align (which
+  // clears the flag only — the stale value is masked by the flag at read).
   /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
   let pendingModeRefresh = false;
   /**
    * The desired mode a mid-turn cycle asked for while enforcement stays on the
    * old snapshot. Shown in the TUI immediately (with a pending marker) so the
    * display tracks intent; enforcement still flips only at the step boundary.
-   * Cleared everywhere `pendingModeRefresh` is.
+   * Cleared together with `pendingModeRefresh` (see exception above).
    */
   let pendingMode: PermissionMode | undefined;
   /** Report one activation failure per registration, on whichever ctx learns of it first. */
@@ -2497,7 +2505,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    shortcutWarningShown = false;
     resetBranchPermissionContext("session changed");
     session.clearLifecycleEvents();
     const generation = session.getGeneration();
@@ -2534,13 +2541,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       if (!session.isCurrentGeneration(generation)) return;
       modeRuntime = restoredRuntime;
       setDefaultStatus(ctx);
-      if ((await shiftTabAvailability(agentDir)) === "reserved" && !shortcutWarningShown) {
-        if (!session.isCurrentGeneration(generation)) return;
-        shortcutWarningShown = true;
-        if (ctx.hasUI) {
-          ctx.ui.notify(renderPermissionNotice({ kind: "shortcut-conflict" }), "warning");
-        }
-      }
     } catch (error: unknown) {
       if (!session.isCurrentGeneration(generation)) return;
       reportPermissionSetupError(ctx, error);
@@ -2788,7 +2788,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       // No shortcut-availability check here: the host arbitrates shift+tab
       // at dispatch (a reserved built-in binding skips this handler
       // entirely), so by the time this runs the key is ours. The known
-      // collision is app.thinking.cycle; see shortcut-config.ts.
+      // collision is app.thinking.cycle, which the host reports under
+      // [Extension issues] at startup/reload.
       const generation = session.getGeneration();
       try {
         let runtime = modeRuntime;
@@ -2860,9 +2861,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   // Unconditional registration: the host arbitrates shift+tab at dispatch
   // (ExtensionRunner.getShortcuts skips this entry when a reserved built-in
-  // such as app.thinking.cycle binds the same key), so no availability probe
-  // is needed here. The session_start notice below is the only remaining
-  // keybindings.json read — one per session, purely informational.
+  // such as app.thinking.cycle binds the same key) and surfaces the conflict
+  // under [Extension issues]. No keybindings.json read here.
   pi.registerShortcut("shift+tab", {
     description: "Cycle permission mode",
     handler: cyclePermissionMode,

@@ -42,7 +42,6 @@ export type PermissionNotice =
   | { kind: "approve-requires-ui" }
   | { kind: "approve-empty" }
   | { kind: "approve-stale" }
-  | { kind: "shortcut-conflict" }
   | { kind: "configuration-invalid"; reason: string }
   | {
       kind: "sandbox-activation-failed";
@@ -209,8 +208,6 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
       return "No recent Auto-review denials in this task.";
     case "approve-stale":
       return "That Auto-review denial is no longer available.";
-    case "shortcut-conflict":
-      return "Shift+Tab is still assigned to app.thinking.cycle. Update ~/.pi/agent/keybindings.json, then run /reload.";
     case "configuration-invalid":
       return `Permission configuration is invalid: ${notice.reason}`;
     case "sandbox-activation-failed":

@@ -238,10 +238,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   tempDirectories.push(agentDir, cwd);
   const configDirectory = agentDir;
   await mkdir(configDirectory, { recursive: true });
-  await writeFile(
-    join(agentDir, "keybindings.json"),
-    JSON.stringify({ "app.thinking.cycle": "ctrl+shift+t" }),
-  );
   if (options.config) {
     await writeFile(join(configDirectory, "safety.json"), JSON.stringify(options.config));
   }
