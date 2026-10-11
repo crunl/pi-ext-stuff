@@ -110,10 +110,22 @@ import {
   hasGlobSyntax,
 } from "./policy-primitives.ts";
 import {
+  abortLiveTurn,
+  ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE,
+  ActivationSupersededError,
+  configKey,
+  DELEGATED_TOOL_NAMES,
   guardianTranscriptEntryFromMessage,
+  isActivationSupersededError,
   nextMode,
   normalizeEscalatedBashTimeout,
+  PERMISSION_MODE_CHANGED_REASON,
+  PI_HOST_FIRST_TOOL_NAMES,
+  PI_OWNED_TOOL_NAMES,
+  policyDeniedError,
+  requiresNetworkQuiescence,
   requiresSandbox,
+  stableSessionId,
 } from "./register-support.ts";
 import {
   createReviewResultRenderer,
@@ -155,13 +167,6 @@ import {
 } from "./tree-sitter/shell-backend.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
-function policyDeniedError(reason: string): Error {
-  return Object.assign(
-    new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
-    { code: "policy-denied", reason },
-  );
-}
-
 type GuardianPolicySource = (context: {
   cwd: string;
   configFingerprint: string;
@@ -191,30 +196,7 @@ interface EffectiveExecutionContext {
   sandboxReady: boolean;
 }
 
-class ActivationSupersededError extends Error {
-  constructor() {
-    super("pi-safety: permission activation was superseded by a newer session");
-    this.name = "ActivationSupersededError";
-  }
-}
-
-function isActivationSupersededError(error: unknown): error is ActivationSupersededError {
-  return error instanceof ActivationSupersededError;
-}
-
-const PERMISSION_MODE_CHANGED_REASON = "permission mode changed";
-const ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE =
-  "The active permission context is unavailable. Retry in the current task.";
 const guardianFallbackNoticeKeys = new Set<string>();
-
-/** Owned tools: same-name registerTool.execute owns risk → Engine → SRT. */
-const PI_OWNED_TOOL_NAMES = new Set(["bash", "write", "edit", "request_permissions"]);
-
-/**
- * Pi host-first read-only tools: tool_call B (rules deny only). Foreign
- * MCP/custom tools are out of scope (A pass-through).
- */
-const PI_HOST_FIRST_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
 
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
@@ -336,16 +318,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     | undefined;
   const session = new PermissionSession();
-  /**
-   * Fail closed when a live turn loses its permission context (a branch
-   * switch or reload narrowing a YOLO run) or cannot trust it (a setup
-   * failure while in yolo): an unrestricted turn must not continue
-   * unreviewed. The narrowing-vs-failure distinction stays at the call
-   * sites; only the idle-guarded abort is shared.
-   */
-  const abortLiveTurn = (ctx: Pick<ExtensionContext, "isIdle" | "abort">): void => {
-    if (!ctx.isIdle()) ctx.abort();
-  };
   let baseSandboxConfig: SandboxPolicy | undefined;
   let sandboxState:
     | { kind: "pending" }
@@ -477,16 +449,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const isCurrentExecutionSnapshot = (snapshot: PermissionExecutionSnapshot): boolean =>
     session.currentExecutionSnapshot() === snapshot;
 
-  const requiresNetworkQuiescence = (network: SandboxPolicy["network"] | undefined): boolean => {
-    if (!network) return false;
-    const authority = effectiveNetworkAuthority(network);
-    return (
-      (network.access?.kind === "explicit" && network.access.transport === "direct") ||
-      network.macosTls === "system" ||
-      authority.localBinding
-    );
-  };
-
   const assertUnmediatedExecutionCurrent = (
     policy: SandboxPolicy,
     snapshot: PermissionExecutionSnapshot,
@@ -527,13 +489,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const cancelInFlightModeTransition = (): void => {
     session.cancelInFlightBarrier();
   };
-
-  /**
-   * Tool names that spawn a delegated subagent turn. A call to one of these
-   * is the delegation point: the parent declares the child's upper bound
-   * here, enforced as a ceiling for the whole nested turn.
-   */
-  const DELEGATED_TOOL_NAMES = new Set(["subagent"]);
 
   // The three live facts the delegation rules need. The rules themselves are in
   // `delegation-policy.ts`; this is the only place that knows how to read them,
@@ -802,27 +757,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
     boundGuardianTranscript(currentRawGuardianTranscript());
 
-  const stableSessionId = (
-    ctx: Pick<ExtensionContext, "sessionManager">,
-    generation: number,
-  ): string => {
-    // SAFETY: the host always supplies a sessionManager object; only the
-    // optional getSessionId shape is assumed, and every use below is guarded
-    // (optional chaining, typeof check, try/catch with a fallback id).
-    const sessionManager = ctx.sessionManager as unknown as
-      | { getSessionId?: () => unknown }
-      | undefined;
-    if (typeof sessionManager?.getSessionId === "function") {
-      try {
-        const sessionId = sessionManager.getSessionId();
-        if (typeof sessionId === "string" && sessionId.trim().length > 0) return sessionId;
-      } catch {
-        // Compatibility test doubles may expose a throwing session manager.
-      }
-    }
-    return `pi-safety-session-${generation}`;
-  };
-
   const buildTurnSnapshot = (
     ctx: ExtensionContext,
     executionSnapshot: PermissionExecutionSnapshot,
@@ -849,7 +783,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     permissions.beginTurn(buildTurnSnapshot(ctx, executionSnapshot), ctx);
   };
 
-  const configKey = (ctx: Pick<ExtensionContext, "cwd">): string => ctx.cwd;
   const isActivationCurrent = (expectedGeneration: number): boolean =>
     session.isCurrentGeneration(expectedGeneration);
   const assertActivationCurrent = (expectedGeneration: number): void => {
