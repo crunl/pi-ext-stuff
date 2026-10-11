@@ -4,16 +4,13 @@ import {
 	isPermissionsModeEvent,
 	PermissionsModeState,
 } from "../../../packages/shared-tool-presentation/src/permissions-mode.ts";
-import {
-	partitionExtensionStatuses,
-	powerlineChain,
-	syncPermissionsMode,
-} from "../src/status-mode.ts";
+import { powerlineChain } from "../src/powerline.ts";
+import { partitionExtensionStatuses, syncPermissionsMode } from "../src/status-mode.ts";
 
 test("powerlineChain joins N segments with caps and seps", () => {
 	const out = powerlineChain([
-		{ text: "A", ansi: "\x1b[38;2;10;10;10m" },
-		{ text: "B", ansi: "\x1b[38;2;20;20;20m" },
+		{ text: "A", rgb: [10, 10, 10] },
+		{ text: "B", rgb: [20, 20, 20] },
 		{ text: "C" },
 	]);
 	assert.ok(out.startsWith("\x1b[38;2;10;10;10m"));

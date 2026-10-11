@@ -34,6 +34,8 @@
  * JSON, or detected by Pi from the terminal's reported colors).
  */
 
+export type Rgb = [number, number, number];
+
 export type PaletteKey = "model" | "folder" | "git";
 export type EffortLevel =
 	| "minimal"
@@ -102,11 +104,8 @@ export function effortColor(
 	return palette.effort.medium;
 }
 
-/** SGR truecolor foreground parseable by badge.parseTruecolor. */
-export function truecolorFg(hex: `#${string}`): string {
+/** Convert a six-digit hex color into RGB channels. */
+export function hexToRgb(hex: `#${string}`): Rgb {
 	const n = Number.parseInt(hex.slice(1), 16);
-	const r = (n >> 16) & 0xff;
-	const g = (n >> 8) & 0xff;
-	const b = n & 0xff;
-	return `\x1b[38;2;${r};${g};${b}m`;
+	return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
 }

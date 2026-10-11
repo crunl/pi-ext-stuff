@@ -1,27 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseTruecolor } from "../../../packages/shared-tool-presentation/src/badge.ts";
 import { resolveModelInfo } from "../src/model-info.ts";
 import {
 	effortColor,
+	hexToRgb,
 	isLightThemeFrom,
 	PALETTE_DARK,
 	PALETTE_LIGHT,
 	paletteForLight,
-	truecolorFg,
 } from "../src/palette.ts";
 
-test("truecolorFg emits SGR parseable by badge.parseTruecolor", () => {
-	const hexes = [
-		...Object.values(PALETTE_DARK.fixed),
-		...Object.values(PALETTE_DARK.effort),
-		...Object.values(PALETTE_LIGHT.fixed),
-		...Object.values(PALETTE_LIGHT.effort),
-	];
-	for (const hex of hexes) {
-		const rgb = parseTruecolor(truecolorFg(hex));
-		assert.ok(rgb, `should parse ${hex}`);
-	}
+test("hexToRgb converts palette colors to RGB", () => {
+	assert.deepEqual(hexToRgb("#ca9ee6"), [202, 158, 230]);
 });
 
 test("dark palette uses Catppuccin Frappé accents", () => {

@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-	buildFooterCandidates,
-	buildLeftForms,
-	buildRightForms,
+	buildCandidates,
+	shedViews,
 	type LeftSeg,
 	type RenderFooterInput,
 	renderFooterLines,
-	SHED_MOVES,
 } from "../src/degrade.ts";
 import { selectFitting } from "../src/layout.ts";
 import { formatTokens, sanitizeStatusText } from "../src/format.ts";
@@ -82,10 +80,10 @@ const DEPS = { measure, truncate, fg };
 // --------------------------------------------------------------- test inputs
 
 const FULL_SEGS: LeftSeg[] = [
-	{ key: "model", text: "claude-sonnet-4-5", hex: "#ca9ee6", icon: "\u{F035B}" },
-	{ key: "effort", text: "high", hex: "#eebebe", icon: "\u{F09D1}" },
-	{ key: "folder", text: "pi-ext-stuff", hex: "#99d1db", icon: "\u{F024B}" },
-	{ key: "branch", text: "main", hex: "#e5c890", icon: "\u{F0641}" },
+	{ key: "model", text: "claude-sonnet-4-5", rgb: [202, 158, 230], icon: "\u{F035B}" },
+	{ key: "effort", text: "high", rgb: [238, 190, 190], icon: "\u{F09D1}" },
+	{ key: "folder", text: "pi-ext-stuff", rgb: [153, 209, 219], icon: "\u{F024B}" },
+	{ key: "branch", text: "main", rgb: [229, 200, 144], icon: "\u{F0641}" },
 ];
 
 function rightInput(over: Partial<RenderFooterInput["right"]> = {}): RenderFooterInput["right"] {
@@ -110,52 +108,50 @@ function baseInput(over: Partial<RenderFooterInput> = {}): RenderFooterInput {
 
 // --------------------------------------------------------------------- tests
 
-test("right ladder widths strictly decrease (C0..C6)", () => {
-	const forms = buildRightForms(rightInput(), measure, fg);
-	const widths = forms.map((f) => f.width);
-	// 7 canonical levels, each strictly narrower than the last, ending at 0.
-	assert.equal(widths.length, 7);
-	for (let i = 1; i < widths.length; i += 1) {
-		assert.ok(widths[i]! < widths[i - 1]!, `level ${i} not narrower: ${widths}`);
+test("shed views and candidates narrow monotonically", () => {
+	assert.equal(shedViews().length, 11);
+	const candidates = buildCandidates({
+		measure,
+		fg,
+		data: { left: { segments: FULL_SEGS }, right: rightInput() },
+	});
+	let previous = Number.POSITIVE_INFINITY;
+	for (const candidate of candidates) {
+		const width = candidate.left.width + candidate.right.width;
+		assert.ok(width < previous, `candidate widths must decrease: ${width}`);
+		previous = width;
 	}
-	assert.equal(widths[widths.length - 1], 0);
+	assert.equal(candidates.at(-1)?.right.width, 0);
 });
 
-test("left ladder sheds powerline chrome before any text", () => {
-	const forms = buildLeftForms({ segments: FULL_SEGS }, measure, fg);
-	// [0] is the pill: contains both powerline caps.
-	assert.ok(forms[0]!.text.includes("\uE0B6"), "pill must open with left cap");
-	assert.ok(forms[0]!.text.includes("\uE0B4"), "pill must close with right cap");
-	// [1] drops the chrome: plain `|`-joined, no caps.
-	assert.ok(!forms[1]!.text.includes("\uE0B6"));
-	assert.ok(forms[1]!.text.includes("|"), "plain form uses | separator");
-	// model label survives every form (it is the last to go).
-	for (const f of forms) {
-		assert.ok(measure(f.text) > 0);
-	}
-	assert.ok(forms[forms.length - 1]!.text.includes("claude-sonnet-4-5"));
+test("shed order drops chrome before left text", () => {
+	const candidates = buildCandidates({
+		measure,
+		fg,
+		data: { left: { segments: FULL_SEGS }, right: rightInput() },
+	});
+	assert.ok(candidates[0]!.left.text.includes("\uE0B6"));
+	assert.ok(candidates[0]!.left.text.includes("\uE0B4"));
+	assert.ok(!candidates[4]!.left.text.includes("\uE0B6"));
+	assert.ok(!candidates[4]!.left.text.includes("\uE0B4"));
+	assert.ok(candidates[4]!.left.text.includes("claude-sonnet-4-5"));
 });
 
-test("merged candidates are strictly decreasing and cover both sides", () => {
-	const cands = buildFooterCandidates(
-		buildLeftForms({ segments: FULL_SEGS }, measure, fg),
-		buildRightForms(rightInput(), measure, fg),
-	);
-	let prev = Number.POSITIVE_INFINITY;
-	for (const c of cands) {
-		const total = c.left.width + c.right.width;
-		assert.ok(total < prev, `not strictly decreasing at ${total}`);
-		prev = total;
-	}
-	assert.ok(cands.length >= 2);
-	assert.ok(SHED_MOVES.length > 0);
+test("merged candidates cover both sides", () => {
+	const candidates = buildCandidates({
+		measure,
+		fg,
+		data: { left: { segments: FULL_SEGS }, right: rightInput() },
+	});
+	assert.ok(candidates.length >= 2);
 });
 
 test("selectFitting is monotone: wider terminal never shows less", () => {
-	const cands = buildFooterCandidates(
-		buildLeftForms({ segments: FULL_SEGS }, measure, fg),
-		buildRightForms(rightInput(), measure, fg),
-	);
+	const cands = buildCandidates({
+		measure,
+		fg,
+		data: { left: { segments: FULL_SEGS }, right: rightInput() },
+	});
 	let prev = -1; // chosen index at the previous (smaller) width
 	for (let w = 0; w <= 200; w += 1) {
 		const idx = selectFitting(cands, w, 2);

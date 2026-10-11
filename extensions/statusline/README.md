@@ -94,12 +94,14 @@ modeleffortfolderbranch
 宽度降级的全部逻辑是**纯函数、零 pi 依赖**，因此可在 bare `node --test` 下完整单测（无需 pi 运行时）：
 
 - `src/footer.ts`：唯一接触 Pi 的薄壳。每帧从 `ctx` 采集数据（model/effort/folder/branch、cache 命中率、context usage、outputPad、statuses），注入 pi-tui 的 `visibleWidth`/`truncateToWidth` 与 `theme.fg`，然后调用 `renderFooterLines`。
-- `src/degrade.ts`：降级阶梯与整帧渲染（`buildLeftForms` / `buildRightForms` / `buildFooterCandidates` / `renderFooterLines`）。`measure`/`truncate`/`fg` 均为注入参数。
+- `src/degrade.ts`：声明式 `View`/`SHED` 降级计划与整帧渲染（`shedViews` / `buildCandidates` / `renderFooterLines`）。`measure`/`truncate`/`fg` 均为注入参数。
+- `src/powerline.ts`：用 `Rgb` 直接渲染 powerline pill，避免颜色在 hex/ANSI/RGB 之间往返。
+- `src/status-mode.ts`：只负责从第二行状态中移除 `pi-safety`。
 - `src/layout.ts`：`Span`（自带实测可见宽度的字符串）原语 + `selectFitting` 选级 + `dedupeNarrowing`。`Span` 消灭了旧的 plain/colored 双轨——宽度只在构造时测一次，之后 `paint`/`join` 只做加法，着色版本永不与宽度漂移。
 
 ## 当前降级行为
 
-宽度不足时，footer 沿一条**全局牺牲阶梯**逐级降级（`src/degrade.ts` 的 `SHED_MOVES`）。每级都比上一级更窄、信息更少，所以「保留内容」关于可用宽度单调不减，不会逐帧闪烁。右侧按稀缺性先降，左侧随后。
+宽度不足时，footer 沿 `src/degrade.ts` 的声明式 `SHED` 计划逐级降级。计划把右侧遥测编码、左侧 pill chrome 和实际 segment 的舍弃分开表达；缺失的 segment 会被跳过，因此每个有效候选都比上一级更窄。
 
 右侧（context 遥测）阶梯：
 

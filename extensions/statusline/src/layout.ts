@@ -80,7 +80,7 @@ export interface Candidate {
  * Pick the richest candidate that still fits.
  *
  * `candidates` MUST be ordered richest-first with *strictly non-increasing*
- * total width (buildFooterCandidates guarantees this). Under that invariant
+ * total width (buildCandidates guarantees this). Under that invariant
  * the chosen index is a monotone non-increasing function of `innerWidth`:
  * a wider terminal can only ever unlock an earlier (richer) candidate, never
  * skip one — so the footer cannot oscillate between frames.

@@ -23,7 +23,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type LeftSeg, renderFooterLines } from "./degrade.ts";
 import { formatCwd, ICONS } from "./format.ts";
 import { getOutputPad } from "./output-pad.ts";
-import { effortColor, isLightThemeFrom, paletteForLight } from "./palette.ts";
+import { effortColor, hexToRgb, isLightThemeFrom, paletteForLight } from "./palette.ts";
 import { createUsageCache } from "./usage.ts";
 
 interface FooterTheme {
@@ -72,14 +72,14 @@ export function installFooter(
 					leftSegments.push({
 						key: "model",
 						text: model.modelId,
-						hex: pal.fixed.model,
+						rgb: hexToRgb(pal.fixed.model),
 						icon: ICONS.model,
 					});
 					if (model.effort) {
 						leftSegments.push({
 							key: "effort",
 							text: model.effort,
-							hex: effortColor(model.effort, pal),
+							rgb: hexToRgb(effortColor(model.effort, pal)),
 							icon: ICONS.effort,
 						});
 					}
@@ -87,14 +87,14 @@ export function installFooter(
 				leftSegments.push({
 					key: "folder",
 					text: formatCwd(ctx.sessionManager.getCwd(), home),
-					hex: pal.fixed.folder,
+					rgb: hexToRgb(pal.fixed.folder),
 					icon: ICONS.folder,
 				});
 				if (branch) {
 					leftSegments.push({
 						key: "branch",
 						text: branch,
-						hex: pal.fixed.git,
+						rgb: hexToRgb(pal.fixed.git),
 						icon: ICONS.branch,
 					});
 				}
