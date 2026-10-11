@@ -150,7 +150,10 @@ import {
   preparePermissionedBashArguments,
 } from "./shell-permissions.ts";
 import type { PermissionMode } from "./state.ts";
-import { activateTreeSitterShellParser, treeSitterShellFailure } from "./tree-sitter/shell-backend.ts";
+import {
+  activateTreeSitterShellParser,
+  treeSitterShellFailure,
+} from "./tree-sitter/shell-backend.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 function policyDeniedError(reason: string): Error {
@@ -455,7 +458,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       pendingModeRefresh && pendingMode !== undefined && pendingMode !== appliedMode
         ? pendingMode
         : undefined;
-    const label = pending ? `${permissionModeLabel(pending)} (pending)` : permissionModeLabel(appliedMode);
+    const label = pending
+      ? `${permissionModeLabel(pending)} (pending)`
+      : permissionModeLabel(appliedMode);
     // Parity with PermissionModeRuntime.statusSeverity: warning marks
     // guardian-reviewed execution, error marks unreviewed execution.
     const severity = appliedMode === "auto" ? "warning" : "error";
