@@ -49,11 +49,12 @@ they never grant or withhold authority on their own. Each step can only
 | ① prepare | setup | activation + snapshot: mode, policy (once per turn; cached hits are free) | `stale-invocation` |
 | ② static risk | **decision** | provable-safe vs needs-review | `policy-denied` |
 | ③ admission | projection | risk verdict → engine vocabulary, plus shape validation — "a projection, not an authorization decision" | `policy-denied` |
-| ④ guardian | **decision** | approve / deny — skipped when ② proved safe; yolo never reaches it | `review-denied`, retriable via `/approve` |
+| ④ guardian | **decision** | approve / deny — skipped when ② proved safe; auto-approved short-circuit in yolo | `review-denied`, retriable via `/approve` |
 | ⑤ lease | derivation | which backend executes: sandboxed / escalated / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **decision** | kernel says yes/no **while running** | command's own error, or timeout |
 
-Steps ②–⑥ are skipped entirely in `yolo` (⑥ too — nothing is sandboxed).
+Steps ②–⑥ are enforcement; in `yolo` ② is skipped and ④ auto-approves,
+while ①/③/⑤ still run and ⑥ executes unsandboxed (bare, no SRT wrap).
 Host-first tools (`read`/`grep`/`find`/`ls`) only see ① and a deny-rule check;
 foreign (MCP/custom) tools see none of it.
 

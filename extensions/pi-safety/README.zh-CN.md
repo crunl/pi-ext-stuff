@@ -37,11 +37,11 @@
 | ① prepare | 准备 | 激活 + 快照：mode、policy（每轮一次；缓存命中零成本） | `stale-invocation` |
 | ② static risk | **决策** | 可证明安全 vs 需要评审 | `policy-denied` |
 | ③ admission | 投影 | 风险判定 → engine 词汇，外加调用形态校验——"是投影，不是授权决策" | `policy-denied` |
-| ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 根本不进 | `review-denied`，可经 `/approve` 重试 |
+| ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 下自动批准短路 | `review-denied`，可经 `/approve` 重试 |
 | ⑤ lease | 派生 | 由哪个后端执行：sandboxed / escalated / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **决策** | **运行过程中**内核说行/不行 | 命令自身的错误，或超时 |
 
-`yolo` 下 ②–⑥ 全部跳过（⑥ 也一样——不进沙箱）。Host-first 工具（`read`/`grep`/`find`/`ls`）只经过 ① 和一次 deny 规则检查；外部（MCP/自定义）工具一层都不经过。
+`yolo` 下 ② 跳过、④ 自动批准；①/③/⑤ 照常运行，⑥ 以裸执行（不进沙箱）落地。Host-first 工具（`read`/`grep`/`find`/`ls`）只经过 ① 和一次 deny 规则检查；外部（MCP/自定义）工具一层都不经过。
 
 **⑥ 是唯一在命令启动之后才起作用的一步。** 那里被拒看起来像命令自身失败——常常是挂住直到超时，而不是一个干净的报错。发生这种情况时 footer 会显示 `SRT diagnostic observations`，它们是*有界的、可能经过脱敏的，且永远不构成授权证据*。
 

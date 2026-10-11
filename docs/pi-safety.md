@@ -38,12 +38,13 @@ Two permission modes exist (`src/state.ts:5`, `src/modes/controller.ts:3`):
 
 - **auto** — the Guardian reviewer approves risky actions on the user's
   behalf. This is the default mode (`src/state.ts:39-46`).
-- **yolo** — unrestricted execution. It bypasses the static risk layer
-  (`executePermissionedBash` routes to `executeYoloDirectBash`,
-  `src/register.ts:1747-1756`; `riskForFileMutation` returns early at
-  `src/register.ts:1938`) and skips both the host-first deny preflight and
-  the `subagent` spawn gate (`src/register.ts:1554`, before the gate at
-  `:1557`).
+- **yolo** — unrestricted execution. It skips the static risk layer
+  (risk evaluates to `undefined`, as in `riskForFileMutation`) and the
+  review auto-approves ("Bypass permissions is active"); the Engine lease
+  is unrestricted so the bare executors run with no SRT wrap. Capture,
+  prepare, snapshots, and the Engine attempt lifecycle stay on for all
+  modes. It also skips both the host-first deny preflight and the
+  `subagent` spawn gate.
 
 The retired human-popup `default`/`plan` modes are gone; `ModeController`
 cycles `auto` → `yolo` → `auto` and nothing else
@@ -778,8 +779,7 @@ This extension deliberately does **not**:
   (`assertSrtPolicySupported`, `src/sandbox/srt-enforcer.ts:91-107`).
 - **Interpret per-CLI verb grammars.** Remote-effect intent is the
   reviewer's judgement; the enforced boundary is the network lease and
-  the per-connection authorizer
-  (`src/permissions/command-effects.ts:64-111`).
+  the per-connection authorizer.
 - **Grant Unix sockets through `request_permissions`.** Use
   `sandbox_permissions=require_escalated` or yolo/host shell for daemon
   tools when the allowlist stays empty. Allowing

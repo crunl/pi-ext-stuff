@@ -29,9 +29,9 @@ import {
 } from "../src/tree-sitter/shell-backend.ts";
 
 /**
- * Actions handed to the facade's Engine submit seam. Yolo Bash must not
- * appear here: it has no review, grant, or lease to derive, so the register
- * layer executes it directly.
+ * Actions handed to the facade's Engine submit seam. All modes submit,
+ * including yolo (review auto-approves, lease is unrestricted); the seam
+ * spy stays live on every path.
  */
 const engineSubmissions = vi.hoisted(() => [] as unknown[]);
 
@@ -1754,9 +1754,10 @@ describe("Permission mode registration", () => {
   });
 
   it("keeps a non-zero exit on the unrestricted backend out of permission failures", async () => {
-    // Yolo Bash executes directly on the bare local backend. A command that
-    // exits non-zero there is the command's result, not a permission failure,
-    // so the captured exit code must keep it completed.
+    // Yolo Bash runs on the bare local backend through the Engine's
+    // unrestricted lease. A command that exits non-zero there is the
+    // command's result, not a permission failure, so the captured exit
+    // code must keep it completed.
     const app = await makeHarness({ useRealBashTool: true, risk: () => blockRisk() });
     await startSession(app);
     const shortcut = app.shortcuts.get("shift+tab");
@@ -1771,10 +1772,11 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).not.toHaveBeenCalled();
   });
 
-  it("executes yolo Bash directly without submitting an Engine invocation", async () => {
-    // Yolo derives no review, grant, admission, or lease, so the register layer
-    // owns the execution. The Auto path in the same harness proves the seam
-    // spy is live: only Bash in yolo mode should be missing from it.
+  it("runs yolo Bash through the Engine unrestricted lease without review", async () => {
+    // Yolo derives no review, grant, admission, or lease checks, but the
+    // execution still flows through Engine submit so dedup, abort, and the
+    // attempt lifecycle stay unified. The Auto path in the same harness proves
+    // the seam spy is live: only the review inputs should stay empty in yolo.
     engineSubmissions.length = 0;
     const app = await makeHarness({ risk: () => lowRisk() });
     await startSession(app);
@@ -1791,7 +1793,7 @@ describe("Permission mode registration", () => {
     app.riskEvaluator.mockClear();
     await executeBash(app, "yolo-direct", "printf direct");
 
-    expect(engineSubmissions).toHaveLength(0);
+    expect(engineSubmissions).toHaveLength(1);
     expect(app.reviewInputs).toHaveLength(0);
     expect(app.riskEvaluator).not.toHaveBeenCalled();
     expect(app.bareBashExecute).toHaveBeenCalledOnce();
@@ -1799,9 +1801,10 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.wrapWithSandbox).toHaveBeenCalledOnce();
   });
 
-  it("keeps a direct yolo non-zero exit a completed command result", async () => {
-    // Same invariant as the engine-driven case above, on the direct path: the
-    // captured exit code, not the thrown rendering, decides the classification.
+  it("keeps a yolo non-zero exit a completed command result", async () => {
+    // Same invariant as the engine-driven case above, on the unrestricted
+    // lease: the captured exit code, not the thrown rendering, decides the
+    // classification.
     engineSubmissions.length = 0;
     const app = await makeHarness({ risk: () => blockRisk(), localExitCode: 3 });
     await startSession(app);
@@ -1815,7 +1818,7 @@ describe("Permission mode registration", () => {
     };
     expect(result.details.exitCode).toBe(3);
     expect(result.content[0]?.text).toContain("Command exited with code 3");
-    expect(engineSubmissions).toHaveLength(0);
+    expect(engineSubmissions).toHaveLength(1);
     expect(app.reviewInputs).toHaveLength(0);
 
     // The completed result still reaches the model as a failed command.
@@ -1832,7 +1835,7 @@ describe("Permission mode registration", () => {
     ).resolves.toEqual({ isError: true });
   });
 
-  it("warns about possible effects when a direct yolo command fails after starting", async () => {
+  it("warns about possible effects when a yolo command fails after starting", async () => {
     // The command started, so a later infrastructure failure must not read as a
     // clean permission failure the agent may simply retry.
     const app = await makeHarness({
@@ -1854,10 +1857,10 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(0);
   });
 
-  it("aborts a running direct yolo Bash when the turn closes, marking effects", async () => {
-    // The Engine aborts its in-flight attempts when a turn closes; the direct
-    // path owns no Engine attempt, so the register layer must signal the same
-    // cancellation and keep the context-changed classification.
+  it("aborts a running yolo Bash when the turn closes, marking effects", async () => {
+    // The Engine aborts its in-flight attempts when a turn closes; yolo now
+    // submits through the same Engine attempt, so the same cancellation and
+    // context-changed classification apply.
     const app = await makeHarness({ risk: () => blockRisk() });
     await startSession(app);
     const shortcut = app.shortcuts.get("shift+tab");
@@ -1885,9 +1888,9 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(0);
   });
 
-  it("refuses a second direct yolo Bash on the same tool-call ID", async () => {
-    // The Engine rejects a duplicate tool-call ID at its own in-flight set; the
-    // direct path runs that check itself.
+  it("refuses a second yolo Bash on the same tool-call ID", async () => {
+    // The Engine rejects a duplicate tool-call ID at its in-flight set; yolo
+    // submits through the Engine, so the same rejection applies.
     const app = await makeHarness({ risk: () => blockRisk() });
     await startSession(app);
     const shortcut = app.shortcuts.get("shift+tab");
@@ -1921,12 +1924,11 @@ describe("Permission mode registration", () => {
     expect(app.bareBashExecute).toHaveBeenCalledOnce();
   });
 
-  // Differential parity with the direct-path twin above: on the auto path the
-  // Engine owns the in-flight set (approve-for-me-engine.ts:2483), on the
-  // direct path the register layer does. Both must refuse with
+  // Differential parity with the yolo twin above: the Engine owns the
+  // in-flight set on both paths now. Both must refuse with
   // concurrent-invocation; if either side ever changes its code, this pair
   // fails instead of drifting silently.
-  it("refuses a second auto Bash on the same tool-call ID, like the direct path", async () => {
+  it("refuses a second auto Bash on the same tool-call ID", async () => {
     let entered!: () => void;
     const entry = new Promise<void>((resolve) => {
       entered = resolve;
@@ -1956,10 +1958,10 @@ describe("Permission mode registration", () => {
     expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
   });
 
-  // Differential parity with "aborts a running direct yolo Bash when the turn
+  // Differential parity with "aborts a running yolo Bash when the turn
   // closes": a turn close must cancel the in-flight attempt on both paths and
-  // keep the effects warning. The Engine owns the auto path, the register
-  // layer owns the direct path — same observable contract.
+  // keep the effects warning. Both paths submit through the Engine now —
+  // same observable contract.
   it("aborts a running auto Bash when the turn closes, marking effects", async () => {
     let entered!: () => void;
     const entry = new Promise<void>((resolve) => {
