@@ -170,3 +170,89 @@ export function stableSessionId(ctx: Pick<ExtensionContext, "sessionManager">, g
 export function configKey(ctx: Pick<ExtensionContext, "cwd">): string {
   return ctx.cwd;
 }
+
+/**
+ * Env-gated turn tracing (PI_SAFETY_TRACE=1): pure helpers, zero cost when
+ * the gate is off. `traceSpan` measures a named segment of a tool call's
+ * extension-side pipeline; `flushTurnTrace` appends one JSON line per call
+ * to {agentDir}/turn-trace.jsonl via the caller's best-effort sink. The
+ * `review` segment (LLM wait) is recorded separately so it can be
+ * subtracted — extension_ms never includes it.
+ */
+export const TURN_TRACE_ENV = "PI_SAFETY_TRACE";
+
+export interface TurnTraceSegments {
+  capture?: number;
+  prepare?: number;
+  risk?: number;
+  admit?: number;
+  review?: number;
+  execute?: number;
+  diagnose?: number;
+}
+
+export function turnTraceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[TURN_TRACE_ENV] === "1";
+}
+
+/** Measures `fn` in milliseconds when tracing is on; passes through otherwise. */
+export async function traceSpan<T>(
+  enabled: boolean,
+  segments: TurnTraceSegments,
+  name: keyof TurnTraceSegments,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!enabled) return fn();
+  const start = performance.now();
+  try {
+    return await fn();
+  } finally {
+    segments[name] = (segments[name] ?? 0) + (performance.now() - start);
+  }
+}
+
+export interface TurnTraceRecord {
+  schema: 1;
+  id: string;
+  tool: string;
+  mode: string;
+  segments: TurnTraceSegments;
+  /** Sum of extension-side segments, excluding review (LLM) and command wait. */
+  extension_ms: number;
+}
+
+export function buildTurnTraceRecord(
+  id: string,
+  tool: string,
+  mode: string,
+  segments: TurnTraceSegments,
+): TurnTraceRecord {
+  const { review: _review, ...extensionSegments } = segments;
+  const extensionMs = Object.values(extensionSegments).reduce(
+    (sum, value) => sum + (value ?? 0),
+    0,
+  );
+  return { schema: 1, id, tool, mode, segments, extension_ms: extensionMs };
+}
+
+/**
+ * Best-effort JSONL append to {agentDir}/turn-trace.jsonl, mirroring the
+ * guardian-metrics sink contract: observational, never throws into the
+ * authorization path.
+ */
+export async function flushTurnTrace(
+  id: string,
+  tool: string,
+  mode: string,
+  segments: TurnTraceSegments,
+  agentDirectory: string,
+): Promise<void> {
+  try {
+    const { appendFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const record = buildTurnTraceRecord(id, tool, mode, segments);
+    await appendFile(join(agentDirectory, "turn-trace.jsonl"), `${JSON.stringify(record)}\n`);
+  } catch {
+    // Tracing is observational; never surface sink failures.
+  }
+}

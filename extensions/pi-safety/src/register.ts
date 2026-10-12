@@ -115,6 +115,7 @@ import {
   ActivationSupersededError,
   configKey,
   DELEGATED_TOOL_NAMES,
+  flushTurnTrace,
   guardianTranscriptEntryFromMessage,
   isActivationSupersededError,
   nextMode,
@@ -126,6 +127,9 @@ import {
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
+  traceSpan,
+  turnTraceEnabled,
+  type TurnTraceSegments,
 } from "./register-support.ts";
 import {
   createReviewResultRenderer,
@@ -1588,19 +1592,28 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     onUpdate: BashOnUpdate,
     ctx: ExtensionContext,
   ): Promise<BashResult> => {
+    const tracing = turnTraceEnabled();
+    const segments: TurnTraceSegments = {};
     const normalizedParams = normalizeBashParams(params);
-    const captured = permissions.captureAction({
-      id,
-      tool: "bash",
-      input: normalizedParams,
-      cwd: resolve(ctx.cwd),
-    });
+    const captured = await traceSpan(tracing, segments, "capture", async () =>
+      permissions.captureAction({
+        id,
+        tool: "bash",
+        input: normalizedParams,
+        cwd: resolve(ctx.cwd),
+      }),
+    );
     const { call } = captured;
     const actionId = call.id;
     const canonicalCwd = call.cwd;
     const canonicalParams = call.input;
     const capturedTranscript = currentGuardianTranscriptSnapshot();
-    const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
+    const { executionSnapshot, executionContext } = await traceSpan(
+      tracing,
+      segments,
+      "prepare",
+      () => preparePermissionExecution(ctx),
+    );
     // SAFETY: the bridge invokes onUpdate solely with ReviewPartialResult
     // payloads, which the host update channel accepts; no other call shape
     // flows through this seam.
@@ -1614,12 +1627,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const risk =
       executionSnapshot.mode === "yolo"
         ? undefined
-        : await evaluateManagedRisk(
-            "bash",
-            canonicalParams as Record<string, unknown>,
-            ctx,
-            executionContext,
-            canonicalCwd,
+        : await traceSpan(tracing, segments, "risk", () =>
+            evaluateManagedRisk(
+              "bash",
+              canonicalParams as Record<string, unknown>,
+              ctx,
+              executionContext,
+              canonicalCwd,
+            ),
           );
     // Ceiling before review: admission-declared roots/hosts merge into the
     // execution lease, so an allow-risk verdict would otherwise carry an
@@ -1675,6 +1690,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         authorizeCapability,
         rejectCapability,
       }) => {
+        const executeSpanStart = tracing ? performance.now() : 0;
         // Records the child's exit code at the operations seam for the
         // thrown-status path (Pi 1.x signal terminations; every status
         // under Pi 0.86). `undefined` means the child never reported a
@@ -1799,6 +1815,13 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           const completed = completedIfCommandRan(error, error, exitCodeSlot);
           if (completed) return { kind: "completed", value: completed };
           return { kind: "failed", error };
+        } finally {
+          if (tracing) {
+            segments.execute = (segments.execute ?? 0) + (performance.now() - executeSpanStart);
+            // extension_ms sums only the measured extension-side spans; the
+            // LLM review wait lives in guardian-metrics.jsonl, never here.
+            void flushTurnTrace(actionId, "bash", executionSnapshot.mode, segments, agentDir);
+          }
         }
       },
     };

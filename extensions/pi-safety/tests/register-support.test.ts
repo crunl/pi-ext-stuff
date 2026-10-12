@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import {
+  buildTurnTraceRecord,
   DEFAULT_BASH_TIMEOUT_SECONDS,
   MAX_BASH_TIMEOUT_SECONDS,
   nextMode,
@@ -9,6 +10,9 @@ import {
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
+  traceSpan,
+  turnTraceEnabled,
+  type TurnTraceSegments,
 } from "../src/register-support.ts";
 import type { SandboxPolicy } from "../src/sandbox-policy.ts";
 
@@ -101,5 +105,39 @@ describe("stableSessionId", () => {
     ["non-string", { getSessionId: () => 42 }],
   ])("falls back on %s session manager", (_label, sessionManager) => {
     expect(stableSessionId(ctxWith(sessionManager), 7)).toBe("pi-safety-session-7");
+  });
+});
+
+describe("turn tracing", () => {
+  it("gates on PI_SAFETY_TRACE=1 only", () => {
+    expect(turnTraceEnabled({ PI_SAFETY_TRACE: "1" })).toBe(true);
+    expect(turnTraceEnabled({})).toBe(false);
+    expect(turnTraceEnabled({ PI_SAFETY_TRACE: "0" })).toBe(false);
+    expect(turnTraceEnabled({ PI_SAFETY_TRACE: "true" })).toBe(false);
+  });
+
+  it("accumulates named spans and excludes review from extension_ms", async () => {
+    const segments: TurnTraceSegments = {};
+    await traceSpan(true, segments, "risk", async () => undefined);
+    await traceSpan(true, segments, "risk", async () => undefined);
+    await traceSpan(true, segments, "execute", async () => undefined);
+    // A visibly slow review span: extension_ms must not absorb it.
+    await traceSpan(true, segments, "review", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    });
+    const record = buildTurnTraceRecord("id-1", "bash", "auto", segments);
+    expect(record.schema).toBe(1);
+    expect(Object.keys(record.segments).sort()).toEqual(["execute", "review", "risk"]);
+    // extension_ms equals the non-review spans only.
+    expect(record.extension_ms).toBeCloseTo(record.segments.risk! + record.segments.execute!, 6);
+    expect(record.extension_ms).toBeLessThan(record.segments.review!);
+  });
+
+  it("passes through untouched when the gate is off", async () => {
+    const segments: TurnTraceSegments = {};
+    const marker = Symbol("result");
+    const result = await traceSpan(false, segments, "risk", async () => marker);
+    expect(result).toBe(marker);
+    expect(Object.keys(segments)).toHaveLength(0);
   });
 });

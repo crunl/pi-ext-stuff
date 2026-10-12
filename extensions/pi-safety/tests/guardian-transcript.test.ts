@@ -171,6 +171,21 @@ describe("guardian transcript", () => {
     expect(entries.at(-1)?.content).toBe(`msg-${MAX_RAW_TRANSCRIPT_ENTRIES + 9}`);
   });
 
+  it("keeps the stored buffer within the character budget under head-drop", () => {
+    // 200_000 is the module-private raw character budget; the assertion pins
+    // the public behavior (head-drop keeps the buffer inside it) so a cap
+    // regression surfaces here without exporting the constant.
+    const rawCharacterBudget = 200_000;
+    let entries: GuardianTranscriptEntry[] = [];
+    const fat = "x".repeat(5_000);
+    for (let index = 0; index < MAX_RAW_TRANSCRIPT_ENTRIES; index += 1) {
+      const result = appendGuardianTranscript(entries, { role: "assistant", content: fat });
+      entries = result.entries;
+    }
+    const total = entries.reduce((sum, entry) => sum + entry.content.length, 0);
+    expect(total).toBeLessThanOrEqual(rawCharacterBudget + fat.length);
+  });
+
   describe("sliceGuardianTranscriptFrom", () => {
     const entries = [
       { role: "user" as const, content: "a" },

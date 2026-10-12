@@ -466,6 +466,14 @@ export class GuardianWorkerClient {
     return this.closing;
   }
 
+  /** Observability only: OS pid of the live worker, or undefined. Never an authority. */
+  get pid(): number | undefined {
+    const phase = this.lifecycle?.phase;
+    return this.lifecycle && phase !== "closed" && phase !== "retiring"
+      ? this.lifecycle.pid
+      : undefined;
+  }
+
   private async ensureChild(): Promise<ChildProcess> {
     // `startChild()` assigns the lifecycle before its bootstrap ACK arrives.
     // Share that pending promise first so concurrent first executions cannot

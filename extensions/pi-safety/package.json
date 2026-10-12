@@ -17,7 +17,8 @@
     "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
     "lint": "biome check .",
     "preflight:sibling": "node scripts/preflight-sibling.mjs",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "bench": "vitest bench --run"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
