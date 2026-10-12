@@ -229,8 +229,27 @@ const MAX_SUBSTITUTION_BODIES = 9;
  */
 let installedParser: ShellAstParser | undefined;
 
+/**
+ * Parser generation. The fold's verdict for a command string is a function
+ * of the string AND the parser behind the slot (install, reinstall, and a
+ * mid-life `markBroken` all change what the same string yields), so memo
+ * holders (see `shell-segment.ts`) key on this number and recompute after
+ * any of those transitions.
+ */
+let parserGeneration = 0;
+
 export function installShellAstParser(parser: ShellAstParser | undefined): void {
   installedParser = parser;
+  parserGeneration += 1;
+}
+
+/** Bump after a transition that changes an already-installed parser's behavior (markBroken). */
+export function invalidateInstalledShellAstParser(): void {
+  parserGeneration += 1;
+}
+
+export function shellAstParserGeneration(): number {
+  return parserGeneration;
 }
 
 export function shellAstParserInstalled(): boolean {
@@ -782,7 +801,8 @@ function commandWords(source: string, command: ShellAstNode): string[] {
   const named = command.children.filter(
     (child) => child.isNamed && !child.isError && !child.isMissing,
   );
-  const leading = named.length > 0 ? source.slice(command.startIndex, named[0]?.startIndex ?? 0) : "";
+  const leading =
+    named.length > 0 ? source.slice(command.startIndex, named[0]?.startIndex ?? 0) : "";
   const builtin = leading.trim();
   if (builtin !== "") words.push(builtin);
   let previous: ShellAstNode | undefined;
@@ -930,8 +950,7 @@ function statementHasError(statement: StatementInfo): boolean {
 function redirectWords(redirect: ShellAstNode): string[] {
   // Heredoc bodies are the command's input data, never argv: `cat <<EOF\nrm
   // -rf /\nEOF` runs `cat`, and the body must not leak into the word list.
-  if (redirect.type === "heredoc_redirect" || redirect.type === "herestring_redirect")
-    return [];
+  if (redirect.type === "heredoc_redirect" || redirect.type === "herestring_redirect") return [];
   const operator = redirectOperator(redirect);
   if (operator && DESCRIPTOR_REDIRECTS.has(operator)) return [];
   const targets = redirect.namedChildren.filter(

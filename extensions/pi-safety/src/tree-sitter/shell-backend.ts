@@ -17,6 +17,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
   installShellAstParser,
+  invalidateInstalledShellAstParser,
   type ShellAstNode,
   type ShellAstParser,
   type ShellAstTree,
@@ -220,6 +221,9 @@ export function resetTreeSitterShellBackend(): void {
   delete state.failure;
   state.broken = false;
   activation = undefined;
+  // The pure slot keeps its parser across a test reset; bump so segment
+  // memos do not serve results folded by a since-broken grammar.
+  invalidateInstalledShellAstParser();
 }
 
 function describeFailure(reason: unknown): ShellBridgeFailure {
@@ -231,6 +235,9 @@ function markBroken(reason: unknown): void {
   state.failure = describeFailure(reason);
   state.broken = true;
   delete state.parser;
+  // The installed slot may keep a wrapper that now abstains where it used
+  // to fold; bump so segment memos drop verdicts made with the old behavior.
+  invalidateInstalledShellAstParser();
 }
 
 /**

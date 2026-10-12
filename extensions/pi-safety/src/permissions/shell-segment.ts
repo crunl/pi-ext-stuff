@@ -11,7 +11,12 @@ import {
   gitExecutesNestedProgram,
 } from "./git-exec-entries.ts";
 import type { CommandSegment, SegmentUnprovenCause } from "./rules.ts";
-import { analyzeCommandWithAst, type SegmentFacts, shellAstParserInstalled } from "./shell-ast.ts";
+import {
+  analyzeCommandWithAst,
+  type SegmentFacts,
+  shellAstParserGeneration,
+  shellAstParserInstalled,
+} from "./shell-ast.ts";
 import { assignmentName, isEnvAssignmentToken } from "./shell-tokens.ts";
 
 const shellExecutables = new Set(["bash", "sh", "zsh", "fish", "dash"]);
@@ -839,8 +844,49 @@ function foldSegment(facts: SegmentFacts): CommandSegment {
   };
 }
 
+/**
+ * A parse result is a pure derivation of (command string, parser
+ * generation): the same pair always yields the same segments. The hot path
+ * folded the same command six times per risk evaluation (normalizeToolCall,
+ * extractShellNetworkHosts, analyzeShellGitNetwork x2), so the top-level
+ * entry caches by string and stamps the generation. A read whose generation
+ * lags recomputes and overwrites — invalidation is by construction, not by
+ * remembering to clear.
+ *
+ * Entries and their segments are frozen. The fold mutates its host segment
+ * at the nesting bound BEFORE this function returns, and callers today only
+ * read; freezing turns a future in-place write into a loud TypeError at the
+ * writer instead of silent cache poisoning. The shared frozen array is
+ * returned as-is — copying per hit would throw away the win the freeze
+ * defends.
+ *
+ * The memo must never become a retention story: bash commands have no byte
+ * cap anywhere else, so oversized inputs bypass the cache and fold fresh.
+ */
+const PARSE_MEMO_CAPACITY = 64;
+const PARSE_MEMO_MAX_COMMAND_CHARS = 32_768;
+const parseMemo = new Map<string, { generation: number; segments: CommandSegment[] }>();
+
+function freezeSegment(segment: CommandSegment): CommandSegment {
+  Object.freeze(segment.args);
+  return Object.freeze(segment);
+}
+
 export function parseCommandSegments(command: string): CommandSegment[] {
-  return parseSegmentsAtDepth(command, 0);
+  if (command.length > PARSE_MEMO_MAX_COMMAND_CHARS) {
+    return parseSegmentsAtDepth(command, 0).map(freezeSegment);
+  }
+  const generation = shellAstParserGeneration();
+  const hit = parseMemo.get(command);
+  if (hit !== undefined && hit.generation === generation) return hit.segments;
+  const segments = parseSegmentsAtDepth(command, 0).map(freezeSegment);
+  Object.freeze(segments);
+  parseMemo.set(command, { generation, segments });
+  if (parseMemo.size > PARSE_MEMO_CAPACITY) {
+    const oldest = parseMemo.keys().next().value;
+    if (oldest !== undefined) parseMemo.delete(oldest);
+  }
+  return segments;
 }
 
 /**
@@ -922,9 +968,7 @@ function parseSegmentsAtDepth(command: string, depth: number): CommandSegment[] 
   const facts = astSegmentFacts(command);
   if (facts === undefined) {
     return [
-      shellAstParserInstalled()
-        ? astUnmodelledSegment(command)
-        : astUnavailableSegment(command),
+      shellAstParserInstalled() ? astUnmodelledSegment(command) : astUnavailableSegment(command),
     ];
   }
   const segments = facts.map((fact) => {
