@@ -132,6 +132,99 @@ describe("auto review result", () => {
       decision: "approve",
     });
   });
+
+  // `JSON.parse` keeps only the last duplicate member, so a collapsed
+  // decision field could silently overwrite the guardian policy floor input.
+  it("rejects a repeated top-level outcome before JSON.parse folds it", () => {
+    expect(() => parseAutoReviewResult('{"outcome":"deny","outcome":"allow"}')).toThrowError(
+      /duplicate decision field/,
+    );
+  });
+
+  it("rejects a Unicode-escaped duplicate of a decision key", () => {
+    // An escaped key that parses to a decision name must be caught even
+    // when it appears only once and JSON.parse would not fold anything.
+    expect(parseAutoReviewResult('{"\\u006futcome":"allow"}')).toMatchObject({
+      decision: "approve",
+    });
+    expect(() => parseAutoReviewResult('{"outcome":"allow","\\u006futcome":"deny"}')).toThrowError(
+      /duplicate decision field/,
+    );
+    expect(() =>
+      parseAutoReviewResult(
+        '{"outcome":"allow","user_authorization":"high","\\u0075ser_authorization":"low"}',
+      ),
+    ).toThrowError(/duplicate decision field/);
+  });
+
+  it("rejects a duplicate decision key wrapped in surrounding prose", () => {
+    expect(() =>
+      parseAutoReviewResult('verdict: {"outcome":"deny","outcome":"allow"} done'),
+    ).toThrowError(/duplicate decision field/);
+  });
+
+  it("fails closed on object-shaped output the key scanner cannot decode", () => {
+    expect(() =>
+      parseAutoReviewResult('{"outcome":"allow","rationale":"bad \\uZZZZ"}'),
+    ).toThrowError(/reviewer output/i);
+    expect(() => parseAutoReviewResult('{"outcome":"allow"')).toThrowError(/reviewer output/i);
+    expect(() => parseAutoReviewResult('{"outcome" "allow"}')).toThrowError(/reviewer output/i);
+  });
+
+  it("keeps JSON.parse fold semantics for non-decision members", () => {
+    expect(
+      parseAutoReviewResult('{"outcome":"allow","extra":1,"extra":{"notes":{"a":1,"a":2}}}'),
+    ).toMatchObject({ decision: "approve" });
+  });
+
+  it("scans strings with escaped braces without losing object depth", () => {
+    expect(
+      parseAutoReviewResult('{"outcome":"allow","rationale":"a \\"} not real {\\" brace"}'),
+    ).toMatchObject({ decision: "approve" });
+  });
+
+  it("rejects two sequential objects after the duplicate scan", () => {
+    expect(() => parseAutoReviewResult('{"outcome":"allow"}{"outcome":"deny"}')).toThrowError(
+      /reviewer output/i,
+    );
+  });
+
+  // The scanner's key identity must equal JSON.parse's decoded key: escaped
+  // spellings resolving to a NON-decision name pass (no fold exists to hide),
+  // while an escaped decision name is caught by the duplicate scan above.
+  it("keeps escaped non-decision keys out of the duplicate scan", () => {
+    expect(parseAutoReviewResult('{"outcome":"allow","\\u004Futcome":"deny"}')).toMatchObject({
+      decision: "approve",
+    });
+    expect(parseAutoReviewResult('{"outcome":"allow","\\u0000utcome":"deny"}')).toMatchObject({
+      decision: "approve",
+    });
+    expect(parseAutoReviewResult('{"outcome":"allow","\\ud83d\\ude00":"deny"}')).toMatchObject({
+      decision: "approve",
+    });
+  });
+
+  it("rejects a repeated risk_level or user_authorization on its own", () => {
+    expect(() =>
+      parseAutoReviewResult('{"outcome":"allow","risk_level":"low","risk_level":"critical"}'),
+    ).toThrowError(/duplicate decision field/);
+    expect(() =>
+      parseAutoReviewResult(
+        '{"outcome":"allow","user_authorization":"high","user_authorization":"low"}',
+      ),
+    ).toThrowError(/duplicate decision field/);
+  });
+
+  it("fails closed on object-led prose the brace-slice cannot re-bound", () => {
+    // Leading `{` with a trailing `}` spans an unparsable slice; the scan
+    // must reject it rather than let JSON.parse fold a recovered object.
+    expect(() => parseAutoReviewResult('{"outcome":"allow"} {notes: not json}')).toThrowError(
+      /reviewer output/i,
+    );
+    expect(() =>
+      parseAutoReviewResult('{"outcome":"allow"}{"outcome":"deny","outcome":"allow"}'),
+    ).toThrowError(/reviewer output/i);
+  });
 });
 
 describe("auto review request", () => {

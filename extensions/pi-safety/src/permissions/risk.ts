@@ -23,10 +23,10 @@ import { normalizedSegmentsFor } from "./cd-normalize.ts";
 import { isDangerousWords, visibleDelegatedDanger } from "./dangerous-commands.ts";
 import { gitExecutableEnvNames } from "./git-exec-entries.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
-import { assignmentName } from "./shell-tokens.ts";
+import { analyzeCommandWithAst } from "./shell-ast.ts";
 import { extractShellNetworkHosts } from "./shell-network.ts";
 import { parseCommandSegments } from "./shell-segment.ts";
-import { analyzeCommandWithAst } from "./shell-ast.ts";
+import { assignmentName } from "./shell-tokens.ts";
 
 /** Builtins that publish an assignment into the environment. */
 const envPublishingBuiltins = new Set(["export", "declare", "local", "readonly", "typeset", "env"]);
@@ -342,6 +342,7 @@ export function classifyRiskWithCause(
 export { isPublicNetworkHost } from "../network-host.ts";
 export {
   analyzeShellGitNetwork,
+  escalatedGitDestinationUnbound,
   type ShellGitNetworkAnalysis,
 } from "./git-network.ts";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";

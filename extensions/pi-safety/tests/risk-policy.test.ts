@@ -899,6 +899,13 @@ describe("ApprovalDisposition policy gate", () => {
     "git remote remove upstream",
     "git remote prune origin",
     "git config --get remote.origin.url",
+    "git status --porcelain",
+    "git -C /tmp/other status",
+    "GIT_DIR=/tmp/other.git git status",
+    "git --version",
+    "git version",
+    "git archive HEAD",
+    "git archive --format=tar HEAD",
   ])("still escalates the local-only Git action %s", async (command) => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(
@@ -919,6 +926,35 @@ describe("ApprovalDisposition policy gate", () => {
     );
     expect(decision).toMatchObject({ action: "prompt", executionMode: "escalated" });
     expect(decision).not.toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
+  });
+
+  // The v08 bypass spellings: the destination model read no remote operand,
+  // so the action reached the escalated executor with an empty capability
+  // set and the bare backend re-read `.git/config` at execution. The
+  // unbound-destination predicate refuses them (and any future verb the
+  // allowlist never heard of) before review.
+  it.each([
+    "git archive --remote=origin HEAD",
+    "git -c alias.p='push origin main' p",
+    "git -c alias.p=push p origin main",
+    "git backfill",
+    "git lfs push origin main",
+    "git send-email someone@example.com",
+  ])("refuses to escalate %s, whose destination the command never binds", async (command) => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await createGitDirectory(
+      join(cwd, ".git"),
+      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
+    );
+
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command, sandbox_permissions: "require_escalated", justification: "probe" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
+    expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
   });
 
   it("does not invent a capability for a Git remote named in the command", async () => {

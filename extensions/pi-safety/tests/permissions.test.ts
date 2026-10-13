@@ -6,6 +6,7 @@ import { isPathAllowed } from "../src/permissions/paths.ts";
 import {
   analyzeShellGitNetwork,
   classifyRisk,
+  escalatedGitDestinationUnbound,
   extractShellNetworkHosts,
   isPublicNetworkHost,
   normalizeToolCall,
@@ -130,6 +131,33 @@ describe("Git network parsing", () => {
     ["git push origin main > push.log", false],
   ] as const)("identifies one parsed implicit Git push in %s", (command, expected) => {
     expect(analyzeShellGitNetwork(command).directImplicitPurpose === "push").toBe(expected);
+  });
+
+  // The escalated-action companion: which Git spellings leave the bare
+  // backend with a destination nothing in the command text binds.
+  it.each([
+    ["git archive --remote=origin HEAD", true],
+    ["git -c alias.p='push origin main' p", true],
+    ["git backfill", true],
+    ["git lfs push origin main", true],
+    ["git send-email someone@example.com", true],
+    ["git push origin main", true],
+    ["git remote update", true],
+    ["git status", false],
+    ["git commit -m update", false],
+    ["git -C /tmp/other status", false],
+    ["GIT_DIR=/tmp/other.git git log", false],
+    ["git --version", false],
+    ["git version", false],
+    ["git archive HEAD", false],
+    ["git config --get remote.origin.url", false],
+    ["git remote set-url origin https://x.example/r.git", false],
+    ["git push https://named.example/owner/repo.git main", false],
+    ["git push ./local.git main", false],
+    ["git clone https://ok.example/r.git", false],
+    ["git rebase --exec 'npm test' main", true],
+  ] as const)("proves or refutes an escalated Git destination for %s", (command, expected) => {
+    expect(escalatedGitDestinationUnbound(command)).toBe(expected);
   });
 });
 
@@ -679,7 +707,9 @@ describe("narrow static risk contract", () => {
       // inspected by the same tier-1 check as a top-level `rm -rf build`.
       // Descent proves danger, never safety: the quoted form reaches review here,
       // not a Skip.
-      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe("NeedsApproval");
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo"))).toBe(
+        "NeedsApproval",
+      );
     },
   );
 
@@ -811,9 +841,7 @@ describe("segment unproven cause", () => {
     }
     // And the dangerous body inside is still a review.
     expect(classifyRisk(request("bash", "{ rm -rf /tmp/x; }"))).toBe("NeedsApproval");
-    expect(classifyRisk(request("bash", "if true; then rm -rf /tmp/x; fi"))).toBe(
-      "NeedsApproval",
-    );
+    expect(classifyRisk(request("bash", "if true; then rm -rf /tmp/x; fi"))).toBe("NeedsApproval");
   });
 
   it("keeps the fold and the cause one fact", () => {

@@ -8,6 +8,7 @@ import {
   type ApprovalDisposition,
   analyzeShellGitNetwork,
   classifyRiskWithCause,
+  escalatedGitDestinationUnbound,
   normalizeToolCall,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
@@ -260,6 +261,10 @@ export async function evaluateRiskRequest(
   const escalationRequested =
     escalation.requested && config.sandbox.filesystem.denyRead.length === 0;
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
+  const destinationUnbound =
+    request.operation === "execute" && command !== undefined
+      ? escalatedGitDestinationUnbound(command)
+      : false;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
     return {
       action: "block",
@@ -291,12 +296,22 @@ export async function evaluateRiskRequest(
   // refused too when `foo` happens to be a local directory. The conservative
   // reading is the right one for a security gate, `./foo` disambiguates, and no
   // local path that reads as a path is affected.
-  if (escalationRequested && usesImplicitGitNetwork) {
+  //
+  // The same proof gap covers spellings the destination model never reads:
+  // `git archive --remote=<name>`, an alias installed by `-c` and invoked by
+  // the same bare argv, or a subcommand whose dispatch (`git lfs`, plumbing,
+  // any future verb) may reach the network through metadata. The classifier
+  // sees no remote operand there, so the action would otherwise reach the
+  // escalated executor with an empty capability set. The companion predicate
+  // `escalatedGitDestinationUnbound` fails closed on those instead: an
+  // invocation counts as bound only when this parser proves it local or
+  // spells the destination in argv.
+  if (escalationRequested && (usesImplicitGitNetwork || destinationUnbound)) {
     return {
       action: "block",
       risk: "Forbidden",
       reason:
-        "Command escalation cannot bind an implicit Git remote destination, and an escalated Bash action has no connection boundary that could enforce it. Run the command sandboxed so each connection is authorised, or name the remote URL in the command.",
+        "Command escalation cannot bind an implicit Git remote destination or a destination the command never models, and an escalated Bash action has no connection boundary that could enforce it. Run the command sandboxed so each connection is authorised, or name the remote URL in the command.",
     };
   }
   // The program here is known to be Git; what is unproven is its option grammar
@@ -441,8 +456,7 @@ export async function evaluateRiskRequest(
         escalation: escalationRequested,
         risk,
         writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
-        actionReview:
-          risk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
+        actionReview: risk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
       justification: escalation.requested

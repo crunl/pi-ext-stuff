@@ -218,19 +218,154 @@ function approvedActionContext(serializedAction: string): string {
   ].join("\n");
 }
 
+const REVIEWER_DECISION_KEYS = new Set(["outcome", "risk_level", "user_authorization"]);
+
+const DUPLICATE_DECISION_KEY_ERROR = "Invalid reviewer output: duplicate decision field";
+const UNVERIFIABLE_DECISION_KEYS_ERROR = "Invalid reviewer output: unverifiable decision fields";
+
+function isDecisionContractError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message === DUPLICATE_DECISION_KEY_ERROR ||
+      error.message === UNVERIFIABLE_DECISION_KEYS_ERROR)
+  );
+}
+
+function skipJsonWhitespace(source: string, index: number): number {
+  let cursor = index;
+  while (cursor < source.length && " \t\n\r".includes(source[cursor])) cursor += 1;
+  return cursor;
+}
+
+/**
+ * Decode one JSON string member starting at `source[index] === '"'`. Escapes
+ * are resolved the way `JSON.parse` resolves them (including `\uXXXX`, so an
+ * attacker cannot hide a decision key behind `"\u006ftcome"`); a string that
+ * cannot be decoded returns undefined instead of desynchronizing the scanner.
+ */
+function readJsonString(
+  source: string,
+  index: number,
+): { value: string; next: number } | undefined {
+  if (source[index] !== '"') return undefined;
+  let cursor = index + 1;
+  let value = "";
+  while (cursor < source.length) {
+    const char = source[cursor];
+    if (char === '"') return { value, next: cursor + 1 };
+    if (char !== "\\") {
+      value += char;
+      cursor += 1;
+      continue;
+    }
+    const escaped = source[cursor + 1];
+    if (escaped === "u") {
+      const hex = source.slice(cursor + 2, cursor + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return undefined;
+      // Decision keys are pure ASCII, so decoding each \uXXXX to one code
+      // unit matches JSON.parse exactly for key identity; surrogate pairs
+      // only ever produce non-matching keys and the cursor still advances
+      // past both escapes.
+      value += String.fromCharCode(Number.parseInt(hex, 16));
+      cursor += 6;
+      continue;
+    }
+    const simple = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+    const mapped = escaped === undefined ? undefined : simple[escaped as keyof typeof simple];
+    if (mapped === undefined) return undefined;
+    value += mapped;
+    cursor += 2;
+  }
+  return undefined;
+}
+
+function skipJsonValue(source: string, index: number): number | undefined {
+  const cursor = skipJsonWhitespace(source, index);
+  const char = source[cursor];
+  if (char === '"') return readJsonString(source, cursor)?.next;
+  if (char === "{" || char === "[") {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let scan = cursor; scan < source.length; scan += 1) {
+      const current = source[scan];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === '"') inString = false;
+        continue;
+      }
+      if (current === '"') inString = true;
+      else if (current === "{" || current === "[") depth += 1;
+      else if (current === "}" || current === "]") {
+        depth -= 1;
+        if (depth === 0) return scan + 1;
+      }
+    }
+    return undefined;
+  }
+  if (char === undefined) return undefined;
+  let end = cursor;
+  while (end < source.length && !",}]\n\t\r ".includes(source[end])) end += 1;
+  return end === cursor ? undefined : end;
+}
+
+/**
+ * Fail closed on reviewer JSON whose top-level object repeats a decision
+ * field. `JSON.parse` silently keeps only the last duplicate member, which
+ * would let `{"outcome":"allow","outcome":"deny"}` (or a Unicode-escaped key)
+ * collapse below the guardian policy floor. Only top-level decision keys are
+ * counted; nested duplicates inside rationale-shaped values stay JSON.parse
+ * semantics. Candidates that do not start a top-level object are left to
+ * JSON.parse (prose recovery is the caller's brace-slice fallback); an
+ * object-looking candidate the scanner cannot traverse throws as
+ * unverifiable, never as accepted.
+ */
+function assertUniqueTopLevelDecisionKeys(source: string): void {
+  let cursor = skipJsonWhitespace(source, 0);
+  if (source[cursor] !== "{") return;
+  cursor = skipJsonWhitespace(source, cursor + 1);
+  if (source[cursor] === "}") return;
+  const seen = new Set<string>();
+  for (;;) {
+    const key = readJsonString(source, cursor);
+    if (key === undefined) throw new Error(UNVERIFIABLE_DECISION_KEYS_ERROR);
+    if (REVIEWER_DECISION_KEYS.has(key.value)) {
+      if (seen.has(key.value)) throw new Error(DUPLICATE_DECISION_KEY_ERROR);
+      seen.add(key.value);
+    }
+    cursor = skipJsonWhitespace(source, key.next);
+    if (source[cursor] !== ":") throw new Error(UNVERIFIABLE_DECISION_KEYS_ERROR);
+    const afterValue = skipJsonValue(source, cursor + 1);
+    if (afterValue === undefined) throw new Error(UNVERIFIABLE_DECISION_KEYS_ERROR);
+    cursor = skipJsonWhitespace(source, afterValue);
+    if (source[cursor] === ",") {
+      cursor = skipJsonWhitespace(source, cursor + 1);
+      continue;
+    }
+    if (source[cursor] === "}") return;
+    throw new Error(UNVERIFIABLE_DECISION_KEYS_ERROR);
+  }
+}
+
 function parseAssessmentPayload(text: string): Record<string, unknown> {
   let parsed: unknown;
   try {
+    assertUniqueTopLevelDecisionKeys(text);
     parsed = JSON.parse(text);
-  } catch {
+  } catch (error) {
+    if (isDecisionContractError(error)) throw error;
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     if (start < 0 || end <= start) {
       throw new Error("Invalid reviewer output: expected JSON");
     }
     try {
-      parsed = JSON.parse(text.slice(start, end + 1));
-    } catch {
+      const candidate = text.slice(start, end + 1);
+      assertUniqueTopLevelDecisionKeys(candidate);
+      parsed = JSON.parse(candidate);
+    } catch (sliceError) {
+      if (isDecisionContractError(sliceError)) throw sliceError;
       throw new Error("Invalid reviewer output: expected JSON");
     }
   }
