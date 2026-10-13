@@ -22,9 +22,6 @@ export interface ReviewStatusBinding {
   notify?(message: string, severity: "info" | "warning" | "error"): void;
 }
 
-/** Kept as a stable compatibility export for integrations that used the key. */
-export const REVIEW_STATUS_KEY = "pi-safety-review";
-
 export const REVIEW_STATUS_ICON = "\u{F105E}";
 const MAX_STATUS_DETAIL_LENGTH = 96;
 
