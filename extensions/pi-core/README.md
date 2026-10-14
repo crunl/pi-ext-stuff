@@ -35,8 +35,8 @@ were removed in favour of stock rendering wherever Pi exposes no public hook.)
 ## Requirements
 
 - Node.js ≥ 22.19.0 (the minimum required by Pi 0.84.1).
-- Pi 1.1.0. The host supplies the peer packages; development dependencies are
-  pinned to 1.1.0 so API checks are reproducible.
+- Pi 1.2.0. The host supplies the peer packages; development dependencies are
+  pinned to 1.2.0 so API checks are reproducible.
 - **No third-party runtime dependencies** — only the pi core packages
   (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, provided by
   the host) and Node built-ins. No external executables are invoked.

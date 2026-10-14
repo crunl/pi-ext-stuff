@@ -155,7 +155,7 @@ sync; there is no sync script or equality test. The only guardrail is
 shared package is missing or its subtree is dirty.
 
 `packages/shared-tool-presentation` and `pi-core` both pin
-`@earendil-works/*` devDependencies to `1.1.0`
+`@earendil-works/*` devDependencies to `1.2.0`
 (`packages/shared-tool-presentation/package.json:19-20`,
 `extensions/pi-core/package.json:50-52`), so the test suites in the two trees
 run against the same host version. The shared package resolves those deps
