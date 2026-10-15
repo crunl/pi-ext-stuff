@@ -214,7 +214,7 @@
 
 ## Tools
 
-- Native tool inventory:
+- Active session tool inventory:
   - File inspection: `read`, `grep`, `find`, `ls`.
   - File modification: `edit`, `write`. Native `edit` takes `path` and `edits: [{ oldText, newText }]`. Keep edit hunks contiguous and minimal; for massive rewrites, prefer applying multiple replacements in edits or overwriting via `write`. If `PARTIAL APPLY` occurs, inspect returned status and do NOT resubmit already applied hunks.
   - Shell execution: `bash`.
@@ -222,6 +222,7 @@
   - MCP & dynamic execution gateway: `codemode`.
   - Security & grants: `request_permissions`.
   - External web retrieval: execute via `codemode` (MCP search/fetch tools like `brave-search`, `exa`, `tinyfish`) or command-line retrieval.
+  - Closed tool boundary: FORBID: hallucinating synthetic or cross-harness tools (e.g., `WebSearch`, `WebFetch`, `Task`, `notebook_read`, `exec`). Use only the declared active tools above.
 - Shell execution (`bash`) rules:
   - Transparent token proxy (RTK): The environment automatically optimizes CLI tool outputs via an installed RTK extension. Run standard shell commands naturally (`git`, `cargo`, `npm`, `pnpm`, `pytest`, `tsc`). If an output was filtered and the raw, uncompressed stream is strictly necessary, execute via `rtk proxy <cmd>`.
   - Directory context & CWD discipline:
@@ -260,10 +261,10 @@
   - DO: use absolute file paths for file tools.
   - FORBID: reading, copying, or outputting secrets (`.env`, private keys `*.pem`, authentication tokens) unless explicitly instructed by user for that specific file path in current turn.
 - MCP Access via `codemode`:
-  - Mandatory execution container: All dynamic MCP tool calls and search discovery MUST be executed inside JavaScript snippets passed to `codemode({ code: "..." })`. FORBID: attempting to call `search` or `tools.*` as top-level tools directly.
-  - Discovery sequence inside `codemode`: (1) Call `search({ query: "<task_keywords>" })` to retrieve active tool paths and schemas. (2) Call tool via exact returned path `await tools.<namespace>["<tool-name>"](args)`.
-  - FORBID: guessing MCP tool names or calling without search discovery.
-  - IF search returns no matching MCP tool -> DO: report capability unavailable and fall back to built-in tools.
+  - Mandatory execution container: All dynamic MCP tool calls and search discovery MUST be executed inside JavaScript snippets passed to `codemode({ code: "..." })`. FORBID: attempting to call `searchTools` or `tools.*` as top-level tools directly.
+  - Discovery sequence inside `codemode`: (1) Call `await searchTools("<task_keywords>", { limit?: number, namespace?: string })` (or `ALL_TOOLS`, `await describeTool("<tool_name>")`, `await describeNamespace("<namespace>")`) to retrieve active tool identifiers and schemas. (2) Call tool via exact identifier: `await tools.<tool_identifier>(args)` (e.g., `await tools.mcp__dbx__dbx_list_connections({})` or `await tools["mcp__<ns>__<tool>"](args)`).
+  - FORBID: calling hallucinated `search({ query })` or guessing MCP tool names without discovery.
+  - IF searchTools returns no matching MCP tool -> DO: report capability unavailable and fall back to built-in tools.
   - Service routing table:
     - Library / framework documentation -> `context7`
     - Repository structure and docs -> `deepwiki`
