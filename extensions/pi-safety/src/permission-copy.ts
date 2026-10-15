@@ -1,4 +1,5 @@
 import type { PermissionError } from "./approve-for-me-engine.ts";
+import { isPermissionArgumentError } from "./shell-permissions.ts";
 import type { PermissionMode } from "./state.ts";
 
 type ReviewStatus = "reviewing" | "approved" | "denied" | "aborted" | "timed-out" | "failed";
@@ -113,6 +114,16 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
         "Retry only if the failure appears transient; otherwise ask the user for guidance.",
       ].join("\n");
     case "policy-denied":
+      // A malformed permission-argument combination is a tool-call mistake
+      // rendered as policy-denied by the risk layer; it must read as a
+      // fixable argument error, never as a policy wall.
+      if (isPermissionArgumentError(reason)) {
+        return [
+          "This action was rejected because its permission arguments were invalid.",
+          `Reason: ${reason}`,
+          "Fix the tool-call arguments and retry the same command. The command itself was not evaluated or refused.",
+        ].join("\n");
+      }
       return [
         "This action is blocked by the active permission policy.",
         `Reason: ${reason}`,

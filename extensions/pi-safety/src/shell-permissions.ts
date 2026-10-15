@@ -134,6 +134,24 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
+/**
+ * Argument-shape validation failures for the bash tool's permission fields.
+ * `requestedWriteRoots` and `requestedEscalation` both reject a malformed
+ * `sandbox_permissions` / `additional_permissions` / `justification`
+ * combination before any policy evaluation runs, so the remedy is to fix the
+ * tool-call arguments and retry — not to read the block as a policy wall. A
+ * new validation reason in either validator must be covered here or it will
+ * render as an unactionable policy denial.
+ */
+export function isPermissionArgumentError(reason: string): boolean {
+  return (
+    reason.startsWith("additional_permissions") ||
+    reason === "additional filesystem permissions require a justification" ||
+    reason === "require_escalated cannot be combined with additional_permissions" ||
+    reason === "command escalation requires a justification"
+  );
+}
+
 function requestedWriteRoots(
   input: Record<string, unknown>,
 ): { roots: string[]; requested: boolean } | { error: string } {

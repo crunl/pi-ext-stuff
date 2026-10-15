@@ -719,7 +719,12 @@ describe("Permission mode registration", () => {
     expect(app.sessionManager.getSessionId).not.toHaveBeenCalled();
     expect(app.sessionManager.getBranch).toHaveBeenCalledOnce();
     expect(app.tools.get("bash")?.label).toBe("bash");
-    expect(app.tools.get("bash")?.description).not.toContain("(sandboxed)");
+    const bashDescription = app.tools.get("bash")?.description ?? "";
+    expect(bashDescription).not.toContain("(sandboxed)");
+    expect(bashDescription).toContain("git remote add/remove/set-url");
+    expect(bashDescription).toContain("could not lock config file");
+    expect(bashDescription).toContain("sandbox_permissions=require_escalated, not a retry");
+    expect(bashDescription).toContain("PIPESTATUS");
   });
 
   it("keeps the Guardian session reusable across ordinary turn boundaries", async () => {

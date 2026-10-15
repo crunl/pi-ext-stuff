@@ -52,6 +52,38 @@ describe("permission copy", () => {
     expect(message).not.toContain("unacceptable risk");
   });
 
+  it.each([
+    "additional_permissions requires sandbox_permissions=with_additional_permissions",
+    "additional_permissions must contain only file_system",
+    "additional_permissions.file_system must contain only write",
+    "additional_permissions.file_system.write contains invalid paths",
+    "additional filesystem permissions require a justification",
+    "require_escalated cannot be combined with additional_permissions",
+    "command escalation requires a justification",
+  ])("renders the malformed permission argument %s as a fixable argument error", (reason) => {
+    const message = renderPermissionErrorForAgent({
+      code: "policy-denied",
+      reason,
+    });
+
+    expect(message).toContain("permission arguments were invalid");
+    expect(message).toContain(`Reason: ${reason}`);
+    expect(message).toContain("Fix the tool-call arguments and retry");
+    expect(message).not.toContain("cannot be overridden through Auto-review");
+    expect(message).not.toContain("unacceptable risk");
+  });
+
+  it("keeps the policy wall for a genuine rule denial", () => {
+    const message = renderPermissionErrorForAgent({
+      code: "policy-denied",
+      reason: "Denied by permissions rule",
+    });
+
+    expect(message).toContain("This action is blocked by the active permission policy.");
+    expect(message).toContain("cannot be overridden through Auto-review");
+    expect(message).not.toContain("Fix the tool-call arguments");
+  });
+
   it("does not suggest a blind retry after an inline review timeout", () => {
     const message = renderPermissionErrorForAgent({
       code: "review-timeout",
