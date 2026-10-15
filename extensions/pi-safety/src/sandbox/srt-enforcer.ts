@@ -113,7 +113,7 @@ function parentProxyActive(connectGuard?: SandboxConnectGuard): boolean {
 }
 
 /**
- * Native SRT config only — never network.mode (pristine 0.0.77).
+ * Native SRT config only — never network.mode (pristine 0.0.79).
  * When connect-guard supplies parentProxy, inject the public
  * enableWeakerNetworkIsolation so Go TLS (gh/gcloud/…) can reach trustd
  * inside the seatbelt; documented security tradeoff in AGENTS.md.

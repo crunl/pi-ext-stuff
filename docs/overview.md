@@ -55,7 +55,7 @@ execution and an external "guardian" LLM reviewer that approves risky
 actions on the user's behalf (`extensions/pi-safety/README.md:1-7`).
 The old human-popup `default`/`plan` modes are retired. `bash`,
 `write`, and `edit` run inside an OS-enforced sandbox backed by
-pristine `@anthropic-ai/sandbox-runtime@0.0.77`
+pristine `@anthropic-ai/sandbox-runtime@0.0.79`
 (`extensions/pi-safety/package.json:27-31`, `extensions/pi-safety/AGENTS.md`
 "sandbox enforcement" section). `extensions/pi-safety/src/register.ts`
 (~2,930 lines) is the host adapter that loads config, captures turn

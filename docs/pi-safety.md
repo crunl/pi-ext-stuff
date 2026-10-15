@@ -262,7 +262,7 @@ ignored — no Engine authorization, no Guardian, no sandbox ownership
 
 ## Runtime enforcement and sandbox
 
-The sandbox is backed by **pristine** `@anthropic-ai/sandbox-runtime@0.0.77`
+The sandbox is backed by **pristine** `@anthropic-ai/sandbox-runtime@0.0.79`
 (no pnpm patch, no `network.mode`). The public seam is the
 backend-neutral `SandboxManagerLike.execute({ policy, program, cwd, env })`
 (`src/sandbox-policy.ts:274-306`); only the adapter serializes argv for
