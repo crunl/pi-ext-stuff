@@ -1480,6 +1480,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     }
 
     const { executionSnapshot, executionContext } = prepared;
+
+    // Yolo drops friction, not intent: a configured deny rule is the
+    // user's explicit persistent intent, so it wins in every mode. The
+    // yolo bypass below still skips the spawn gate and every later check.
+    const denial = evaluateHostFirstRulesOnly(
+      event.toolName,
+      structuredClone(event.input) as Record<string, unknown>,
+      resolve(ctx.cwd),
+      executionContext.config,
+    );
+    if (denial) {
+      return {
+        block: true,
+        reason: renderPermissionErrorForAgent({
+          code: "policy-denied",
+          reason: denial.reason,
+        }),
+      };
+    }
     if (executionSnapshot.mode === "yolo") {
       return;
     }
@@ -1496,22 +1515,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           }),
         };
       }
-    }
-
-    const denial = evaluateHostFirstRulesOnly(
-      event.toolName,
-      structuredClone(event.input) as Record<string, unknown>,
-      resolve(ctx.cwd),
-      executionContext.config,
-    );
-    if (denial) {
-      return {
-        block: true,
-        reason: renderPermissionErrorForAgent({
-          code: "policy-denied",
-          reason: denial.reason,
-        }),
-      };
     }
     return;
   };

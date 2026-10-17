@@ -2663,7 +2663,7 @@ describe("Permission mode registration", () => {
     expect(keys).toEqual(["block", "reason"].sort());
   });
 
-  it("yolo skips host-first B deny and subagent spawn gate (documented exception)", async () => {
+  it("yolo enforces host-first B deny but still skips the subagent spawn gate", async () => {
     const app = await makeHarness({
       config: {
         rules: [{ action: "deny", tool: "read", pattern: "*" }],
@@ -2677,6 +2677,8 @@ describe("Permission mode registration", () => {
     await shortcut.handler(app.context);
     await startAgent(app);
 
+    // P0 yolo: deny wins in every mode. The read matches the deny rule,
+    // so it blocks even with approvals off.
     await expect(
       invoke(app, "tool_call", {
         type: "tool_call",
@@ -2684,7 +2686,7 @@ describe("Permission mode registration", () => {
         toolCallId: "yolo-read",
         input: { path: "secret.env" },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ block: true });
 
     await expect(executeHostCall(app, "subagent", "yolo-spawn")).resolves.toBeUndefined();
 

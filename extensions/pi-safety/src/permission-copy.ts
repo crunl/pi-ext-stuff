@@ -233,7 +233,8 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
 }
 
 export function renderPermissionSummary(summary: PermissionSummary): string {
-  if (summary.mode === "yolo") return "Bypass permissions · sandbox off · approvals off";
+  if (summary.mode === "yolo")
+    return "Bypass permissions · sandbox off · approvals off · deny rules still apply";
   const reviewer = summary.reviewer
     ? `${summary.reviewer.kind === "active" ? "active reviewer" : "reviewer preference"}: ${summary.reviewer.reference}`
     : "reviewer preference: current session model";
