@@ -116,10 +116,10 @@ export function summarizeGuardianMetrics(
     byAction,
     denialsByResidual: [...denialResiduals.entries()]
       .map(([residual, denials]) => ({ residual, denials }))
-      .sort((a, b) => b.denials - a.denials || (a.residual < b.residual ? -1 : 1)),
+      .sort((a, b) => b.denials - a.denials || a.residual.localeCompare(b.residual)),
     triggersByResidual: [...triggerResiduals.entries()]
       .map(([residual, { reviews, approved }]) => ({ residual, reviews, approved }))
-      .sort((a, b) => b.reviews - a.reviews || (a.residual < b.residual ? -1 : 1)),
+      .sort((a, b) => b.reviews - a.reviews || a.residual.localeCompare(b.residual)),
     durationMs: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95) },
     tokens: { input, output, total },
   };
