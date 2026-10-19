@@ -114,10 +114,9 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
         "Retry only if the failure appears transient; otherwise ask the user for guidance.",
       ].join("\n");
     case "policy-denied":
-      // A malformed permission-argument combination is a tool-call mistake
-      // rendered as policy-denied by the risk layer; it must read as a
-      // fixable argument error, never as a policy wall.
-      if (isPermissionArgumentError(reason)) {
+      // The static layer classified the deny, so a malformed permission
+      // argument is known rather than sniffed from the reason text.
+      if (error.recoverable === "fix-arguments" || isPermissionArgumentError(reason)) {
         return [
           "This action was rejected because its permission arguments were invalid.",
           `Reason: ${reason}`,

@@ -12,7 +12,7 @@ export interface PermissionAmendment {
 
 type NormalizePermissionAmendmentResult =
   | { ok: true; amendment: PermissionAmendment }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; recoverable: "fix-arguments" | "no" };
 
 /** Normalize and validate the explicit filesystem/network request. */
 export async function normalizePermissionAmendment(
@@ -34,7 +34,11 @@ export async function normalizePermissionAmendment(
         !isPublicNetworkHost(host) &&
         !isExactLocalNetworkAllowed(input.allowedDomains ?? [], host))
     ) {
-      return { ok: false, reason: `Private or special-use network target is blocked: ${raw}` };
+      return {
+        ok: false,
+        reason: `Private or special-use network target is blocked: ${raw}`,
+        recoverable: "no",
+      };
     }
     if (!networkHosts.includes(host)) networkHosts.push(host);
   }
@@ -42,10 +46,14 @@ export async function normalizePermissionAmendment(
   const writeRoots: string[] = [];
   for (const raw of input.writeRoots ?? []) {
     if (typeof raw !== "string" || raw.trim().length === 0 || raw.length > MAX_PATH_LENGTH) {
-      return { ok: false, reason: "request_permissions write root is invalid" };
+      return { ok: false, reason: "request_permissions write root is invalid", recoverable: "fix-arguments" };
     }
     if (hasGlobSyntax(raw)) {
-      return { ok: false, reason: "request_permissions write roots cannot contain globs" };
+      return {
+        ok: false,
+        reason: "request_permissions write roots cannot contain globs",
+        recoverable: "fix-arguments",
+      };
     }
     const resolved = resolvePolicyPath(raw.trim(), cwd);
     const decision = await isPathAllowed(resolved, {
@@ -57,7 +65,7 @@ export async function normalizePermissionAmendment(
       operation: "write",
     });
     if (!decision.allowed && decision.reason === "permission control path is protected") {
-      return { ok: false, reason: "permission control path is protected" };
+      return { ok: false, reason: "permission control path is protected", recoverable: "no" };
     }
     for (const path of expandSymlinkAliases(resolved)) {
       if (!writeRoots.includes(path)) writeRoots.push(path);

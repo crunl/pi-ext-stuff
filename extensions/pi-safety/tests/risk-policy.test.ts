@@ -155,6 +155,95 @@ describe("Permission request own-property shape", () => {
 });
 
 describe("ApprovalDisposition policy gate", () => {
+  it("orders deny above allow and falls through to review, never to allow", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
+
+    // A deny rule and an allow rule both match. Deny is checked first, so the
+    // allow rule cannot discharge it — the ordering is structural, not a
+    // consequence of where the two `if`s happen to sit.
+    const conflicting = config({
+      rules: [
+        { action: "allow", tool: "bash", pattern: "*" },
+        { action: "deny", tool: "bash", pattern: "*" },
+      ],
+    });
+    await expect(
+      evaluateRiskRequest("bash", { command: "printf hi" }, cwd, conflicting),
+    ).resolves.toMatchObject({ action: "block", risk: "Forbidden", recoverable: "no" });
+
+    // An allow rule cannot force execution of a command the classifier could
+    // not prove safe: the allow gate requires `risk !== "Forbidden"`.
+    const allowAll = config({ rules: [{ action: "allow", tool: "WebFetch", pattern: "*" }] });
+    await expect(
+      evaluateRiskRequest("WebFetch", { url: "http://127.0.0.1/admin" }, cwd, allowAll),
+    ).resolves.toMatchObject({ action: "prompt" });
+
+    // An ask rule outranks the proof gate: a provably safe argv still becomes
+    // an action review, because the user asked for one.
+    const askSafe = config({ rules: [{ action: "ask", tool: "bash", pattern: "printf *" }] });
+    const asked = await evaluateRiskRequest(
+      "bash",
+      { command: "printf hi" },
+      cwd,
+      askSafe,
+    );
+    expect(asked).toMatchObject({
+      action: "prompt",
+      risk: "Skip",
+      reason: "Approval required by permissions rule",
+    });
+    expect(admissionPlanFromRiskDecision(asked)).toMatchObject({
+      kind: "review",
+      review: "action",
+    });
+  });
+
+  it("treats an unproven argv as review and an approved write root as a grant", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
+    const outputRoot = join(await realpath(tmpdir()), `pi-safety-grant-${Date.now()}`);
+
+    // The classifier cannot prove this safe (`sudo` is a proven dangerous
+    // form), so no allow gate fires and the fall-through exit is review. It
+    // must not read as allow.
+    const dangerous = await evaluateRiskRequest(
+      "bash",
+      { command: "sudo rm -rf /var/tmp/pi-safety-gate" },
+      cwd,
+      config(),
+    );
+    expect(dangerous).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+
+    // An additional write root is a grant, not a proof. It must keep the
+    // packet at NeedsApproval so a reviewer reads the widened scope, and it
+    // must not be discharged by a matching allow rule.
+    const granted = await evaluateRiskRequest(
+      "bash",
+      {
+        command: `mkdir -p ${outputRoot}`,
+        sandbox_permissions: "with_additional_permissions",
+        additional_permissions: { file_system: { write: [outputRoot] } },
+        justification: "Write the requested build artifact",
+      },
+      cwd,
+      config(),
+    );
+    expect(granted).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+
+    const allowAll = config({ rules: [{ action: "allow", tool: "bash", pattern: "*" }] });
+    const stillReviewed = await evaluateRiskRequest(
+      "bash",
+      {
+        command: `mkdir -p ${outputRoot}`,
+        sandbox_permissions: "with_additional_permissions",
+        additional_permissions: { file_system: { write: [outputRoot] } },
+        justification: "Write the requested build artifact",
+      },
+      cwd,
+      allowAll,
+    );
+    expect(stillReviewed).toMatchObject({ action: "prompt", risk: "NeedsApproval" });
+  });
+
   it("host-first B: empty rules never block; only deny does; ask is ignored", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-host-"));
 

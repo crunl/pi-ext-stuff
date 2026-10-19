@@ -93,7 +93,7 @@ function retainClosedSchemaValue(schema: unknown, value: unknown): unknown {
 
 type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; recoverable: "fix-arguments" | "no" };
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
@@ -176,7 +176,9 @@ export async function resolveAdditionalWriteRoots(
   protectedWritePaths: readonly string[],
 ): Promise<AdditionalWriteRootsResult> {
   const requested = requestedWriteRoots(input);
-  if ("error" in requested) return { ok: false, reason: requested.error };
+  if ("error" in requested) {
+    return { ok: false, reason: requested.error, recoverable: "fix-arguments" };
+  }
   if (!requested.requested) return { ok: true, writeRoots: [] };
 
   const filesystem = createFilesystemPolicy(config.sandbox, cwd, [...protectedWritePaths]);
@@ -198,6 +200,7 @@ export async function resolveAdditionalWriteRoots(
       return {
         ok: false,
         reason: `additional write root cannot be the filesystem root: ${absolutePath}`,
+        recoverable: "no",
       };
     }
     if (decision.allowed) continue;
@@ -205,6 +208,7 @@ export async function resolveAdditionalWriteRoots(
       return {
         ok: false,
         reason: `additional write root is protected: ${absolutePath}`,
+        recoverable: "no",
       };
     }
     writeRoots.push(decision.canonicalPath);

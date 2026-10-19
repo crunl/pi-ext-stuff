@@ -1,3 +1,4 @@
+import type { BlockRecoverability } from "./approve-for-me-engine.ts";
 import type { SafetyConfig } from "./config.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
@@ -28,7 +29,12 @@ export type RiskDecision =
       justification?: string;
       residuals?: ResidualSignal[];
     }
-  | { action: "block"; risk: ApprovalDisposition; reason: string };
+  | {
+      action: "block";
+      risk: ApprovalDisposition;
+      reason: string;
+      recoverable: BlockRecoverability;
+    };
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -109,6 +115,7 @@ async function evaluateRequestPermissions(
       risk: "Forbidden",
       reason:
         "request_permissions supports turn-scoped network.hosts OR network_access:true, and file_system.write lists",
+      recoverable: "fix-arguments",
     };
   }
   const permissions = input.permissions;
@@ -126,7 +133,12 @@ async function evaluateRequestPermissions(
     protectedWritePaths,
   );
   if (!normalized.ok) {
-    return { action: "block", risk: "Forbidden", reason: normalized.reason };
+    return {
+      action: "block",
+      risk: "Forbidden",
+      reason: normalized.reason,
+      recoverable: normalized.recoverable,
+    };
   }
   if (
     network.network_access !== true &&
@@ -137,6 +149,7 @@ async function evaluateRequestPermissions(
       action: "block",
       risk: "Forbidden",
       reason: "request_permissions requires at least one permission",
+      recoverable: "fix-arguments",
     };
   }
   return {
@@ -183,6 +196,49 @@ function pathOperation(operation: string): "read" | "write" | undefined {
   return undefined;
 }
 
+const RULE_DENY_REASON = "Denied by permissions rule";
+const RULE_ASK_REASON = "Approval required by permissions rule";
+const RULE_ALLOW_REASON = "Allowed by permissions rule";
+const LOW_RISK_REASON = "Low-risk operation";
+
+/**
+ * A gate either produces a reason (it fired) or `undefined` (it did not).
+ */
+type Gate = () => string | undefined;
+
+/**
+ * Ordered gate evaluation.
+ *
+ * Deny is checked before allow, and *no gate firing is a review* — never an
+ * allow. Both properties are structural: a later allow gate cannot resurrect
+ * something an earlier deny gate refused, and "nothing proved this safe"
+ * cannot silently become permission to run.
+ *
+ * `forceReview` sits between the two: a user rule asking for approval must not
+ * be discharged by a proof gate that happens to be able to run this argv. It
+ * reports `review` so the caller keeps the pre-existing packet shape (the
+ * admission must stay an `action` review, not become a capability review).
+ */
+function decide(
+  denyGates: readonly Gate[],
+  forceReviewGates: readonly Gate[],
+  allowGates: readonly Gate[],
+): { kind: "deny" | "review" | "allow"; reason: string } | undefined {
+  for (const gate of denyGates) {
+    const reason = gate();
+    if (reason !== undefined) return { kind: "deny", reason };
+  }
+  for (const gate of forceReviewGates) {
+    const reason = gate();
+    if (reason !== undefined) return { kind: "review", reason };
+  }
+  for (const gate of allowGates) {
+    const reason = gate();
+    if (reason !== undefined) return { kind: "allow", reason };
+  }
+  return undefined;
+}
+
 /**
  * Host-first B: only configured `rules` deny blocks. ask/allow/no-match do
  * not enter Engine or Guardian — host-first tools have no sandbox ownership.
@@ -214,7 +270,7 @@ export async function evaluateHostRiskRequest(
 ): Promise<RiskDecision> {
   const denial = evaluateHostFirstRulesOnly(tool, input, cwd, config);
   if (denial) {
-    return { action: "block", risk: "Forbidden", reason: denial.reason };
+    return { action: "block", risk: "Forbidden", reason: denial.reason, recoverable: "no" };
   }
   return {
     action: "allow",
@@ -246,6 +302,7 @@ export async function evaluateRiskRequest(
       action: "block",
       risk: "Forbidden",
       reason: `Unsafe Git network invocation: ${gitNetwork.unsafeReason}`,
+      recoverable: "no",
     };
   }
   const usesImplicitGitNetwork =
@@ -264,7 +321,8 @@ export async function evaluateRiskRequest(
   // by this flag, while `classifyRisk` treats those operations as `Skip`.
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
-    return { action: "block", risk: "Forbidden", reason: gitMetadata.reason };
+    // Reading repository state failed, so the action was never judged.
+    return { action: "block", risk: "Forbidden", reason: gitMetadata.reason, recoverable: "transient" };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
     const remoteHosts = await readRepositoryRemoteHosts(
@@ -272,7 +330,13 @@ export async function evaluateRiskRequest(
       gitNetwork?.directImplicitPurpose === "push" ? "push" : "fetch",
     );
     if (!remoteHosts.ok) {
-      return { action: "block", risk: "Forbidden", reason: remoteHosts.reason };
+      // Same as above: a configuration read, not a verdict on the action.
+      return {
+        action: "block",
+        risk: "Forbidden",
+        reason: remoteHosts.reason,
+        recoverable: "transient",
+      };
     }
     request.networkTargets = [
       ...new Set([...(request.networkTargets ?? []), ...remoteHosts.hosts]),
@@ -285,18 +349,22 @@ export async function evaluateRiskRequest(
     protectedWritePaths ? [...protectedWritePaths] : defaultProtectedWritePaths(cwd),
   );
   if (!additionalWriteRoots.ok) {
-    return { action: "block", risk: "Forbidden", reason: additionalWriteRoots.reason };
+    return {
+      action: "block",
+      risk: "Forbidden",
+      reason: additionalWriteRoots.reason,
+      recoverable: additionalWriteRoots.recoverable,
+    };
   }
   const filesystemWriteRoots = [...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
-  if (rule?.decision === "deny") {
-    return { action: "block", risk: "Forbidden", reason: "Denied by permissions rule" };
-  }
   if (request.operation === "external") {
     // Product scope 2026-09-19: owned tools do not produce operation=external;
     // host-first B uses evaluateHostFirstRulesOnly and foreign A is out of
     // tool_call governance. This branch is compatibility-only — do not route
-    // host-first/foreign here to resurrect host-admission review.
+    // host-first/foreign here to resurrect host-admission review. It sits
+    // outside the gate list because it never reaches classification: an
+    // external request carries no resolved paths, so no policy gate applies.
     if (rule?.decision === "ask") {
       return {
         action: "prompt",
@@ -313,7 +381,7 @@ export async function evaluateRiskRequest(
     return {
       action: "allow",
       risk: "Skip",
-      reason: rule?.decision === "allow" ? "Allowed by permissions rule" : "Host tool policy",
+      reason: rule?.decision === "allow" ? RULE_ALLOW_REASON : "Host tool policy",
     };
   }
   const filesystem = createFilesystemPolicy(
@@ -334,16 +402,12 @@ export async function evaluateRiskRequest(
     filesystem.protectedWritePaths,
     filesystem.denyWrite,
   );
-  let risk = classification.disposition;
-  // Kept while the write flip, carve-out and elevation go: extra write
-  // roots are a *grant*, not a proof question — the justification must be
-  // read by a reviewer before the scope widens. Deleting this line would
-  // grant additional_permissions silently.
-  if (filesystemWriteRoots.length > 0 && risk === "Skip") risk = "NeedsApproval";
+  const risk = classification.disposition;
 
   const allowWrite = [...filesystem.allowWrite];
   const operation = pathOperation(request.operation);
   let writeOutsideRoots = false;
+  let protectedPathReason: string | undefined;
   if (operation) {
     for (const path of request.resolvedPaths) {
       const decision = await isPathAllowed(path, {
@@ -362,42 +426,62 @@ export async function evaluateRiskRequest(
         writeOutsideRoots = true;
         continue;
       }
-      return { action: "block", risk: "Forbidden", reason: decision.reason };
+      // A protected path, a denied read/write, or an unreadable target: the
+      // verdict is about this exact path, so repeating it cannot succeed.
+      protectedPathReason = decision.reason;
+      break;
     }
   }
 
-  if (
-    rule?.decision === "allow" &&
-    risk !== "Forbidden" &&
-    filesystemWriteRoots.length === 0
-  ) {
-    return { action: "allow", risk, reason: "Allowed by permissions rule" };
+  // Extra write roots are a *grant*, not a proof question. They must not turn
+  // a prove-safe argv into an allow, and they must still read as
+  // "needs approval" in the packet so a reviewer sees the widened scope.
+  const grantsWriteRoots = filesystemWriteRoots.length > 0;
+  const packetRisk = risk === "Skip" && grantsWriteRoots ? "NeedsApproval" : risk;
+
+  const verdict = decide(
+    [
+      () => (rule?.decision === "deny" ? RULE_DENY_REASON : undefined),
+      () => protectedPathReason,
+    ],
+    [() => (rule?.decision === "ask" ? RULE_ASK_REASON : undefined)],
+    [
+      () =>
+        rule?.decision === "allow" && risk !== "Forbidden" && !grantsWriteRoots
+          ? RULE_ALLOW_REASON
+          : undefined,
+      () => (risk === "Skip" && !grantsWriteRoots ? LOW_RISK_REASON : undefined),
+    ],
+  );
+  if (verdict?.kind === "deny") {
+    return { action: "block", risk: "Forbidden", reason: verdict.reason, recoverable: "no" };
+  }
+  if (verdict?.kind === "allow") {
+    return { action: "allow", risk, reason: verdict.reason };
   }
 
-  const promptedByRule = rule?.decision === "ask";
-  const wouldPrompt = promptedByRule || risk !== "Skip";
-  if (wouldPrompt) {
-    return {
-      action: "prompt",
-      risk,
-      reason: promptedByRule
-        ? "Approval required by permissions rule"
+  // No deny or allow gate fired, so this is a review — the only remaining
+  // exit. `rule ask` lands here too, via its own force-review gate, so the
+  // packet shape below stays the one it always produced.
+  return {
+    action: "prompt",
+    risk: packetRisk,
+    reason:
+      rule?.decision === "ask"
+        ? RULE_ASK_REASON
         : // This names where the dangerous argv itself was found, so it
           // belongs in the review packet the Guardian reads.
           classification.dangerousSubstitution !== undefined
           ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
-          : `${risk} operation`,
-      summary: summarize(tool, input),
-      residuals: residualsForPrompt({
-        ruleAsk: promptedByRule,
-        risk,
-        writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
-        actionReview: risk !== "Skip" && filesystemWriteRoots.length === 0,
-      }),
-      ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
-      justification: additionalWriteRoots.justification,
-    };
-  }
-
-  return { action: "allow", risk, reason: "Low-risk operation" };
+          : `${packetRisk} operation`,
+    summary: summarize(tool, input),
+    residuals: residualsForPrompt({
+      ruleAsk: rule?.decision === "ask",
+      risk: packetRisk,
+      writeUncovered: grantsWriteRoots || writeOutsideRoots,
+      actionReview: packetRisk !== "Skip" && !grantsWriteRoots,
+    }),
+    ...(grantsWriteRoots ? { filesystemWriteRoots } : {}),
+    justification: additionalWriteRoots.justification,
+  };
 }

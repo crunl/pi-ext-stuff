@@ -66,6 +66,8 @@ export type AdmissionPlan =
   | {
       kind: "deny";
       reason: string;
+      /** Present when the producer knows what the agent can do about it. */
+      recoverable?: BlockRecoverability;
     };
 
 export interface TurnSnapshot {
@@ -302,9 +304,29 @@ type PermissionErrorCode =
   | "enforcement-unavailable"
   | "execution-failed";
 
+/**
+ * What the agent can do about a deny.
+ *
+ * - `fix-arguments`: the tool call itself is malformed. Retry the same intent
+ *   with corrected arguments.
+ * - `transient`: reading policy state failed. The action was never judged, so a
+ *   retry may succeed.
+ * - `no`: the action was proven unsafe or denied by configuration. Retrying the
+ *   same action cannot succeed.
+ *
+ * It is declared here rather than in the static layer because it is part of the
+ * Engine's error contract; the static layer classifies, the Engine carries it.
+ */
+export type BlockRecoverability = "fix-arguments" | "transient" | "no";
+
 export interface PermissionError {
   code: PermissionErrorCode;
   reason: string;
+  /**
+   * Static-layer classification of what the agent can do about this block.
+   * Absent for engine-local denials, which never need the argument-error split.
+   */
+  recoverable?: BlockRecoverability;
   request?: CapabilityRequest;
   /** True when the executor had started and earlier effects may exist. */
   effectsMayHaveOccurred?: true;
@@ -504,7 +526,7 @@ type ResolvedAdmission =
       justification?: string;
       residuals?: ResidualSignal[];
     }
-  | { kind: "deny"; reason: string };
+  | { kind: "deny"; reason: string; recoverable?: BlockRecoverability };
 
 const DEFAULT_MAX_CONSECUTIVE_DENIALS = 3;
 const DEFAULT_DENIAL_WINDOW_SIZE = 50;
@@ -1925,7 +1947,11 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
     const admission = admissionResult.admission;
     if (admission.kind === "deny") {
-      return blocked({ code: "policy-denied", reason: admission.reason });
+      return blocked({
+        code: "policy-denied",
+        reason: admission.reason,
+        ...(admission.recoverable === undefined ? {} : { recoverable: admission.recoverable }),
+      });
     }
     if (request.ownership === "host-admission" && admission.requested.length === 0) {
       return blocked({

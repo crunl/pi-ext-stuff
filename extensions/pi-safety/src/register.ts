@@ -1794,7 +1794,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       executionContext.config,
       delegationScope(),
     );
-    if (envelopeViolation) return { action: "block", risk: "Forbidden", reason: envelopeViolation };
+    if (envelopeViolation) {
+      return {
+        action: "block",
+        risk: "Forbidden",
+        reason: envelopeViolation,
+        recoverable: "no",
+      };
+    }
     if (decision.action !== "prompt") return decision;
     const requested = decision.filesystemWriteRoots ?? [];
     if (requested.some((path) => resolvePolicyPath(path, canonicalCwd) === target)) {

@@ -131,10 +131,12 @@ describe("admissionPlanFromRiskDecision", () => {
       action: "block",
       risk: "Forbidden",
       reason: "Protected path",
+      recoverable: "no",
     };
     expect(admissionPlanFromRiskDecision(decision)).toEqual({
       kind: "deny",
       reason: "Protected path",
+      recoverable: "no",
     });
   });
 

@@ -227,7 +227,7 @@ function promptRisk(
 }
 
 function blockRisk(reason = "HARD test policy"): RiskDecision {
-  return { action: "block", risk: "Forbidden", reason };
+  return { action: "block", risk: "Forbidden", reason, recoverable: "no" };
 }
 
 function shellQuote(value: string): string {

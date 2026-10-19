@@ -104,7 +104,7 @@ function requestedCapabilities(
  */
 export function admissionPlanFromRiskDecision(decision: RiskDecision): AdmissionPlan {
   if (decision.action === "block") {
-    return { kind: "deny", reason: decision.reason };
+    return { kind: "deny", reason: decision.reason, recoverable: decision.recoverable };
   }
   if (decision.action === "allow") {
     return { kind: "allow" };
