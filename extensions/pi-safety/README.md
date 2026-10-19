@@ -68,6 +68,32 @@ projects `safety.json`'s `sandbox` section straight into the policy at
 activation time (session start, turn start, mode change). The guardian runs
 under its own separate read-only, zero-network policy.
 
+That activation-time policy is fixed until the next activation boundary; it is
+not rebuilt per call. One part of it is refreshed per execution: before ⑥ runs,
+`policyWithGitMetadataProtection` re-discovers the Git metadata roots for the
+*request's* cwd (which can differ from the activation cwd after a `cd`, a
+worktree switch, or a submodule checkout) and appends their `hooks`/`config`
+denies to a copy of the policy. The copy is skipped entirely when it would add
+nothing.
+
+## What the sandbox denies inside Git metadata
+
+Only the Git *code-execution* surfaces of each discovered metadata root are
+denied — `<root>/hooks` and `<root>/config`. History paths (`objects`, `refs`,
+`index`, `logs`) stay writable so a commit runs inside the sandbox without an
+approval round trip. Everything else — `HEAD`, `packed-refs`, `worktrees/`,
+`modules/`, `info/attributes`, and the `.git` pointer file of a worktree or
+submodule — is **not** denied.
+
+That gap is deliberate. A git metadata write the sandbox refuses surfaces as
+`EPERM` and is routed to `sandbox_permissions=require_escalated`, which runs the
+exact command outside the sandbox after one review; the bash tool description
+states this. Widening the deny list would force every commit through that
+escalation instead, and the pointer file cannot be denied on shape alone without
+re-deriving "directory vs `gitdir:` file" inside `sandbox-policy.ts`, which sits
+in the engine value-closure and must stay free of `node:fs`
+(`tests/structure-invariants.test.ts:188-221`).
+
 Full walkthrough: [`docs/pi-safety.md`](../../docs/pi-safety.md).
 
 ## Install

@@ -47,6 +47,14 @@
 
 沙箱 policy 本身并不由 ②–⑤ 产生：`createSandboxRuntimeConfig` 在激活时（session 启动、turn 启动、mode 切换）把 `safety.json` 的 `sandbox` 段直接投影成 policy。guardian 则在它自己独立的只读、零网络 policy 下运行。
 
+这份激活期 policy 在下一个激活边界之前是固定的，不按调用重建。只有一处会按执行刷新：⑥ 之前，`policyWithGitMetadataProtection` 会针对**请求自身的** cwd（`cd`、切换 worktree、checkout submodule 之后可能与激活期 cwd 不同）重新发现 Git 元数据根，并把它们的 `hooks`/`config` deny 追加到 policy 副本上。若追加内容为空，则完全跳过拷贝。
+
+## 沙箱对 Git 元数据的限制范围
+
+每个发现的元数据根只 deny Git 的**代码执行面**——`<root>/hooks` 与 `<root>/config`。历史路径（`objects`、`refs`、`index`、`logs`）保持可写，使 commit 无需审批往返即可在沙箱内完成。其余路径——`HEAD`、`packed-refs`、`worktrees/`、`modules/`、`info/attributes`，以及 worktree/submodule 的 `.git` 指针文件——**都不** deny。
+
+这个缺口是有意保留的。被沙箱拒绝的 Git 元数据写入会以 `EPERM` 暴露，并被引导到 `sandbox_permissions=require_escalated`：经过一次评审后把该精确命令放到沙箱外执行（bash 工具描述已写明这一点）。扩大 deny 名单会让每次 commit 都走这条升级路径；而仅凭形态无法 deny 指针文件，除非在 `sandbox-policy.ts` 里重新判定「目录还是 `gitdir:` 文件」，而该文件位于 engine value-closure 内，必须保持不含 `node:fs`（`tests/structure-invariants.test.ts:188-221`）。
+
 完整讲解见 [`docs/pi-safety.md`](../../docs/pi-safety.md)。
 
 ## 安装
