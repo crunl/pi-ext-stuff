@@ -47,9 +47,9 @@ describe("commandGlance workspace cd fold", () => {
     expect(commandGlance("cd /repo; npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe("npx vitest");
   });
 
-  it("relativizes a cd below the workspace root", () => {
+  it("relativizes a cd below the workspace root but keeps the cd keyword", () => {
     expect(commandGlance("cd /repo/packages/foo && npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe(
-      "packages/foo && npx vitest",
+      "cd packages/foo && npx vitest",
     );
   });
 
@@ -69,9 +69,33 @@ describe("commandGlance workspace cd fold", () => {
 
   it("unquotes a quoted cd target before comparing", () => {
     expect(commandGlance('cd "/repo/packages/foo" && ls', BASH_GLANCE_BUDGET, cwd)).toBe(
-      "packages/foo && ls",
+      "cd packages/foo && ls",
     );
     expect(commandGlance("cd '/repo' && ls", BASH_GLANCE_BUDGET, cwd)).toBe("ls");
+  });
+
+  it("preserves the original separator and its spacing", () => {
+    // A `;` written tight against the path must not gain a space in front of it.
+    expect(commandGlance("cd /repo/packages/foo; npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe(
+      "cd packages/foo; npx vitest",
+    );
+    expect(commandGlance("cd /repo/packages/foo ; npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe(
+      "cd packages/foo ; npx vitest",
+    );
+  });
+
+  it("collapses redundant slashes in the relativized path", () => {
+    // `/repo//foo` resolves to the same directory as `/repo/foo`; the fold must
+    // not turn the remainder into a leading-slash (absolute) path.
+    expect(commandGlance("cd /repo//foo && ls", BASH_GLANCE_BUDGET, cwd)).toBe("cd foo && ls");
+    expect(commandGlance("cd /repo/foo && ls", BASH_GLANCE_BUDGET, cwd)).toBe("cd foo && ls");
+  });
+
+  it("folds absolute and relative subdirectory cds to the same glance", () => {
+    const absolute = commandGlance("cd /repo/packages/foo && npx vitest", BASH_GLANCE_BUDGET, cwd);
+    const relative = commandGlance("cd packages/foo && npx vitest", BASH_GLANCE_BUDGET, cwd);
+    expect(absolute).toBe(relative);
+    expect(absolute).toBe("cd packages/foo && npx vitest");
   });
 
   it("expands a ~ target before comparing", () => {
@@ -92,10 +116,11 @@ describe("commandGlance workspace cd fold", () => {
   it("folds a workspace cd that alone exceeds the budget", () => {
     const deep = `/repo/${"segment/".repeat(12)}leaf`;
     const glance = commandGlance(`cd ${deep} && ls`, BASH_GLANCE_BUDGET, cwd);
-    // The budget now lands inside the relative path instead of inside `cd /repo/…`.
-    expect(glance.startsWith("segment/segment/")).toBe(true);
-    expect(glance).not.toContain("cd ");
-    expect(glance).toBe(`${`${"segment/".repeat(12)}leaf && ls`.slice(0, BASH_GLANCE_BUDGET)}…`);
+    // The budget lands inside the relative path instead of inside `cd /repo/…`,
+    // and the kept `cd ` prefix pushes the visible slice two chars in.
+    const folded = `cd ${"segment/".repeat(12)}leaf && ls`;
+    expect(glance.startsWith("cd segment/segment/")).toBe(true);
+    expect(glance).toBe(`${folded.slice(0, BASH_GLANCE_BUDGET)}…`);
   });
 });
 

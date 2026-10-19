@@ -13,9 +13,14 @@ import { buildExpandedOutput } from "./tool-output.ts";
 /** Fixed glance budget so `· N output lines` + chevron stay on the header row. */
 export const BASH_GLANCE_BUDGET = 52;
 
-/** Leading same-line `cd <target> &&|;` with the target captured unquoted. */
+/**
+ * Leading same-line `cd <target>` followed by `&&` or `;`, with the target
+ * captured unquoted (groups 1-3) and the separator plus its surrounding blanks
+ * captured whole (group 4), so the fold never re-spaces a `;` the author wrote
+ * tight against the path.
+ */
 const WORKSPACE_CD_PREFIX =
-  /^[ \t]*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|"'()<>]+))[ \t]*(&&|;)[ \t]+/u;
+  /^[ \t]*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|"'()<>]+))([ \t]*(?:&&|;)[ \t]+)/u;
 
 function expandHome(path: string): string {
   const home = homedir();
@@ -29,10 +34,19 @@ function trimTrailingSlashes(path: string): string {
 }
 
 /**
- * Display-only fold of a leading same-line `cd <workspace>` prefix: the header
- * already sits in that directory, so repeating it costs glance budget and says
- * nothing. Lexical comparison only (no fs, no realpath), absolute targets only,
- * and a newline-separated `cd <workspace>` + command stays untouched. A missing
+ * Display-only fold of a leading same-line `cd <workspace>` prefix. Two
+ * different edits, because the two cases differ in what they delete:
+ *
+ * - target === workspace: drop the prefix entirely. The `cd` is pure
+ *   redundancy — the header already sits in that directory.
+ * - target below workspace: rewrite the absolute path as a cwd-relative one
+ *   and KEEP `cd`. The directory change is real; only the path gets shorter.
+ *   Dropping the keyword would render `packages/foo && npx vitest`, which reads
+ *   as executing `packages/foo`, and the shell highlighter paints the word
+ *   after `&&` as a command-position token.
+ *
+ * Lexical comparison only (no fs, no realpath), absolute targets only, and a
+ * newline-separated `cd <workspace>` + command stays untouched. A missing
  * `cwd` leaves the command unchanged — there is no `process.cwd()` fallback,
  * because the rendered row must not depend on the renderer's own directory.
  */
@@ -47,7 +61,11 @@ function stripWorkspaceCdPrefix(command: string, cwd?: string): string {
   if (target === workspace) return rest;
   const prefix = workspace === "/" ? "/" : `${workspace}/`;
   if (!target.startsWith(prefix)) return command;
-  return `${target.slice(prefix.length)} ${match[4] ?? "&&"} ${rest}`;
+  // A doubled slash (`/repo//foo`) resolves to the same directory as `/repo/foo`,
+  // but slicing the prefix off leaves a leading `/` that would read as an
+  // absolute path. Strip it so the relative form stays relative.
+  const relativePath = target.slice(prefix.length).replace(/^\/+/u, "");
+  return `cd ${relativePath}${match[4] ?? " && "}${rest}`;
 }
 
 /**
