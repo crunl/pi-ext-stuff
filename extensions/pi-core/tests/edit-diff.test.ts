@@ -64,10 +64,12 @@ describe("createEditDiffBox", () => {
     const plain = stripAnsi(rendered.join("\n"));
 
     expect(rendered).toHaveLength(3);
-    expect(plain).toContain("  9 │ before");
-    expect(plain).toContain("- 10 │ old value");
-    expect(plain).toContain("+ 10 │ new value");
-    expect(rendered[0]).toContain(BASE_BG); // context: neutral box background
+    expect(plain).toContain(" 9   │ before");
+    expect(plain).toContain("10 - │ old value");
+    expect(plain).toContain("10 + │ new value");
+    expect(rendered[0]).not.toContain(BASE_BG); // context: transparent, no base bg
+    expect(rendered[0]).not.toContain(ADDED_BG);
+    expect(rendered[0]).not.toContain(REMOVED_BG);
     expect(rendered[1]).toContain(REMOVED_BG); // MiniMax removed background
     expect(rendered[2]).toContain(ADDED_BG); // added: MiniMax #213A2B
     expect(rendered.every((line) => line.startsWith(" "))).toBe(true);
@@ -81,7 +83,7 @@ describe("createEditDiffBox", () => {
     expect(rendered[0]).toContain(ADDED_BG);
   });
 
-  it("falls back to the uniform box background without truecolor theme data", () => {
+  it("falls back to the MiniMax palette without truecolor theme data", () => {
     const nonTruecolor = {
       ...(theme as unknown as Record<string, unknown>),
       getBgAnsi: () => "\u001b[48;5;22m", // 256-color, not parseable as truecolor
@@ -99,7 +101,7 @@ describe("createEditDiffBox", () => {
     const rendered = component.render(18);
     const plain = rendered.map(stripAnsi);
 
-    expect(plain[0]).toContain("+ 120 │");
+    expect(plain[0]).toContain("120 + │");
     expect(plain.slice(1).some((line) => line.includes("     │"))).toBe(true);
     expect(rendered.every((line) => visibleWidth(line) <= 18)).toBe(true);
   });
@@ -121,7 +123,7 @@ describe("createEditDiffBox", () => {
     expect(rendered[2]).toContain("\x1b[35mnew value\x1b[39m"); // added highlighted
     expect(rendered[1]).toContain("\x1b[35mold value\x1b[39m"); // removed highlighted too
     expect(rendered[1]).toContain(REMOVED_BG); // removal uses MiniMax removed bg */
-    expect(stripAnsi(rendered[1])).toContain("- 10 │ old value");
+    expect(stripAnsi(rendered[1])).toContain("10 - │ old value");
   });
 
   it("keeps the gutter diff-colored while content is highlighted", () => {
@@ -133,7 +135,7 @@ describe("createEditDiffBox", () => {
     });
     const rendered = component.render(60);
     // gutter colored via theme.fg(toolDiffAdded, ...) before the content colors
-    expect(rendered[0].indexOf("+ 10 │")).toBeLessThan(rendered[0].indexOf("\x1b[35m"));
+    expect(rendered[0].indexOf("10 + │")).toBeLessThan(rendered[0].indexOf("\x1b[35m"));
   });
 
   it("falls back to plain content when the highlighter throws", () => {
@@ -145,7 +147,7 @@ describe("createEditDiffBox", () => {
       },
     });
     const plain = component.render(60).map(stripAnsi);
-    expect(plain[0]).toContain("+ 10 │ boom");
+    expect(plain[0]).toContain("10 + │ boom");
   });
 
   it("skips highlighting entirely without a lang", () => {
@@ -153,7 +155,7 @@ describe("createEditDiffBox", () => {
       throw new Error("must not be called");
     };
     const component = createEditDiffBox("+10 x", theme, { outputPad: 0, highlight });
-    expect(stripAnsi(component.render(60)[0])).toContain("+ 10 │ x");
+    expect(stripAnsi(component.render(60)[0])).toContain("10 + │ x");
   });
 
   it("reuses cached lines for repeated renders at the same width", () => {
