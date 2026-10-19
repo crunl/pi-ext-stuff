@@ -6,6 +6,7 @@ import { effectiveNetworkAuthority } from "./policy-primitives.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
 import type { PermissionMode } from "./state.ts";
 import { isRecord } from "./unknown-value.ts";
+import type { BlockRecoverability } from "./approve-for-me-engine.ts";
 
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -71,10 +72,16 @@ export function nextMode(mode: PermissionMode): PermissionMode {
   return mode === "auto" ? "yolo" : "auto";
 }
 
-export function policyDeniedError(reason: string): Error {
+export function policyDeniedError(reason: string, recoverable?: BlockRecoverability): Error {
   return Object.assign(
-    new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),
-    { code: "policy-denied", reason },
+    new Error(
+      renderPermissionErrorForAgent({
+        code: "policy-denied",
+        reason,
+        ...(recoverable === undefined ? {} : { recoverable }),
+      }),
+    ),
+    { code: "policy-denied", reason, ...(recoverable === undefined ? {} : { recoverable }) },
   );
 }
 

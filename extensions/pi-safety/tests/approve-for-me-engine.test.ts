@@ -310,6 +310,63 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
+  it("carries the admission's recoverability through normalization to the block", async () => {
+    const { engine, review } = createEngine(async () => ({
+      kind: "approve" as const,
+      rationale: "must not be consulted for a deny",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const executor = vi.fn(async () => completed("must not run"));
+
+    // `normalizeAdmission` rebuilds the deny from request data. If it drops the
+    // producer's classification, the renderer can only guess from the reason
+    // text and a fixable argument error reads as an unoverridable policy wall.
+    const result = await turn.execute(
+      call(executor, {
+        admission: {
+          kind: "deny",
+          reason: "request_permissions write root is invalid",
+          recoverable: "fix-arguments",
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      kind: "blocked",
+      error: {
+        code: "policy-denied",
+        reason: "request_permissions write root is invalid",
+        recoverable: "fix-arguments",
+      },
+    });
+    expect(executor).not.toHaveBeenCalled();
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it("rejects an admission that carries an unknown recoverability value", async () => {
+    const { engine } = createEngine(async () => ({
+      kind: "approve" as const,
+      rationale: "unused",
+    }));
+    const turn = engine.beginTurn(snapshot());
+    const executor = vi.fn(async () => completed("must not run"));
+
+    await expect(
+      turn.execute(
+        call(executor, {
+          admission: {
+            kind: "deny",
+            reason: "denied",
+            recoverable: "maybe" as never,
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({
+      kind: "blocked",
+      error: { code: "policy-denied", reason: "Admission plan is invalid" },
+    });
+    expect(executor).not.toHaveBeenCalled();
+  });
+
   it("fail-closes uncovered inline network without Guardian firewall review", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve" as const,

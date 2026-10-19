@@ -322,7 +322,12 @@ export async function evaluateRiskRequest(
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
     // Reading repository state failed, so the action was never judged.
-    return { action: "block", risk: "Forbidden", reason: gitMetadata.reason, recoverable: "transient" };
+    return {
+      action: "block",
+      risk: "Forbidden",
+      reason: gitMetadata.reason,
+      recoverable: "transient",
+    };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
     const remoteHosts = await readRepositoryRemoteHosts(
@@ -330,12 +335,13 @@ export async function evaluateRiskRequest(
       gitNetwork?.directImplicitPurpose === "push" ? "push" : "fetch",
     );
     if (!remoteHosts.ok) {
-      // Same as above: a configuration read, not a verdict on the action.
+      // Same split as above: a failed read is retryable, a parsed rejection of
+      // the config contents is not.
       return {
         action: "block",
         risk: "Forbidden",
         reason: remoteHosts.reason,
-        recoverable: "transient",
+        recoverable: remoteHosts.transient === true ? "transient" : "no",
       };
     }
     request.networkTargets = [
@@ -449,10 +455,7 @@ export async function evaluateRiskRequest(
   const packetRisk = risk === "Skip" && grantsWriteRoots ? "NeedsApproval" : risk;
 
   const verdict = decide(
-    [
-      () => (rule?.decision === "deny" ? RULE_DENY_REASON : undefined),
-      () => protectedPathReason,
-    ],
+    [() => (rule?.decision === "deny" ? RULE_DENY_REASON : undefined), () => protectedPathReason],
     [() => (rule?.decision === "ask" ? RULE_ASK_REASON : undefined)],
     [
       () =>

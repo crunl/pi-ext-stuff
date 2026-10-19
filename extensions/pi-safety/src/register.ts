@@ -2138,7 +2138,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         canonicalCwd,
       );
       if (decision.action === "block") {
-        throw policyDeniedError(decision.reason);
+        throw policyDeniedError(decision.reason, decision.recoverable);
       }
       if (
         decision.action !== "prompt" ||

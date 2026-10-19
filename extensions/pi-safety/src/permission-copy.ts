@@ -114,13 +114,27 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
         "Retry only if the failure appears transient; otherwise ask the user for guidance.",
       ].join("\n");
     case "policy-denied":
-      // The static layer classified the deny, so a malformed permission
-      // argument is known rather than sniffed from the reason text.
-      if (error.recoverable === "fix-arguments" || isPermissionArgumentError(reason)) {
+      // The static layer classified the deny, so prefer its verdict. The string
+      // sniff is only a fallback for denies produced without a classification;
+      // an explicit `no` must not be overridden by a reason that happens to
+      // look like an argument error.
+      if (
+        error.recoverable === "fix-arguments" ||
+        (error.recoverable === undefined && isPermissionArgumentError(reason))
+      ) {
         return [
           "This action was rejected because its permission arguments were invalid.",
           `Reason: ${reason}`,
           "Fix the tool-call arguments and retry the same command. The command itself was not evaluated or refused.",
+        ].join("\n");
+      }
+      if (error.recoverable === "transient") {
+        // The policy state could not be read, so nothing was judged about the
+        // action. Saying "cannot be overridden" here would be a false wall.
+        return [
+          "This action could not be evaluated because the permission policy state could not be read.",
+          `Reason: ${reason}`,
+          "The action was not refused on its own merits. Retry once; if the same failure recurs, stop and ask the user.",
         ].join("\n");
       }
       return [

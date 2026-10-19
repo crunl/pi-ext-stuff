@@ -750,9 +750,26 @@ function normalizeAdmission(
 ): { ok: true; admission: ResolvedAdmission } | { ok: false } {
   if (!isRecord(raw) || typeof raw.kind !== "string") return { ok: false };
   if (raw.kind === "deny") {
-    return typeof raw.reason === "string" && raw.reason.trim().length > 0
-      ? { ok: true, admission: { kind: "deny", reason: raw.reason } }
-      : { ok: false };
+    if (typeof raw.reason !== "string" || raw.reason.trim().length === 0) return { ok: false };
+    // `recoverable` is producer-side classification, not request data: it must
+    // survive normalization or the renderer falls back to sniffing the reason.
+    const recoverable = raw.recoverable;
+    if (
+      recoverable !== undefined &&
+      recoverable !== "fix-arguments" &&
+      recoverable !== "transient" &&
+      recoverable !== "no"
+    ) {
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      admission: {
+        kind: "deny",
+        reason: raw.reason,
+        ...(recoverable === undefined ? {} : { recoverable }),
+      },
+    };
   }
   if (raw.kind !== "allow" && raw.kind !== "review") return { ok: false };
   const rawRequested = raw.requested;

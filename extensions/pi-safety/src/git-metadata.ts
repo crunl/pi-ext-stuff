@@ -3,17 +3,19 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { parseGitRemoteTarget, unquoteGitConfigValue } from "./network-host.ts";
 
-type GitMetadataResult =
-  | { ok: true; configPath: string; writeRoots: string[] }
-  | { ok: false; reason: string };
+/**
+ * A refusal is either a verdict about the repository (deterministic: no retry
+ * can change it) or a failed filesystem read (transient: the same call may
+ * succeed). The distinction is carried as a field so callers never have to
+ * recognize it from the message text.
+ */
+type GitMetadataFailure = { ok: false; reason: string; transient?: true; notFound?: true };
 
-type GitMetadataProtectionResult =
-  | { ok: true; roots: string[] }
-  | { ok: false; reason: string };
+type GitMetadataResult = { ok: true; configPath: string; writeRoots: string[] } | GitMetadataFailure;
 
-type GitMetadataInspectionResult =
-  | GitMetadataResult
-  | { ok: false; reason: string; notFound: true };
+type GitMetadataProtectionResult = { ok: true; roots: string[] } | GitMetadataFailure;
+
+type GitMetadataInspectionResult = GitMetadataResult;
 
 function isFilesystemRoot(path: string): boolean {
   return path === parse(path).root;
@@ -127,7 +129,11 @@ async function inspectGitMetadata(
       details = await lstat(dotGit);
     } catch (error) {
       if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
-        return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+        return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
       }
       if (!searchParents || directory === root) {
         return {
@@ -157,7 +163,11 @@ async function inspectGitMetadata(
           writeRoots: [...new Set([gitDirectory])],
         };
       } catch (error) {
-        return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+        return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
       }
     }
     if (!details.isFile()) {
@@ -168,7 +178,11 @@ async function inspectGitMetadata(
     try {
       pointer = /^gitdir:\s*(.+?)\s*$/i.exec(await readFile(dotGit, "utf8"))?.[1];
     } catch (error) {
-      return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+      return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
     }
     if (!pointer) {
       return { ok: false, reason: "unsafe Git metadata pointer" };
@@ -181,7 +195,11 @@ async function inspectGitMetadata(
         return { ok: false, reason: "unsafe Git metadata path" };
       }
     } catch (error) {
-      return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+      return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
     }
 
     if (await worktreeGitDirectoryPointsBack(gitDirectory, dotGit)) {
@@ -193,7 +211,11 @@ async function inspectGitMetadata(
         const common = (await readFile(join(gitDirectory, "commondir"), "utf8")).trim();
         commonDirectory = await realpath(resolve(gitDirectory, common));
       } catch (error) {
-        return { ok: false, reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}` };
+        return {
+        ok: false,
+        reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
       }
       if (
         commonDirectory === gitDirectory ||
@@ -251,7 +273,11 @@ async function discoverMetadataRoots(metadataRoot: string): Promise<GitMetadataP
     commondirDetails = await lstat(commondirPath);
   } catch (error) {
     if (isMissingPath(error)) return { ok: true, roots: [metadataRoot] };
-    return { ok: false, reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}` };
+    return {
+        ok: false,
+        reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
   }
   if (!commondirDetails.isFile() || commondirDetails.isSymbolicLink()) {
     return { ok: false, reason: "unsafe Git common metadata path" };
@@ -261,7 +287,11 @@ async function discoverMetadataRoots(metadataRoot: string): Promise<GitMetadataP
   try {
     commonPointer = (await readFile(commondirPath, "utf8")).trim();
   } catch (error) {
-    return { ok: false, reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}` };
+    return {
+        ok: false,
+        reason: `unsafe Git common metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
   }
   if (!commonPointer) return { ok: false, reason: "unsafe Git common metadata path" };
   const commonRoot = await canonicalMetadataDirectory(resolve(metadataRoot, commonPointer));
@@ -290,7 +320,11 @@ export async function discoverGitMetadataProtectionRoots(
       details = await lstat(dotGit);
     } catch (error) {
       if (!isMissingPath(error)) {
-        return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+        return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
       }
       if (directory === root) return { ok: true, roots: [] };
       directory = dirname(directory);
@@ -315,7 +349,11 @@ export async function discoverGitMetadataProtectionRoots(
     try {
       pointer = /^gitdir:\s*(.+?)\s*$/i.exec(await readFile(dotGit, "utf8"))?.[1];
     } catch (error) {
-      return { ok: false, reason: `unsafe Git metadata: ${filesystemErrorReason(error)}` };
+      return {
+        ok: false,
+        reason: `unsafe Git metadata: ${filesystemErrorReason(error)}`,
+        transient: true,
+      };
     }
     if (!pointer) return { ok: false, reason: "unsafe Git metadata pointer" };
 
@@ -327,7 +365,7 @@ export async function discoverGitMetadataProtectionRoots(
 
 export type GitRemotePurpose = "fetch" | "push";
 
-type GitRemoteHostsResult = { ok: true; hosts: string[] } | { ok: false; reason: string };
+type GitRemoteHostsResult = { ok: true; hosts: string[] } | GitMetadataFailure;
 
 export async function readRepositoryRemoteHosts(
   configPath: string | undefined,
@@ -341,6 +379,7 @@ export async function readRepositoryRemoteHosts(
     return {
       ok: false,
       reason: `unsafe Git remote config: ${filesystemErrorReason(error)}`,
+      transient: true,
     };
   }
   const remotes = new Map<string, { urls: string[]; pushUrls: string[]; hasPushUrl: boolean }>();

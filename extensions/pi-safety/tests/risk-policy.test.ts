@@ -158,18 +158,25 @@ describe("ApprovalDisposition policy gate", () => {
   it("orders deny above allow and falls through to review, never to allow", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
 
-    // A deny rule and an allow rule both match. Deny is checked first, so the
-    // allow rule cannot discharge it — the ordering is structural, not a
-    // consequence of where the two `if`s happen to sit.
-    const conflicting = config({
-      rules: [
-        { action: "allow", tool: "bash", pattern: "*" },
-        { action: "deny", tool: "bash", pattern: "*" },
-      ],
-    });
+    // Ordering is observable where two gates could both fire. A deny rule and a
+    // protected path are independent sources: the deny gate is listed first, so
+    // its reason wins. (A deny rule competing with an allow rule proves nothing
+    // about gate order — `matchRules` already collapses both into one decision.)
+    const denyRule = config({ rules: [{ action: "deny", tool: "write", pattern: "*" }] });
+    const protectedPath = {
+      ...denyRule,
+      sandbox: {
+        ...denyRule.sandbox,
+        filesystem: { ...denyRule.sandbox.filesystem, protectedWritePaths: [join(cwd, "guard")] },
+      },
+    };
     await expect(
-      evaluateRiskRequest("bash", { command: "printf hi" }, cwd, conflicting),
-    ).resolves.toMatchObject({ action: "block", risk: "Forbidden", recoverable: "no" });
+      evaluateRiskRequest("write", { path: join(cwd, "guard/file"), content: "x" }, cwd, protectedPath),
+    ).resolves.toMatchObject({
+      action: "block",
+      reason: "Denied by permissions rule",
+      recoverable: "no",
+    });
 
     // An allow rule cannot force execution of a command the classifier could
     // not prove safe: the allow gate requires `risk !== "Forbidden"`.
@@ -232,7 +239,10 @@ describe("ApprovalDisposition policy gate", () => {
 
   it("treats an unproven argv as review and an approved write root as a grant", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
-    const outputRoot = join(await realpath(tmpdir()), `pi-safety-grant-${Date.now()}`);
+    // /var/tmp is outside the default allowWrite roots ($TMPDIR resolves to
+    // /private/tmp, which the default config already allows), so this root is
+    // genuinely a grant rather than a no-op.
+    const outputRoot = join(await realpath("/var/tmp"), `pi-safety-grant-${Date.now()}`);
 
     // The classifier cannot prove this safe (`sudo` is a proven dangerous
     // form), so no allow gate fires and the fall-through exit is review. It
