@@ -66,6 +66,20 @@ describe("Git metadata ownership", () => {
     await expect(inspectRepositoryGitMetadata(cwd)).resolves.toMatchObject({ ok: false });
   });
 
+  it("marks a deterministic refusal as non-transient", async () => {
+    // No repository at all: a verdict about the working directory, so the
+    // caller must not be told a retry could succeed.
+    const missing = await mkdtemp(join(tmpdir(), "pi-safety-git-metadata-"));
+    const notARepository = await inspectRepositoryGitMetadata(missing);
+    expect(notARepository).toMatchObject({ ok: false, notFound: true });
+    expect(notARepository).not.toHaveProperty("transient");
+
+    // A .git that is not a directory is likewise a layout verdict.
+    const misplaced = await mkdtemp(join(tmpdir(), "pi-safety-git-metadata-"));
+    await writeFile(join(misplaced, ".git"), "not a directory");
+    expect(await inspectRepositoryGitMetadata(misplaced)).not.toHaveProperty("transient");
+  });
+
   it("rejects a .git symbolic link before resolving its target", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-git-metadata-"));
     await symlink("/", join(cwd, ".git"));

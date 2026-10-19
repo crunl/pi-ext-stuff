@@ -158,25 +158,26 @@ describe("ApprovalDisposition policy gate", () => {
   it("orders deny above allow and falls through to review, never to allow", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
 
-    // Ordering is observable where two gates could both fire. A deny rule and a
-    // protected path are independent sources: the deny gate is listed first, so
-    // its reason wins. (A deny rule competing with an allow rule proves nothing
-    // about gate order — `matchRules` already collapses both into one decision.)
-    const denyRule = config({ rules: [{ action: "deny", tool: "write", pattern: "*" }] });
-    const protectedPath = {
-      ...denyRule,
-      sandbox: {
-        ...denyRule.sandbox,
-        filesystem: { ...denyRule.sandbox.filesystem, protectedWritePaths: [join(cwd, "guard")] },
-      },
-    };
+    // Ordering is observable only where two gates can both fire *and* still
+    // reach `decide()`: a deny rule exits earlier, and `matchRules` already
+    // collapses a deny and an allow into one decision. A protected path and a
+    // proven-safe argv are the pair that qualifies — both would otherwise
+    // decide this call, so the deny gate listed first must win.
+    // `.agents` is a default protected write path, so the protected-path gate
+    // fires while the argv itself is a plain, provable-safe write.
     await expect(
-      evaluateRiskRequest("write", { path: join(cwd, "guard/file"), content: "x" }, cwd, protectedPath),
+      evaluateRiskRequest("write", { path: join(cwd, ".agents/note.md"), content: "x" }, cwd, config()),
     ).resolves.toMatchObject({
       action: "block",
-      reason: "Denied by permissions rule",
+      reason: expect.stringContaining("protected"),
       recoverable: "no",
     });
+
+    // The same call without the guard is a proven-safe write, so this pair is
+    // exactly what swapping the two gate closures in `decide()` would flip.
+    await expect(
+      evaluateRiskRequest("write", { path: join(cwd, "plain/file"), content: "x" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
 
     // An allow rule cannot force execution of a command the classifier could
     // not prove safe: the allow gate requires `risk !== "Forbidden"`.

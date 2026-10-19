@@ -321,12 +321,14 @@ export async function evaluateRiskRequest(
   // by this flag, while `classifyRisk` treats those operations as `Skip`.
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
-    // Reading repository state failed, so the action was never judged.
+    // Only a failed filesystem read is retryable. "repository not found",
+    // symlinked metadata, unexpected ownership and unparsable config are
+    // verdicts about the repository, which no retry can change.
     return {
       action: "block",
       risk: "Forbidden",
       reason: gitMetadata.reason,
-      recoverable: "transient",
+      recoverable: gitMetadata.transient === true ? "transient" : "no",
     };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
@@ -454,8 +456,10 @@ export async function evaluateRiskRequest(
   const grantsWriteRoots = filesystemWriteRoots.length > 0;
   const packetRisk = risk === "Skip" && grantsWriteRoots ? "NeedsApproval" : risk;
 
+  // Rule deny is not a gate here: it is checked earlier, before the external
+  // branch, so that a deny rule also covers tools that never reach this point.
   const verdict = decide(
-    [() => (rule?.decision === "deny" ? RULE_DENY_REASON : undefined), () => protectedPathReason],
+    [() => protectedPathReason],
     [() => (rule?.decision === "ask" ? RULE_ASK_REASON : undefined)],
     [
       () =>

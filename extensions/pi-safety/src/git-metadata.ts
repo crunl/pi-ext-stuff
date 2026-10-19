@@ -247,8 +247,10 @@ async function inspectGitMetadata(
 }
 
 export async function inspectRepositoryGitMetadata(cwd: string): Promise<GitMetadataResult> {
-  const result = await inspectGitMetadata(cwd, true);
-  return result.ok ? result : { ok: false, reason: result.reason };
+  // Return the inspection result as-is: rebuilding the failure here would drop
+  // the `transient` marker, and every caller would then have to guess from the
+  // message whether a retry could ever succeed.
+  return inspectGitMetadata(cwd, true);
 }
 
 function isMissingPath(error: unknown): boolean {
