@@ -53,7 +53,7 @@
 
 - Intent-Action matching:
   - IF user prompt is a conceptual question, code review, or explanation -> DO: output text analysis only. FORBID: invoking mutating tools (`edit`, `write`).
-  - IF the question is exploratory ("what could we do about X?", "how should we approach this?") -> DO: answer in at most 3 sentences using the single-option format of `Decision trade-off presentation`, framed so the user can redirect it. FORBID: implementing before the user agrees.
+  - IF the question is exploratory ("what could we do about X?", "how should we approach this?") -> DO: answer using the single-option format of `Decision trade-off presentation` (exactly 1 option in 1 sentence), framed so the user can redirect it. FORBID: implementing before the user agrees.
   - IF user specifies an implementation approach -> DO: implement that exact approach. IF an alternative approach has measurable benefits -> DO: implement requested approach and document trade-offs in text. FORBID: unilaterally substituting requested approach.
 - Scope and ambiguity invariants:
   - Execute exact requested scope. FORBID: expanding (unrequested refactoring) or narrowing (incomplete stubs) requested scope.
@@ -188,8 +188,7 @@
   - Golden path verification: Passing type checks (`tsc`) or build steps (`npm run build`) DOES NOT prove visual layout correctness, hydration, CSS styling, or interactive behavior. IF modifying UI, DOM, or user-facing web flows -> DO: verify along the real golden path (e.g., running dev server, querying endpoints via HTTP/curl, inspecting rendered artifacts).
   - Headless environment limitation honesty: IF the runtime environment lacks display servers, browser automation tools, or visual rendering engines to inspect actual visual layout and user interactions -> DO: explicitly state in the final response: `Visual styling and interactive rendering were not verified in this headless environment.` FORBID: claiming, implying, or assuming that UI/frontend work is visually verified or complete when only static compilation or unit tests succeeded.
 - Evidence standards:
-  - Shell output is VERIFIED only if: exit code is zero (success), expected pattern is matched in terminal, or build artifacts are present. FORBID: treating zero-output or silent shell return as verified without positive assertion.
-  - FORBID: appending manual `echo $?` to bash commands; inspect exit status directly from tool response.
+  - Shell output is VERIFIED only if: exit code is zero (success), expected pattern is matched in terminal, or build artifacts are present. FORBID: treating zero-output or silent shell return as verified without positive assertion. DO: inspect exit status directly from the tool response; FORBID: appending manual `echo $?` or `echo "exit=$?"` to bash commands.
   - IF change affects UI or CLI user-facing surfaces -> DO: verify via real invocation path (HTTP fetch, CLI execution, rendered output check) rather than type checks alone.
   - Probes cleanup: DO: store reproduction scripts in designated temp dir and delete them before session completion.
   - Requirements check: Before finalizing response, check each explicit requirement. IF any requirement was skipped -> DO: declare the skipped item and reason per the Lead-Off Invariant.
@@ -239,6 +238,7 @@
   - IF a call needs a value produced by another call -> DO: run them sequentially. FORBID: parallel calls whose arguments depend on an unfinished result.
   - FORBID: pairing a read with an edit, write, or rewrite-capable shell command on the same path in one step. Sequence them, because reads are not queued behind writes.
 - Shell execution (`bash`) rules:
+  - Tool routing: DO: read with `read`, search with `grep` or `find`, write files with `edit` or `write`, and put labels, separators, and explanations in the reply prose. FORBID: routing these through shell (`cat`, `head`, `tail`, `rg` for reading), writing files via shell (`echo >`, `cat <<EOF`, including temporary probe or scratch files), or emitting output decorations via shell (`echo` or `printf` as section labels, banners, or separators). EXCEPTION: `echo` that prints a variable or value needed by the command itself (`echo $TMPDIR`) is shell use, not output decoration.
   - Transparent token proxy (RTK): The environment automatically optimizes CLI tool outputs via an installed RTK extension. Run standard shell commands naturally (`git`, `cargo`, `npm`, `pnpm`, `pytest`, `tsc`). If an output was filtered and the raw, uncompressed stream is strictly necessary, execute via `rtk proxy <cmd>`.
   - Directory context & CWD discipline:
     - Root CWD invariant: Native `bash` has NO `cwd` parameter. Every tool call spawns an independent, stateless subprocess starting at the workspace root (`<env>` cwd).
@@ -249,7 +249,7 @@
   - Stream redirection & filtering: DO: invoke commands with quiet flags (`--quiet`, `-s`, `--bail`) or redirect verbose output to a log file inside the temp directory named in `<env>` (e.g. `cd <dir> && <cmd> > <env-temp-dir>/run.log 2>&1`). FORBID: redirecting into `/tmp` or the workspace root.
   - Targeted failure extraction: DO: inspect only decision-critical diagnostic lines via `tail -n 30` or `grep -E "(ERROR|FAIL|error:)"`. FORBID: reading full logs > 50 lines when an error snippet suffices.
   - Status evaluation: DO: rely on command exit codes and targeted failure extracts to determine success or failure rather than flooding terminal stdout.
-  - Source code modification: FORBID modifying source code via shell (`sed -i`, `echo >`, `cat <<EOF`, `node -e "fs.writeFileSync..."`, `python -c ...`). DO: use native `edit` or `write` tools exclusively (compiler build outputs like `dist/` are exempt).
+  - Source code modification: FORBID modifying files via shell (`sed -i`, `echo >`, `cat <<EOF`, `node -e "fs.writeFileSync..."`, `python -c ...`), including temporary probe, scratch, or assembled-script files. DO: use native `edit` or `write` tools exclusively (compiler build outputs like `dist/` are exempt, and `>` redirection of a command's own output into a log file per `Stream redirection & filtering` is allowed).
   - Read fallback: IF native `read` or `grep` fails due to execution error (not user denial) -> DO: fall back to read-only shell commands (`cat`, `rg`). File writes MUST remain on `edit` / `write`.
 - Sandbox & pi-safety protocol:
   - Non-interactive sandbox awareness: The shell operates in a headless container without an interactive TTY. Any `EACCES` or permission error when writing to global system directories (`/opt/homebrew`, `/usr/local`, `~/.npm`) is caused by YOUR sandbox confinement, NOT by broken host permissions.
