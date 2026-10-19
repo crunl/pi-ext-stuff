@@ -45,6 +45,11 @@ function wrapEvidenceCommandLine(
 }
 
 class BashExpandedEvidence implements Component {
+  private cachedWidth: number | undefined;
+  private cachedLines: string[] | undefined;
+  /** Width-independent shell highlight — survives resizes like read-evidence paintedCache. */
+  private highlightedCache: string[] | undefined;
+
   constructor(
     private readonly command: string,
     private readonly outputText: string,
@@ -53,17 +58,27 @@ class BashExpandedEvidence implements Component {
     private readonly isError: boolean,
   ) {}
 
+  private highlightedCommand(): string[] {
+    if (this.highlightedCache) return this.highlightedCache;
+    if (this.command.length === 0) {
+      this.highlightedCache = [];
+      return this.highlightedCache;
+    }
+    const source =
+      this.command.length > MAX_COMMAND_CHARS
+        ? this.command.slice(0, MAX_COMMAND_CHARS)
+        : this.command;
+    this.highlightedCache = highlightShellCommandLines(source);
+    return this.highlightedCache;
+  }
+
   render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     const pad = " ".repeat(this.outputPad);
     const lines: string[] = [];
     if (this.command.length > 0) {
-      const source =
-        this.command.length > MAX_COMMAND_CHARS
-          ? this.command.slice(0, MAX_COMMAND_CHARS)
-          : this.command;
       const rail = `${pad}  │ `;
-      const highlighted = highlightShellCommandLines(source);
-      highlighted.forEach((line, index) => {
+      this.highlightedCommand().forEach((line, index) => {
         lines.push(...wrapEvidenceCommandLine(line, width, rail, index === 0));
       });
     }
@@ -73,10 +88,16 @@ class BashExpandedEvidence implements Component {
         lines.push(this.isError ? this.theme.fg("error", row) : this.theme.fg("toolOutput", row));
       }
     }
-    return lines;
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return this.cachedLines;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+    this.highlightedCache = undefined;
+  }
 }
 
 /**

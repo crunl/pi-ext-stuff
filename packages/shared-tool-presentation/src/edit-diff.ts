@@ -85,10 +85,9 @@ function truecolorBackground(rgb: [number, number, number]): RowBg {
 /**
  * Row backgrounds aligned with MiniMax: solid `diffAddedBg`/`diffRemovedBg`
  * hex values (dark vs light picked from the host theme surface). Context
- * keeps the neutral tool surface — MiniMax does not tint unchanged lines.
+ * rows paint no background — the terminal surface shows through.
  */
 function buildRowBackgrounds(theme: Theme): RowBackgrounds {
-  const boxBg: RowBg = (text) => theme.bg("toolSuccessBg", text);
   let isLightSurface = false;
   try {
     const base = parseTruecolor(theme.getBgAnsi("toolSuccessBg"));
@@ -97,7 +96,7 @@ function buildRowBackgrounds(theme: Theme): RowBackgrounds {
     // Fall through to dark palette (MiniMax default in the dark.json set).
   }
   return {
-    context: boxBg,
+    context: (text) => text,
     added: truecolorBackground(
       isLightSurface ? MINIMAX_DIFF_ADDED_BG_LIGHT : MINIMAX_DIFF_ADDED_BG_DARK,
     ),
@@ -158,7 +157,10 @@ class EditDiffRows implements Component {
             : "toolDiffContext";
 
       logicalRows.forEach((content, index) => {
-        const gutter = index === 0 ? `${marker} ${number} │ ` : `${" ".repeat(numberWidth + 2)} │ `;
+        // Number-first gutter (`12 + │ code`): the line-number column keeps a
+        // clean left edge; the marker hugs the rail next to its content row.
+        // Parsing stays marker-first (host diff format) — only render swaps.
+        const gutter = index === 0 ? `${number} ${marker} │ ` : `${" ".repeat(numberWidth + 2)} │ `;
         // Highlighted content carries its own ANSI colors; only the gutter gets
         // the diff color. Plain content keeps the whole-line diff color.
         const body = highlighted
@@ -205,7 +207,8 @@ export function createEditDiffBox(
 ): Component {
   if (diff.length === 0) return new Container();
 
-  // No box-wide background: each row paints its own (added/removed/context).
+  // No box-wide background: added/removed rows paint their own; context
+  // rows stay transparent.
   const box = new Box(1, 0);
   box.addChild(new EditDiffRows(parseEditDiff(diff), theme, options.lang, options.highlight));
   return new IndentedComponent(box, options.outputPad);
