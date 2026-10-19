@@ -871,3 +871,26 @@ describe("segment unproven cause", () => {
     expect(cat?.unprovenCause).toBeUndefined();
   });
 });
+
+describe("empty-segment invariant", () => {
+  it("fails closed when the parser reduces a non-empty command to zero segments", () => {
+    // Arithmetic `(( ... ))` and C-style `for ((...))` loops vanish in
+    // collectStatements — including live `$(...)` bodies — so vacuous
+    // `.some()` truth must not Skip them.
+    for (const command of [
+      "(( i++ ))",
+      "(( y = $(echo 5) ))",
+      "for (( i=0; i<3; i++ )); do echo $i; done",
+    ]) {
+      expect(classifyRisk(request("bash", command)), command).toBe("NeedsApproval");
+    }
+  });
+
+  it("keeps blank input Skip and pure comments unaffected", () => {
+    expect(classifyRisk(request("bash", ""))).toBe("Skip");
+    expect(classifyRisk(request("bash", "   "))).toBe("Skip");
+    // Comments still produce segments, so the invariant does not touch them.
+    expect(classifyRisk(request("bash", "# just a comment"))).toBe("Skip");
+    expect(classifyRisk(request("bash", "echo hi"))).toBe("Skip");
+  });
+});

@@ -348,3 +348,12 @@ export {
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
 export { extractShellNetworkHosts } from "./shell-network.ts";
 export { parseCommandSegments } from "./shell-segment.ts";
+  // Empty-segment invariant: a non-empty command the parser reduced to zero
+  // segments is a representation failure, not proof of safety. Arithmetic
+  // `(( ... ))` and C-style `for ((...))` loops vanish here — including live
+  // `$(...)` bodies — and the vacuous `.some()` truth below would Skip them.
+  // Fail closed at this convergence point instead of per-node parser surgery.
+  // Pure comments still produce segments, and blank input stays Skip.
+  if (command.trim() !== "" && segments.length === 0) {
+    return { disposition: "NeedsApproval" };
+  }
