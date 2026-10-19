@@ -200,7 +200,10 @@ export async function resolveAdditionalWriteRoots(
       return {
         ok: false,
         reason: `additional write root cannot be the filesystem root: ${absolutePath}`,
-        recoverable: "no",
+        // Asking for `/` can never be honoured, but naming a narrower root is a
+        // plain argument fix — unlike asking for a protected path, which no
+        // rewording of the request can make acceptable.
+        recoverable: "fix-arguments",
       };
     }
     if (decision.allowed) continue;

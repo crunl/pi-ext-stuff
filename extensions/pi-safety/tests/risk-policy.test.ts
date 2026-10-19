@@ -198,6 +198,38 @@ describe("ApprovalDisposition policy gate", () => {
     });
   });
 
+  it("keeps a deny rule above the external-tool compatibility branch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
+
+    // An unrecognized tool name normalizes to operation "external", which has
+    // its own allow/prompt branch. A deny rule must still win: the branch is a
+    // compatibility path for tools that never reach classification, not a way
+    // past the user's own refusal.
+    const denied = config({ rules: [{ action: "deny", tool: "mcp__custom", pattern: "*" }] });
+    await expect(
+      evaluateRiskRequest("mcp__custom", { anything: "x" }, cwd, denied),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "Forbidden",
+      reason: "Denied by permissions rule",
+      recoverable: "no",
+    });
+
+    // Without a deny rule the same call keeps the compatibility behaviour.
+    await expect(
+      evaluateRiskRequest("mcp__custom", { anything: "x" }, cwd, config()),
+    ).resolves.toMatchObject({ action: "allow", reason: "Host tool policy" });
+
+    // An ask rule on the same branch still prompts.
+    const asked = config({ rules: [{ action: "ask", tool: "mcp__custom", pattern: "*" }] });
+    await expect(
+      evaluateRiskRequest("mcp__custom", { anything: "x" }, cwd, asked),
+    ).resolves.toMatchObject({
+      action: "prompt",
+      reason: "Approval required by permissions rule",
+    });
+  });
+
   it("treats an unproven argv as review and an approved write root as a grant", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-gate-"));
     const outputRoot = join(await realpath(tmpdir()), `pi-safety-grant-${Date.now()}`);

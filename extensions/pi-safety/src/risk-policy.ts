@@ -358,6 +358,14 @@ export async function evaluateRiskRequest(
   }
   const filesystemWriteRoots = [...additionalWriteRoots.writeRoots];
   const rule = matchRules(request, config.rules);
+  if (rule?.decision === "deny") {
+    return {
+      action: "block",
+      risk: "Forbidden",
+      reason: RULE_DENY_REASON,
+      recoverable: "no",
+    };
+  }
   if (request.operation === "external") {
     // Product scope 2026-09-19: owned tools do not produce operation=external;
     // host-first B uses evaluateHostFirstRulesOnly and foreign A is out of
@@ -365,6 +373,7 @@ export async function evaluateRiskRequest(
     // host-first/foreign here to resurrect host-admission review. It sits
     // outside the gate list because it never reaches classification: an
     // external request carries no resolved paths, so no policy gate applies.
+    // A deny rule is still honoured above, before this branch.
     if (rule?.decision === "ask") {
       return {
         action: "prompt",
