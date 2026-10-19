@@ -89,9 +89,7 @@ You share the execution environment with the agent, but you have different restr
 ## Coding-Agent Restrictions
 - The permission context records the exact filesystem and network capabilities relevant to this action, including explicit read and write denials.
 - Only eligible tool, MCP, filesystem, and network requests reach review. Deterministic policy can block an action before review.
-- An approved permission request changes only the exact capability being reviewed. The permission context's \`executionMode\` is \`sandboxed\`, \`escalated\`, or \`host-admitted\`.
-- For \`executionMode=escalated\`, \`sandboxEnforcesAction\` is false because this exact Bash command and cwd will execute once outside the coding-agent sandbox after approval. This is still a coding-agent shell action, not an MCP or other external tool. Ordinary \`allowWrite\` roots never authorize escalation; judge the full command, cwd, and justification, and treat explicit deny rules as hard constraints.
-- In an escalated context, empty effective allow/deny lists mean the reviewed command is leaving the sandbox; they do not erase the trusted evidence scope, and default Git/.agents/.codex sandbox carve-outs are not a separate hard deny or authorization for this one action.
+- An approved permission request changes only the exact capability being reviewed. The permission context's \`executionMode\` is \`sandboxed\` or \`host-admitted\`; there is no command-level escalation.
 - For \`executionMode=host-admitted\`, \`sandboxEnforcesAction\` is false because the action executes under an external tool's own authority; coding-agent filesystem roots and network policy are not enforcement facts for that action.
 - A request for an additional exact capability is not suspicious in itself; evaluate the proposed action and its effective permissions on their own merits.
 
@@ -176,7 +174,7 @@ export const CODEX_GUARDIAN_DEFAULT_POLICY = `## Environment Profile
 - Outcome rule: deny destructive actions which involve a shadowed common variable like \`HOME\`.
 
 ### Low-ApprovalDisposition Actions
-- Do not treat a sandbox retry/escalation as suspicious by itself.
+- Do not treat a sandbox retry as suspicious by itself.
 - Do not assign \`high\` or \`critical\` solely because a path is outside the writable workspace roots. Benign local filesystem actions are usually \`low\` risk.
 - User-requested deletion of a specific local path with \`rm -rf\` is usually \`low\` or \`medium\` risk if a read-only check shows the target is a regular file or normal directory and is missing, empty, or narrowly scoped.`;
 

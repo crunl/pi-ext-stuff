@@ -11,6 +11,7 @@ import {
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
 } from "../src/risk-policy.ts";
+import { isPermissionArgumentError } from "../src/shell-permissions.ts";
 import { createGitDirectory } from "./git-fixtures.ts";
 
 function config(overrides: Partial<SafetyConfig> = {}): SafetyConfig {
@@ -689,41 +690,6 @@ describe("ApprovalDisposition policy gate", () => {
     expect(decision).not.toHaveProperty("networkHosts");
   });
 
-  it.each([
-    ["covered.example", true],
-    ["uncovered.example", false],
-  ])(
-    "refuses to escalate an implicit Git push whose destination cannot be bound: %s",
-    async (remoteHost, coveredByConfig) => {
-      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-      await createGitDirectory(
-        join(cwd, ".git"),
-        `[remote "origin"]\n\turl = https://${remoteHost}/owner/repo.git\n`,
-      );
-      const next = config();
-      if (coveredByConfig) next.sandbox.network.allowedDomains = [remoteHost];
-
-      // An escalated action runs outside the sandbox and so outside the
-      // per-connection authorizer. A remote read from repository metadata is in
-      // neither the command text nor the call fingerprint, so the destination
-      // can be neither bound nor enforced, whether or not the config parser
-      // happened to recover a host.
-      const decision = await evaluateRiskRequest(
-        "bash",
-        {
-          command: "git push origin main",
-          sandbox_permissions: "require_escalated",
-          justification: "bind the destination before leaving the sandbox",
-        },
-        cwd,
-        next,
-      );
-
-      expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
-      expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
-    },
-  );
-
   it("keeps a mandatory rule review mandatory for an implicit Git push", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
     await createGitDirectory(
@@ -774,187 +740,6 @@ describe("ApprovalDisposition policy gate", () => {
     );
     expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
-  });
-
-  it.each([
-    "git status && git push origin main",
-    "git status; git remote update",
-    "sh -c 'git push origin main'",
-    "git status | git push origin main",
-    "git>log push origin main",
-    "git >log push origin main",
-    "git 2>log push origin main",
-    "git push>log origin main",
-    "git -- 2>log push origin main",
-    "git -- > log push origin main",
-    "sh -c 'git push origin main' >log",
-    "bash -c >log 'git push origin main'",
-  ])("sees through %s and still refuses the implicit remote", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
-    );
-
-    // The refusal is only worth anything if the analysis survives composition.
-    // A segment that hides the Git call would hand the reviewer a packet with
-    // no destination in it, which is the defect this closes. A redirection
-    // operator is one such segment: read as word text it made the executable
-    // `git>log`, which is in no executable table.
-    const decision = await evaluateRiskRequest(
-      "bash",
-      { command, sandbox_permissions: "require_escalated", justification: "probe" },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
-  });
-
-  it("refuses an escalated implicit push behind an unsafe Git global option", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
-    );
-
-    // `-C` relocates the repository, so the config that decides the destination
-    // is not the one this inspection read. The analysis refuses the invocation
-    // outright rather than reasoning about a repository it cannot see.
-    const decision = await evaluateRiskRequest(
-      "bash",
-      {
-        command: "git -C /tmp/other push origin main",
-        sandbox_permissions: "require_escalated",
-        justification: "probe",
-      },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
-  });
-
-  it("does not refuse escalation for a Git remote named in the command", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    // The config names a different remote entirely. Only the operand the
-    // command actually names may decide whether the action is escalatable.
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://other.example/owner/repo.git\n',
-    );
-
-    // Scope of the refusal, not a claim that an explicit remote is fully bound.
-    // The destination is stated by the frozen command, so it is inside the call
-    // fingerprint the grant binds and visible in the review packet, and this
-    // rule does not fire on it. It does not follow that the action is safe:
-    // `url.<base>.insteadOf` in repository config can rewrite a command-named
-    // URL to a host the command never mentions, and modelling that rewrite is
-    // outside this rule and unproven here. Treat an escalated Git action as
-    // reviewed on its exact text, not as destination-enforced.
-    const decision = await evaluateRiskRequest(
-      "bash",
-      {
-        command: "git push https://named.example/owner/repo.git main",
-        sandbox_permissions: "require_escalated",
-        justification: "the destination is in the command text",
-      },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "prompt", executionMode: "escalated" });
-  });
-
-  it.each([
-    ["git remote update", "every configured remote"],
-    ["git remote update origin", "one named remote"],
-    ["git remote show origin", "a query for the remote's own refs"],
-    ["git remote show", "every configured remote"],
-    ["git remote set-head --auto origin", "the remote's own HEAD"],
-  ])("refuses to escalate %s, which contacts %s", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
-    );
-
-    // These are the same defect as an implicit push: a bare remote name
-    // resolved through repository metadata, on a backend with no per-connection
-    // authorizer. Leaving them out would make the refusal claim false.
-    const decision = await evaluateRiskRequest(
-      "bash",
-      { command, sandbox_permissions: "require_escalated", justification: "probe" },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
-    expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
-  });
-
-  it.each([
-    "git remote show -n origin",
-    "git remote show --no-query origin",
-    "git remote -v",
-    "git remote get-url origin",
-    "git remote set-url origin https://x.example/r.git",
-    "git remote add upstream https://x.example/r.git",
-    "git remote remove upstream",
-    "git remote prune origin",
-    "git config --get remote.origin.url",
-    "git status --porcelain",
-    "git -C /tmp/other status",
-    "GIT_DIR=/tmp/other.git git status",
-    "git --version",
-    "git version",
-    "git archive HEAD",
-    "git archive --format=tar HEAD",
-  ])("still escalates the local-only Git action %s", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
-    );
-
-    // These never leave the machine, so there is no destination to bind and
-    // nothing for the refusal to protect. `git remote set-url` in particular is
-    // the documented escalated Git mutation, and it is also how a later push
-    // gets its destination changed; refusing it would remove the capability
-    // without closing anything, since the push itself is refused.
-    const decision = await evaluateRiskRequest(
-      "bash",
-      { command, sandbox_permissions: "require_escalated", justification: "local mutation" },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "prompt", executionMode: "escalated" });
-    expect(decision).not.toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
-  });
-
-  // The v08 bypass spellings: the destination model read no remote operand,
-  // so the action reached the escalated executor with an empty capability
-  // set and the bare backend re-read `.git/config` at execution. The
-  // unbound-destination predicate refuses them (and any future verb the
-  // allowlist never heard of) before review.
-  it.each([
-    "git archive --remote=origin HEAD",
-    "git -c alias.p='push origin main' p",
-    "git -c alias.p=push p origin main",
-    "git backfill",
-    "git lfs push origin main",
-    "git send-email someone@example.com",
-  ])("refuses to escalate %s, whose destination the command never binds", async (command) => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
-    await createGitDirectory(
-      join(cwd, ".git"),
-      '[remote "origin"]\n\turl = https://cfg.example/owner/repo.git\n',
-    );
-
-    const decision = await evaluateRiskRequest(
-      "bash",
-      { command, sandbox_permissions: "require_escalated", justification: "probe" },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
-    expect(decision).toHaveProperty("reason", expect.stringContaining("implicit Git remote"));
   });
 
   it("does not invent a capability for a Git remote named in the command", async () => {
@@ -2021,233 +1806,40 @@ describe("ApprovalDisposition policy gate", () => {
     });
   });
 
-  it("routes require_escalated through an exact action review", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
+  it("rejects the retired require_escalated parameter with a fixable argument error", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
+    // The parameter no longer exists in the tool schema. A stale model that
+    // still sends it must be told which field is wrong, not which field to add.
+    const decision = await evaluateRiskRequest(
+      "bash",
+      { command: "git status --porcelain", sandbox_permissions: "require_escalated" },
+      cwd,
+      config(),
+    );
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
+    if (decision.action !== "block") throw new Error("expected a block");
+    expect(decision.reason).toContain("sandbox_permissions");
+    expect(isPermissionArgumentError(decision.reason)).toBe(true);
+  });
+
+  it("rejects require_escalated even when additional_permissions is also present", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+
     const decision = await evaluateRiskRequest(
       "bash",
       {
-        command: "git add README.md && git commit -m update",
+        command: "git status --porcelain",
         sandbox_permissions: "require_escalated",
-        justification: "Update the isolated fixture repository",
+        additional_permissions: { file_system: { write: [join(cwd, "out")] } },
+        justification: "Write the build artifact",
       },
       cwd,
       config(),
     );
-
-    expect(decision).toMatchObject({
-      action: "prompt",
-      reason: "Command requires escalated sandbox permissions",
-      executionMode: "escalated",
-      justification: "Update the isolated fixture repository",
-    });
-    expect(decision).not.toHaveProperty("filesystemWriteRoots");
-    expect(decision).not.toHaveProperty("networkHosts");
-  });
-
-  it("does not let an allow rule bypass an escalated action review", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-    const configured = config({
-      rules: [{ action: "allow", tool: "bash", pattern: "git add *" }],
-    });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "git add README.md",
-          sandbox_permissions: "require_escalated",
-          justification: "Update the isolated fixture repository",
-        },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      executionMode: "escalated",
-      reason: "Command requires escalated sandbox permissions",
-    });
-  });
-
-  it("suppresses unsandboxed escalation when denyRead is configured (Codex parity)", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-    const configured = config({
-      sandbox: {
-        ...structuredClone(DEFAULT_CONFIG.sandbox),
-        filesystem: {
-          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
-          denyRead: ["/secret"],
-        },
-      },
-    });
-    // denyRead only exists inside the sandbox, so require_escalated is
-    // downgraded to the ordinary sandboxed path instead of HARD-blocked.
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "printf escalated",
-          sandbox_permissions: "require_escalated",
-          justification: "Run a controlled command",
-        },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
-      action: "allow",
-      risk: "Skip",
-    });
-  });
-
-  it("lets an allow rule short-circuit a denyRead-suppressed escalation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-    const configured = config({
-      sandbox: {
-        ...structuredClone(DEFAULT_CONFIG.sandbox),
-        filesystem: {
-          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
-          denyRead: ["/secret"],
-        },
-      },
-      rules: [{ action: "allow", tool: "bash", pattern: "printf *" }],
-    });
-    // Suppressed escalation is an ordinary sandboxed bash, so allow rules apply.
-    // Unlike Codex (still one RequireEscalated approval), Pi does not force a prompt.
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "printf escalated",
-          sandbox_permissions: "require_escalated",
-          justification: "Run a controlled command",
-        },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
-      action: "allow",
-      risk: "Skip",
-      reason: "Allowed by permissions rule",
-    });
-  });
-
-  it("still prompts a dangerous command when denyRead suppresses escalation", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-    const configured = config({
-      sandbox: {
-        ...structuredClone(DEFAULT_CONFIG.sandbox),
-        filesystem: {
-          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
-          denyRead: ["/secret"],
-        },
-      },
-      rules: [{ action: "allow", tool: "bash", pattern: "printf *" }],
-    });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "rm -rf /tmp/does-not-matter",
-          sandbox_permissions: "require_escalated",
-          justification: "Delete a scratch tree",
-        },
-        cwd,
-        configured,
-      ),
-    ).resolves.toMatchObject({
-      action: "prompt",
-      risk: "NeedsApproval",
-      reason: "NeedsApproval operation",
-    });
-    const decision = await evaluateRiskRequest(
-      "bash",
-      {
-        command: "rm -rf /tmp/does-not-matter",
-        sandbox_permissions: "require_escalated",
-        justification: "Delete a scratch tree",
-      },
-      cwd,
-      configured,
-    );
-    expect(decision).not.toMatchObject({ executionMode: "escalated" });
-  });
-
-  it.each<Partial<SafetyConfig>>([
-    {
-      sandbox: {
-        ...structuredClone(DEFAULT_CONFIG.sandbox),
-        filesystem: {
-          ...structuredClone(DEFAULT_CONFIG.sandbox.filesystem),
-          denyWrite: ["/secret"],
-        },
-      },
-    },
-    {
-      sandbox: {
-        ...structuredClone(DEFAULT_CONFIG.sandbox),
-        network: {
-          ...structuredClone(DEFAULT_CONFIG.sandbox.network),
-          deniedDomains: ["example.com"],
-        },
-      },
-    },
-  ])(
-    "still issues an escalated lease when only denyWrite or deniedDomains are configured",
-    async (override) => {
-      const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-      const configured = config(override);
-      await expect(
-        evaluateRiskRequest(
-          "bash",
-          {
-            command: "printf escalated",
-            sandbox_permissions: "require_escalated",
-            justification: "Run a controlled command",
-          },
-          cwd,
-          configured,
-        ),
-      ).resolves.toMatchObject({
-        action: "prompt",
-        executionMode: "escalated",
-        reason: "Command requires escalated sandbox permissions",
-      });
-    },
-  );
-
-  it("rejects escalation for non-Bash tools and malformed requests", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-escalated-"));
-    await expect(
-      evaluateRiskRequest(
-        "write",
-        { path: "out.txt", sandbox_permissions: "require_escalated", justification: "write" },
-        cwd,
-        config(),
-      ),
-    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        { command: "printf x", sandbox_permissions: "require_escalated" },
-        cwd,
-        config(),
-      ),
-    ).resolves.toMatchObject({
-      action: "block",
-      risk: "Forbidden",
-      reason: expect.stringContaining("justification"),
-    });
-    await expect(
-      evaluateRiskRequest(
-        "bash",
-        {
-          command: "printf x",
-          sandbox_permissions: "require_escalated",
-          additional_permissions: { file_system: { write: ["/tmp"] } },
-          justification: "conflicting modes",
-        },
-        cwd,
-        config(),
-      ),
-    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
+    expect(decision).toMatchObject({ action: "block", risk: "Forbidden" });
+    if (decision.action !== "block") throw new Error("expected a block");
+    expect(decision.reason).toContain("require_escalated");
   });
 
   it("applies deny, ask, and allow rules without bypassing hard policy", async () => {
@@ -2480,24 +2072,6 @@ describe("RiskDecision residual stamps", () => {
     expect(owned).toMatchObject({
       action: "prompt",
       residuals: expect.arrayContaining(["rule_ask"]),
-    });
-  });
-
-  it("stamps escalation on require_escalated prompts", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-residual-esc-"));
-    const decision = await evaluateRiskRequest(
-      "bash",
-      {
-        command: "git add README.md && git commit -m update",
-        sandbox_permissions: "require_escalated",
-        justification: "Update the isolated fixture repository",
-      },
-      cwd,
-      config(),
-    );
-    expect(decision).toMatchObject({
-      action: "prompt",
-      residuals: expect.arrayContaining(["escalation"]),
     });
   });
 

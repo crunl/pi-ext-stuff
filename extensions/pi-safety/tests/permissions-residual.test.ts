@@ -93,11 +93,6 @@ describe("retired static review causes (cut 3)", () => {
       "action_review",
       "risk_not_skip",
     ]);
-    // Under escalation the buckets stay disjoint.
-    expect(residualsForPrompt({ risk: "NeedsApproval", escalation: true })).toEqual([
-      "escalation",
-      "risk_not_skip",
-    ]);
     // No review input, no change: the arrays stay byte-identical.
     expect(residualsForPrompt({ risk: "NeedsApproval" })).toEqual(["risk_not_skip"]);
   });
@@ -118,7 +113,6 @@ describe("residual helpers", () => {
 
   it("stamps the most specific prompt facts known", () => {
     expect(residualsForPrompt({ ruleAsk: true, risk: "Skip" })).toEqual(["rule_ask"]);
-    expect(residualsForPrompt({ escalation: true, risk: "Skip" })).toEqual(["escalation"]);
     expect(residualsForPrompt({ risk: "NeedsApproval" })).toEqual(["risk_not_skip"]);
     expect(
       residualsForPrompt({

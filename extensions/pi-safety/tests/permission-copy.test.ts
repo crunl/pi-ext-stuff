@@ -54,12 +54,11 @@ describe("permission copy", () => {
 
   it.each([
     "additional_permissions requires sandbox_permissions=with_additional_permissions",
+    "unsupported sandbox_permissions value: require_escalated",
     "additional_permissions must contain only file_system",
     "additional_permissions.file_system must contain only write",
     "additional_permissions.file_system.write contains invalid paths",
     "additional filesystem permissions require a justification",
-    "require_escalated cannot be combined with additional_permissions",
-    "command escalation requires a justification",
   ])("renders the malformed permission argument %s as a fixable argument error", (reason) => {
     const message = renderPermissionErrorForAgent({
       code: "policy-denied",

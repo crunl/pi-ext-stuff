@@ -294,8 +294,7 @@ function remotePurpose(invocation: GitInvocation): GitRemotePurpose {
  * path. A bare word may contain `/` and still be a configured remote — `git
  * remote add team/origin …` is ordinary, and `git push team/origin` is how it is
  * used. Reading any slash as a path turned that into `local`, which skipped the
- * implicit-remote refusal and the metadata read behind it, so an escalated push
- * reached the bare backend with a destination nothing had bound.
+ * implicit-remote refusal and the metadata read behind it.
  *
  * `sub/dir` is also a valid relative path, and the two are genuinely ambiguous.
  * The ambiguity is resolved toward the remote, because that is the side on which
@@ -386,8 +385,7 @@ function parseGitSubmoduleAddRemote(
  * indistinguishable from a trusted executable. They are computed separately here
  * because the context verdict and the network classification are independent
  * questions, and answering the first by returning early from the second made
- * `git -C DIR push` stop looking like an implicit push at all, which is the one
- * case the escalation guard exists to refuse.
+ * `git -C DIR push` stop looking like an implicit push at all.
  *
  * `unsafe` means the program cannot be identified, so nothing in the words can
  * be trusted and a reviewer has nothing to read. `unproven` means the program is
@@ -572,103 +570,3 @@ export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis
   };
 }
 
-/**
- * Subcommands that only read or rewrite the local repository, so an escalated
- * action has no destination for the bare backend to resolve. `git archive` is
- * deliberately absent: with `--remote` it fetches from a named remote, and it
- * is judged separately below.
- */
-const provablyLocalGitSubcommands = new Set([
-  "add",
-  "blame",
-  "branch",
-  "cat-file",
-  "checkout",
-  "cherry-pick",
-  "commit",
-  "config",
-  "describe",
-  "diff",
-  "gc",
-  "grep",
-  "help",
-  "init",
-  "log",
-  "ls-files",
-  "ls-tree",
-  "merge",
-  "mv",
-  "notes",
-  "reflog",
-  "remote",
-  "rebase",
-  "reset",
-  "restore",
-  "rev-list",
-  "rev-parse",
-  "rm",
-  "revert",
-  "show",
-  "stash",
-  "status",
-  "submodule",
-  "switch",
-  "tag",
-  "version",
-  "worktree",
-]);
-
-function gitInvocationDestinationUnbound(invocation: GitInvocation): boolean {
-  // The classifier already proved Git will run a program the argv never
-  // names (an alias, a `bisect run` payload, `submodule foreach`, a replaced
-  // executable). Whatever destination that program reaches is not on screen.
-  // `config` is exempt: a `nested_git_program` stamp on it is a key that may
-  // PERSIST an alias or a hook path, but this invocation only edits local
-  // config — it resolves no destination and runs nothing, which is the
-  // documented escalated capability (`git remote set-url`'s sibling).
-  if (
-    invocation.segment.unprovenCause === "nested_git_program" &&
-    invocation.subcommand !== "config"
-  ) {
-    return true;
-  }
-  if (invocation.subcommand === undefined) {
-    // `git`, `git --version`: every option the parser consumed is provably
-    // inert. An option that made the grammar unproven (`-c`, `-C`,
-    // `--git-dir`, a bare `--`) can still hand control to an alias or a
-    // relocated repository at execution, and no subcommand names the result.
-    return !invocation.globalOptionsSafe;
-  }
-  if (invocation.subcommand === "archive") {
-    return invocation.arguments.some(
-      (argument) => argument === "--remote" || argument.startsWith("--remote="),
-    );
-  }
-  if (gitInvocationUsesNetwork(invocation)) {
-    // Only a spelled-out host (`host:` / `://`) or a spelled-out path
-    // (`./`, `/`) proves the destination inside the frozen command text. A
-    // bare operand resolves through repository metadata the reviewer never
-    // sees, and an unparsable grammar may resolve to anything.
-    return parsedGitRemotes(invocation).some(
-      (remote) => remote.kind !== "host" && remote.kind !== "local",
-    );
-  }
-  return !provablyLocalGitSubcommands.has(invocation.subcommand);
-}
-
-/**
- * Whether an escalated Bash action contains a Git invocation whose egress
- * destination the command text never states — the general form of the
- * implicit-remote refusal. `analyzeShellGitNetwork` binds destinations for
- * the spellings it models (`push`/`fetch`/`pull`/`clone`/`ls-remote` and the
- * network forms of `remote`/`submodule`); this closes the gap the model leaves
- * open for everything else: `git archive --remote=<name>`, an alias invoked by
- * `git -c alias.x='push' x`, or a subcommand whose dispatch (plumbing, `git
- * lfs`, `git send-email`, any future verb) may reach the network through
- * metadata while the escalated executor has no connection boundary. Fail
- * closed: an invocation only counts as bound when this predicate proves it
- * local or literal, so adding a Git verb cannot reopen the hole.
- */
-export function escalatedGitDestinationUnbound(command: string): boolean {
-  return parsedGitInvocations(command).some(gitInvocationDestinationUnbound);
-}

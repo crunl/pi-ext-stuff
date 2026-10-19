@@ -8,12 +8,11 @@ import {
   type ApprovalDisposition,
   analyzeShellGitNetwork,
   classifyRiskWithCause,
-  escalatedGitDestinationUnbound,
   normalizeToolCall,
 } from "./permissions/risk.ts";
 import { matchRules } from "./permissions/rules.ts";
 import { effectiveNetworkAuthority } from "./policy-primitives.ts";
-import { requestedEscalation, resolveAdditionalWriteRoots } from "./shell-permissions.ts";
+import { resolveAdditionalWriteRoots } from "./shell-permissions.ts";
 import { isRecord } from "./unknown-value.ts";
 
 export type RiskDecision =
@@ -27,7 +26,6 @@ export type RiskDecision =
       networkAll?: true;
       filesystemWriteRoots?: string[];
       justification?: string;
-      executionMode?: "escalated";
       residuals?: ResidualSignal[];
     }
   | { action: "block"; risk: ApprovalDisposition; reason: string };
@@ -242,29 +240,7 @@ export async function evaluateRiskRequest(
   }
   const request = normalizeToolCall(tool, input, cwd);
   const command = typeof input.command === "string" ? input.command : undefined;
-  const escalation = requestedEscalation(input);
-  if ("error" in escalation) {
-    return { action: "block", risk: "Forbidden", reason: escalation.error };
-  }
-  if (escalation.requested && (tool.toLowerCase() !== "bash" || command === undefined)) {
-    return {
-      action: "block",
-      risk: "Forbidden",
-      reason: "Command escalation is supported only for Bash executions",
-    };
-  }
-  // Codex parity (`sandboxing.rs` `unsandboxed_execution_allowed`): denied
-  // reads only exist inside the sandbox. Keep the command runnable under the
-  // ordinary sandboxed path instead of blocking or issuing an unsandboxed
-  // lease. denyWrite / deniedDomains alone do not suppress escalation (Codex
-  // drops write restrictions and the managed network proxy on bypass).
-  const escalationRequested =
-    escalation.requested && config.sandbox.filesystem.denyRead.length === 0;
   const gitNetwork = command ? analyzeShellGitNetwork(command) : undefined;
-  const destinationUnbound =
-    request.operation === "execute" && command !== undefined
-      ? escalatedGitDestinationUnbound(command)
-      : false;
   if (request.operation === "execute" && gitNetwork?.unsafeReason) {
     return {
       action: "block",
@@ -274,56 +250,16 @@ export async function evaluateRiskRequest(
   }
   const usesImplicitGitNetwork =
     request.operation === "execute" && Boolean(gitNetwork?.usesImplicitNetwork);
-  // An escalated action runs on the bare local backend, outside the sandbox and
-  // therefore outside the per-connection authorizer that checks the real host.
-  // If the destination came from repository metadata it is in none of the places
-  // that could bind it: not the command text the reviewer reads, not the Engine's
-  // call fingerprint, and not the one-shot grant — and Git re-reads it at
-  // execution. There is no enforcement point left, so the destination cannot be
-  // proven and the action is refused rather than approved as if it were bound.
-  //
-  // This deliberately does not try to model Git's remote resolution to decide
-  // whether the destination happens to be known. `readRepositoryRemoteHosts` is a
-  // single-file parser: it follows no `include`/`includeIf`, no
-  // `config.worktree`, no `url.*.insteadOf`, and no environment relocation, so a
-  // parse that yields a host is not proof and a parse that yields none is not
-  // proof either. Blocking on the fact that metadata was consulted is both
-  // smaller and more complete than binding a host we cannot trust to be the one
-  // Git will use. A remote named in the command is unaffected: it is stated by
-  // the frozen input, and `usesImplicitNetwork` does not cover it.
-  //
-  // A bare operand is deliberately read as a remote name, so `git clone foo` is
-  // refused too when `foo` happens to be a local directory. The conservative
-  // reading is the right one for a security gate, `./foo` disambiguates, and no
-  // local path that reads as a path is affected.
-  //
-  // The same proof gap covers spellings the destination model never reads:
-  // `git archive --remote=<name>`, an alias installed by `-c` and invoked by
-  // the same bare argv, or a subcommand whose dispatch (`git lfs`, plumbing,
-  // any future verb) may reach the network through metadata. The classifier
-  // sees no remote operand there, so the action would otherwise reach the
-  // escalated executor with an empty capability set. The companion predicate
-  // `escalatedGitDestinationUnbound` fails closed on those instead: an
-  // invocation counts as bound only when this parser proves it local or
-  // spells the destination in argv.
-  if (escalationRequested && (usesImplicitGitNetwork || destinationUnbound)) {
-    return {
-      action: "block",
-      risk: "Forbidden",
-      reason:
-        "Command escalation cannot bind an implicit Git remote destination or a destination the command never models, and an escalated Bash action has no connection boundary that could enforce it. Run the command sandboxed so each connection is authorised, or name the remote URL in the command.",
-    };
-  }
   // The program here is known to be Git; what is unproven is its option grammar
   // or its wrapper. `git -C DIR` and `git --git-dir DIR` only relocate the target
   // and say so in the argv, while `git -c KEY=VALUE` can install a hook directory
-  // or an alias that the same invocation then runs. Cut 3 deleted the review
-  // this used to escalate to: a nested program Git is proven to run is now a
-  // static review at the classifier (`nested_git_program`), and anything less
-  // than that runs under the sandbox. The verdict below keeps the same shape
-  // so the summary and residual set are the same ones every other review gets.
+  // or an alias that the same invocation then runs. A nested program Git is
+  // proven to run is a static review at the classifier (`nested_git_program`),
+  // and anything less than that runs under the sandbox. The verdict below keeps
+  // the same shape so the summary and residual set are the same ones every
+  // other review gets.
   //
-  // Scoped to execute for the same reason the two checks above are: a `write` or
+  // Scoped to execute for the same reason the check above is: a `write` or
   // `read` input that happens to carry a `command` field was being sent to review
   // by this flag, while `classifyRisk` treats those operations as `Skip`.
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
@@ -433,40 +369,33 @@ export async function evaluateRiskRequest(
   if (
     rule?.decision === "allow" &&
     risk !== "Forbidden" &&
-    filesystemWriteRoots.length === 0 &&
-    !escalationRequested
+    filesystemWriteRoots.length === 0
   ) {
     return { action: "allow", risk, reason: "Allowed by permissions rule" };
   }
 
   const promptedByRule = rule?.decision === "ask";
-  const wouldPrompt = promptedByRule || risk !== "Skip" || escalationRequested;
+  const wouldPrompt = promptedByRule || risk !== "Skip";
   if (wouldPrompt) {
     return {
       action: "prompt",
       risk,
-      reason: escalationRequested
-        ? "Command requires escalated sandbox permissions"
-        : promptedByRule
-          ? "Approval required by permissions rule"
-          : // This names where the dangerous argv itself was found, so it
-            // belongs in the review packet the Guardian reads.
-            classification.dangerousSubstitution !== undefined
-            ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
-            : `${risk} operation`,
+      reason: promptedByRule
+        ? "Approval required by permissions rule"
+        : // This names where the dangerous argv itself was found, so it
+          // belongs in the review packet the Guardian reads.
+          classification.dangerousSubstitution !== undefined
+          ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
+          : `${risk} operation`,
       summary: summarize(tool, input),
       residuals: residualsForPrompt({
         ruleAsk: promptedByRule,
-        escalation: escalationRequested,
         risk,
         writeUncovered: filesystemWriteRoots.length > 0 || writeOutsideRoots,
-        actionReview: risk !== "Skip" && filesystemWriteRoots.length === 0 && !escalationRequested,
+        actionReview: risk !== "Skip" && filesystemWriteRoots.length === 0,
       }),
       ...(filesystemWriteRoots.length > 0 ? { filesystemWriteRoots } : {}),
-      justification: escalation.requested
-        ? escalation.justification
-        : additionalWriteRoots.justification,
-      ...(escalationRequested ? { executionMode: "escalated" as const } : {}),
+      justification: additionalWriteRoots.justification,
     };
   }
 

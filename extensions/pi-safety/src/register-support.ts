@@ -71,26 +71,6 @@ export function nextMode(mode: PermissionMode): PermissionMode {
   return mode === "auto" ? "yolo" : "auto";
 }
 
-/** Pi 0.85.1 createBashTool leaves timeout unset; escalated path normalizes at ingress.
- * Keep in lockstep with sandbox.ts DEFAULT_BASH_TIMEOUT_MS (SRT bash path). */
-export const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
-export const MAX_BASH_TIMEOUT_SECONDS = 2_147_483.647;
-
-export function normalizeEscalatedBashTimeout(timeout: number | undefined): number | undefined {
-  if (timeout === undefined) return DEFAULT_BASH_TIMEOUT_SECONDS;
-  if (
-    typeof timeout !== "number" ||
-    !Number.isFinite(timeout) ||
-    timeout <= 0 ||
-    timeout > MAX_BASH_TIMEOUT_SECONDS
-  ) {
-    throw new Error(
-      `Invalid timeout: must be a finite number greater than 0 and at most ${MAX_BASH_TIMEOUT_SECONDS} seconds`,
-    );
-  }
-  return timeout;
-}
-
 export function policyDeniedError(reason: string): Error {
   return Object.assign(
     new Error(renderPermissionErrorForAgent({ code: "policy-denied", reason })),

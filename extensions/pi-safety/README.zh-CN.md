@@ -25,7 +25,7 @@
       │
  ④ guardian review ──── 决策：外部 LLM 裁判（仅当 ② 无法证明时）
       │
- ⑤ capability lease ─── 派生：sandboxed | escalated | unrestricted
+ ⑤ capability lease ─── 派生：sandboxed | host-admitted | unrestricted
       │
  ⑥ SRT sandbox ──────── 决策：内核强制（seatbelt / bwrap）
       │
@@ -38,7 +38,7 @@
 | ② static risk | **决策** | 可证明安全 vs 需要评审 | `policy-denied` |
 | ③ admission | 投影 | 风险判定 → engine 词汇，外加调用形态校验——"是投影，不是授权决策" | `policy-denied` |
 | ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 下自动批准短路 | `review-denied`，可经 `/approve` 重试 |
-| ⑤ lease | 派生 | 由哪个后端执行：sandboxed / escalated / unrestricted | `enforcement-unavailable` |
+| ⑤ lease | 派生 | 由哪个后端执行：sandboxed / host-admitted / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **决策** | **运行过程中**内核说行/不行 | 命令自身的错误，或超时 |
 
 `yolo` 下 ② 跳过、④ 自动批准；①/③/⑤ 照常运行，⑥ 以裸执行（不进沙箱）落地。Host-first 工具（`read`/`grep`/`find`/`ls`）只经过 ① 和一次 deny 规则检查；外部（MCP/自定义）工具一层都不经过。
@@ -53,7 +53,7 @@
 
 每个发现的元数据根只 deny Git 的**代码执行面**——`<root>/hooks` 与 `<root>/config`。历史路径（`objects`、`refs`、`index`、`logs`）保持可写，使 commit 无需审批往返即可在沙箱内完成。其余路径——`HEAD`、`packed-refs`、`worktrees/`、`modules/`、`info/attributes`，以及 worktree/submodule 的 `.git` 指针文件——**都不** deny。
 
-这个缺口是有意保留的。被沙箱拒绝的 Git 元数据写入会以 `EPERM` 暴露，并被引导到 `sandbox_permissions=require_escalated`：经过一次评审后把该精确命令放到沙箱外执行（bash 工具描述已写明这一点）。扩大 deny 名单会让每次 commit 都走这条升级路径；而仅凭形态无法 deny 指针文件，除非在 `sandbox-policy.ts` 里重新判定「目录还是 `gitdir:` 文件」，而该文件位于 engine value-closure 内，必须保持不含 `node:fs`（`tests/structure-invariants.test.ts:188-221`）。
+这个缺口是有意保留的。被沙箱拒绝的 Git 元数据写入会以 `EPERM` 暴露，而这个错误对沙箱路径是终态的：参数集里没有命令级升级。出路只有三条——目标允许时用更窄的 `sandbox_permissions=with_additional_permissions` 写入、`request_permissions`，或由用户切到 yolo（bash 工具描述已写明这一点）。扩大 deny 名单会让每次 commit 都改走其中一条；而仅凭形态无法 deny 指针文件，除非在 `sandbox-policy.ts` 里重新判定「目录还是 `gitdir:` 文件」，而该文件位于 engine value-closure 内，必须保持不含 `node:fs`（`tests/structure-invariants.test.ts:188-221`）。
 
 完整讲解见 [`docs/pi-safety.md`](../../docs/pi-safety.md)。
 

@@ -14,7 +14,6 @@ import {
   type ExecutionAttempt as EngineExecutionAttempt,
   type PermissionAmendment as EnginePermissionAmendment,
   type RuntimeOutcome as EngineRuntimeOutcome,
-  type EscalationEligibility,
   type ExecutionOutcome,
   type GuardianAdapter,
   type Invocation,
@@ -77,7 +76,7 @@ interface PiCapturedAction<Input = unknown> {
 /** The only execution capability shape visible to a Pi adapter. */
 export interface PiExecutionAttempt<Input = unknown> {
   readonly call: PiActionCall<Input>;
-  readonly mode: "sandboxed" | "host-admitted" | "escalated" | "unrestricted";
+  readonly mode: "sandboxed" | "host-admitted" | "unrestricted";
   readonly policy?: SandboxPolicy;
   readonly signal: AbortSignal;
   readonly authorizeCapability: (
@@ -243,7 +242,6 @@ interface PiSafety<ReviewContext = undefined> {
     mode: "auto" | "yolo";
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: EscalationEligibility;
   }): boolean;
   inspect(): PermissionStateView | undefined;
   /**
@@ -382,7 +380,6 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
     mode: "auto" | "yolo";
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: EscalationEligibility;
   }): boolean {
     let refreshed = false;
     for (const level of this.nestedLevels) {

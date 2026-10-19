@@ -120,7 +120,6 @@ export function admissionPlanFromRiskDecision(decision: RiskDecision): Admission
     reason: decision.reason,
     summary: decision.summary,
     residuals,
-    ...(decision.executionMode === undefined ? {} : { executionMode: decision.executionMode }),
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
   };
 }
@@ -183,11 +182,6 @@ function policyForReview(
     // not mean an external MCP/custom tool is isolated by the sandbox adapter.
     return undefined;
   }
-  if (input.effective.mode === "escalated") {
-    // A one-shot escalated lease carries no sandbox policy. Evidence still
-    // comes from the separate baseline lease in evidenceScopeForReview().
-    return undefined;
-  }
   return input.effective.policy ?? context.baseSandboxPolicy;
 }
 
@@ -210,7 +204,6 @@ function guardianPermissionContext(
   decision: PromptRiskDecision,
 ): GuardianPermissionContext {
   const policy = policyForReview(input);
-  const escalated = input.effective.mode === "escalated";
   const hostAdmitted = input.ownership === "host-admission";
   const requestedNetworkTargets = input.requested.flatMap((request) =>
     request.kind === "network"
@@ -225,13 +218,11 @@ function guardianPermissionContext(
   );
   return {
     sandboxProfile: input.context.sandboxProfile,
-    executionMode: escalated ? "escalated" : hostAdmitted ? "host-admitted" : "sandboxed",
-    sandboxEnforcesAction: !hostAdmitted && !escalated && input.context.sandboxEnabled,
-    // Escalated execution has no sandbox grant or effective filesystem/network
-    // policy. The baseline remains separate reviewer evidence.
-    filesystemWriteRoots: escalated ? [] : [...(policy?.filesystem.allowWrite ?? [])],
-    filesystemDenyRead: escalated ? [] : [...(policy?.filesystem.denyRead ?? [])],
-    filesystemDenyWrite: escalated ? [] : [...(policy?.filesystem.denyWrite ?? [])],
+    executionMode: hostAdmitted ? "host-admitted" : "sandboxed",
+    sandboxEnforcesAction: !hostAdmitted && input.context.sandboxEnabled,
+    filesystemWriteRoots: [...(policy?.filesystem.allowWrite ?? [])],
+    filesystemDenyRead: [...(policy?.filesystem.denyRead ?? [])],
+    filesystemDenyWrite: [...(policy?.filesystem.denyWrite ?? [])],
     requestedNetworkTargets,
     requestedWholeNetwork: input.requested.some((request) => request.kind === "network-all"),
     authorityFreezePoint: "execution-attempt-after-review",
@@ -245,12 +236,12 @@ function guardianPermissionContext(
         ? "turn-end-after-confirmation"
         : "exact-action-only",
     networkWarning: !policy
-      ? "This action has no sandbox network/TLS profile (host-admitted or escalated). Baseline evidence is not enforcement; execution and TLS success are unknown."
+      ? "This action has no sandbox network/TLS profile (host-admitted). Baseline evidence is not enforcement; execution and TLS success are unknown."
       : policy.network.macosTls === "system"
         ? "Host opted into startup system TLS: authorized proxy processes may egress via helpers outside ticket enforcement. Approval does not prove TLS success or execution success."
         : "Strict startup TLS; approval does not prove execution or TLS success. Uncovered network fail-closed; this review is not a connection firewall.",
-    allowedNetworkHosts: escalated ? [] : [...(policy?.network.allowedDomains ?? [])],
-    deniedNetworkHosts: escalated ? [] : [...(policy?.network.deniedDomains ?? [])],
+    allowedNetworkHosts: [...(policy?.network.allowedDomains ?? [])],
+    deniedNetworkHosts: [...(policy?.network.deniedDomains ?? [])],
     staticRisk: decision.risk,
     staticReason: decision.reason,
     ...(decision.justification === undefined ? {} : { justification: decision.justification }),
@@ -280,7 +271,6 @@ function promptDecisionFromEngine(
     ...(input.source === "permission-amendment" && input.reason !== undefined
       ? { justification: input.reason }
       : {}),
-    ...(input.executionMode === undefined ? {} : { executionMode: input.executionMode }),
     ...(input.justification === undefined ? {} : { justification: input.justification }),
   };
 }

@@ -657,36 +657,6 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).not.toHaveBeenCalled();
   });
 
-  it("rejects escalation when the exact Bash input is not present", async () => {
-    const { engine, review } = createEngine(async () => ({
-      kind: "approve",
-      rationale: "must not review",
-    }));
-    const turn = engine.beginTurn(
-      snapshot({ escalationEligibility: { eligible: true, reason: "test" } }),
-    );
-    const executor = vi.fn(async () => completed("must not run"));
-
-    const result = await turn.execute(
-      call(executor, {
-        admission: {
-          kind: "review",
-          risk: "NeedsApproval",
-          requested: [],
-          review: "action",
-          reason: "Command requires escalated sandbox permissions",
-          executionMode: "escalated",
-          justification: "Run the exact command",
-        },
-      }),
-    );
-
-    expect(result.kind).toBe("blocked");
-    if (result.kind === "blocked") expect(result.error.code).toBe("policy-denied");
-    expect(executor).not.toHaveBeenCalled();
-    expect(review).not.toHaveBeenCalled();
-  });
-
   it("does not release a protected deny for an approved write", async () => {
     const { engine, review } = createEngine(async () => ({
       kind: "approve",
@@ -1833,88 +1803,6 @@ describe("ApproveForMeEngine public seam", () => {
     expect(review).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps an exact retry armed when the escalation justification changes", async () => {
-    const sources: GuardianReviewInput["source"][] = [];
-    const { engine, review } = createEngine(async (request) => {
-      sources.push(request.source);
-      if (sources.length === 1) {
-        return { kind: "deny", rationale: "Review the exact escalated command." };
-      }
-      return { kind: "approve", rationale: "This exact escalated command is acceptable." };
-    });
-    const turn = engine.beginTurn(
-      snapshot({ escalationEligibility: { eligible: true, reason: "test" } }),
-    );
-    const originalInput = {
-      command: "git add README.md && git commit -m update",
-      sandbox_permissions: "require_escalated" as const,
-      justification: "Run the exact Git update",
-    };
-    const originalAdmission: AdmissionPlan = {
-      kind: "review",
-      risk: "NeedsApproval",
-      requested: [],
-      review: "action",
-      reason: "Command requires escalated sandbox permissions",
-      executionMode: "escalated",
-      justification: originalInput.justification,
-    };
-    const differentInput = { ...originalInput, justification: "A different reason" };
-    const first = await turn.execute(
-      call(
-        vi.fn(async () => completed("never")),
-        {
-          call: { id: "original", tool: "bash", input: originalInput, cwd: "/workspace" },
-          admission: originalAdmission,
-        },
-      ),
-    );
-    const retryHandle = first.kind === "blocked" ? first.retryHandle : undefined;
-    expect(retryHandle).toBeDefined();
-    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(true);
-
-    await expect(
-      turn.execute(
-        call(
-          vi.fn(async () => completed("different plan")),
-          {
-            call: {
-              id: "different-justification",
-              tool: "bash",
-              input: differentInput,
-              cwd: "/workspace",
-            },
-            admission: {
-              kind: "review",
-              risk: "NeedsApproval",
-              requested: [],
-              review: "action",
-              reason: "Command requires escalated sandbox permissions",
-              executionMode: "escalated",
-              justification: "A different reason",
-            },
-          },
-        ),
-      ),
-    ).resolves.toEqual({ kind: "completed", value: "different plan" });
-
-    await expect(
-      turn.execute(
-        call(
-          vi.fn(async () => completed("exact plan")),
-          {
-            call: { id: "exact-escalation", tool: "bash", input: originalInput, cwd: "/workspace" },
-            admission: originalAdmission,
-          },
-        ),
-      ),
-    ).resolves.toEqual({ kind: "completed", value: "exact plan" });
-
-    expect(sources).toEqual(["preview", "preview", "manual-retry"]);
-    expect(review).toHaveBeenCalledTimes(3);
-    expect(engine.armRetry(retryHandle as RetryHandle)).toBe(false);
-  });
-
   it("arms a denied action after turn close and retries it in the next turn", async () => {
     const { engine, review } = createEngine(async (request) => {
       if (request.source === "preview") {
@@ -2508,10 +2396,6 @@ describe("ApproveForMeEngine public seam", () => {
       engine.refreshTurnMode({
         mode: "yolo",
         sandboxReady: false,
-        escalationEligibility: {
-          eligible: false,
-          reason: "Command escalation is unavailable outside auto mode",
-        },
       }),
     ).toBe(true);
     const yoloExecutor = vi.fn(async (attempt) => {
@@ -2531,10 +2415,6 @@ describe("ApproveForMeEngine public seam", () => {
         mode: "auto",
         sandboxReady: true,
         baseSandboxPolicy: basePolicy,
-        escalationEligibility: {
-          eligible: true,
-          reason: "Sandbox is healthy",
-        },
       }),
     ).toBe(true);
     const autoAgain = vi.fn(async (attempt) => {

@@ -37,7 +37,7 @@ they never grant or withhold authority on their own. Each step can only
       │
  ④ guardian review ──── DECISION: external LLM judge (only when ② can't prove)
       │
- ⑤ capability lease ─── derivation: sandboxed | escalated | unrestricted
+ ⑤ capability lease ─── derivation: sandboxed | host-admitted | unrestricted
       │
  ⑥ SRT sandbox ──────── DECISION: kernel enforcement (seatbelt / bwrap)
       │
@@ -50,7 +50,7 @@ they never grant or withhold authority on their own. Each step can only
 | ② static risk | **decision** | provable-safe vs needs-review | `policy-denied` |
 | ③ admission | projection | risk verdict → engine vocabulary, plus shape validation — "a projection, not an authorization decision" | `policy-denied` |
 | ④ guardian | **decision** | approve / deny — skipped when ② proved safe; auto-approved short-circuit in yolo | `review-denied`, retriable via `/approve` |
-| ⑤ lease | derivation | which backend executes: sandboxed / escalated / unrestricted | `enforcement-unavailable` |
+| ⑤ lease | derivation | which backend executes: sandboxed / host-admitted / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **decision** | kernel says yes/no **while running** | command's own error, or timeout |
 
 Steps ②–⑥ are enforcement; in `yolo` ② is skipped and ④ auto-approves,
@@ -86,13 +86,15 @@ approval round trip. Everything else — `HEAD`, `packed-refs`, `worktrees/`,
 submodule — is **not** denied.
 
 That gap is deliberate. A git metadata write the sandbox refuses surfaces as
-`EPERM` and is routed to `sandbox_permissions=require_escalated`, which runs the
-exact command outside the sandbox after one review; the bash tool description
-states this. Widening the deny list would force every commit through that
-escalation instead, and the pointer file cannot be denied on shape alone without
-re-deriving "directory vs `gitdir:` file" inside `sandbox-policy.ts`, which sits
-in the engine value-closure and must stay free of `node:fs`
-(`tests/structure-invariants.test.ts:188-221`).
+`EPERM`, and that error is final: there is no command-level escalation
+parameter. The remedies are a narrower
+`sandbox_permissions=with_additional_permissions` write where the target allows
+one, `request_permissions`, or the user switching to yolo; the bash tool
+description states this. Widening the deny list would force every commit through
+one of those routes instead, and the pointer file cannot be denied on shape
+alone without re-deriving "directory vs `gitdir:` file" inside
+`sandbox-policy.ts`, which sits in the engine value-closure and must stay free
+of `node:fs` (`tests/structure-invariants.test.ts:188-221`).
 
 Full walkthrough: [`docs/pi-safety.md`](../../docs/pi-safety.md).
 

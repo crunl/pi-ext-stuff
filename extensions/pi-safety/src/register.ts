@@ -26,7 +26,6 @@ import {
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../../packages/shared-tool-presentation/src/index.ts";
 import {
-  type EscalationEligibility,
   matchesNetworkDomainPattern,
 } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
@@ -63,7 +62,6 @@ import {
   checkRequestedCapabilities,
   type DelegationScope,
 } from "./delegation-policy.ts";
-import { escalationEligibility as escalationPolicy } from "./escalation-policy.ts";
 import {
   defaultProtectedWritePaths,
   expandSymlinkAliases,
@@ -119,7 +117,6 @@ import {
   guardianTranscriptEntryFromMessage,
   isActivationSupersededError,
   nextMode,
-  normalizeEscalatedBashTimeout,
   PERMISSION_MODE_CHANGED_REASON,
   PI_HOST_FIRST_TOOL_NAMES,
   PI_OWNED_TOOL_NAMES,
@@ -169,7 +166,7 @@ import {
   activateTreeSitterShellParser,
   treeSitterShellFailure,
 } from "./tree-sitter/shell-backend.ts";
-import { errorMessage, isRecord } from "./unknown-value.ts";
+import { errorMessage } from "./unknown-value.ts";
 
 type GuardianPolicySource = (context: {
   cwd: string;
@@ -180,7 +177,7 @@ export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
   bashToolFactory?: typeof createBashTool;
-  /** Builds the operations used for unrestricted/escalated leases. Default: pi's local shell backend. */
+  /** Builds the operations used for unrestricted leases. Default: pi's local shell backend. */
   localBashOperations?: () => BashOperations;
   sandboxLifecycleLease?: Pick<SandboxLifecycleLease, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
@@ -215,7 +212,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
   const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
-  // Builds the operations used for unrestricted/escalated leases. Test
+  // Builds the operations used for unrestricted leases. Test
   // doubles replace this with a stub to avoid real spawns; production uses
   // pi's local shell backend.
   const resolveLocalBashOperations = options.localBashOperations ?? createLocalBashOperations;
@@ -229,7 +226,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // Cluster A (activation): written by commitActivation/activateWithSandbox/
   // activateConfigUnlocked, read by every tool's prepare + snapshot. The
   // sandbox pair below is the split bottleneck: activation writes, per-tool
-  // reads (prepare, snapshot, escalation health) — never separate them.
+  // reads (prepare, snapshot, sandbox health) — never separate them.
   let loaded: LoadedSafetyConfig | undefined;
   let loadedKey: string | undefined;
   let configFailure: Error | undefined;
@@ -351,21 +348,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return false;
     }
   };
-
-  // The rules live in `escalation-policy.ts`; this is the wiring that supplies
-  // the two live facts they need. Eligibility itself is pure and unit-tested.
-  const escalationEligibility = (
-    snapshot: Pick<
-      PermissionExecutionSnapshot,
-      "mode" | "config" | "sandboxReady" | "baseSandboxConfig"
-    >,
-    baseSandboxPolicy?: SandboxPolicy,
-  ): EscalationEligibility =>
-    escalationPolicy(snapshot, {
-      sandboxHealthy: sandboxManagerHealthy(),
-      delegationCeilingActive: session.activeDelegationCeiling() !== undefined,
-      baseSandboxPolicy,
-    });
 
   const setDefaultStatus = (ctx: Pick<ExtensionContext, "ui" | "hasUI">): void => {
     // Display leads with intent, enforcement stays truthful: `mode` and
@@ -786,7 +768,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ? overrides.baseSandboxPolicy
         : executionSnapshot.baseSandboxConfig,
     sandboxReady: executionSnapshot.sandboxReady,
-    escalationEligibility: escalationEligibility(executionSnapshot, overrides?.baseSandboxPolicy),
     transcript: currentGuardianTranscriptSnapshot(),
   });
 
@@ -1102,19 +1083,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
   type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
 
-  // Pi 0.85.1's native createBashTool leaves timeout unset by default. The
-  // escalated path is deliberately still Pi's executor, so normalize only
-  // that path at ingress; ordinary sandbox/yolo calls retain their Pi/SRT
-  // timeout semantics.
-  const normalizeBashParams = (params: BashParams): BashParams => {
-    if (!isRecord(params)) throw new Error("Bash parameters must be an object");
-    // SAFETY: isRecord above establishes string-keyed input; the host Bash type omits extension fields.
-    const rawParams = params as unknown as Record<string, unknown>;
-    if (rawParams.sandbox_permissions !== "require_escalated") return params;
-    const timeout = normalizeEscalatedBashTimeout(params.timeout);
-    return timeout === params.timeout ? params : ({ ...params, timeout } as BashParams);
-  };
-
   interface PreparedPermissionExecution {
     executionSnapshot: PermissionExecutionSnapshot;
     executionContext: EffectiveExecutionContext;
@@ -1172,7 +1140,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             mode: targetMode,
             sandboxReady: true,
             baseSandboxPolicy: baseSandboxConfig,
-            escalationEligibility: escalationEligibility(applied),
           });
         }
       } else {
@@ -1183,7 +1150,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           permissions.refreshTurnMode({
             mode: targetMode,
             sandboxReady: false,
-            escalationEligibility: escalationEligibility(applied),
           });
         }
         await activateConfig(ctx, false, targetMode, undefined, generation);
@@ -1252,7 +1218,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       permissions.refreshTurnMode({
         mode: executionSnapshot.mode,
         sandboxReady: ready,
-        escalationEligibility: escalationEligibility(executionSnapshot),
       });
     }
     const executionContext = getEffectiveExecutionContext(executionSnapshot);
@@ -1597,12 +1562,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): Promise<BashResult> => {
     const tracing = turnTraceEnabled();
     const segments: TurnTraceSegments = {};
-    const normalizedParams = normalizeBashParams(params);
     const captured = await traceSpan(tracing, segments, "capture", async () =>
       permissions.captureAction({
         id,
         tool: "bash",
-        input: normalizedParams,
+        input: params,
         cwd: resolve(ctx.cwd),
       }),
     );
@@ -1703,7 +1667,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         // reaches the catch — it is returned and recognized on the result
         // channel below.
         const exitCodeSlot: ExitCodeSlot = { code: undefined };
-        // Unrestricted and escalated leases share the bare local backend;
+        // Unrestricted leases use the bare local backend;
         // the sandboxed branch builds its own wrapper below.
         const localBash = () =>
           bashToolFactory(canonicalCwd, {
@@ -1712,35 +1676,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         try {
           if (attemptSignal.aborted) throw new Error("aborted");
           if (mode === "unrestricted") {
-            const value = await localBash().execute(
-              call.id,
-              call.input,
-              attemptSignal,
-              reviewBridge.onUpdate as BashOnUpdate,
-            );
-            // A Pi 1.x returned failure is the command's own result.
-            return {
-              kind: "completed",
-              value: completedBashFromResult(value) ?? value,
-            };
-          }
-          if (mode === "escalated") {
-            // The Engine supplies this explicit one-shot lease only after the
-            // exact command/cwd review. Re-check live backend health so a
-            // poisoned SRT snapshot can never turn into a bare execution.
-            if (!sandboxManagerHealthy()) {
-              return {
-                kind: "failed",
-                error: new Error("Sandbox executor is unavailable or poisoned"),
-              };
-            }
-            if (session.activeDelegationCeiling()) {
-              return {
-                kind: "failed",
-                error: new Error("Command escalation is outside the active delegation envelope"),
-              };
-            }
-            if (attemptSignal.aborted) throw new Error("aborted");
             const value = await localBash().execute(
               call.id,
               call.input,
@@ -2099,15 +2034,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseBash,
     ...addReviewResultRenderer(adoptHostTheme(codexBashToolSpec)),
     label: "bash",
-    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write. For any command that writes Git metadata — such as git add, git commit, git init, git remote add/remove/set-url, git tag, git branch -m/-d, git config, git notes, git reflog — use sandbox_permissions=require_escalated instead of additional_permissions when the exact command must run outside the active sandbox, with a concrete justification; it receives one action review and is not a blind retry. A sandboxed Git metadata write fails with EPERM ('could not lock config file'); that error means use sandbox_permissions=require_escalated, not a retry. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
+    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write. A sandboxed write to Git metadata (.git/hooks, .git/config and similar) fails with EPERM ('could not lock config file'); that error is final for the sandboxed path — the parameter set offers no escalation, so either request a narrower write with with_additional_permissions where the target allows it, or ask the user to switch to yolo. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
     promptGuidelines: [
-      "When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write and explain why. For any command that writes Git metadata — such as git add, git commit, git init, git remote add/remove/set-url, git tag, git branch -m/-d, git config, git notes, git reflog — use sandbox_permissions=require_escalated instead of additional_permissions when the exact command must run outside the active sandbox, with a concrete justification; it is a one-shot reviewed action and cannot be combined with additional_permissions. A sandboxed Git metadata write fails with EPERM ('could not lock config file'); that error means use sandbox_permissions=require_escalated, not a retry. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
+      "When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write and explain why. A sandboxed write to Git metadata (.git/hooks, .git/config and similar) fails with EPERM ('could not lock config file'); there is no escalation parameter, so treat that error as final for the sandboxed path: request a narrower write where the target allows it, or ask the user to switch to yolo. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
     ],
     parameters: permissionedBashParameters,
     prepareArguments: preparePermissionedBashArguments as (args: unknown) => {
       command: string;
       timeout?: number;
-      sandbox_permissions?: "use_default" | "with_additional_permissions" | "require_escalated";
+      sandbox_permissions?: "use_default" | "with_additional_permissions";
       additional_permissions?: { file_system: { write: string[] } };
       justification?: string;
     },

@@ -42,19 +42,15 @@ export const permissionedBashParameters = Type.Object(
     timeout: Type.Optional(
       Type.Number({
         description:
-          "Timeout in seconds (escalated commands default to 120 seconds; other modes keep their runtime default)",
+          "Timeout in seconds (keeps the runtime default when omitted)",
       }),
     ),
     sandbox_permissions: Type.Optional(
       Type.Union(
-        [
-          Type.Literal("use_default"),
-          Type.Literal("with_additional_permissions"),
-          Type.Literal("require_escalated"),
-        ],
+        [Type.Literal("use_default"), Type.Literal("with_additional_permissions")],
         {
           description:
-            "Use require_escalated only when this exact command must run outside the active sandbox; use with_additional_permissions for narrow sandbox writes",
+            "Use with_additional_permissions for narrow sandbox writes; there is no command-level escalation",
         },
       ),
     ),
@@ -63,7 +59,7 @@ export const permissionedBashParameters = Type.Object(
       Type.String({
         minLength: 1,
         maxLength: MAX_JUSTIFICATION_LENGTH,
-        description: "Why the additional filesystem access or command escalation is required",
+        description: "Why the additional filesystem access is required",
       }),
     ),
   },
@@ -99,56 +95,24 @@ type AdditionalWriteRootsResult =
   | { ok: true; writeRoots: string[]; justification?: string }
   | { ok: false; reason: string };
 
-interface EscalatedCommandRequest {
-  readonly requested: boolean;
-  readonly justification?: string;
-}
-
-/**
- * Parse the command-level escalation intent without granting or selecting an
- * executor. The Engine remains the only authority that can turn this intent
- * into an effective lease.
- */
-export function requestedEscalation(
-  input: Record<string, unknown>,
-): EscalatedCommandRequest | { error: string } {
-  if (input.sandbox_permissions !== "require_escalated") {
-    return { requested: false };
-  }
-  if (input.additional_permissions !== undefined) {
-    return {
-      error: "require_escalated cannot be combined with additional_permissions",
-    };
-  }
-  if (
-    typeof input.justification !== "string" ||
-    input.justification.trim().length === 0 ||
-    input.justification.length > MAX_JUSTIFICATION_LENGTH
-  ) {
-    return { error: "command escalation requires a justification" };
-  }
-  return { requested: true, justification: input.justification.trim() };
-}
-
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 /**
  * Argument-shape validation failures for the bash tool's permission fields.
- * `requestedWriteRoots` and `requestedEscalation` both reject a malformed
- * `sandbox_permissions` / `additional_permissions` / `justification`
- * combination before any policy evaluation runs, so the remedy is to fix the
- * tool-call arguments and retry — not to read the block as a policy wall. A
- * new validation reason in either validator must be covered here or it will
- * render as an unactionable policy denial.
+ * `requestedWriteRoots` rejects a malformed `sandbox_permissions` /
+ * `additional_permissions` / `justification` combination before any policy
+ * evaluation runs, so the remedy is to fix the tool-call arguments and retry —
+ * not to read the block as a policy wall. A new validation reason in that
+ * validator must be covered here or it will render as an unactionable policy
+ * denial.
  */
 export function isPermissionArgumentError(reason: string): boolean {
   return (
     reason.startsWith("additional_permissions") ||
-    reason === "additional filesystem permissions require a justification" ||
-    reason === "require_escalated cannot be combined with additional_permissions" ||
-    reason === "command escalation requires a justification"
+    reason.startsWith("unsupported sandbox_permissions") ||
+    reason === "additional filesystem permissions require a justification"
   );
 }
 
@@ -163,8 +127,10 @@ function requestedWriteRoots(
   if (mode === "use_default" && permissions === undefined) {
     return { roots: [], requested: false };
   }
-  if (mode === "require_escalated") {
-    return { roots: [], requested: false };
+  if (mode !== undefined && mode !== "with_additional_permissions" && mode !== "use_default") {
+    // `require_escalated` used to live here. Name the offending parameter
+    // rather than the one the caller may never have passed.
+    return { error: `unsupported sandbox_permissions value: ${String(mode)}` };
   }
   if (mode !== "with_additional_permissions") {
     return {

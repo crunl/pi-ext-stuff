@@ -3,10 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import {
   buildTurnTraceRecord,
-  DEFAULT_BASH_TIMEOUT_SECONDS,
-  MAX_BASH_TIMEOUT_SECONDS,
   nextMode,
-  normalizeEscalatedBashTimeout,
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
@@ -15,24 +12,6 @@ import {
   type TurnTraceSegments,
 } from "../src/register-support.ts";
 import type { SandboxPolicy } from "../src/sandbox-policy.ts";
-
-describe("normalizeEscalatedBashTimeout", () => {
-  it("defaults an unset timeout to the escalated host budget", () => {
-    expect(normalizeEscalatedBashTimeout(undefined)).toBe(DEFAULT_BASH_TIMEOUT_SECONDS);
-  });
-
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, MAX_BASH_TIMEOUT_SECONDS + 1])(
-    "rejects invalid timeout %s",
-    (timeout) => {
-      expect(() => normalizeEscalatedBashTimeout(timeout)).toThrow(/Invalid timeout/);
-    },
-  );
-
-  it("passes through a valid finite timeout", () => {
-    expect(normalizeEscalatedBashTimeout(30)).toBe(30);
-    expect(normalizeEscalatedBashTimeout(MAX_BASH_TIMEOUT_SECONDS)).toBe(MAX_BASH_TIMEOUT_SECONDS);
-  });
-});
 
 describe("mode helpers", () => {
   it("cycles auto <-> yolo", () => {

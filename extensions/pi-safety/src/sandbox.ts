@@ -60,8 +60,7 @@ export {
 /** POSIX shell used as a program when the caller requested shell semantics. */
 const WRAP_SHELL = "/bin/bash";
 
-/** Default host-side deadline for a permissioned bash command.
- * Keep in lockstep with register-support DEFAULT_BASH_TIMEOUT_SECONDS (escalated path). */
+/** Default host-side deadline for a permissioned bash command. */
 export const DEFAULT_BASH_TIMEOUT_MS = 120_000;
 
 /** Default host-side deadline for a native sandboxed file operation. */

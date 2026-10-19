@@ -26,7 +26,6 @@ export { matchesNetworkDomainPattern } from "./network-domain-pattern.ts";
 /** The only permission modes understood by the deep module. */
 export type ApproveForMeMode = "auto" | "yolo";
 type AdmissionRisk = "Skip" | "NeedsApproval" | "Forbidden";
-type CommandExecutionMode = "escalated";
 
 /** Ownership says which external execution Adapter is authoritative. */
 export type InvocationOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
@@ -60,7 +59,6 @@ export type AdmissionPlan =
       reason: string;
       summary?: string;
       /** Exact Bash action may run outside the coding-agent sandbox once approved. */
-      executionMode?: CommandExecutionMode;
       justification?: string;
       /** Stamped residual facts from the static projection; never a skip signal. */
       residuals?: readonly ResidualSignal[];
@@ -70,25 +68,6 @@ export type AdmissionPlan =
       reason: string;
     };
 
-/**
- * A turn snapshot is immutable from the Engine's point of view. The caller
- * may load it asynchronously before beginTurn, but cannot replace its policy
- * or identity while a call is in flight.
- */
-/**
- * Immutable, host-derived facts required before a Bash escalation review.
- *
- * Declared here rather than at the producer because this is the interface the
- * Engine consumes; `escalation-policy.ts` imports it from here. This shape was
- * an inline `{eligible, reason}` in six places across this file and
- * `pi-safety.ts`, three of them inside two structurally identical copies of the
- * turn-snapshot interface.
- */
-export interface EscalationEligibility {
-  eligible: boolean;
-  reason: string;
-}
-
 export interface TurnSnapshot {
   sessionId: string;
   turnId: string | number;
@@ -97,13 +76,12 @@ export interface TurnSnapshot {
   configFingerprint: string;
   baseSandboxPolicy?: SandboxPolicy;
   sandboxReady?: boolean;
-  escalationEligibility?: EscalationEligibility;
   transcript?: readonly unknown[];
 }
 
 /** The effective lease supplied to a concrete execution Adapter. */
 export interface CapabilityLease {
-  readonly mode: "sandboxed" | "host-admitted" | "escalated" | "unrestricted";
+  readonly mode: "sandboxed" | "host-admitted" | "unrestricted";
   readonly policy?: SandboxPolicy;
 }
 
@@ -192,7 +170,6 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   transcript: readonly unknown[];
   reason?: string;
   summary?: string;
-  executionMode?: CommandExecutionMode;
   justification?: string;
   residuals?: readonly ResidualSignal[];
   context: ReviewContext;
@@ -411,7 +388,6 @@ export interface ApproveForMeEngine<ReviewContext = undefined> {
     mode: ApproveForMeMode;
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: EscalationEligibility;
   }): boolean;
   invalidate(reason: string): void;
   listDenials(): readonly DenialNotice[];
@@ -441,7 +417,7 @@ interface GrantRecord {
  * the approved scope and the policy it was approved under, so any drift
  * misses instead of authorizing. Dies with the TurnState — never persisted,
  * never inherited by nested turns (those get a fresh Engine), never read for
- * escalated, unrestricted, or manual-retry paths.
+ * unrestricted or manual-retry paths.
  */
 interface ApprovalCacheEntry {
   readonly requestedFingerprint: string;
@@ -481,7 +457,6 @@ interface RetryRecord {
   readonly risk?: AdmissionRisk;
   readonly rationale: string;
   readonly summary?: string;
-  readonly executionMode?: CommandExecutionMode;
   readonly justification?: string;
 }
 
@@ -494,7 +469,6 @@ interface ReviewRequest {
   /** Override the derived post-review lease for a retry of an existing attempt. */
   readonly effective?: CapabilityLease;
   readonly approvalOverride?: ApprovalOverride;
-  readonly executionMode?: CommandExecutionMode;
   readonly justification?: string;
   readonly residuals?: readonly ResidualSignal[];
 }
@@ -527,7 +501,6 @@ type ResolvedAdmission =
       risk: AdmissionRisk;
       reason: string;
       summary?: string;
-      executionMode?: CommandExecutionMode;
       justification?: string;
       residuals?: ResidualSignal[];
     }
@@ -626,13 +599,6 @@ function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
     configFingerprint: snapshot.configFingerprint,
     baseSandboxPolicy: clonePolicy(snapshot.baseSandboxPolicy),
     sandboxReady: snapshot.sandboxReady,
-    escalationEligibility:
-      snapshot.escalationEligibility === undefined
-        ? undefined
-        : {
-            eligible: snapshot.escalationEligibility.eligible,
-            reason: snapshot.escalationEligibility.reason,
-          },
     transcript: snapshot.transcript === undefined ? [] : structuredClone(snapshot.transcript),
   };
 }
@@ -793,18 +759,12 @@ function normalizeAdmission(
   ) {
     return { ok: false };
   }
-  if (raw.executionMode !== undefined && raw.executionMode !== "escalated") {
-    return { ok: false };
-  }
   if (
     raw.justification !== undefined &&
     (typeof raw.justification !== "string" ||
       raw.justification.trim().length === 0 ||
       raw.justification.length > MAX_JUSTIFICATION_LENGTH)
   ) {
-    return { ok: false };
-  }
-  if (raw.executionMode === "escalated" && raw.justification === undefined) {
     return { ok: false };
   }
   const residuals = normalizeResidualSignals(raw.residuals);
@@ -818,7 +778,6 @@ function normalizeAdmission(
       risk: raw.risk,
       reason: raw.reason,
       ...(raw.summary === undefined ? {} : { summary: raw.summary }),
-      ...(raw.executionMode === undefined ? {} : { executionMode: raw.executionMode }),
       ...(raw.justification === undefined ? {} : { justification: raw.justification.trim() }),
       ...(residuals === undefined ? {} : { residuals }),
     },
@@ -879,17 +838,6 @@ function runtimeCapabilitySupported(
   if (ownership === "host-admission") return request.kind === "external-tool";
   return (
     (request.kind === "filesystem" || request.kind === "network") && sandboxCanEnforce(request)
-  );
-}
-
-function isExactEscalatedBashCall(call: InvocationCall): boolean {
-  if (call.tool.toLowerCase() !== "bash" || !isRecord(call.input)) return false;
-  return (
-    call.input.sandbox_permissions === "require_escalated" &&
-    call.input.additional_permissions === undefined &&
-    typeof call.input.command === "string" &&
-    typeof call.input.justification === "string" &&
-    call.input.justification.trim().length > 0
   );
 }
 
@@ -998,7 +946,6 @@ function retryFingerprint(
   ownership: InvocationOwnership,
   grantScope: readonly CapabilityRequest[],
   admissionScope: readonly CapabilityRequest[],
-  executionMode?: CommandExecutionMode,
   justification?: string,
 ): string {
   // A manually armed retry is a request to review the same action in the
@@ -1015,7 +962,6 @@ function retryFingerprint(
     metadata: call.metadata,
     grantScope,
     admissionScope,
-    executionMode,
     justification,
   });
 }
@@ -1113,7 +1059,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       readonly admissionRequested: readonly CapabilityRequest[];
       readonly risk?: AdmissionRisk;
       readonly summary?: string;
-      readonly executionMode?: CommandExecutionMode;
       readonly justification?: string;
     },
   ): RetryHandle => {
@@ -1127,7 +1072,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         request.ownership,
         frozenRequested,
         frozenAdmissionRequested,
-        denial.executionMode,
         denial.justification,
       ),
       call: cloneInvocationCall(request.call),
@@ -1137,7 +1081,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       ...(denial.risk === undefined ? {} : { risk: denial.risk }),
       rationale: denial.rationale,
       ...(denial.summary === undefined ? {} : { summary: denial.summary }),
-      ...(denial.executionMode === undefined ? {} : { executionMode: denial.executionMode }),
       ...(denial.justification === undefined ? {} : { justification: denial.justification }),
     });
     const notice: DenialNotice = {
@@ -1300,7 +1243,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           transcript: structuredClone(state.snapshot.transcript ?? []),
           reason: review.reason,
           summary: review.summary,
-          ...(review.executionMode === undefined ? {} : { executionMode: review.executionMode }),
           ...(review.justification === undefined ? {} : { justification: review.justification }),
           ...(review.residuals === undefined || review.residuals.length === 0
             ? {}
@@ -1985,35 +1927,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     if (admission.kind === "deny") {
       return blocked({ code: "policy-denied", reason: admission.reason });
     }
-    const escalated = admission.kind === "review" && admission.executionMode === "escalated";
-    if (escalated) {
-      if (
-        request.ownership !== "sandbox-owned" ||
-        admission.kind !== "review" ||
-        admission.review !== "action" ||
-        admission.requested.length > 0 ||
-        admission.justification === undefined ||
-        !isExactEscalatedBashCall(request.call) ||
-        admission.justification !==
-          (isRecord(request.call.input) && typeof request.call.input.justification === "string"
-            ? request.call.input.justification.trim()
-            : undefined)
-      ) {
-        return blocked({
-          code: "policy-denied",
-          reason: "Command escalation admission does not match the exact Bash action",
-        });
-      }
-      const eligibility = state.snapshot.escalationEligibility;
-      if (eligibility?.eligible !== true) {
-        return blocked({
-          code: "enforcement-unavailable",
-          reason:
-            eligibility?.reason ??
-            "Command escalation is unavailable without a trusted eligible sandbox snapshot",
-        });
-      }
-    }
     if (request.ownership === "host-admission" && admission.requested.length === 0) {
       return blocked({
         code: "enforcement-unavailable",
@@ -2311,9 +2224,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let reviewSummary = admission.kind === "review" ? admission.summary : undefined;
     let reviewRisk = admission.kind === "review" ? admission.risk : undefined;
     let approvalOverride: ApprovalOverride | undefined;
-    const effectiveLeaseOverride: CapabilityLease | undefined = escalated
-      ? { mode: "escalated" }
-      : undefined;
     const armed = armedRetry;
     const armedRecord =
       armed !== undefined &&
@@ -2324,7 +2234,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           request.ownership,
           armed.record.requested,
           admission.requested,
-          admission.kind === "review" ? admission.executionMode : undefined,
           admission.kind === "review" ? admission.justification : undefined,
         )
         ? armed
@@ -2369,7 +2278,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           summary: reviewSummary,
           residuals: admission.kind === "review" ? admission.residuals : undefined,
         },
-        effectiveLeaseOverride !== undefined || approvalOverride !== undefined,
+        approvalOverride !== undefined,
       );
       const decision =
         cachedApproval ??
@@ -2380,8 +2289,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           reason: reviewReason,
           summary: reviewSummary,
           approvalOverride,
-          effective: effectiveLeaseOverride,
-          executionMode: admission.kind === "review" ? admission.executionMode : undefined,
           justification: admission.kind === "review" ? admission.justification : undefined,
           residuals:
             admission.kind === "review" &&
@@ -2398,7 +2305,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           admissionRequested: admission.requested,
           risk: reviewRisk,
           summary: reviewSummary,
-          executionMode: admission.kind === "review" ? admission.executionMode : undefined,
           justification: admission.kind === "review" ? admission.justification : undefined,
         });
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
@@ -2418,13 +2324,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           code: "stale-invocation",
           reason: "Exact capability grant no longer matches",
         });
-      const result = await executeAttempt(
-        state,
-        request,
-        leaseRequested,
-        spent,
-        effectiveLeaseOverride,
-      );
+      const result = await executeAttempt(state, request, leaseRequested, spent);
       if ("kind" in result && (result.kind === "blocked" || result.kind === "failed"))
         return result;
       if (result.kind === "completed") {
@@ -2442,7 +2342,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
             summary: reviewSummary,
             residuals: admission.kind === "review" ? admission.residuals : undefined,
           },
-          effectiveLeaseOverride !== undefined || approvalOverride !== undefined,
+          approvalOverride !== undefined,
         );
         return result;
       }
@@ -2452,8 +2352,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       return handleRuntimeOutcome(state, request, result, {
         requested: [...leaseRequested],
         admissionRequested: [...admission.requested],
-        lease:
-          effectiveLeaseOverride ?? leaseWithRequests(state, request.ownership, leaseRequested),
+        lease: leaseWithRequests(state, request.ownership, leaseRequested),
       });
     }
 
@@ -2536,13 +2435,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       });
     }
     if (state.snapshot.mode === "yolo") return { kind: "allow", capability: normalized };
-    if (attempt.baseline.mode === "escalated") {
-      return denyAttemptForAttempt({
-        code: "enforcement-unavailable",
-        reason: "Escalated Bash executions cannot authorize a second inline capability",
-        request: normalized,
-      });
-    }
     if (privateNetworkBlocked(attempt.baseline.policy, normalized)) {
       return denyAttemptForAttempt({
         code: "policy-denied",
@@ -2630,7 +2522,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
           record.ownership,
           record.requested,
           record.admissionRequested,
-          record.executionMode,
           record.justification,
         )
       ) {
@@ -2684,7 +2575,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     mode: ApproveForMeMode;
     sandboxReady?: boolean;
     baseSandboxPolicy?: SandboxPolicy;
-    escalationEligibility?: EscalationEligibility;
   }): boolean => {
     if (!active || !isCurrent(active)) return false;
     const modeChanged = active.snapshot.mode !== patch.mode;
@@ -2698,12 +2588,6 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     }
     if (patch.baseSandboxPolicy !== undefined) {
       active.snapshot.baseSandboxPolicy = clonePolicy(patch.baseSandboxPolicy);
-    }
-    if (patch.escalationEligibility !== undefined) {
-      active.snapshot.escalationEligibility = {
-        eligible: patch.escalationEligibility.eligible,
-        reason: patch.escalationEligibility.reason,
-      };
     }
     // Mode or base-policy drift voids remembered approvals: a hit must never
     // survive the context it was approved under.

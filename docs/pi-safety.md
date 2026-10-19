@@ -206,17 +206,14 @@ Parity design rationales recorded in the source:
   `Decision { clear, caution }` is a two-axis assessment produced by a
   model reviewer; a static classifier has no producer for a four-point
   score (`src/permissions/risk.ts:71-74`).
-- **Escalation parity** (`sandboxing.rs` `unsandboxed_execution_allowed`):
-  denied *reads* only exist inside the sandbox. A command escalation
-  (`sandbox_permissions=require_escalated`) stays runnable under the
-  ordinary sandboxed path when `denyRead` is empty; `denyWrite` /
-  `deniedDomains` alone do not suppress escalation
-  (`src/risk-policy.ts:258-263`, `src/escalation-policy.ts:38-40`).
-- **Implicit git remote binding** — an escalated action runs on the bare
-  local backend outside the per-connection authorizer, so a destination
-  that came from repository metadata is in no place that could bind it.
-  `escalationRequested && usesImplicitGitNetwork` is refused outright
-  rather than approved as if bound (`src/risk-policy.ts:258-296`).
+- **No command-level escalation** — the bash parameter set has no
+  `require_escalated`. A sandbox refusal is final for the sandboxed path;
+  the only routes out are a narrower
+  `sandbox_permissions=with_additional_permissions` write,
+  `request_permissions`, or the user switching to yolo. This diverges from
+  Codex's `sandboxing.rs` `unsandboxed_execution_allowed` on purpose: there
+  is no third path, so no escalation-eligibility predicate exists to keep
+  in parity.
 - **Unproven git grammar** — `git -c KEY=VALUE` can install a hook
   directory or an alias that the same invocation then runs, so an
   unproven git context is a review (not a refusal), matching the
@@ -238,9 +235,6 @@ The remaining decision flow (`src/risk-policy.ts:377-519`):
   accepts turn-scoped `network.hosts`, `network_access: true`, and/or
   `file_system.write` lists, and produces a `prompt` that becomes an
   Engine permission amendment.
-- Escalation (`require_escalated`) is supported only for `bash` with a
-  `command` and a non-empty `justification`
-  (`src/risk-policy.ts:246-256`, `src/shell-permissions.ts:112`).
 - User `rules` are matched first; a `deny` blocks before anything else
   (`src/risk-policy.ts:349-351`).
 - `classifyRiskWithCause` runs with the resolved filesystem policy
@@ -352,12 +346,10 @@ spaces preserved, control characters escaped, sanitized/unrelated
 observations never select an authorization scope
 (`readFailureDiagnostics`, `src/sandbox/srt-enforcer.ts:689-716`).
 
-### Escalated bash and native recovery
+### Unrestricted bash and native recovery
 
-A `require_escalated` bash call that passes hard policy runs once on the
-bare local backend outside the sandbox (`isExactEscalatedBashCall`,
-`src/approve-for-me-engine.ts:886`; `CapabilityLease` mode
-`"escalated"`).
+An `unrestricted` lease is the only path that runs bash on the bare local
+backend, and only yolo produces one (`CapabilityLease` mode).
 Native Write/Edit recovery uses attempt-local parent-side operation
 evidence from `createSandboxedFileOperations`, not a parsed denied path;
 only access failures before content-write entry can trigger fresh Engine
@@ -538,9 +530,9 @@ request source, and ownership (`src/guardian/metrics.ts:5-35`).
 
 `src/approve-for-me-engine.ts` is the deep, I/O-free decision module. It
 owns admission-plan validation, hard policy checks, Guardian review
-routing, exact one-shot grants, exact command-escalation leases, denial
-circuit breaking, `/approve` retry handles, and turn/session-scoped
-permission amendments (`createApproveForMeEngine`,
+routing, exact one-shot grants, denial circuit breaking, `/approve`
+retry handles, and turn/session-scoped permission amendments
+(`createApproveForMeEngine`,
 `src/approve-for-me-engine.ts:1024`).
 
 Key mechanics:
@@ -780,9 +772,8 @@ This extension deliberately does **not**:
 - **Interpret per-CLI verb grammars.** Remote-effect intent is the
   reviewer's judgement; the enforced boundary is the network lease and
   the per-connection authorizer.
-- **Grant Unix sockets through `request_permissions`.** Use
-  `sandbox_permissions=require_escalated` or yolo/host shell for daemon
-  tools when the allowlist stays empty. Allowing
+- **Grant Unix sockets through `request_permissions`.** Use yolo/host
+  shell for daemon tools when the allowlist stays empty. Allowing
   `~/.orbstack/run/docker.sock` / `/var/run/docker.sock` ≈ host
   docker-group privilege; Linux path lists are ignored by SRT (seccomp
   all-or-nothing).

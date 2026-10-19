@@ -418,7 +418,6 @@ export function classifyRiskWithCause(
 export { isPublicNetworkHost } from "../network-host.ts";
 export {
   analyzeShellGitNetwork,
-  escalatedGitDestinationUnbound,
   type ShellGitNetworkAnalysis,
 } from "./git-network.ts";
 export type { CommandSegment, PermissionRequest } from "./rules.ts";

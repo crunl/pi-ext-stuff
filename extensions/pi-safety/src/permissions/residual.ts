@@ -3,7 +3,6 @@ export const RESIDUAL_SIGNALS = [
   "rule_ask",
   "rule_deny",
   "risk_not_skip",
-  "escalation",
   "write_root_uncovered",
   "network_uncovered",
   "action_review",
@@ -15,8 +14,10 @@ export const RESIDUAL_SIGNALS = [
   "capability_uncovered",
   "other_explicit_review",
   // Retired static review causes (cut 3: the Q3 proof gate is gone, so no
-  // call site produces these anymore). Kept as vocabulary so historical
-  // metrics keep their names — production stopped, names kept.
+  // call site produces these anymore; `escalation` retired with the
+  // command-escalation feature). Kept as vocabulary so historical metrics
+  // keep their names — production stopped, names kept.
+  "escalation",
   "process_control",
   "env_context_unproven",
   "state_crosses_segments",
@@ -53,7 +54,6 @@ export function ensureNonEmptyResiduals(
 export function residualsForPrompt(input: {
   ruleAsk?: boolean;
   ruleDeny?: boolean;
-  escalation?: boolean;
   risk: "Skip" | "NeedsApproval" | "Forbidden";
   writeUncovered?: boolean;
   networkUncovered?: boolean;
@@ -66,7 +66,6 @@ export function residualsForPrompt(input: {
   if (input.ruleDeny) residuals.push("rule_deny");
   if (input.ruleAsk) residuals.push("rule_ask");
   if (input.permissionAmendment) residuals.push("permission_amendment");
-  if (input.escalation) residuals.push("escalation");
   if (input.writeUncovered) residuals.push("write_root_uncovered");
   if (input.networkUncovered) residuals.push("network_uncovered");
   if (input.actionReview) residuals.push("action_review");
