@@ -15,6 +15,7 @@
     "check": "tsc --noEmit",
     "check:host-turn-boundary": "node scripts/host-turn-boundary.mjs",
     "diagnose:guardian": "jiti scripts/guardian-srt-diagnostic.ts",
+    "report:guardian": "jiti scripts/guardian-metrics-report.ts",
     "lint": "biome check .",
     "preflight:sibling": "node scripts/preflight-sibling.mjs",
     "test": "vitest --run",

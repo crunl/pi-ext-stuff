@@ -2,20 +2,10 @@ import type { ReviewEvent } from "../approve-for-me-engine.ts";
 import type { AutoReviewerFailureKind } from "./errors.ts";
 
 /** Codex-aligned terminal_status vocabulary. */
-type GuardianTerminalStatus =
-  | "approved"
-  | "denied"
-  | "aborted"
-  | "timed_out"
-  | "failed_closed";
+type GuardianTerminalStatus = "approved" | "denied" | "aborted" | "timed_out" | "failed_closed";
 
 /** Codex-aligned failure_reason vocabulary. */
-type GuardianFailureReason =
-  | "timeout"
-  | "cancelled"
-  | "session_error"
-  | "parse_error"
-  | "none";
+type GuardianFailureReason = "timeout" | "cancelled" | "session_error" | "parse_error" | "none";
 
 type GuardianSessionKind = "trunk_new" | "trunk_reused" | "ephemeral_forked";
 
@@ -32,7 +22,7 @@ type GuardianRequestSource = "main_turn" | "delegated_subagent";
 type GuardianOwnership = "sandbox-owned" | "host-admission" | "permission-amendment";
 
 /** One JSONL record per review terminal state. Enums and numbers only. */
-interface GuardianMetricsRecord {
+export interface GuardianMetricsRecord {
   readonly schema: 1;
   readonly reviewId: string;
   readonly timestamp: string;
@@ -60,6 +50,112 @@ interface GuardianMetricsRecord {
     readonly reasoning: number;
     readonly total: number;
   };
+}
+
+export interface GuardianMetricsSummary {
+  readonly total: number;
+  readonly byStatus: Record<string, number>;
+  readonly byAction: Record<string, number>;
+  /** Denials attributed to the record's first residual signal (fixed stamp
+   * order, so the first is the highest-priority cause); sums to total denials. */
+  readonly denialsByResidual: Array<{ residual: string; denials: number }>;
+  /** Review trigger ranking: the record's first residual signal. Residuals
+   * are stamped in fixed category order with the review's trigger first and
+   * segment-level passengers (lex_incomplete, substitution_unproven, ...)
+   * appended after, so first-only counting measures what sent the command
+   * to review — not what merely rode along. High reviews + high approved =
+   * pure friction: precision-engineering targets that a sharper static layer
+   * could turn into fast-path Skips. */
+  readonly triggersByResidual: Array<{ residual: string; reviews: number; approved: number }>;
+  readonly durationMs: { p50: number; p95: number };
+  readonly tokens: { input: number; output: number; total: number };
+}
+
+function percentile(sorted: readonly number[], quantile: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(quantile * sorted.length) - 1))];
+}
+
+/**
+ * Pure offline aggregation over sanitized metrics records. Reviews only:
+ * fast-path allows and pre-review blocks never emit review events, so the
+ * denominator here is Guardian strictness, not overall friction.
+ */
+export function summarizeGuardianMetrics(
+  records: readonly GuardianMetricsRecord[],
+): GuardianMetricsSummary {
+  const byStatus: Record<string, number> = {};
+  const byAction: Record<string, number> = {};
+  const denialResiduals = new Map<string, number>();
+  const triggerResiduals = new Map<string, { reviews: number; approved: number }>();
+  const durations: number[] = [];
+  let input = 0;
+  let output = 0;
+  let total = 0;
+  for (const record of records) {
+    byStatus[record.terminal_status] = (byStatus[record.terminal_status] ?? 0) + 1;
+    byAction[record.action] = (byAction[record.action] ?? 0) + 1;
+    if (record.terminal_status === "denied") {
+      const cause = record.residual_signals?.[0] ?? "unstamped";
+      denialResiduals.set(cause, (denialResiduals.get(cause) ?? 0) + 1);
+    }
+    const triggers = record.residual_signals?.[0] ?? "unstamped";
+    const entry = triggerResiduals.get(triggers) ?? { reviews: 0, approved: 0 };
+    entry.reviews += 1;
+    if (record.terminal_status === "approved") entry.approved += 1;
+    triggerResiduals.set(triggers, entry);
+    durations.push(record.duration_ms);
+    input += record.token_usage.input;
+    output += record.token_usage.output;
+    total += record.token_usage.total;
+  }
+  durations.sort((a, b) => a - b);
+  return {
+    total: records.length,
+    byStatus,
+    byAction,
+    denialsByResidual: [...denialResiduals.entries()]
+      .map(([residual, denials]) => ({ residual, denials }))
+      .sort((a, b) => b.denials - a.denials || (a.residual < b.residual ? -1 : 1)),
+    triggersByResidual: [...triggerResiduals.entries()]
+      .map(([residual, { reviews, approved }]) => ({ residual, reviews, approved }))
+      .sort((a, b) => b.reviews - a.reviews || (a.residual < b.residual ? -1 : 1)),
+    durationMs: { p50: percentile(durations, 0.5), p95: percentile(durations, 0.95) },
+    tokens: { input, output, total },
+  };
+}
+
+export function formatGuardianMetricsSummary(summary: GuardianMetricsSummary): string {
+  const lines = [
+    `reviews: ${summary.total} (Guardian reviews only; fast-path allows and pre-review blocks emit no review events)`,
+    `status: ${Object.entries(summary.byStatus)
+      .sort((a, b) => b[1] - a[1])
+      .map(([status, count]) => `${status}=${count}`)
+      .join(" ")}`,
+    `action: ${Object.entries(summary.byAction)
+      .sort((a, b) => b[1] - a[1])
+      .map(([action, count]) => `${action}=${count}`)
+      .join(" ")}`,
+    `denials by residual: ${
+      summary.denialsByResidual.length === 0
+        ? "none"
+        : summary.denialsByResidual
+            .map(({ residual, denials }) => `${residual}=${denials}`)
+            .join(" ")
+    }`,
+    `triggers by residual: ${
+      summary.triggersByResidual.length === 0
+        ? "none"
+        : summary.triggersByResidual
+            .map(
+              ({ residual, reviews, approved }) => `${residual}=${reviews}(approved=${approved})`,
+            )
+            .join(" ")
+    }`,
+    `duration_ms: p50=${summary.durationMs.p50} p95=${summary.durationMs.p95}`,
+    `tokens: input=${summary.tokens.input} output=${summary.tokens.output} total=${summary.tokens.total}`,
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 export function mapTerminalStatus(
