@@ -393,7 +393,11 @@ export async function evaluateRiskRequest(
   // (dangerous? nested program?) and everything else runs — a proven
   // dangerous argv is a review the user settles (codex `OnRequest`
   // → `Prompt`), not a hard block.
-  const classification = classifyRiskWithCause(request, filesystem.protectedWritePaths);
+  const classification = classifyRiskWithCause(
+    request,
+    filesystem.protectedWritePaths,
+    filesystem.denyWrite,
+  );
   let risk = classification.disposition;
   // Kept while the write flip, carve-out and elevation go: extra write
   // roots are a *grant*, not a proof question — the justification must be

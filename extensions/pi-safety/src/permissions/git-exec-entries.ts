@@ -106,8 +106,11 @@ export const gitConfigSourceEnvNames = new Set([
   "GIT_CONFIG_NOSYSTEM",
 ]);
 
-/** `git config` options that consume the following word as their value. */
-const gitConfigValueOptions = new Set(["--file", "-f", "--blob", "--default"]);
+/** `git config` options that consume the following word as their value.
+ * `--type`/`--value` take `<type>`/`<value>` (`git config -h` synopsis);
+ * without them the value word is miscounted as the key. No `--comment`:
+ * absent from the synopsis, and an unknown flag fails closed at runtime. */
+const gitConfigValueOptions = new Set(["--file", "-f", "--blob", "--default", "--type"]);
 
 /**
  * The first operand that is not a flag and not the value of a value-taking
@@ -209,6 +212,66 @@ const gitGlobalValueOptions = new Set([
 ]);
 
 /**
+ * Values for a program-naming Git variable that cannot execute anything:
+ * `cat` / `true` run a fixed harmless binary, empty disables the facility.
+ * Exact literal match only — spaces, metacharacters, substitutions, or paths
+ * stay unproven. File-path variables (`GIT_CONFIG_*`) never qualify: a path
+ * is a config-injection vector, not a program. Callers gate the variable
+ * name; this judges only the value.
+ */
+function inertGitProgramValue(word: string): boolean {
+  const value = word.slice(word.indexOf("=") + 1);
+  return value === "cat" || value === "true" || value === "";
+}
+
+/** `git config` flags that mutate the store. `--stdin` feeds key=value lines
+ * with `--add`/`--replace-all` semantics, so it fails closed without them.
+ * `--value` accompanies new-style set/unset; it vetoes the read-only fast
+ * path (the verb still decides the key below). */
+const GIT_CONFIG_WRITE_OPTIONS = new Set([
+  "--add",
+  "--replace-all",
+  "--unset",
+  "--unset-all",
+  "--rename-section",
+  "--remove-section",
+  "--stdin",
+  "--value",
+]);
+
+/**
+ * Whether the operand tail carries a write. `--value=` attaches its value,
+ * so the prefix form must veto too, or `unset --value=old key` dodges while
+ * smuggling a write. Other members take no `=` value (`--add=x` is a
+ * runtime error), and `=...` words are flag-skipped by both counters, so
+ * attached values can never leak into the operand count.
+ */
+function gitConfigWrites(rest: readonly string[]): boolean {
+  return rest.some((token) => GIT_CONFIG_WRITE_OPTIONS.has(token) || token.startsWith("--value="));
+}
+
+/**
+ * Whether a `git config` operand tail can only read: no write flag and at
+ * most one bare operand (the key). Operand counting mirrors
+ * `firstOperandAfterValueOptions` consumption so the two cannot disagree.
+ */
+function gitConfigReadOnlyQuery(rest: readonly string[]): boolean {
+  if (gitConfigWrites(rest)) return false;
+  let operands = 0;
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? "";
+    if (gitConfigValueOptions.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    operands += 1;
+    if (operands > 1) return false;
+  }
+  return true;
+}
+
+/**
  * Whether this Git invocation can run a program the static words never name.
  * Once Git has been told to execute something, the segment's argv describes the
  * wrapper rather than the program, so it cannot be proven decomposable.
@@ -221,7 +284,10 @@ export function gitExecutesNestedProgram(
     const name = assignmentName(word);
     if (name === undefined) continue;
     const upper = name.toUpperCase();
-    if (gitExecutableEnvNames.has(upper) || gitConfigSourceEnvNames.has(upper)) return true;
+    if (gitConfigSourceEnvNames.has(upper)) return true;
+    // A program-naming variable with an inert value runs nothing: `PAGER=cat`
+    // is how every non-interactive agent invokes Git.
+    if (gitExecutableEnvNames.has(upper) && !inertGitProgramValue(word)) return true;
     // `GIT_CONFIG_PARAMETERS` and the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
     // `GIT_CONFIG_VALUE_n` triple can set any config key, including an alias.
     if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(upper)) return true;
@@ -234,7 +300,8 @@ export function gitExecutesNestedProgram(
   // the same sets the environment split in `shell-segment` now consults.
   for (const word of words) {
     const name = assignmentName(word);
-    if (name === "EDITOR" || name === "VISUAL" || name === "PAGER") return true;
+    if ((name === "EDITOR" || name === "VISUAL" || name === "PAGER") && !inertGitProgramValue(word))
+      return true;
   }
   let subcommand: string | undefined;
   let subcommandIndex = -1;
@@ -282,6 +349,15 @@ export function gitExecutesNestedProgram(
     // `--edit` opens the config file in $GIT_EDITOR, so the program it runs is
     // named by the environment rather than by argv.
     if (rest.includes("--edit") || rest.includes("-e")) return true;
+    // `--stdin` names no key in argv — its key=value pairs arrive on stdin,
+    // so the key check below sees `undefined` and would Skip a bulk write.
+    // Fail closed: stdin content is unprovable by construction.
+    if (rest.includes("--stdin")) return true;
+    // Read-only queries change nothing and run nothing: flag-shaped reads or
+    // a bare key lookup print values. Any write flag or key+value store falls
+    // through to the key check below. New-style verbs (`get`/`set`/`unset`)
+    // read as the key and review — safe direction, revisit if noisy.
+    if (gitConfigReadOnlyQuery(rest)) return false;
     // Options that take a value must be consumed first, or their value is read
     // as the key: `git config --file user.name --add core.pager '!cmd'` writes
     // `core.pager`, not `user.name`.

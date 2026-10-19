@@ -26,10 +26,7 @@ import {
 } from "../src/permissions/risk.ts";
 import { deletionTargets } from "../src/permissions/rules.ts";
 import type { CommandSegment } from "../src/permissions/rules.ts";
-import {
-  installShellAstParser,
-  shellAstParserInstalled,
-} from "../src/permissions/shell-ast.ts";
+import { installShellAstParser, shellAstParserInstalled } from "../src/permissions/shell-ast.ts";
 import { astFrontEndEngaged } from "../src/permissions/shell-segment.ts";
 import {
   activateTreeSitterShellParser,
@@ -77,16 +74,20 @@ const EVERYDAY: readonly (readonly [string, Disposition])[] = [
   ["git add README.md &&", "Skip"],
   ["git add README.md ||", "Skip"],
   ["a && b &&", "Skip"],
-  // A trailing operator names no command, but the `rm` before it still reviews.
+  // A trailing operator names no command: `/tmp/work` is outside the
+  // request cwd either way, so the `rm` before it still reviews.
   ["rm -f /tmp/work |", "NeedsApproval"],
   ["rm -f /tmp/work &&", "NeedsApproval"],
   ["ls | wc -l", "Skip"],
   ["true && :", "Skip"],
   ["git commit -m 'fix bug'", "Skip"],
   ['git commit -m "fix bug"', "Skip"],
-  ["rm -f build/output.txt", "NeedsApproval"],
-  ["rm -f 'a b'", "NeedsApproval"],
-  ['rm -f "a b"', "NeedsApproval"],
+  // Non-recursive `rm -f` on concrete in-cwd names deletes at most those
+  // entries. The parser already resolved quoting (`'a b'`, `a\ b` arrive
+  // as the runtime word), so the static text is the runtime target.
+  ["rm -f build/output.txt", "Skip"],
+  ["rm -f 'a b'", "Skip"],
+  ['rm -f "a b"', "Skip"],
   ['echo ""', "Skip"],
   ["echo ''", "Skip"],
   ["echo ''\"\"$x", "Skip"],
@@ -107,7 +108,17 @@ const EVERYDAY: readonly (readonly [string, Disposition])[] = [
   ['sh -c "$(echo ls) /tmp"', "NeedsApproval"],
   ["FOO=1 rm -f /tmp/work", "NeedsApproval"],
   ["FOO='$(pwd)' bar", "Skip"],
-  ["GIT_EDITOR='true' git commit", "NeedsApproval"],
+  ["GIT_EDITOR='true' git commit", "Skip"],
+  // Inert program values run nothing: exact `cat` / `true` / empty only.
+  // Anything else naming a program Git runs stays unproven.
+  ["PAGER=cat git status", "Skip"],
+  ["GIT_PAGER=cat git log --oneline", "Skip"],
+  ["EDITOR=true git commit", "Skip"],
+  ["PAGER= git status", "Skip"],
+  ["PAGER=less git log", "NeedsApproval"],
+  ["PAGER='cat; rm -f /tmp/x' git log", "NeedsApproval"],
+  ["PAGER=$PAGER git log", "NeedsApproval"],
+  ["GIT_SSH_COMMAND='ssh -i key' git fetch", "NeedsApproval"],
   ["GIT_TRACE=1 git status", "Skip"],
   ["GIT_DIR=/tmp git push", "Skip"],
   ["env X=1 rm -f /tmp/work", "NeedsApproval"],
@@ -404,9 +415,9 @@ describe("shell AST adapter fidelity", () => {
     try {
       const after = observe("pwd");
       expect(after.disposition).toBe("NeedsApproval");
-      expect(
-        after.segments.some((segment) => segment.unprovenCause === "ast_unmodelled"),
-      ).toBe(true);
+      expect(after.segments.some((segment) => segment.unprovenCause === "ast_unmodelled")).toBe(
+        true,
+      );
     } finally {
       resetTreeSitterShellActivation();
       installShellAstParser(undefined);

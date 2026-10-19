@@ -22,6 +22,7 @@ import { defaultSafetyConfigPath, isPathWithin } from "../policy-primitives.ts";
 import { normalizedSegmentsFor } from "./cd-normalize.ts";
 import { isDangerousWords, visibleDelegatedDanger } from "./dangerous-commands.ts";
 import { gitExecutableEnvNames } from "./git-exec-entries.ts";
+import { matchesProtectedPatternLexical } from "./paths.ts";
 import type { CommandSegment, PermissionRequest } from "./rules.ts";
 import { analyzeCommandWithAst } from "./shell-ast.ts";
 import { extractShellNetworkHosts } from "./shell-network.ts";
@@ -223,6 +224,62 @@ export function classifyRisk(
 }
 
 /**
+ * Whether an `rm` segment deletes at most named entries: `-f`/`--force`
+ * without any recursion flag, concrete literal operands, every target
+ * resolving inside `cwd`, outside protected controls and `denyWrite` names.
+ *
+ * The destructive capacity is single entries — no tree walk, no descent into
+ * symlinked directories — matching the `write` tool's Skip parity (runtime
+ * SRT still enforces the sandbox). Bare `rm` spelling only: the fold erases
+ * delegation prefixes, so `sudo`/`env`/`command`/`time`-led forms are read
+ * off the source and keep their review. Backslashes and quotes in an operand
+ * mean the static text is not the runtime word (error-span words), and
+ * globs/`~`/`$`/backticks let the runtime choose names — all stay review.
+ */
+function rmForceOnlySafeTargets(
+  segment: CommandSegment,
+  cwd: string,
+  protectedWritePaths: readonly string[],
+  denyWritePatterns: readonly string[],
+): boolean {
+  if (segment.executable !== "rm") return false;
+  if (!/^\s*rm(?:\s|$)/.test(segment.source)) return false;
+  // Top-level segments only: a nested segment's execution context (cwd,
+  // privilege, timing) is named by the outer construct — `sh -c`, `sudo`,
+  // a trap, a substitution — not by the segment, so capacity equivalence
+  // with bare `rm` does not transfer.
+  if (segment.nestedFrom !== undefined) return false;
+  // Any redirection keeps review: the target is not in the segment argv,
+  // so a `> /etc/passwd` beside an in-cwd `rm` would otherwise vanish.
+  if (segment.hasRedirect) return false;
+  let force = false;
+  const operands: string[] = [];
+  let terminated = false;
+  for (const arg of segment.args) {
+    if (!terminated && arg === "--") {
+      terminated = true;
+      continue;
+    }
+    if (!terminated && arg.startsWith("-") && arg !== "-") {
+      if (arg !== "--force" && !/^-[f]+$/.test(arg)) return false;
+      force = true;
+      continue;
+    }
+    operands.push(arg);
+  }
+  if (!force) return false;
+  const lexicalCwd = resolve(cwd);
+  for (const target of operands) {
+    if (/[*?[\]{}~$`!()|&;<>\\'"]/.test(target)) return false;
+    const resolved = resolvePolicyPath(target, lexicalCwd);
+    if (!isPathWithin(resolved, lexicalCwd)) return false;
+    if (protectedWritePaths.some((control) => isPathWithin(resolved, control))) return false;
+    if (matchesProtectedPatternLexical(resolved, lexicalCwd, denyWritePatterns)) return false;
+  }
+  return true;
+}
+
+/**
  * The static question, codex-aligned: proven dangerous (or proven to run
  * another program) → NeedsApproval, everything else → Skip. The runtime
  * sandbox owns the rest.
@@ -230,6 +287,7 @@ export function classifyRisk(
 export function classifyRiskWithCause(
   request: PermissionRequest,
   protectedWritePaths: readonly string[] = [defaultSafetyConfigPath()],
+  denyWritePatterns: readonly string[] = [],
 ): RiskClassification {
   const lowerTool = request.tool.toLowerCase();
   if (lowerTool === "websearch") return { disposition: "Skip" };
@@ -246,6 +304,15 @@ export function classifyRiskWithCause(
   // the (empty) word vector non-dangerous.
   if (!command) return { disposition: "Skip" };
   const segments = request.commandSegments ?? normalizedSegmentsFor(command, request.cwd);
+  // Empty-segment invariant: a non-empty command the parser reduced to zero
+  // segments is a representation failure, not proof of safety. Arithmetic
+  // `(( ... ))` and C-style `for ((...))` loops vanish here — including live
+  // `$(...)` bodies — and the vacuous `.some()` truth below would Skip them.
+  // Fail closed at this convergence point instead of per-node parser surgery.
+  // Pure comments still produce segments, and blank input stays Skip.
+  if (command.trim() !== "" && segments.length === 0) {
+    return { disposition: "NeedsApproval" };
+  }
   // Proven dangerous (forced rm, sudo, env wrapper). Mirrors
   // codex `render_decision_for_unmatched_command_for_platform`: a proven
   // dangerous command is a review the user settles, not a hard block
@@ -257,7 +324,16 @@ export function classifyRiskWithCause(
   // Network egress is not judged here — the runtime `NetworkBoundary`
   // owns it (codex `NetworkProxy`), so a non-exempt network target is
   // no longer a static refusal.
-  if (segments.some((segment) => isDangerousSegment(segment))) {
+  // `rm -f` without recursion deletes at most the named entries (see
+  // `rmForceOnlySafeTargets`): those segments carry no tree-deletion
+  // capacity, so only a dangerous segment the carve-out does NOT cover sends
+  // the command to review. Later arms still run for carved commands.
+  const dangerousUncarved = segments.some(
+    (segment) =>
+      isDangerousSegment(segment) &&
+      !rmForceOnlySafeTargets(segment, request.cwd, protectedWritePaths, denyWritePatterns),
+  );
+  if (dangerousUncarved) {
     const substituted = segments.find(
       (segment) => segment.nestedFrom === "substitution" && isDangerousSegment(segment),
     );
@@ -348,12 +424,3 @@ export {
 export type { CommandSegment, PermissionRequest } from "./rules.ts";
 export { extractShellNetworkHosts } from "./shell-network.ts";
 export { parseCommandSegments } from "./shell-segment.ts";
-  // Empty-segment invariant: a non-empty command the parser reduced to zero
-  // segments is a representation failure, not proof of safety. Arithmetic
-  // `(( ... ))` and C-style `for ((...))` loops vanish here — including live
-  // `$(...)` bodies — and the vacuous `.some()` truth below would Skip them.
-  // Fail closed at this convergence point instead of per-node parser surgery.
-  // Pure comments still produce segments, and blank input stays Skip.
-  if (command.trim() !== "" && segments.length === 0) {
-    return { disposition: "NeedsApproval" };
-  }

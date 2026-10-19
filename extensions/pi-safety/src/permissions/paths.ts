@@ -38,9 +38,9 @@ export async function canonicalize(path: string): Promise<string> {
   }
 }
 
-function globMatches(value: string, pattern: string): boolean {
+function globMatches(value: string, pattern: string, caseInsensitive = false): boolean {
   const expression = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${expression}$`).test(value);
+  return new RegExp(`^${expression}$`, caseInsensitive ? "i" : "").test(value);
 }
 
 async function matchesProtectedPattern(
@@ -73,6 +73,35 @@ async function matchesProtectedPattern(
       }),
     )
   ).some(Boolean);
+}
+
+/**
+ * Synchronous lexical projection of `matchesProtectedPattern`: no filesystem
+ * canonicalization. Sound only where the final path component is never
+ * followed — `rm` without `-r` deletes the entry itself, so the lexical path
+ * is what gets removed. Anything symlink-sensitive must keep using
+ * `isPathAllowed`.
+ */
+export function matchesProtectedPatternLexical(
+  lexicalPath: string,
+  lexicalCwd: string,
+  patterns: readonly string[],
+): boolean {
+  // Deletion is irreversible, and darwin/win32 filesystems fold case while
+  // the regex does not: `rm -f ID.PEM` would dodge `*.pem`. Fold where the
+  // platform does. The async `isPathAllowed` path is untouched (zero blast
+  // radius); the divergence denies more, never less. Absolute non-glob
+  // patterns keep exact `isPathWithin` semantics, identical on both paths.
+  const foldCase = process.platform === "darwin" || process.platform === "win32";
+  return patterns.some((rawPattern) => {
+    const pattern = expandHome(rawPattern);
+    if (isAbsolute(pattern)) {
+      if (pattern.includes("*")) return globMatches(lexicalPath, pattern, foldCase);
+      return isPathWithin(lexicalPath, pattern);
+    }
+    const candidates = [basename(lexicalPath), relative(lexicalCwd, lexicalPath)];
+    return candidates.some((candidate) => globMatches(candidate, pattern, foldCase));
+  });
 }
 
 /** Resolves symlinks in every existing ancestor before comparing path components. */

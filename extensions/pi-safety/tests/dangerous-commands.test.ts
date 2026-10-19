@@ -49,9 +49,7 @@ describe("env assignment items (codex-aligned)", () => {
       "sudo env 1=foo rm -f /tmp/x",
       "env 1=foo rm -f /tmp/x && echo after",
     ]) {
-      const review = classifyRiskWithCause(
-        normalizeToolCall("bash", { command }, "/work/repo")
-      );
+      const review = classifyRiskWithCause(normalizeToolCall("bash", { command }, "/work/repo"));
       expect(review.disposition, command).toBe("NeedsApproval");
     }
   });
@@ -95,17 +93,80 @@ describe("env -- terminator (codex-aligned, known gap)", () => {
     expect(isDangerousWords(["env", "--", "FOO=1", "rm", "-rf", "/tmp/x"])).toBe(false);
     expect(
       classifyRiskWithCause(
-        normalizeToolCall("bash", { command: "env -- 1=foo rm -f /tmp/x" }, "/work/repo")
+        normalizeToolCall("bash", { command: "env -- 1=foo rm -f /tmp/x" }, "/work/repo"),
       ),
     ).toEqual({ disposition: "Skip" });
     expect(
       classifyRiskWithCause(
-        normalizeToolCall("bash", { command: "env =foo rm -f /tmp/x" }, "/work/repo")
+        normalizeToolCall("bash", { command: "env =foo rm -f /tmp/x" }, "/work/repo"),
       ),
     ).toEqual({ disposition: "NeedsApproval" });
     // Cut 3 keeps `=`-leading executables in review even though bash never
     // executes them ("No such file"): the spelling is zsh filename
     // expansion, and `zsh -c '=rm …'` shares it exactly — statically
     // indistinguishable without a PATH lookup, so both review.
+  });
+});
+
+describe("rm -f without recursion on concrete in-cwd targets", () => {
+  const cwd = "/work/repo";
+  const risk = (
+    command: string,
+    protectedWritePaths: readonly string[] = [],
+    denyWrite: readonly string[] = [],
+  ) =>
+    classifyRiskWithCause(
+      normalizeToolCall("bash", { command }, cwd),
+      protectedWritePaths,
+      denyWrite,
+    ).disposition;
+
+  it("skips force removal that can delete at most named workspace entries", () => {
+    for (const command of [
+      "rm -f notes.txt",
+      "rm -f",
+      "rm --force a.txt b.txt",
+      "rm -f -- -rf",
+      "rm -f sub/dir/file.txt",
+      // The parser already consumed the escape: the word is the runtime word.
+      "rm -f a\\ b",
+    ]) {
+      expect(risk(command), command).toBe("Skip");
+    }
+  });
+
+  it("keeps review for recursion, escapes, runtime-chosen names, and dir removal", () => {
+    for (const command of [
+      "rm -rf dist",
+      "rm -rf /",
+      "rm -rf src",
+      "rm -fr x",
+      "rm -fR x",
+      "rm -fd emptydir",
+      "rm -f ../../x",
+      "rm -f ~/x",
+      "rm -f /abs/path.txt",
+      "rm -f *.log",
+      "rm -f $DIR",
+      "rm -f `hostname`.txt",
+    ]) {
+      expect(risk(command), command).toBe("NeedsApproval");
+    }
+  });
+
+  it("keeps review for protected controls and denyWrite names", () => {
+    expect(risk("rm -f id.pem", [], ["*.pem"]), "denyWrite glob").toBe("NeedsApproval");
+    expect(risk("rm -f .env", [], [".env"]), "denyWrite literal").toBe("NeedsApproval");
+    expect(risk("rm -f secret", ["/work/repo/secret"]), "protected control").toBe("NeedsApproval");
+    expect(risk("rm -f secret/file.txt", ["/work/repo/secret"]), "under protected dir").toBe(
+      "NeedsApproval",
+    );
+    expect(risk("rm -f notes.txt", [], ["*.pem"]), "unrelated pattern").toBe("Skip");
+    // Case folds where the platform does: on darwin/win32 `ID.PEM` names
+    // the same file `*.pem` denies, so it reviews; on case-sensitive
+    // filesystems it is genuinely a different name, so it Skips.
+    expect(risk("rm -f ID.PEM", [], ["*.pem"]), "denyWrite case variant").toBe(
+      process.platform === "linux" ? "Skip" : "NeedsApproval",
+    );
   });
 });

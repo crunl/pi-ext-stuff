@@ -278,8 +278,16 @@ describe("narrow static risk contract", () => {
     ["cat $(pwd)", "Skip"],
     ["bash -c 'pwd'", "Skip"],
     ["rm -rf build", "NeedsApproval"],
-    ["rm --force build", "NeedsApproval"],
-    ["rm -f build/a.ts", "NeedsApproval"],
+    // `rm -f` without recursion deletes at most the named entries — same
+    // capacity as the `write` tool, same Skip. Any delegation prefix
+    // (`sudo`/`env`/assignments/`command`/`time`) keeps its review: the
+    // fold erases wrappers, so the carve-out reads the bare spelling.
+    ["rm --force build", "Skip"],
+    ["rm -f build/a.ts", "Skip"],
+    ["sudo rm -f build", "NeedsApproval"],
+    ["env FOO=1 rm -f build", "NeedsApproval"],
+    ["FOO=1 rm -f build", "NeedsApproval"],
+    ["command rm -f build", "NeedsApproval"],
     ["sudo rm -rf build", "NeedsApproval"],
     ["env -i rm -rf build", "NeedsApproval"],
     ["time rm -rf build", "NeedsApproval"],
@@ -381,7 +389,9 @@ describe("narrow static risk contract", () => {
     ['echo "unclosed', "Skip"],
     ["echo \\", "Skip"],
     ["echo \u0000", "Skip"],
-    ["rm -f x \\", "NeedsApproval"],
+    // A trailing continuation leaves a carved `rm` (at most `./x` deleted)
+    // beside a lex-incomplete error piece: Skip, same capacity argument.
+    ["rm -f x \\", "Skip"],
     // Git can run a program the argv never names: a shell alias, a config key
     // whose value is an executable, a `GIT_*` override, or a subcommand that
     // takes a command. Codex has no Git arm, so nothing upstream catches these.
@@ -398,6 +408,28 @@ describe("narrow static risk contract", () => {
     ["git bisect run rm -f /tmp/x", "NeedsApproval"],
     ["git hook run post-checkout", "NeedsApproval"],
     ["git submodule foreach 'rm -f /tmp/x'", "NeedsApproval"],
+    // Read-only config queries print values and run nothing: flag-shaped
+    // reads or a bare key lookup. Writes (any write flag, key+value store,
+    // `--edit`) still reach the key check below.
+    ["git config --get remote.origin.url", "Skip"],
+    ["git config --get-all user.name", "Skip"],
+    ["git config --list", "Skip"],
+    ["git config -l", "Skip"],
+    ["git config user.name", "Skip"],
+    ["git config --global user.name", "Skip"],
+    ["git config --file other.conf user.name", "Skip"],
+    ["git config --add alias.x '!evil'", "NeedsApproval"],
+    ["git config --unset alias.x", "NeedsApproval"],
+    ["git config alias.x '!evil'", "NeedsApproval"],
+    // `--stdin` names no key in argv — its pairs arrive on stdin, so the
+    // key check would see `undefined` and Skip a bulk write. Fail closed.
+    ["git config --stdin", "NeedsApproval"],
+    ["printf 'alias.x !evil\\n' | git config --stdin", "NeedsApproval"],
+    // `--type` consumes the next word: without that, the type value reads
+    // as the key and the real (possibly executable) key goes unchecked.
+    ["git config --type user.name alias.x '!sh'", "NeedsApproval"],
+    ["git config --type bool alias.x '!evil'", "NeedsApproval"],
+    ["git config --type bool core.bare", "Skip"],
     // A config value that names no executable leaves the argv provable.
     ["git -c core.quotepath=false status", "Skip"],
     ["git -c user.name=Foo commit -m x", "Skip"],
@@ -413,10 +445,9 @@ describe("narrow static risk contract", () => {
     ["GIT_AUTHOR_NAME=x git commit -m x", "Skip"],
     ["GIT_TRACE=1 git status", "Skip"],
     ["GIT_OPTIONAL_LOCKS=0 git status", "Skip"],
-    // `EDITOR`, `VISUAL` and `PAGER` are absent from this table on purpose:
-    // Git falls back to them when the `GIT_`-prefixed variable is unset, so
-    // they name a program Git runs — still `nested_git_program` review, still
-    // covered in `risk-policy.test.ts`.
+    // `EDITOR`, `VISUAL` and `PAGER` name a program Git runs — except when
+    // the value is inert (`cat` / `true` / empty), which runs nothing.
+    // Covered above alongside the `GIT_*` program variables.
     // Codex alignment, cut 2: Unix signals escape the sandbox, but codex
     // never gated them (`is_dangerous_command.rs` has no kill arm) and
     // neither do we now. A proven danger still outranks everything.
