@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
@@ -12,13 +13,56 @@ import { buildExpandedOutput } from "./tool-output.ts";
 /** Fixed glance budget so `· N output lines` + chevron stay on the header row. */
 export const BASH_GLANCE_BUDGET = 52;
 
+/** Leading same-line `cd <target> &&|;` with the target captured unquoted. */
+const WORKSPACE_CD_PREFIX =
+  /^[ \t]*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|"'()<>]+))[ \t]*(&&|;)[ \t]+/u;
+
+function expandHome(path: string): string {
+  const home = homedir();
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return `${home}${path.slice(1)}`;
+  return path;
+}
+
+function trimTrailingSlashes(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/u, "") : path;
+}
+
+/**
+ * Display-only fold of a leading same-line `cd <workspace>` prefix: the header
+ * already sits in that directory, so repeating it costs glance budget and says
+ * nothing. Lexical comparison only (no fs, no realpath), absolute targets only,
+ * and a newline-separated `cd <workspace>` + command stays untouched. A missing
+ * `cwd` leaves the command unchanged — there is no `process.cwd()` fallback,
+ * because the rendered row must not depend on the renderer's own directory.
+ */
+function stripWorkspaceCdPrefix(command: string, cwd?: string): string {
+  if (!cwd) return command;
+  const match = WORKSPACE_CD_PREFIX.exec(command);
+  if (!match) return command;
+  const target = trimTrailingSlashes(expandHome(match[1] ?? match[2] ?? match[3] ?? ""));
+  const workspace = trimTrailingSlashes(expandHome(cwd));
+  if (!target.startsWith("/") || !workspace.startsWith("/")) return command;
+  const rest = command.slice(match[0].length);
+  if (target === workspace) return rest;
+  const prefix = workspace === "/" ? "/" : `${workspace}/`;
+  if (!target.startsWith(prefix)) return command;
+  return `${target.slice(prefix.length)} ${match[4] ?? "&&"} ${rest}`;
+}
+
 /**
  * Glance subject for bash headers: first logical line capped at `budget`
- * characters; `…` when truncated or more command lines exist.
+ * characters; `…` when truncated or more command lines exist. A leading
+ * `cd <cwd>` is folded before the budget applies, so the visible command start
+ * is the part that actually runs.
  */
-export function commandGlance(command: string, budget: number = BASH_GLANCE_BUDGET): string {
+export function commandGlance(
+  command: string,
+  budget: number = BASH_GLANCE_BUDGET,
+  cwd?: string,
+): string {
   if (!command) return "";
-  const lines = command.replace(/\r?\n/gu, "\n").split("\n");
+  const lines = stripWorkspaceCdPrefix(command, cwd).replace(/\r?\n/gu, "\n").split("\n");
   const first = lines[0]?.trim() ?? "";
   const hasMoreLines = lines.slice(1).some((line) => line.trim().length > 0);
   if (!first) return hasMoreLines ? "…" : "";

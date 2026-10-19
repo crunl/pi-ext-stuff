@@ -5,7 +5,7 @@ import {
   getLanguageFromPath,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { commandGlance, createBashExpandedEvidence } from "./bash-evidence.ts";
+import { BASH_GLANCE_BUDGET, commandGlance, createBashExpandedEvidence } from "./bash-evidence.ts";
 import { createEditDiffBox } from "./edit-diff.ts";
 import { createReadEvidence, summarizeReadLines } from "./read-evidence.ts";
 import { highlightShellCommandLines } from "./shell-command-highlight.ts";
@@ -177,7 +177,8 @@ export const codexBashToolSpec: CodexToolRendererSpec = {
   icon: "\uF155", // fa-upload / bash
   runningVerb: "Running",
   completedVerb: "Ran",
-  argument: (args) => commandGlance(typeof args.command === "string" ? args.command : ""),
+  argument: (args, cwd) =>
+    commandGlance(typeof args.command === "string" ? args.command : "", BASH_GLANCE_BUDGET, cwd),
   highlightArgument: (argument) =>
     argument.length > 0 ? highlightShellCommandLines(argument).join("\n") : argument,
   singleLineHeader: true,

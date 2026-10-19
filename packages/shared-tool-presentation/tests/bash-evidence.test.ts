@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -35,6 +36,66 @@ describe("commandGlance", () => {
   it("handles empty and whitespace-only commands", () => {
     expect(commandGlance("")).toBe("");
     expect(commandGlance("\n\n")).toBe("");
+  });
+});
+
+describe("commandGlance workspace cd fold", () => {
+  const cwd = "/repo";
+
+  it("drops a leading cd into the workspace root", () => {
+    expect(commandGlance("cd /repo && npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe("npx vitest");
+    expect(commandGlance("cd /repo; npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe("npx vitest");
+  });
+
+  it("relativizes a cd below the workspace root", () => {
+    expect(commandGlance("cd /repo/packages/foo && npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe(
+      "packages/foo && npx vitest",
+    );
+  });
+
+  it("keeps a cd outside the workspace root", () => {
+    expect(commandGlance("cd /tmp && npx vitest", BASH_GLANCE_BUDGET, cwd)).toBe(
+      "cd /tmp && npx vitest",
+    );
+    // `/repo-other` shares the string prefix but not a path segment.
+    expect(commandGlance("cd /repo-other && ls", BASH_GLANCE_BUDGET, cwd)).toBe(
+      "cd /repo-other && ls",
+    );
+  });
+
+  it("keeps the cd when no cwd is supplied", () => {
+    expect(commandGlance("cd /repo && npx vitest")).toBe("cd /repo && npx vitest");
+  });
+
+  it("unquotes a quoted cd target before comparing", () => {
+    expect(commandGlance('cd "/repo/packages/foo" && ls', BASH_GLANCE_BUDGET, cwd)).toBe(
+      "packages/foo && ls",
+    );
+    expect(commandGlance("cd '/repo' && ls", BASH_GLANCE_BUDGET, cwd)).toBe("ls");
+  });
+
+  it("expands a ~ target before comparing", () => {
+    expect(commandGlance("cd ~/repo && ls", BASH_GLANCE_BUDGET, `${homedir()}/repo`)).toBe("ls");
+    expect(commandGlance(`cd ${homedir()}/repo && ls`, BASH_GLANCE_BUDGET, "~/repo")).toBe("ls");
+  });
+
+  it("leaves a newline-separated cd untouched", () => {
+    expect(commandGlance("cd /repo\nnpx vitest", BASH_GLANCE_BUDGET, cwd)).toBe("cd /repo…");
+  });
+
+  it("folds before the budget truncates", () => {
+    const long = `cd /repo && ${"x".repeat(80)}`;
+    const glance = commandGlance(long, BASH_GLANCE_BUDGET, cwd);
+    expect(glance).toBe(`${"x".repeat(BASH_GLANCE_BUDGET)}…`);
+  });
+
+  it("folds a workspace cd that alone exceeds the budget", () => {
+    const deep = `/repo/${"segment/".repeat(12)}leaf`;
+    const glance = commandGlance(`cd ${deep} && ls`, BASH_GLANCE_BUDGET, cwd);
+    // The budget now lands inside the relative path instead of inside `cd /repo/…`.
+    expect(glance.startsWith("segment/segment/")).toBe(true);
+    expect(glance).not.toContain("cd ");
+    expect(glance).toBe(`${`${"segment/".repeat(12)}leaf && ls`.slice(0, BASH_GLANCE_BUDGET)}…`);
   });
 });
 
