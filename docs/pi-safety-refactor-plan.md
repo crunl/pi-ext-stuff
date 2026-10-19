@@ -1,7 +1,7 @@
 # pi-safety 重构：链路最简骨架
 
-Status: **第 2 步已落地**（删除 escalation，见第 4 节）。本文其余部分仍是目标形态
-与迁移顺序的规划；第 1 步已判定跳过（见 7 节），第 3、4 步未开始。
+Status: **第 2、3 步已落地；第 1、4 步判定无需改动**（见 7 节）。第 8 节的命令
+模型分层未开始。基线：`npm run check` 零错误，1805 tests 通过 1 跳过，biome 干净。
 
 所有路径相对 `extensions/pi-safety/`。规模基线：`src/` 58 个模块 24,459 行，
 `tests/` 27,925 行。
@@ -148,12 +148,17 @@ review: 以上都不命中
 
 | 分类器输出 | 门模型 |
 | --- | --- |
-| `Forbidden` | deny 门命中 |
+| `Forbidden` | **不是 deny**：仍进 review packet（见下方修正） |
 | `Skip` | allow 门命中 |
 | `NeedsApproval` | 两门都不命中 → 落空为 review |
 
 所以这一步是**重新接线**，不是重写分类逻辑。`classifyRiskWithCause` 原样保留，
 从「返回 disposition 给调用方判断」变成「在门内部被调用」。
+
+> **实施修正（第 3 步）**：上表最初把 `Forbidden` 写成「deny 门命中」，与代码
+> 不符。`classifyRiskWithCause` 返回 `Forbidden` 时，`evaluateRiskRequest` 的
+> 现有行为是 `prompt`（例：私有地址的 WebFetch 目标进 review），不是 `block`。
+> deny 门只承接那批显式 `action: "block"` 的拒绝；把它们混为一谈会变成行为变更。
 
 ### 2.4 这个形状删掉什么
 
@@ -369,17 +374,36 @@ LLM 作为唯一审批者时这个前提依然成立。倾向保留，省 LLM �
 `npm run check` / 1800 tests / biome 全绿。保留 `host-admitted`（0.98：host-first
 工具有真实消费点）。
 
-### 第 3 步：静态层改门模型（中风险）
+### 第 3 步：静态层改门模型（中风险）—— 已完成
 
-按第 2 节重接 `evaluateRiskRequest`。工作量：提取 `Skip` 清单 → 写 6 个谓词 →
-`decide()` 替换主体 → 调整受影响测试期望。
+`decide(denyGates, forceReviewGates, allowGates)` 用三组有序谓词替换了
+`wouldPrompt` 析取式和末尾的裸 `allow` return。落空即 review，不会变成 allow。
 
-**这是唯一一步需要修改现有测试断言的**，因为行为确实变了。要特别小心不要为了
-让测试过而放宽断言。
+两处与本节原设想不同，以实际代码为准：
 
-### 第 4 步：lease 模式收敛 + deny 构建器合并（低风险）
+1. **`Forbidden` 不映射到 deny 门。** 分类器返回 `Forbidden` 时当前行为是
+   `prompt`（如私有 WebFetch 目标），并未变成 `block`。deny 门只承接那批显式
+   `action: "block"` 的拒绝。若按原表接线会变成行为变更。
+2. **需要第三组 `forceReviewGates`。** `rule ask` 不能被证明安全的 allow 门
+   抵消，否则用户明确要求的审批会被悄悄跳过。它单独成组，落在 deny 之后、
+   allow 之前。
 
-四种 lease 模式减到两种，两个 deny 构建器合成一个。依赖第 2 步。
+`recoverable` 按 2.6 实现：`fix-arguments | transient | no` 在 deny 产生处标定，
+经 `AdmissionPlan` → `PermissionError` 传到渲染层。
+
+**行为等价，现有断言一条未改**（唯一的两处改动是新字段参与 `toEqual` 的期望值
+与测试 fixture 补字段）。新增 2 条测试锁定门序与落空语义。
+
+### 第 4 步：lease 模式收敛 + deny 构建器合并（低风险）—— 已由第 2 步达成
+
+`CapabilityLease.mode` 现在恰好是 `sandboxed | host-admitted | unrestricted`，
+没有第四种。原计划删掉 `host-admitted`，决策模型以 0.98 置信度否决：host-first
+工具（`read`/`grep`/`find`/`ls`）由 host 自己执行，与沙箱内执行是不同的事实，
+压成同一模式会让 Guardian 拿到错的 `sandboxEnforcesAction`。
+
+「两个 deny 构建器」核实后不存在：`createSandboxRuntimeConfig` 是唯一的 deny
+组装点（`projectDeny(denyWrite) + protectedRuntimeDeny + metadataDenyWrite`），
+`createFilesystemPolicy` 只做配置投影。没有可合并的重复。
 
 ### 7.1 关于 worktree
 
