@@ -481,7 +481,11 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyRead).toEqual([]);
     expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/**/.env");
     expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/**/*.key");
-    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
+    // History paths stay writable so the agent can commit; only the
+    // code-execution surfaces are denied. Agent-control dirs stay denied.
+    expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/.git");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git/hooks");
+    expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git/config");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.agents");
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.codex");
     expect(runtime.filesystem.denyWrite).not.toContain("/workspace/project/.pi/permissions.json");
@@ -504,39 +508,45 @@ describe("sandbox integration", () => {
     expect(runtime.filesystem.denyWrite).toContain("/workspace/project/.git");
   });
 
-  it("keeps Git config, hooks, and metadata roots hard-denied for extra roots", () => {
+  it("keeps Git config and hooks hard-denied while history roots stay writable", () => {
     const cwd = "/workspace/project";
     const gitRoot = `${cwd}/.git`;
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd, undefined, [gitRoot]);
 
+    expect(runtime.filesystem.denyWrite).not.toContain(gitRoot);
     expect(runtime.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([gitRoot, `${gitRoot}/hooks`, `${gitRoot}/config`]),
+      expect.arrayContaining([`${gitRoot}/hooks`, `${gitRoot}/config`]),
     );
 
     const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
     expect(exact.filesystem.allowWrite).toContain(gitRoot);
-    expect(exact.filesystem.denyWrite).toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
     expect(exact.filesystem.denyWrite).toEqual(
       expect.arrayContaining([`${gitRoot}/hooks`, `${gitRoot}/config`]),
     );
 
     const broad = withAdditionalWriteRoots(runtime, [cwd]);
     expect(broad.filesystem.allowWrite).toContain(cwd);
-    expect(broad.filesystem.denyWrite).toContain(gitRoot);
+    // Extra write roots never lift the hooks/config denies.
+    expect(broad.filesystem.denyWrite).not.toContain(gitRoot);
+    expect(broad.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([`${gitRoot}/hooks`, `${gitRoot}/config`]),
+    );
   });
 
-  it("does not form descendant deny patterns below a lexical .git pointer", () => {
+  it("denies the real root's execution surfaces below a lexical .git pointer", () => {
     const cwd = "/workspace/project";
     const metadataRoot = "/tmp/project-metadata.git";
     const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, cwd, undefined, [
       metadataRoot,
     ]);
 
-    expect(runtime.filesystem.denyWrite).toContain(`${cwd}/.git`);
-    expect(runtime.filesystem.denyWrite).not.toContain(`${cwd}/.git/hooks`);
-    expect(runtime.filesystem.denyWrite).not.toContain(`${cwd}/.git/config`);
+    // The pointer itself is not a directory: history through it stays
+    // writable, and its hooks/config entries are inert. The real root's
+    // execution surfaces are what the deny targets.
+    expect(runtime.filesystem.denyWrite).not.toContain(`${cwd}/.git`);
     expect(runtime.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([metadataRoot, `${metadataRoot}/hooks`, `${metadataRoot}/config`]),
+      expect.arrayContaining([`${metadataRoot}/hooks`, `${metadataRoot}/config`]),
     );
   });
 
@@ -654,14 +664,16 @@ describe("sandbox integration", () => {
       const refreshed = lastRequest.policy;
       expect(refreshed.filesystem.allowWrite).toEqual(policy.filesystem.allowWrite);
       expect(refreshed.filesystem.denyRead).toEqual(policy.filesystem.denyRead);
+      // The refresh picks up newly appeared metadata, but only its
+      // execution surfaces: history roots stay writable by default posture.
       expect(refreshed.filesystem.denyWrite).toEqual(
         expect.arrayContaining([
           ...policy.filesystem.denyWrite,
-          metadata,
           join(metadata, "hooks"),
           join(metadata, "config"),
         ]),
       );
+      expect(refreshed.filesystem.denyWrite).not.toContain(metadata);
       expect(refreshed.network).toEqual(policy.network);
       expect(policy.filesystem.denyWrite).toEqual(["/baseline/write"]);
     } finally {
@@ -880,11 +892,21 @@ describe("sandbox integration", () => {
     const gitRoot = "/workspace/project/.git";
     const agentsRoot = "/workspace/project/.agents";
 
+    // The history root itself stays writable by default posture; its
+    // execution surfaces and the agent-control dirs must survive any grant.
     const broad = withAdditionalWriteRoots(runtime, ["/workspace"]);
-    expect(broad.filesystem.denyWrite).toContain(gitRoot);
+    expect(broad.filesystem.denyWrite).not.toContain(gitRoot);
+    expect(broad.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([
+        `${gitRoot}/hooks`,
+        `${gitRoot}/config`,
+        agentsRoot,
+        "/workspace/project/.codex",
+      ]),
+    );
 
     const exact = withAdditionalWriteRoots(runtime, [gitRoot]);
-    expect(exact.filesystem.denyWrite).toContain(gitRoot);
+    expect(exact.filesystem.denyWrite).not.toContain(gitRoot);
     expect(exact.filesystem.denyWrite).toContain(agentsRoot);
     expect(exact.filesystem.denyWrite).toContain("/workspace/project/.codex");
   });

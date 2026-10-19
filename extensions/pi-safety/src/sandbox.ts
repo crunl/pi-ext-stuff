@@ -84,23 +84,21 @@ async function executeSandboxProgram(
   return manager.execute(policy === request.policy ? request : { ...request, policy });
 }
 
-/** Add only current Git metadata deny rules to one execution's policy copy. */
+/** Deny only the Git code-execution surfaces for one execution's policy copy.
+ * History paths (objects/refs/index/logs) stay writable so the agent can
+ * commit — see `createSandboxRuntimeConfig` for the same posture. */
 function policyWithGitMetadataProtection(
   policy: SandboxPolicy,
   cwd: string,
   roots: readonly string[],
 ): SandboxPolicy {
   const metadataRoots = [...new Set(roots.flatMap((root) => expandSymlinkAliases(resolve(root))))];
-  if (metadataRoots.length === 0) return policy;
-
   const denyWrite = [...policy.filesystem.denyWrite];
   const additions: string[] = [];
-  for (const root of expandSymlinkAliases(resolve(cwd, ".git"))) {
-    if (!denyWrite.includes(root)) additions.push(root);
-  }
-  for (const root of metadataRoots) {
-    if (denyWrite.includes(root)) continue;
-    additions.push(root, join(root, "hooks"), join(root, "config"));
+  for (const root of [...expandSymlinkAliases(resolve(cwd, ".git")), ...metadataRoots]) {
+    for (const entry of [join(root, "hooks"), join(root, "config")]) {
+      if (!denyWrite.includes(entry)) additions.push(entry);
+    }
   }
   const uniqueAdditions = [...new Set(additions)].filter((path) => !denyWrite.includes(path));
   if (uniqueAdditions.length === 0) return policy;

@@ -356,20 +356,36 @@ export function createSandboxRuntimeConfig(
   const denyRead = filesystem.denyRead.flatMap((pattern) =>
     expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
   );
-  const denyWrite = filesystem.denyWrite.flatMap((pattern) =>
-    expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)),
-  );
+  const projectDeny = (patterns: readonly string[]): string[] =>
+    patterns.flatMap((pattern) => expandSymlinkAliases(resolveSandboxDenyPattern(pattern, cwd)));
   const gitRoot = resolve(cwd, ".git");
   const gitAliases = new Set(expandSymlinkAliases(gitRoot));
+  // Protected controls project into runtime denies, except the history root:
+  // static `protectedWritePaths` still blocks direct writes and reviews rms
+  // there, but the runtime must let git itself mutate history. User rules
+  // project untouched — only protected-derived history entries are dropped.
+  const protectedRuntimeDeny = projectDeny(filesystem.protectedWritePaths).filter(
+    (entry) => !gitAliases.has(entry),
+  );
   const metadataRoots = [
     ...new Set(gitMetadataProtectionRoots.flatMap((path) => expandSymlinkAliases(resolve(path)))),
   ];
-  const metadataDenyWrite = metadataRoots.flatMap((root) => [
-    root,
+  // History paths (objects/refs/index/logs) stay writable so the agent can
+  // commit: an undecorated sandbox does not deny them. Only the
+  // code-execution surfaces (hooks, config) are denied, for every root
+  // including lexical .git pointers (inert entries when the root is a file).
+  // No knob by design — this is the default posture, not an opt-in.
+  const metadataDenyWrite = [...gitAliases, ...metadataRoots].flatMap((root) => [
     join(root, "hooks"),
     join(root, "config"),
   ]);
-  const finalDenyWrite = [...new Set([...denyWrite, ...gitAliases, ...metadataDenyWrite])];
+  const finalDenyWrite = [
+    ...new Set([
+      ...projectDeny(config.filesystem.denyWrite),
+      ...protectedRuntimeDeny,
+      ...metadataDenyWrite,
+    ]),
+  ];
   return {
     filesystem: {
       allowWrite: filesystem.allowWrite,

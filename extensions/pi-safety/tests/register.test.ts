@@ -3748,8 +3748,13 @@ describe("Permission mode registration", () => {
     expect(
       app.sandboxManager.execute.mock.calls[1]?.[0].policy.network.allowLocalBinding,
     ).toBeUndefined();
-    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.filesystem.denyWrite).toContain(
+    // Amendments widen authority without lifting hard denies: history stays
+    // writable, but the execution surfaces survive.
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.filesystem.denyWrite).not.toContain(
       join(app.cwd, ".git"),
+    );
+    expect(app.sandboxManager.execute.mock.calls[1]?.[0].policy.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([join(app.cwd, ".git", "hooks"), join(app.cwd, ".git", "config")]),
     );
     expect(app.reviewInputs).toHaveLength(1);
   });
@@ -4126,7 +4131,10 @@ describe("Permission mode registration", () => {
       deniedDomains: ["blocked.example.com"],
     });
     expect(childPolicy.filesystem.denyRead).toContain("/explicit-secret");
-    expect(childPolicy.filesystem.denyWrite).toContain(join(app.cwd, ".git"));
+    expect(childPolicy.filesystem.denyWrite).not.toContain(join(app.cwd, ".git"));
+    expect(childPolicy.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([join(app.cwd, ".git", "hooks"), join(app.cwd, ".git", "config")]),
+    );
     await expect(
       executeRequestPermissions(app, "child-outside", "other.example.com"),
     ).rejects.toMatchObject({ code: "policy-denied" });
