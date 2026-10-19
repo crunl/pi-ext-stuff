@@ -58,34 +58,16 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-/** `└ Ran 1 command · Read 3 files · Edited 1 file · 1 failed · 2 images` */
+/** `└ Execute` — the glance is a static label; the category breakdown lives in the expanded tree. */
 export function formatCodemodeGlance(
-  glance: GlanceSummary,
+  _glance: GlanceSummary,
   theme: CodemodeTreeTheme,
   options: { leadingIconOverride?: string; imageCount?: number } = {},
 ): string {
   const root = options.leadingIconOverride
     ? theme.fg("warning", theme.bold(options.leadingIconOverride))
     : theme.fg("dim", "└");
-  const parts: string[] = [];
-  if (glance.commands > 0)
-    parts.push(theme.bold(`Ran ${plural(glance.commands, "command", "commands")}`));
-  if (glance.reads > 0) parts.push(theme.bold(`Read ${plural(glance.reads, "file", "files")}`));
-  if (glance.edits > 0) parts.push(theme.bold(`Edited ${plural(glance.edits, "file", "files")}`));
-  if (glance.other > 0) parts.push(theme.bold(plural(glance.other, "call", "calls")));
-  if (parts.length === 0) parts.push(theme.bold(plural(glance.total, "tool", "tools")));
-  const failure =
-    glance.failed > 0
-      ? theme.fg(
-          "error",
-          glance.failed === glance.total ? " · all failed" : ` · ${glance.failed} failed`,
-        )
-      : "";
-  const active = glance.running > 0 ? theme.fg("warning", ` · ${glance.running} running`) : "";
-  const imageCount = options.imageCount ?? 0;
-  const images =
-    imageCount > 0 ? theme.fg("muted", ` · ${plural(imageCount, "image", "images")}`) : "";
-  return `${root} ${parts.join(theme.fg("muted", " · "))}${failure}${active}${images}`;
+  return `${root} ${theme.bold("Execute")}`;
 }
 
 export function formatNestedCallRow(

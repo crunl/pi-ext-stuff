@@ -33,17 +33,17 @@ function child(partial: Partial<ChildRow> & { id: string; toolLabel: string }): 
 }
 
 describe("formatCodemodeGlance", () => {
-  it("summarizes categories in English", () => {
+  it("renders a static Execute label for mixed counts", () => {
     const line = formatCodemodeGlance(
       glance({ total: 5, commands: 1, reads: 3, edits: 1, failed: 1 }),
       theme,
     );
-    expect(line).toBe("└ Ran 1 command · Read 3 files · Edited 1 file · 1 failed");
+    expect(line).toBe("└ Execute");
   });
 
-  it("omits empty categories and uses singular nouns", () => {
+  it("shows Execute for a single command without counting", () => {
     const line = formatCodemodeGlance(glance({ total: 1, commands: 1 }), theme);
-    expect(line).toBe("└ Ran 1 command");
+    expect(line).toBe("└ Execute");
   });
 
   it("prefers review icon override when provided", () => {
@@ -120,12 +120,13 @@ describe("createCodemodeTreeRendering", () => {
       { expanded: false },
       context(false),
     );
-    expect(joined).toContain("Ran 1 command");
+    expect(joined).toContain("Execute");
+    expect(joined).not.toContain("command");
     expect(joined).not.toContain("body");
     expect(joined).not.toContain("├");
   });
 
-  it("mentions generated images in the collapsed glance", () => {
+  it("omits image counts from the collapsed glance", () => {
     const joined = render(
       {
         content: [
@@ -139,7 +140,7 @@ describe("createCodemodeTreeRendering", () => {
       { expanded: false },
       context(false),
     );
-    expect(joined.trimEnd()).toBe("└ Ran 1 command · 1 image");
+    expect(joined.trimEnd()).toBe("└ Execute");
   });
 
   it("renders child rows and collapsible code/output when expanded", () => {
@@ -156,7 +157,9 @@ describe("createCodemodeTreeRendering", () => {
       { expanded: true },
       context(true),
     );
-    expect(joined).toContain("1 failed");
+    expect(joined.startsWith("└ Execute")).toBe(true); // root carries no counts
+    expect(joined).toContain("✗ read"); // failure surfaces in the child row
+    expect(joined).toContain("missing");
     expect(joined).toContain("pwd");
     expect(joined).toContain("▸ code");
     expect(joined).toContain("▸ output");
@@ -172,7 +175,8 @@ describe("createCodemodeTreeRendering", () => {
       { expanded: true, isPartial: true },
       context(true),
     );
-    expect(joined).toContain("running");
+    expect(joined.startsWith("└ Execute")).toBe(true); // root carries no counts
+    expect(joined).toContain("… bash"); // running state surfaces in the child row
     expect(joined).not.toContain("partial-body");
     expect(joined).not.toContain("▸ output");
   });
