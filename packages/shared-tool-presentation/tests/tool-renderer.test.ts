@@ -1,7 +1,7 @@
 import { stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
-import { compactBashStatusSpacing, summarizeEditDiff } from "../src/tui/codex-tool-specs.ts";
-import { createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+import { compactBashStatusSpacing, summarizeEditDiff } from "../src/codex-tool-specs.ts";
+import { createCodexToolRendering } from "../src/tool-renderer.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

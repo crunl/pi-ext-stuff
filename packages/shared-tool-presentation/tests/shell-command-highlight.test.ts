@@ -1,6 +1,6 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { beforeAll, describe, expect, it } from "vitest";
-import { highlightShellCommandLines } from "../src/tui/shell-command-highlight.ts";
+import { highlightShellCommandLines } from "../src/shell-command-highlight.ts";
 
 beforeAll(() => {
   initTheme("dark", false);

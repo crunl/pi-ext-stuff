@@ -6,7 +6,7 @@ import {
   READ_EVIDENCE_MAX_CHARS,
   READ_EVIDENCE_MAX_LINES,
   summarizeReadLines,
-} from "../src/tui/read-evidence.ts";
+} from "../src/read-evidence.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

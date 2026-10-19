@@ -5,7 +5,7 @@ import {
   BASH_GLANCE_BUDGET,
   commandGlance,
   createBashExpandedEvidence,
-} from "../src/tui/bash-evidence.ts";
+} from "../src/bash-evidence.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

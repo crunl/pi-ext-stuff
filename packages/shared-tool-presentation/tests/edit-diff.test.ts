@@ -1,7 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { createEditDiffBox, parseEditDiff } from "../src/tui/edit-diff.ts";
+import { createEditDiffBox, parseEditDiff } from "../src/edit-diff.ts";
 
 // Theme fake: MiniMax dedicated diff backgrounds apply regardless of fg tint.
 const BASE_BG = "\u001b[48;2;60;60;70m";

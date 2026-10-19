@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderWritePreviewText, updateWriteHighlightCache } from "../src/tui/write-preview.ts";
+import { renderWritePreviewText, updateWriteHighlightCache } from "../src/write-preview.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

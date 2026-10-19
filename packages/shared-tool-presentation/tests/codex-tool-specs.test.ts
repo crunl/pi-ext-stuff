@@ -14,8 +14,8 @@ import {
   displayPath,
   summarizeBashOutput,
   summarizeEditDiff,
-} from "../src/tui/codex-tool-specs.ts";
-import { type CodexToolRendererSpec, createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+} from "../src/codex-tool-specs.ts";
+import { type CodexToolRendererSpec, createCodexToolRendering } from "../src/tool-renderer.ts";
 
 beforeAll(() => {
   initTheme("dark", false);

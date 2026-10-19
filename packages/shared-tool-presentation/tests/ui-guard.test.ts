@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isInteractiveTui } from "../src/tui/ui-guard.ts";
+import { isInteractiveTui } from "../src/ui-guard.ts";
 
 describe("isInteractiveTui", () => {
   it("is true only when the host has UI and runs in tui mode", () => {

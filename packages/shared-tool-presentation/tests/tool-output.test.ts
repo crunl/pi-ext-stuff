@@ -13,7 +13,7 @@ import {
   buildOutputPreview,
   countNonEmptyLines,
   hasMeaningfulToolOutput,
-} from "../src/tui/tool-output.ts";
+} from "../src/tool-output.ts";
 
 describe("buildOutputPreview", () => {
   it("keeps the head and tail within the Codex five-row budget", () => {

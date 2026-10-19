@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withCodexToolPresentation } from "../src/tui/codex-tool-presentation.ts";
+import { withCodexToolPresentation } from "../src/codex-tool-presentation.ts";
 
 function definition(name: string) {
   const execute = async () => ({ content: [], details: undefined });

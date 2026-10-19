@@ -6,7 +6,7 @@ import {
   OutputPaddingController,
   outputPaddingController,
   registerOutputPaddingSync,
-} from "../src/tui/output-padding.ts";
+} from "../src/output-padding.ts";
 
 const temporaryDirectories: string[] = [];
 

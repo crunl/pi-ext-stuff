@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   COMMAND_CONTINUATION_PREFIX,
   WrappedCommandHeader,
-} from "../src/tui/bash-command-header.ts";
+} from "../src/bash-command-header.ts";
 
 function leading() {
   return { icon: "X ", verb: "Ran", summary: "" };
