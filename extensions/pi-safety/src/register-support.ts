@@ -4,6 +4,7 @@ import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import { renderPermissionErrorForAgent } from "./permission-copy.ts";
 import { effectiveNetworkAuthority } from "./policy-primitives.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
+import type { PermissionExecutionSnapshot } from "./permission-session.ts";
 import type { PermissionMode } from "./state.ts";
 import { isRecord } from "./unknown-value.ts";
 import type { BlockRecoverability } from "./approve-for-me-engine.ts";
@@ -167,6 +168,28 @@ export function configKey(ctx: Pick<ExtensionContext, "cwd">): string {
  * subtracted — extension_ms never includes it.
  */
 export const TURN_TRACE_ENV = "PI_SAFETY_TRACE";
+
+/** The mode a registered tool actually executes under after activation. */
+export type ExecutablePermissionMode = PermissionMode;
+
+/**
+ * What a prepared permission call executes against: the applied snapshot, the
+ * mode it was captured in, and the config that produced it. Shared by the
+ * registration and by the request_permissions tool so both read one shape.
+ */
+export interface EffectiveExecutionContext {
+  readonly snapshot: PermissionExecutionSnapshot;
+  readonly mode: ExecutablePermissionMode;
+  readonly config: SafetyConfig;
+  readonly baseSandboxConfig?: SandboxPolicy;
+  readonly sandboxReady: boolean;
+}
+
+/** The pair returned by preparePermissionExecution. */
+export interface PreparedPermissionExecution {
+  readonly executionSnapshot: PermissionExecutionSnapshot;
+  readonly executionContext: EffectiveExecutionContext;
+}
 
 export interface TurnTraceSegments {
   capture?: number;

@@ -18,16 +18,14 @@ import {
   createWriteTool,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { type TSchema, Type } from "typebox";
+import type { TSchema } from "typebox";
 import {
   codexBashToolSpec,
   codexEditToolSpec,
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../../packages/shared-tool-presentation/src/index.ts";
-import {
-  matchesNetworkDomainPattern,
-} from "./approve-for-me-engine.ts";
+import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   bashFailureText,
@@ -128,17 +126,20 @@ import {
   turnTraceEnabled,
   type TurnTraceSegments,
 } from "./register-support.ts";
+import { registerRequestPermissionsTool } from "./register-request-permissions.ts";
+import {
+  permissionedBashDescriptionSuffix,
+  permissionedBashPromptGuidelines,
+} from "./register-tool-copy.ts";
 import {
   createReviewResultRenderer,
   createReviewStatusBridge,
-  plainReviewResultRenderer,
   type ReviewPartialResult,
   type ReviewRenderResult,
 } from "./review-renderer.ts";
 import {
   evaluateHostFirstRulesOnly,
   evaluateRiskRequest,
-  isSupportedPermissionRequestShape,
   type RiskDecision,
 } from "./risk-policy.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
@@ -2041,10 +2042,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     ...baseBash,
     ...addReviewResultRenderer(adoptHostTheme(codexBashToolSpec)),
     label: "bash",
-    description: `${baseBash.description} When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write. A sandboxed write to Git metadata (.git/hooks, .git/config and similar) fails with EPERM ('could not lock config file'); that error is final for the sandboxed path — the parameter set offers no escalation, so either request a narrower write with with_additional_permissions where the target allows it, or ask the user to switch to yolo. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped grant.`,
-    promptGuidelines: [
-      "When the active sandbox does not allow a required filesystem operation, use with_additional_permissions for the smallest exact sandbox write and explain why. A sandboxed write to Git metadata (.git/hooks, .git/config and similar) fails with EPERM ('could not lock config file'); there is no escalation parameter, so treat that error as final for the sandboxed path: request a narrower write where the target allows it, or ask the user to switch to yolo. A shell pipeline reports only the last command's exit status; run the command directly, or check the PIPESTATUS array right after, when its status matters. Public network access is reviewed automatically at the connection boundary; use request_permissions for an explicit turn-scoped network grant.",
-    ],
+    description: `${baseBash.description} ${permissionedBashDescriptionSuffix}`,
+    promptGuidelines: [...permissionedBashPromptGuidelines],
     parameters: permissionedBashParameters,
     prepareArguments: preparePermissionedBashArguments as (args: unknown) => {
       command: string;
@@ -2076,196 +2075,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     execute: executePermissionedEdit,
   });
 
-  pi.registerTool({
-    name: "request_permissions",
-    label: "request_permissions",
-    description:
-      "Request a turn-scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for execution attempts created afterwards in the current turn and does not disable the sandbox. Network authority freezes at attempt creation after action review, not invocation submission; a still-reviewing invocation may see an intervening grant. It does not expand an existing attempt or replay an action. Protected paths and prohibited targets remain blocked.",
-    promptSnippet: "Request explicit filesystem/network permissions",
-    parameters: Type.Object({
-      reason: Type.Optional(Type.String()),
-      scope: Type.Optional(Type.Literal("turn")),
-      permissions: Type.Object({
-        file_system: Type.Optional(Type.Object({ write: Type.Array(Type.String()) })),
-        network: Type.Optional(
-          Type.Union([
-            Type.Object({ hosts: Type.Array(Type.String()) }),
-            Type.Object({ network_access: Type.Literal(true) }),
-          ]),
-        ),
-      }),
-    }),
-    // SAFETY: same renderer-wrapper contract as addReviewResultRenderer —
-    // identical input/output behavior, assertion only bridges host generics.
-    renderResult: createReviewResultRenderer(
-      plainReviewResultRenderer,
-      "overlay",
-    ) as unknown as NonNullable<ToolDefinition<TSchema>["renderResult"]>,
-    // Machine-readable grant for codemode callers; the model still receives
-    // `content` text. Deliberately no readOnlyHint: a permission grant is a
-    // privilege-escalation entry point and must keep the MCP-default
-    // "not read-only, may be destructive" posture toward external reviewers.
-    outputSchema: Type.Object({
-      granted: Type.Boolean(),
-      networkAll: Type.Boolean(),
-      hosts: Type.Array(Type.String()),
-      writeRoots: Type.Array(Type.String()),
-    }),
-    async execute(id, params, _signal, _onUpdate, ctx) {
-      if (!isSupportedPermissionRequestShape(params)) {
-        const reason =
-          "request_permissions requires an unambiguous turn-scoped network.hosts OR network_access:true request, and/or file_system.write";
-        throw policyDeniedError(reason);
-      }
-      const actionSignal = _signal;
-      const captured = permissions.captureAction({
-        id,
-        tool: "request_permissions",
-        input: params,
-        cwd: resolve(ctx.cwd),
-      });
-      const { call } = captured;
-      const actionId = call.id;
-      const canonicalCwd = call.cwd;
-      const canonicalParams = call.input;
-      const capturedTranscript = currentGuardianTranscriptSnapshot();
-      const { executionSnapshot, executionContext } = await preparePermissionExecution(ctx);
-      const decision = await evaluateManagedRisk(
-        "request_permissions",
-        canonicalParams as Record<string, unknown>,
-        ctx,
-        executionContext,
-        canonicalCwd,
-      );
-      if (decision.action === "block") {
-        throw policyDeniedError(decision.reason, decision.recoverable);
-      }
-      if (
-        decision.action !== "prompt" ||
-        (!decision.networkAll &&
-          (decision.networkHosts?.length ?? 0) === 0 &&
-          (decision.filesystemWriteRoots?.length ?? 0) === 0)
-      ) {
-        throw policyDeniedError("request_permissions requires a non-empty capability request");
-      }
-      if (decision.networkAll && session.activeDelegationCeiling()) {
-        throw policyDeniedError("Whole-network authority is outside the delegation envelope");
-      }
-      // A nested amendment may only request capabilities inside its
-      // delegation envelope; the child Engine would otherwise accumulate
-      // rights the parent never granted it.
-      for (const root of decision.filesystemWriteRoots ?? []) {
-        const violation = checkDelegationWrite(
-          resolvePolicyPath(root, canonicalCwd),
-          executionSnapshot.mode,
-          executionContext.config,
-          delegationScope(),
-        );
-        if (violation) {
-          throw policyDeniedError(violation);
-        }
-      }
-      for (const host of decision.networkHosts ?? []) {
-        const violation = checkDelegationNetwork(host, executionSnapshot.mode, delegationScope());
-        if (violation) {
-          throw policyDeniedError(violation);
-        }
-      }
-      const reason = canonicalParams.reason ?? decision.reason;
-      const event = {
-        type: "tool_call" as const,
-        toolCallId: actionId,
-        toolName: "request_permissions",
-        input: canonicalParams,
-      } as ToolCallEvent;
-      // SAFETY: same bridge contract as the bash path — only ReviewPartialResult
-      // payloads reach the host update channel.
-      const reviewBridge = createReviewStatusBridge(
-        _onUpdate as unknown as (result: ReviewPartialResult) => void,
-        ctx.hasUI ? (message, severity) => ctx.ui.notify(message, severity) : undefined,
-      );
-      const action: PiAction<WriteResult, PiGuardianReviewContext, typeof canonicalParams> = {
-        captured,
-        kind: "permission-amendment",
-        risk: decision,
-        permission: {
-          reason,
-        },
-        reviewContext: createPiGuardianReviewContext(
-          event,
-          executionContext,
-          ctx,
-          capturedTranscript,
-          canonicalCwd,
-        ),
-        signal: actionSignal,
-        reviewStatus: reviewBridge.binding,
-        execute: async ({
-          mode,
-          policy,
-          signal: attemptSignal,
-        }): Promise<PiActionOutcome<WriteResult>> => {
-          try {
-            if (attemptSignal.aborted) return { kind: "failed", error: new Error("aborted") };
-            if (mode === "unrestricted") {
-              return {
-                kind: "completed",
-                value: {
-                  content: [
-                    {
-                      type: "text",
-                      text: "Bypass permissions is already active; no additional permission grant was recorded.",
-                    },
-                  ],
-                  details: undefined,
-                  // Host forwards unknown result fields to tool_result
-                  // (agent-session spread); AgentToolResult omits the field
-                  // by type, same as the host bash tool's own literal.
-                  structuredContent: {
-                    granted: false,
-                    networkAll: false,
-                    hosts: [],
-                    writeRoots: [],
-                  },
-                } as WriteResult,
-              };
-            }
-            if (mode !== "sandboxed" || !policy) {
-              return {
-                kind: "failed",
-                error: new Error("Sandbox enforcement is unavailable for this action"),
-              };
-            }
-            const grantedHosts = [...(decision.networkHosts ?? [])];
-            const grantedRoots = [...(decision.filesystemWriteRoots ?? [])];
-            return {
-              kind: "completed",
-              value: {
-                content: [
-                  {
-                    type: "text",
-                    text: `Granted turn permissions${decision.networkAll ? "; whole-network outbound authority subject to hard domain/private policy (not bind or TLS authority)" : ""}${
-                      grantedHosts.length > 0 ? `; hosts: ${grantedHosts.join(", ")}` : ""
-                    }${grantedRoots.length > 0 ? `; write roots: ${grantedRoots.join(", ")}` : ""}`,
-                  },
-                ],
-                details: undefined,
-                // Same host-forwarding contract as the bypass branch above.
-                structuredContent: {
-                  granted: true,
-                  networkAll: decision.networkAll ?? false,
-                  hosts: grantedHosts,
-                  writeRoots: grantedRoots,
-                },
-              } as WriteResult,
-            };
-          } catch (error: unknown) {
-            return { kind: "failed", error };
-          }
-        },
-      };
-      return executePermissionAction(action);
-    },
+  registerRequestPermissionsTool(pi, {
+    executePermissionAction,
+    preparePermissionExecution,
+    evaluateManagedRisk,
+    createPiGuardianReviewContext,
+    delegationScope,
+    currentGuardianTranscriptSnapshot,
+    session,
+    permissions,
   });
 
   const reportPermissionSetupError = (

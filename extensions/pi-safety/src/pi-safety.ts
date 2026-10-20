@@ -68,7 +68,7 @@ interface PiActionCall<Input = unknown> {
 const CAPTURED_ACTION = Symbol("pi-safety-captured-action");
 
 /** Opaque proof that the complete action identity was cloned at Pi ingress. */
-interface PiCapturedAction<Input = unknown> {
+export interface PiCapturedAction<Input = unknown> {
   readonly call: PiActionCall<Input>;
   readonly [CAPTURED_ACTION]: true;
 }
