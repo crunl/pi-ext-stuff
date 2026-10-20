@@ -18,6 +18,14 @@ import {
   projectExecutionNetwork,
   type SandboxPolicy,
 } from "./sandbox-policy.ts";
+import {
+  cloneInvocation,
+  cloneInvocationCall,
+  cloneLease,
+  clonePolicy,
+  cloneSnapshot,
+} from "./engine-clone.ts";
+import { callFingerprint, invocationFingerprint, retryFingerprint } from "./engine-fingerprint.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.
@@ -531,18 +539,6 @@ const DEFAULT_DENIAL_WINDOW_SIZE = 50;
 const DEFAULT_MAX_WINDOW_DENIALS = 10;
 const MAX_DENIAL_NOTICES = 10;
 
-function clonePolicy(policy: SandboxPolicy | undefined): SandboxPolicy | undefined {
-  return policy === undefined ? undefined : structuredClone(policy);
-}
-
-function cloneLease(lease: CapabilityLease): CapabilityLease {
-  const policy = clonePolicy(lease.policy);
-  return {
-    mode: lease.mode,
-    ...(policy === undefined ? {} : { policy }),
-  };
-}
-
 function nativeFailureEvidence(outcome: NativeActionFailure): string {
   const failure = outcome.failure;
   return `${errorMessage(outcome.error)}${isRecord(failure) && typeof failure.error === "string" ? `\nHelper failure: ${failure.error}` : ""}\nEffects warning: preparation may have partial directory effects; any content-write attempt may have truncated the file.`;
@@ -550,77 +546,6 @@ function nativeFailureEvidence(outcome: NativeActionFailure): string {
 
 function withExecutionEffects(error: PermissionError): PermissionError {
   return error.effectsMayHaveOccurred === true ? error : { ...error, effectsMayHaveOccurred: true };
-}
-
-function cloneMetadata(metadata: unknown): InvocationCall["metadata"] {
-  if (metadata === undefined) return undefined;
-  try {
-    return structuredClone(metadata);
-  } catch {
-    throw new Error("Invocation metadata must be structured-cloneable");
-  }
-}
-
-function cloneInvocationCall(call: InvocationCall): InvocationCall {
-  const metadata = cloneMetadata(call.metadata);
-  let input: unknown;
-  try {
-    input = structuredClone(call.input);
-  } catch {
-    throw new Error("Invocation input must be structured-cloneable");
-  }
-  return {
-    id: call.id,
-    tool: call.tool,
-    input,
-    cwd: resolve(call.cwd),
-    ...(metadata === undefined ? {} : { metadata }),
-  };
-}
-
-function cloneInvocation<T, ReviewContext>(
-  invocation: Invocation<T, ReviewContext>,
-): Invocation<T, ReviewContext> {
-  let admission: AdmissionPlan | undefined;
-  let intent: PermissionAmendment | undefined;
-  const runtimeDenialPolicy = invocation.runtimeDenialPolicy;
-  if (
-    runtimeDenialPolicy !== undefined &&
-    runtimeDenialPolicy !== "terminal" &&
-    runtimeDenialPolicy !== "review-and-retry"
-  ) {
-    throw new Error("Invocation runtime denial policy is invalid");
-  }
-  try {
-    admission =
-      invocation.admission === undefined ? undefined : structuredClone(invocation.admission);
-    intent = invocation.intent === undefined ? undefined : structuredClone(invocation.intent);
-  } catch {
-    throw new Error("Invocation authorization evidence must be structured-cloneable");
-  }
-  return {
-    ownership: invocation.ownership,
-    call: cloneInvocationCall(invocation.call),
-    ...(admission === undefined ? {} : { admission }),
-    ...(intent === undefined ? {} : { intent }),
-    ...(runtimeDenialPolicy === undefined ? {} : { runtimeDenialPolicy }),
-    reviewContext: invocation.reviewContext,
-    executor: invocation.executor,
-    ...(invocation.signal === undefined ? {} : { signal: invocation.signal }),
-  };
-}
-
-function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
-  return {
-    sessionId: snapshot.sessionId,
-    turnId: snapshot.turnId,
-    mode: snapshot.mode,
-    cwd: resolve(snapshot.cwd),
-    configFingerprint: snapshot.configFingerprint,
-    baseSandboxPolicy: clonePolicy(snapshot.baseSandboxPolicy),
-    sandboxReady: snapshot.sandboxReady,
-    transcript: snapshot.transcript === undefined ? [] : structuredClone(snapshot.transcript),
-  };
 }
 
 function pathMatches(pattern: string, path: string): boolean {
@@ -945,59 +870,6 @@ function leaseWithAdditionalRequests(
   return next;
 }
 
-function invocationFingerprint(
-  state: TurnState,
-  call: InvocationCall,
-  ownership: InvocationOwnership,
-  includeCallId: boolean,
-): string {
-  const identity = {
-    sessionId: state.snapshot.sessionId,
-    turnId: state.snapshot.turnId,
-    configFingerprint: state.snapshot.configFingerprint,
-    ownership,
-    tool: call.tool.toLowerCase(),
-    input: call.input,
-    cwd: resolve(call.cwd),
-    metadata: call.metadata,
-  };
-  return fingerprintValue(includeCallId ? { ...identity, id: call.id } : identity);
-}
-
-function callFingerprint(
-  state: TurnState,
-  call: InvocationCall,
-  ownership: InvocationOwnership,
-): string {
-  return invocationFingerprint(state, call, ownership, true);
-}
-
-function retryFingerprint(
-  state: TurnState,
-  call: InvocationCall,
-  ownership: InvocationOwnership,
-  grantScope: readonly CapabilityRequest[],
-  admissionScope: readonly CapabilityRequest[],
-  justification?: string,
-): string {
-  // A manually armed retry is a request to review the same action in the
-  // next turn, not permission to replay the old tool-call envelope.  Keep the
-  // session/config/ownership/action identity, but deliberately omit both the
-  // old turn id and old call id so Pi can issue a fresh invocation.
-  return fingerprintValue({
-    sessionId: state.snapshot.sessionId,
-    configFingerprint: state.snapshot.configFingerprint,
-    ownership,
-    tool: call.tool.toLowerCase(),
-    input: call.input,
-    cwd: resolve(call.cwd),
-    metadata: call.metadata,
-    grantScope,
-    admissionScope,
-    justification,
-  });
-}
-
 export function createApproveForMeEngine<ReviewContext = undefined>(
   options: ApproveForMeEngineOptions<ReviewContext> = {},
 ): ApproveForMeEngine<ReviewContext> {
@@ -1099,7 +971,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     const frozenAdmissionRequested = denial.admissionRequested.map((item) => structuredClone(item));
     const retryHandle = makeRetryHandle({
       fingerprint: retryFingerprint(
-        state,
+        state.snapshot,
         request.call,
         request.ownership,
         frozenRequested,
@@ -1439,7 +1311,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     request: Invocation<unknown, ReviewContext>,
     requested: readonly CapabilityRequest[],
   ): GrantRecord | undefined => {
-    const fingerprint = callFingerprint(state, request.call, request.ownership);
+    const fingerprint = callFingerprint(state.snapshot, request.call, request.ownership);
     const grant = state.grants.get(request.call.id);
     if (!grant || grant.callFingerprint !== fingerprint) return undefined;
     // Delete before the Adapter is entered: this is the atomic one-shot spend.
@@ -1484,7 +1356,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let basePolicyFingerprint: string;
     let evidenceFingerprint: string;
     try {
-      key = invocationFingerprint(state, request.call, request.ownership, false);
+      key = invocationFingerprint(state.snapshot, request.call, request.ownership, false);
       requestedFingerprint = fingerprintValue(requested);
       basePolicyFingerprint = fingerprintValue(state.snapshot.baseSandboxPolicy ?? null);
       evidenceFingerprint = fingerprintValue(evidence);
@@ -1517,7 +1389,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
     let key: string;
     let entry: ApprovalCacheEntry;
     try {
-      key = invocationFingerprint(state, request.call, request.ownership, false);
+      key = invocationFingerprint(state.snapshot, request.call, request.ownership, false);
       entry = {
         requestedFingerprint: fingerprintValue(requested),
         basePolicyFingerprint: fingerprintValue(state.snapshot.baseSandboxPolicy ?? null),
@@ -2151,7 +2023,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         armed !== undefined &&
         armed.record.fingerprint ===
           retryFingerprint(
-            state,
+            state.snapshot,
             request.call,
             request.ownership,
             armed.record.requested,
@@ -2265,7 +2137,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       armed !== undefined &&
       armed.record.fingerprint ===
         retryFingerprint(
-          state,
+          state.snapshot,
           request.call,
           request.ownership,
           armed.record.requested,
@@ -2346,7 +2218,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
         return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
       }
       const grant: GrantRecord = {
-        callFingerprint: callFingerprint(state, request.call, request.ownership),
+        callFingerprint: callFingerprint(state.snapshot, request.call, request.ownership),
         requested: reviewRequested,
       };
       state.grants.set(request.call.id, grant);
@@ -2553,7 +2425,7 @@ export function createApproveForMeEngine<ReviewContext = undefined>(
       if (
         record.fingerprint !==
         retryFingerprint(
-          active,
+          active.snapshot,
           record.call,
           record.ownership,
           record.requested,
