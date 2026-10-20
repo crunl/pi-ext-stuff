@@ -569,4 +569,3 @@ export function analyzeShellGitNetwork(command: string): ShellGitNetworkAnalysis
         : {}),
   };
 }
-

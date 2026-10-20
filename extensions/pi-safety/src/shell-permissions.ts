@@ -41,18 +41,14 @@ export const permissionedBashParameters = Type.Object(
     command: Type.String({ description: "Bash command to execute" }),
     timeout: Type.Optional(
       Type.Number({
-        description:
-          "Timeout in seconds (keeps the runtime default when omitted)",
+        description: "Timeout in seconds (keeps the runtime default when omitted)",
       }),
     ),
     sandbox_permissions: Type.Optional(
-      Type.Union(
-        [Type.Literal("use_default"), Type.Literal("with_additional_permissions")],
-        {
-          description:
-            "Use with_additional_permissions for narrow sandbox writes; there is no command-level escalation",
-        },
-      ),
+      Type.Union([Type.Literal("use_default"), Type.Literal("with_additional_permissions")], {
+        description:
+          "Use with_additional_permissions for narrow sandbox writes; there is no command-level escalation",
+      }),
     ),
     additional_permissions: Type.Optional(additionalPermissions),
     justification: Type.Optional(

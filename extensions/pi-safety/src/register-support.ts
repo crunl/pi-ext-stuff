@@ -125,9 +125,7 @@ export function abortLiveTurn(ctx: Pick<ExtensionContext, "isIdle" | "abort">): 
   if (!ctx.isIdle()) ctx.abort();
 }
 
-export function requiresNetworkQuiescence(
-  network: SandboxPolicy["network"] | undefined,
-): boolean {
+export function requiresNetworkQuiescence(network: SandboxPolicy["network"] | undefined): boolean {
   if (!network) return false;
   const authority = effectiveNetworkAuthority(network);
   return (
@@ -137,7 +135,10 @@ export function requiresNetworkQuiescence(
   );
 }
 
-export function stableSessionId(ctx: Pick<ExtensionContext, "sessionManager">, generation: number): string {
+export function stableSessionId(
+  ctx: Pick<ExtensionContext, "sessionManager">,
+  generation: number,
+): string {
   // SAFETY: the host always supplies a sessionManager object; only the
   // optional getSessionId shape is assumed, and every use below is guarded
   // (optional chaining, typeof check, try/catch with a fallback id).

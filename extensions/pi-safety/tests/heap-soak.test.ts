@@ -26,7 +26,12 @@ const snapshot = (turnId: number): TurnSnapshot => ({
 });
 
 const invocation = (id: string): Invocation<string> => ({
-  call: { id, tool: "write", input: { path: "/workspace/file.txt", content: "x".repeat(512) }, cwd: "/workspace" },
+  call: {
+    id,
+    tool: "write",
+    input: { path: "/workspace/file.txt", content: "x".repeat(512) },
+    cwd: "/workspace",
+  },
   ownership: "sandbox-owned",
   admission: { kind: "allow" },
   runtimeDenialPolicy: "terminal",
@@ -37,7 +42,6 @@ const invocation = (id: string): Invocation<string> => ({
 const gcFn = globalThis.gc;
 const gc: () => void =
   typeof gcFn === "function" ? () => gcFn.call(globalThis, {}) : () => undefined;
-
 
 async function runTurn(engine: ReturnType<typeof createApproveForMeEngine>, turnId: number) {
   const turn = engine.beginTurn(snapshot(turnId));

@@ -77,7 +77,14 @@ describe("stableSessionId", () => {
   });
 
   it.each([
-    ["throwing", { getSessionId: () => { throw new Error("boom"); } }],
+    [
+      "throwing",
+      {
+        getSessionId: () => {
+          throw new Error("boom");
+        },
+      },
+    ],
     ["missing", {}],
     ["empty", { getSessionId: () => "" }],
     ["blank", { getSessionId: () => "   " }],

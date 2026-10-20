@@ -56,9 +56,10 @@ describe("tree-sitter activation failure fails closed to review", () => {
     // is a review, per product decision — never a silent Skip.
     for (const command of ["pwd", "ls -la", "rm -f /tmp/work", "rm -f /tmp/work &&"]) {
       const segments = parseCommandSegments(command);
-      expect(segments.some((segment) => segment.unprovenCause === "ast_unavailable"), command).toBe(
-        true,
-      );
+      expect(
+        segments.some((segment) => segment.unprovenCause === "ast_unavailable"),
+        command,
+      ).toBe(true);
       const review = classifyRiskWithCause(normalizeToolCall("bash", { command }, "/work/repo"));
       expect(review.disposition, command).toBe("NeedsApproval");
     }

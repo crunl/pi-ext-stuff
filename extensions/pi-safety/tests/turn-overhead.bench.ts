@@ -1,10 +1,10 @@
 import { bench, describe } from "vitest";
-import {
-  classifyRiskWithCause,
-  type PermissionRequest,
-} from "../src/permissions/risk.ts";
+import { classifyRiskWithCause, type PermissionRequest } from "../src/permissions/risk.ts";
 import { evaluateRiskRequest } from "../src/risk-policy.ts";
-import { appendGuardianTranscript, type GuardianTranscriptEntry } from "../src/guardian-transcript.ts";
+import {
+  appendGuardianTranscript,
+  type GuardianTranscriptEntry,
+} from "../src/guardian-transcript.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 
 /**

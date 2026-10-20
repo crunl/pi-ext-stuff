@@ -46,7 +46,11 @@ export async function normalizePermissionAmendment(
   const writeRoots: string[] = [];
   for (const raw of input.writeRoots ?? []) {
     if (typeof raw !== "string" || raw.trim().length === 0 || raw.length > MAX_PATH_LENGTH) {
-      return { ok: false, reason: "request_permissions write root is invalid", recoverable: "fix-arguments" };
+      return {
+        ok: false,
+        reason: "request_permissions write root is invalid",
+        recoverable: "fix-arguments",
+      };
     }
     if (hasGlobSyntax(raw)) {
       return {

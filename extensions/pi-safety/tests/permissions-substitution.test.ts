@@ -131,10 +131,9 @@ describe("inert heredoc bodies", () => {
       const [segment] = parseCommandSegments(command);
       expect(segment?.executable, opener).toBe("cat");
       expect(segment?.decomposable, opener).toBe(true);
-      expect(
-        classifyRisk(normalizeToolCall("bash", { command }, "/work/repo")),
-        opener,
-      ).toBe("Skip");
+      expect(classifyRisk(normalizeToolCall("bash", { command }, "/work/repo")), opener).toBe(
+        "Skip",
+      );
     }
   });
 
@@ -166,9 +165,9 @@ describe("inert heredoc bodies", () => {
     // opener) runs code the argv walk never visits, so the whole command
     // abstains and reviews rather than dropping the stage silently.
     const piped = "cat <<'EOF' | $(date)\nEOF";
-    expect(
-      parseCommandSegments(piped).some((s) => s.unprovenCause === "ast_unmodelled"),
-    ).toBe(true);
+    expect(parseCommandSegments(piped).some((s) => s.unprovenCause === "ast_unmodelled")).toBe(
+      true,
+    );
     expect(classifyRisk(normalizeToolCall("bash", { command: piped }, "/w/r"))).toBe(
       "NeedsApproval",
     );
@@ -181,14 +180,10 @@ describe("inert heredoc bodies", () => {
     expect(
       classifyRisk(normalizeToolCall("bash", { command: "cat < <(echo hi)" }, "/work/repo")),
     ).toBe("Skip");
-    expect(
-      parseCommandSegments("cat < <(echo hi)").map((s) => s.executable),
-    ).toContain("echo");
+    expect(parseCommandSegments("cat < <(echo hi)").map((s) => s.executable)).toContain("echo");
     // A `<<` inside double quotes is literal text.
     expect(
-      classifyRisk(
-        normalizeToolCall("bash", { command: `echo "a <<'b'\nc\nEOF"` }, "/work/repo"),
-      ),
+      classifyRisk(normalizeToolCall("bash", { command: `echo "a <<'b'\nc\nEOF"` }, "/work/repo")),
     ).toBe("Skip");
     // A here-string feeds one expanding word: its substitution stays live,
     // exactly as the shell expands it.
