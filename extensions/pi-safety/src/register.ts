@@ -25,7 +25,6 @@ import {
   codexWriteToolSpec,
   createCodexToolRendering as createPiCoreCodexToolRendering,
 } from "../../../packages/shared-tool-presentation/src/index.ts";
-import { matchesNetworkDomainPattern } from "./approve-for-me-engine.ts";
 import { type AutoReviewer, type GuardianReviewIdentity, PiAutoReviewer } from "./auto-reviewer.ts";
 import {
   bashFailureText,
@@ -60,6 +59,7 @@ import {
   checkRequestedCapabilities,
   type DelegationScope,
 } from "./delegation-policy.ts";
+import { matchesNetworkDomainPattern } from "./engine.ts";
 import {
   defaultProtectedWritePaths,
   expandSymlinkAliases,
@@ -87,10 +87,7 @@ import {
 import type { ModeTransitionBarrier } from "./permission-session.ts";
 import { type PermissionExecutionSnapshot, PermissionSession } from "./permission-session.ts";
 import { canonicalize } from "./permissions/paths.ts";
-import {
-  createPiGuardianAdapter,
-  type PiGuardianReviewContext,
-} from "./pi-approve-for-me-adapters.ts";
+import { createPiGuardianAdapter, type PiGuardianReviewContext } from "./pi-guardian-adapters.ts";
 import {
   type PiAction,
   type PiActionOutcome,
@@ -105,10 +102,11 @@ import {
   fingerprintValue,
   hasGlobSyntax,
 } from "./policy-primitives.ts";
+import { registerRequestPermissionsTool } from "./register-request-permissions.ts";
 import {
-  abortLiveTurn,
   ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE,
   ActivationSupersededError,
+  abortLiveTurn,
   configKey,
   DELEGATED_TOOL_NAMES,
   flushTurnTrace,
@@ -122,11 +120,10 @@ import {
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
+  type TurnTraceSegments,
   traceSpan,
   turnTraceEnabled,
-  type TurnTraceSegments,
 } from "./register-support.ts";
-import { registerRequestPermissionsTool } from "./register-request-permissions.ts";
 import {
   permissionedBashDescriptionSuffix,
   permissionedBashPromptGuidelines,

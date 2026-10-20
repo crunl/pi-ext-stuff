@@ -263,7 +263,7 @@ guardian 保留，且从「人类不在时的兜底」变成**唯一决策组件
 
 ### 3.1 当前审批缓存
 
-键是调用指纹，五重校验，任何一项漂移即 miss（`approve-for-me-engine.ts:1491-1528`）：
+键是调用指纹，五重校验，任何一项漂移即 miss（`engine.ts:1491-1528`）：
 
 ```text
 key                        = invocationFingerprint(调用身份，不含 call id)
@@ -302,7 +302,7 @@ LLM 作为唯一审批者时这个前提依然成立。倾向保留，省 LLM �
 
 要删的：
 
-- `CapabilityLease.mode` 的 `"escalated"`（`approve-for-me-engine.ts:106`）
+- `CapabilityLease.mode` 的 `"escalated"`（`engine.ts:106`）
 - `escalation-policy.ts` 整个模块（78 行）
 - `register.ts:66,357,789` 的 `escalationEligibility` 消费点
 - `register.ts:2102` 工具描述里「git 元数据写入用 require_escalated」那段
@@ -327,7 +327,7 @@ LLM 作为唯一审批者时这个前提依然成立。倾向保留，省 LLM �
 与 Codex `RequestPermissionProfile` 语义一致：只扩大权限，不脱离沙箱。
 
 批准后写 `turnWriteRoots` / `turnNetworkHosts`，turn 级有效，`closeState` 清除
-（`approve-for-me-engine.ts:1185-1200`）。
+（`engine.ts:1185-1200`）。
 
 若改成裸跑授权，权限清单失去约束力，且与已删除的 escalation 重复。
 

@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  type ApproveForMeEngine,
   type CapabilityRequestInput,
-  createApproveForMeEngine,
+  createEngine,
+  type Engine,
   type ExecutionAttempt,
   type GuardianDecision,
   type GuardianReviewInput,
   type Invocation,
   type RuntimeOutcome,
-} from "../src/approve-for-me-engine.ts";
+} from "../src/engine.ts";
 
 const basePolicy = {
   filesystem: {
@@ -22,7 +22,7 @@ const basePolicy = {
   },
 };
 
-function snapshot(overrides: Partial<Parameters<ApproveForMeEngine["beginTurn"]>[0]> = {}) {
+function snapshot(overrides: Partial<Parameters<Engine["beginTurn"]>[0]> = {}) {
   return {
     sessionId: "session-1",
     turnId: "turn-1",
@@ -60,12 +60,12 @@ function actionAdmission(): Invocation<unknown>["admission"] {
   };
 }
 
-function createEngine(review: (request: GuardianReviewInput) => Promise<GuardianDecision>): {
-  engine: ApproveForMeEngine;
+function makeEngine(review: (request: GuardianReviewInput) => Promise<GuardianDecision>): {
+  engine: Engine;
   spy: ReturnType<typeof vi.fn>;
 } {
   const spy = vi.fn(review);
-  return { engine: createApproveForMeEngine({ guardian: { review: spy } }), spy };
+  return { engine: createEngine({ guardian: { review: spy } }), spy };
 }
 
 function completed<T>(value: T): RuntimeOutcome<T> {
@@ -74,7 +74,7 @@ function completed<T>(value: T): RuntimeOutcome<T> {
 
 describe("turn-scoped approval cache", () => {
   it("skips Guardian on an identical repeat in the same turn", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     const first = await turn.execute(
       bash(async () => completed("one"), "call-1", actionAdmission()),
@@ -88,7 +88,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("never writes on Guardian deny", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     spy.mockResolvedValueOnce({ kind: "deny", rationale: "no" });
     const turn = engine.beginTurn(snapshot());
     await expect(
@@ -102,7 +102,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("never writes on failed execution", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     await expect(
       turn.execute(
@@ -121,7 +121,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("misses when the approved scope drifts", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     const scoped = (path: string): Invocation<unknown>["admission"] => ({
       kind: "review",
@@ -138,7 +138,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("never lets an approved scope satisfy an action review", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     const scoped = (review: "action" | "capability"): Invocation<unknown>["admission"] => ({
       kind: "review",
@@ -157,7 +157,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("misses in a new turn", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const first = engine.beginTurn(snapshot());
     await expect(
       first.execute(bash(async () => completed("one"), "call-1", actionAdmission())),
@@ -170,7 +170,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("clears on mode change", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     await expect(
       turn.execute(bash(async () => completed("one"), "call-1", actionAdmission())),
@@ -188,7 +188,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("clears on base policy change", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     await expect(
       turn.execute(bash(async () => completed("one"), "call-1", actionAdmission())),
@@ -209,7 +209,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("clears when a turn amendment widens the lease", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     await expect(
       turn.execute(bash(async () => completed("one"), "call-1", actionAdmission())),
@@ -235,7 +235,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("never hits while the circuit is open", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     const action = (id: string, command: string) => ({
       ownership: "sandbox-owned" as const,
@@ -268,7 +268,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("misses when residuals change", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     await expect(
       turn.execute(bash(async () => completed("one"), "call-1", actionAdmission())),
@@ -289,7 +289,7 @@ describe("turn-scoped approval cache", () => {
   });
 
   it("never seeds the cache from yolo executions", async () => {
-    const { engine, spy } = createEngine(async () => ({ kind: "approve", rationale: "ok" }));
+    const { engine, spy } = makeEngine(async () => ({ kind: "approve", rationale: "ok" }));
     const turn = engine.beginTurn(snapshot());
     expect(engine.refreshTurnMode({ mode: "yolo" })).toBe(true);
     await expect(

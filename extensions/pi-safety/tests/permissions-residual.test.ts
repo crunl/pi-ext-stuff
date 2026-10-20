@@ -9,7 +9,7 @@ import {
   residualSignalsForReviewSource,
   residualsForPrompt,
 } from "../src/permissions/residual.ts";
-import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
+import { admissionPlanFromRiskDecision } from "../src/pi-guardian-adapters.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
 
 describe("residual closed union", () => {

@@ -1,7 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
-import type { GuardianReviewInput } from "./approve-for-me-engine.ts";
 import type { SafetyConfig } from "./config.ts";
+import type { GuardianReviewInput } from "./engine.ts";
 import { type GuardianAction, guardianActionFromToolCall } from "./guardian-action.ts";
 import {
   type GuardianRiskLevel,

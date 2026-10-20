@@ -1,13 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SafetyConfig } from "./config.ts";
+import type { BlockRecoverability } from "./engine.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import { renderPermissionErrorForAgent } from "./permission-copy.ts";
+import type { PermissionExecutionSnapshot } from "./permission-session.ts";
 import { effectiveNetworkAuthority } from "./policy-primitives.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
-import type { PermissionExecutionSnapshot } from "./permission-session.ts";
 import type { PermissionMode } from "./state.ts";
 import { isRecord } from "./unknown-value.ts";
-import type { BlockRecoverability } from "./approve-for-me-engine.ts";
 
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;

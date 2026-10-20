@@ -14,7 +14,7 @@
  *
  * Keeping them together makes those differences comparable at a glance. They
  * are pure; every `import type` here keeps this module off the runtime graph of
- * `approve-for-me-engine.ts`.
+ * `engine.ts`.
  */
 import { resolve } from "node:path";
 import type {
@@ -22,7 +22,7 @@ import type {
   InvocationCall,
   InvocationOwnership,
   TurnSnapshot,
-} from "./approve-for-me-engine.ts";
+} from "./engine.ts";
 import { fingerprintValue } from "./policy-primitives.ts";
 
 /** The snapshot fields that make a turn's identity; nothing else is read. */

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { CapabilityRequest } from "../src/approve-for-me-engine.ts";
 import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import type { DelegationEnvelope } from "../src/delegation.ts";
 import {
@@ -9,6 +8,7 @@ import {
   checkRequestedCapabilities,
   type DelegationScope,
 } from "../src/delegation-policy.ts";
+import type { CapabilityRequest } from "../src/engine.ts";
 import type { PermissionMode } from "../src/state.ts";
 
 /**

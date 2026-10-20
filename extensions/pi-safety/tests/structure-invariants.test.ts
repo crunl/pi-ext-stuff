@@ -186,7 +186,7 @@ async function proposeModules(): Promise<string[]> {
 
 describe("layer boundaries named by the import-graph review", () => {
   it("engine value-closure performs no I/O and binds no host packages", async () => {
-    const closure = await valueClosure("src/approve-for-me-engine.ts");
+    const closure = await valueClosure("src/engine.ts");
     const offenders: string[] = [];
     for (const file of [...closure].sort()) {
       for (const target of await valueNodeImports(file)) {
@@ -230,7 +230,7 @@ describe("layer boundaries named by the import-graph review", () => {
         declarers.add(file.replace(/\\/g, "/"));
       }
     }
-    expect([...declarers].sort()).toEqual(["src/approve-for-me-engine.ts"]);
+    expect([...declarers].sort()).toEqual(["src/engine.ts"]);
   });
 
   it("propose layer never touches authority names and owns no I/O but paths.ts", async () => {
@@ -334,7 +334,7 @@ describe("layer boundaries named by the import-graph review", () => {
       "src/sandbox/srt-enforcer.ts",
     ]);
     // The authorizer reaches enforcement only through the pure projection seam.
-    const closure = await valueClosure("src/approve-for-me-engine.ts");
+    const closure = await valueClosure("src/engine.ts");
     const ioEnforcement = [...closure].filter(
       (file) =>
         file === "src/sandbox.ts" ||

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   type AdmissionPlan,
-  type ApproveForMeEngine,
   type CapabilityRequest,
   type CapabilityRequestInput,
-  createApproveForMeEngine,
+  createEngine,
+  type Engine,
   type ExecutionAttempt,
   type GuardianDecision,
   type GuardianReviewInput,
@@ -14,7 +14,7 @@ import {
   type RetryHandle,
   type ReviewEvent,
   type RuntimeOutcome,
-} from "../src/approve-for-me-engine.ts";
+} from "../src/engine.ts";
 
 const basePolicy = {
   filesystem: {
@@ -28,7 +28,7 @@ const basePolicy = {
   },
 };
 
-function snapshot(overrides: Partial<Parameters<ApproveForMeEngine["beginTurn"]>[0]> = {}) {
+function snapshot(overrides: Partial<Parameters<Engine["beginTurn"]>[0]> = {}) {
   return {
     sessionId: "session-1",
     turnId: "turn-1",
@@ -89,13 +89,13 @@ function reviewAdmission(
   };
 }
 
-function createEngine(
+function makeEngine(
   review: (request: GuardianReviewInput) => Promise<GuardianDecision>,
-  options: Parameters<typeof createApproveForMeEngine>[0] = {},
-): { engine: ApproveForMeEngine; review: ReturnType<typeof vi.fn> } {
+  options: Parameters<typeof createEngine>[0] = {},
+): { engine: Engine; review: ReturnType<typeof vi.fn> } {
   const reviewMock = vi.fn(review);
   return {
-    engine: createApproveForMeEngine({
+    engine: createEngine({
       guardian: { review: reviewMock },
       ...options,
     }),
@@ -103,11 +103,11 @@ function createEngine(
   };
 }
 
-describe("ApproveForMeEngine public seam", () => {
+describe("Engine public seam", () => {
   it.each(["completed", "failed", "aborted", "stale"] as const)(
     "commits whole-network authority only after a current successful acknowledgement (%s)",
     async (outcome) => {
-      const { engine, review } = createEngine(async () => ({
+      const { engine, review } = makeEngine(async () => ({
         kind: "approve",
         rationale: "whole outbound subject to hard policy",
       }));
@@ -181,7 +181,7 @@ describe("ApproveForMeEngine public seam", () => {
   );
 
   it("refuses broad authority from action-risk approval, runtime denial or a constrained baseline", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "approve action",
     }));
@@ -245,7 +245,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("emits independently identified review lifecycles without letting observers block execution", async () => {
     const events: ReviewEvent[] = [];
-    const engine = createApproveForMeEngine({
+    const engine = createEngine({
       guardian: {
         review: async () => ({ kind: "approve" as const, rationale: "approved" }),
       },
@@ -297,7 +297,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("runs a baseline call through the sandbox without reviewing it", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async (attempt) => {
       expect(attempt.lease.mode).toBe("sandboxed");
@@ -311,7 +311,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("carries the admission's recoverability through normalization to the block", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve" as const,
       rationale: "must not be consulted for a deny",
     }));
@@ -343,7 +343,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("rejects an admission that carries an unknown recoverability value", async () => {
-    const { engine } = createEngine(async () => ({
+    const { engine } = makeEngine(async () => ({
       kind: "approve" as const,
       rationale: "unused",
     }));
@@ -368,7 +368,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("fail-closes uncovered inline network without Guardian firewall review", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve" as const,
       rationale: "must not be used as a network firewall",
     }));
@@ -399,7 +399,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("coalesces nothing: uncovered concurrent network asks all fail-closed without review", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve" as const,
       rationale: "unused",
     }));
@@ -428,7 +428,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("allows an exact local address from the static policy without reviewer escalation", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -458,7 +458,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("fail-closes uncovered private DNS capability even when allowLocalBinding is set", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -487,7 +487,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps explicit network denies ahead of local-binding and static allows", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -518,7 +518,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("latches an authoritative adapter rejection and aborts the whole attempt", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -560,7 +560,7 @@ describe("ApproveForMeEngine public seam", () => {
     const drain = new Promise<void>((resolve) => {
       releaseDrain = resolve;
     });
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "deny",
       rationale: "must not review as network firewall",
     }));
@@ -591,7 +591,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not treat a wildcard as an exact local exception", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -618,7 +618,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("covers a public host from config-level whole-network without Guardian review", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -651,7 +651,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("allows a private target under config-level network_access without Guardian review", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -684,7 +684,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("still hard-blocks a denied domain when network_access is enabled", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -715,7 +715,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not release a protected deny for an approved write", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "The Git mutation is explicitly approved.",
     }));
@@ -748,7 +748,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not let an approved broad root or hard protected path unlock nested denies", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "Reviewed for the protected-path test.",
     }));
@@ -814,7 +814,7 @@ describe("ApproveForMeEngine public seam", () => {
       expect(input.context).toBe(reviewContext);
       return { kind: "approve" as const, rationale: "Context is trusted by the host." };
     });
-    const engine = createApproveForMeEngine<typeof reviewContext>({
+    const engine = createEngine<typeof reviewContext>({
       guardian: { review },
     });
     const turn = engine.beginTurn(snapshot());
@@ -854,7 +854,7 @@ describe("ApproveForMeEngine public seam", () => {
       expect(input.approvalOverride?.actionFingerprint).toEqual(expect.any(String));
       return { kind: "approve" as const, rationale: "The exact retry is approved." };
     });
-    const engine = createApproveForMeEngine<typeof reviewContext>({
+    const engine = createEngine<typeof reviewContext>({
       guardian: { review },
     });
     const turn = engine.beginTurn(snapshot());
@@ -902,7 +902,7 @@ describe("ApproveForMeEngine public seam", () => {
       source: GuardianReviewInput["source"];
       requested: readonly CapabilityRequest[];
     }> = [];
-    const { engine } = createEngine(async (input) => {
+    const { engine } = makeEngine(async (input) => {
       reviewed.push({ source: input.source, requested: input.requested });
       if (reviewed.length === 1) {
         return { kind: "deny", rationale: "The original scope is denied." };
@@ -976,7 +976,7 @@ describe("ApproveForMeEngine public seam", () => {
       paused: boolean;
     }> = [];
     let reviewCount = 0;
-    const { engine, review } = createEngine(
+    const { engine, review } = makeEngine(
       async () => {
         reviewCount += 1;
         return reviewCount === 2
@@ -1023,7 +1023,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("resets consecutive denials after a completed timeout", async () => {
     let reviewCount = 0;
-    const { engine, review } = createEngine(async () => {
+    const { engine, review } = makeEngine(async () => {
       reviewCount += 1;
       if (reviewCount === 2) return { kind: "timed-out" };
       return { kind: "deny", rationale: `Denied ${reviewCount}.` };
@@ -1056,7 +1056,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("reviews a declared capability before execution and grants only that call", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       expect(request.source).toBe("preview");
       expect(request.reason).toBe("The operation needs an output path.");
       expect(request.summary).toBe("Write the generated result.");
@@ -1093,7 +1093,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("hard-blocks an admission deny without Guardian or enforcement", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -1110,7 +1110,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("reviews an action even when it requests no capabilities", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       expect(request.source).toBe("preview");
       expect(request.requested).toEqual([]);
       expect(request.reason).toBe("Confirm the action itself.");
@@ -1137,7 +1137,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not call Guardian for a static allow admission", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -1152,7 +1152,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("passes residual stamps into Guardian review input", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       expect(request.source).toBe("preview");
       expect(request.residuals).toEqual(["rule_ask", "risk_not_skip"]);
       return { kind: "approve", rationale: "stamped review" };
@@ -1178,7 +1178,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("still reviews a review admission missing residual stamps (empty residuals never skip)", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       expect(request.residuals === undefined || request.residuals.length === 0).toBe(true);
       return { kind: "approve", rationale: "unstamped review still reviewed" };
     });
@@ -1202,7 +1202,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("blocks review admission with empty residual array (normalize fail-closed)", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not run",
     }));
@@ -1229,7 +1229,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("blocks review admission with an illegal residual signal", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not run",
     }));
@@ -1255,7 +1255,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("skips review when capability caps are covered regardless of residual labels", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review covered caps",
     }));
@@ -1287,7 +1287,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("preserves hard deny rules while applying an approved one-shot grant", async () => {
     const sources: string[] = [];
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       sources.push(request.source);
       return { kind: "approve", rationale: "reviewed" };
     });
@@ -1314,7 +1314,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("does not replay a reviewed command after a mid-execution network denial", async () => {
     const sources: string[] = [];
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       sources.push(request.source);
       return { kind: "approve", rationale: "reviewed" };
     });
@@ -1341,7 +1341,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("blocks a denied preview without invoking the executor", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "deny",
       rationale: "Not needed.",
     }));
@@ -1359,7 +1359,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("deep-clones denied call input for notices and exact retries", async () => {
-    const { engine, review } = createEngine(async (input) => {
+    const { engine, review } = makeEngine(async (input) => {
       if (input.source === "manual-retry") {
         expect(input.call.input).toEqual({
           command: "printf clone",
@@ -1434,7 +1434,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("fails closed when reviewed invocation metadata is not cloneable", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not be reached",
     }));
@@ -1460,7 +1460,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("blocks a runtime filesystem denial without review or replay", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review runtime denial",
     }));
@@ -1476,7 +1476,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("blocks every runtime filesystem denial without replay", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
     const execute = vi.fn(async () =>
       denied({ kind: "filesystem", operation: "write", path: "/outside/result.txt" }),
@@ -1490,7 +1490,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not infer native replay safety from a typed write capability denial", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "Must not review",
     }));
@@ -1530,7 +1530,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not re-review a runtime denial already covered by the first lease", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review an enforcement drift",
     }));
@@ -1567,7 +1567,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not review a retry that the sandbox policy cannot represent", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review an unsupported deny",
     }));
@@ -1604,7 +1604,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not mint a capability-only manual retry for a post-start denial", async () => {
-    const { engine, review } = createEngine(async (input) => {
+    const { engine, review } = makeEngine(async (input) => {
       if (input.source === "inline") return { kind: "deny", rationale: "Review it manually." };
       expect(input.source).toBe("manual-retry");
       return { kind: "approve", rationale: "The exact retry is approved." };
@@ -1636,7 +1636,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not replay Edit from typed capability evidence alone", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "Approve one exact retry.",
     }));
@@ -1673,7 +1673,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps network runtime denial terminal even for a retry-capable adapter", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review a connection replay",
     }));
@@ -1700,7 +1700,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("leaves an armed retry untouched when a mismatched call executes", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "No." }));
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "No." }));
     const turn = engine.beginTurn(snapshot());
     const first = await turn.execute(
       call(
@@ -1756,7 +1756,7 @@ describe("ApproveForMeEngine public seam", () => {
     const changedMetadata = {
       mcp: { server: "mail", method: "send", requestId: "request-2" },
     };
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       if (request.source === "preview") {
         return { kind: "deny", rationale: "The first metadata-bound action is denied." };
       }
@@ -1826,7 +1826,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("allows an exact manual retry with a new tool-call id", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       if (request.source === "preview") return { kind: "deny", rationale: "Try again manually." };
       expect(request.source).toBe("manual-retry");
       return { kind: "approve", rationale: "The exact retry is acceptable." };
@@ -1861,7 +1861,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("arms a denied action after turn close and retries it in the next turn", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       if (request.source === "preview") {
         return { kind: "deny", rationale: "Retry this action manually." };
       }
@@ -1914,7 +1914,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps an armed retry through a next-turn mismatch and then consumes the exact action", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       if (request.source === "preview") return { kind: "deny", rationale: "Try manually." };
       expect(request.source).toBe("manual-retry");
       return { kind: "approve", rationale: "Exact action approved." };
@@ -1969,7 +1969,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("clears an unarmed and armed retry on engine invalidation", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "deny",
       rationale: "No retry after invalidation.",
     }));
@@ -2001,7 +2001,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps only the ten most recent denial notices and retry records", async () => {
-    const { engine, review } = createEngine(
+    const { engine, review } = makeEngine(
       async () => ({ kind: "deny", rationale: "Bounded denial." }),
       { maxConsecutiveDenials: 100, maxWindowDenials: 100 },
     );
@@ -2052,7 +2052,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps explicit permission amendments within the current turn", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "Explicitly requested.",
     }));
@@ -2084,7 +2084,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps protected denies through turn amendments", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "The explicit turn amendment is approved.",
     }));
@@ -2149,7 +2149,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("re-reviews an exact permission amendment retry and leaves mismatches armed", async () => {
     let reviewCount = 0;
-    const { engine, review } = createEngine(async (input) => {
+    const { engine, review } = makeEngine(async (input) => {
       if (reviewCount === 0) {
         expect(input.source).toBe("permission-amendment");
         reviewCount += 1;
@@ -2232,7 +2232,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("re-reviews turn-covered requests while still reviewing actions", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       if (request.source === "permission-amendment") {
         return { kind: "approve", rationale: "Explicitly requested." };
       }
@@ -2288,7 +2288,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("clears turn permissions on session/config invalidation", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "yes" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "yes" }));
     const first = engine.beginTurn(snapshot());
     await first.execute(
       call(
@@ -2316,7 +2316,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not make an ordinary approval sticky across turns", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "yes" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "yes" }));
     const first = engine.beginTurn(snapshot());
     await expect(
       first.execute(
@@ -2341,7 +2341,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("commits an explicit amendment only after its executor succeeds", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "yes" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "yes" }));
     const first = engine.beginTurn(snapshot());
     const amendmentResult = await first.execute(
       call(
@@ -2371,7 +2371,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("admits a generic host tool only from an exact preview", async () => {
-    const { engine, review } = createEngine(async (request) => {
+    const { engine, review } = makeEngine(async (request) => {
       expect(request.ownership).toBe("host-admission");
       return { kind: "approve", rationale: "The external operation is requested." };
     });
@@ -2393,7 +2393,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("blocks a host-admission runtime denial without replay", async () => {
     const requested = { kind: "external-tool" as const, provider: "mail", name: "send" };
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review runtime denial",
     }));
@@ -2422,7 +2422,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("bypasses Guardian and sandbox in yolo mode", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "unused" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot({ mode: "yolo", baseSandboxPolicy: undefined }));
     const executor = vi.fn(async (attempt) => {
       expect(attempt.lease.mode).toBe("unrestricted");
@@ -2438,7 +2438,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("refreshTurnMode applies a step-boundary mode change without beginTurn", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "unused" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot({ mode: "auto" }));
     const sandboxExecutor = vi.fn(async (attempt) => {
       expect(attempt.lease.mode).toBe("sandboxed");
@@ -2485,7 +2485,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("refreshTurnMode refuses when no turn is current", () => {
-    const { engine } = createEngine(async () => ({ kind: "deny", rationale: "unused" }));
+    const { engine } = makeEngine(async () => ({ kind: "deny", rationale: "unused" }));
     expect(engine.refreshTurnMode({ mode: "yolo" })).toBe(false);
     const turn = engine.beginTurn(snapshot());
     turn.close();
@@ -2494,7 +2494,7 @@ describe("ApproveForMeEngine public seam", () => {
 
   it("executes in yolo mode despite a denying policy", async () => {
     const policy = vi.fn(async () => ({ kind: "deny" as const, reason: "blocked by policy" }));
-    const { engine, review } = createEngine(
+    const { engine, review } = makeEngine(
       async () => ({ kind: "deny", rationale: "must not review" }),
       { policy: { check: policy } },
     );
@@ -2513,7 +2513,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("allows a yolo host-admission call without a preview", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "deny",
       rationale: "must not review",
     }));
@@ -2533,7 +2533,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("does not persist a yolo permission amendment when returning to auto", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "yes" }));
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "yes" }));
     const yolo = engine.beginTurn(snapshot({ mode: "yolo", baseSandboxPolicy: undefined }));
     const yoloExecutor = vi.fn(async (attempt) => {
       expect(attempt.lease.mode).toBe("unrestricted");
@@ -2565,7 +2565,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("rejects an aborted call before invoking its executor", async () => {
-    const { engine } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const { engine } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
     const controller = new AbortController();
     controller.abort();
@@ -2578,8 +2578,8 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("keeps the turn snapshot immutable after beginTurn", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
-    const input: Parameters<ApproveForMeEngine["beginTurn"]>[0] = snapshot();
+    const { engine, review } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const input: Parameters<Engine["beginTurn"]>[0] = snapshot();
     const turn = engine.beginTurn(input);
     input.mode = "yolo";
     input.cwd = "/other";
@@ -2625,7 +2625,7 @@ describe("ApproveForMeEngine public seam", () => {
       };
       return { kind: "approve" as const, rationale: "The canonical action is approved." };
     });
-    const engine = createApproveForMeEngine({ guardian: { review }, policy: { check: policy } });
+    const engine = createEngine({ guardian: { review }, policy: { check: policy } });
     const turn = engine.beginTurn(snapshot());
     const mutableInput = { command: "printf safe" };
     const mutableRequested: CapabilityRequestInput[] = [
@@ -2674,7 +2674,7 @@ describe("ApproveForMeEngine public seam", () => {
     const pending = new Promise<RuntimeOutcome<unknown>>((resolve) => {
       release = resolve;
     });
-    const { engine } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const { engine } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const turn = engine.beginTurn(snapshot());
     const executor = vi.fn(() => pending);
     const resultPromise = turn.execute(call(executor));
@@ -2692,7 +2692,7 @@ describe("ApproveForMeEngine public seam", () => {
     const pending = new Promise<RuntimeOutcome<unknown>>((resolve) => {
       release = resolve;
     });
-    const { engine } = createEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const { engine } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
     const first = engine.beginTurn(snapshot());
     const executor = vi.fn(() => pending);
     const firstPromise = first.execute(call(executor));
@@ -2722,7 +2722,7 @@ describe("ApproveForMeEngine public seam", () => {
     const pending = new Promise<{ kind: "approve"; rationale: string }>((resolve) => {
       release = resolve;
     });
-    const { engine } = createEngine(async () => pending);
+    const { engine } = makeEngine(async () => pending);
     const turn = engine.beginTurn(snapshot());
     const executor = vi.fn(async () => completed("never"));
     const resultPromise = turn.execute(call(executor, { admission: reviewAdmission() }));
@@ -2736,7 +2736,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("opens the denial circuit after three Guardian denials", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "No." }));
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "No." }));
     const turn = engine.beginTurn(snapshot());
     for (let index = 0; index < 3; index += 1) {
       const result = await turn.execute(
@@ -2775,7 +2775,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("resets the denial breaker for each turn while retaining session identity", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "No." }));
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "No." }));
     const first = engine.beginTurn(snapshot());
     for (let index = 0; index < 3; index += 1) {
       const result = await first.execute(
@@ -2817,7 +2817,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("opens the denial breaker after ten denials in a fifty-call window", async () => {
-    const { engine, review } = createEngine(async () => ({ kind: "deny", rationale: "No." }), {
+    const { engine, review } = makeEngine(async () => ({ kind: "deny", rationale: "No." }), {
       maxConsecutiveDenials: 50,
       denialWindowSize: 50,
       maxWindowDenials: 10,
@@ -2860,7 +2860,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("fails closed for sandbox network constraints that SandboxPolicy cannot express", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "must not review",
     }));
@@ -2886,7 +2886,7 @@ describe("ApproveForMeEngine public seam", () => {
           ? { kind: "deny" as const, reason: "runtime capability is forbidden" }
           : { kind: "allow" as const },
     );
-    const { engine, review } = createEngine(
+    const { engine, review } = makeEngine(
       async () => ({ kind: "approve", rationale: "must not review" }),
       { policy: { check: policy } },
     );
@@ -2909,7 +2909,7 @@ describe("ApproveForMeEngine public seam", () => {
         return { kind: "allow" as const };
       },
     );
-    const { engine, review } = createEngine(
+    const { engine, review } = makeEngine(
       async () => ({ kind: "approve", rationale: "must not review" }),
       { policy: { check: policy } },
     );
@@ -2928,7 +2928,7 @@ describe("ApproveForMeEngine public seam", () => {
     const pendingReview = new Promise<{ kind: "approve"; rationale: string }>((resolve) => {
       releaseReview = resolve;
     });
-    const { engine, review } = createEngine(async () => pendingReview);
+    const { engine, review } = makeEngine(async () => pendingReview);
     const turn = engine.beginTurn(snapshot());
     const executor = vi.fn(async () => completed("ok"));
     const firstPromise = turn.execute(call(executor, { admission: reviewAdmission() }));
@@ -2948,7 +2948,7 @@ describe("ApproveForMeEngine public seam", () => {
       { kind: "credential", name: "TOKEN" },
     ];
     for (const request of unsupported) {
-      const { engine, review } = createEngine(async () => ({
+      const { engine, review } = makeEngine(async () => ({
         kind: "approve",
         rationale: "must not run",
       }));
@@ -2989,7 +2989,7 @@ describe("ApproveForMeEngine public seam", () => {
     ];
 
     for (const [index, testCase] of cases.entries()) {
-      const { engine, review } = createEngine(async () => ({
+      const { engine, review } = makeEngine(async () => ({
         kind: "approve",
         rationale: "must not review runtime capability",
       }));
@@ -3021,7 +3021,7 @@ describe("ApproveForMeEngine public seam", () => {
   });
 
   it("fails closed on an unsupported permission-amendment runtime denial", async () => {
-    const { engine, review } = createEngine(async () => ({
+    const { engine, review } = makeEngine(async () => ({
       kind: "approve",
       rationale: "approve the declared amendment",
     }));

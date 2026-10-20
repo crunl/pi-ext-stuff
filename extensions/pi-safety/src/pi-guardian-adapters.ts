@@ -1,13 +1,6 @@
 import { resolve } from "node:path";
 
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
-
-import type {
-  AdmissionPlan,
-  CapabilityRequestInput,
-  GuardianAdapter,
-  GuardianReviewInput,
-} from "./approve-for-me-engine.ts";
 import {
   type AutoReviewApprovalOverride,
   type AutoReviewerContext,
@@ -20,6 +13,12 @@ import {
   AutoReviewerFailure,
   type TrustedAutoReviewerContext,
 } from "./auto-reviewer.ts";
+import type {
+  AdmissionPlan,
+  CapabilityRequestInput,
+  GuardianAdapter,
+  GuardianReviewInput,
+} from "./engine.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import {
   ensureNonEmptyResiduals,

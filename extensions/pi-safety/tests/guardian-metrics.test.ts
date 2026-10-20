@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { GuardianDecisionMetrics, ReviewEvent } from "../src/approve-for-me-engine.ts";
+import type { GuardianDecisionMetrics, ReviewEvent } from "../src/engine.ts";
 import {
   buildGuardianMetricsRecord,
   guardianMetricsRecordFromEvent,

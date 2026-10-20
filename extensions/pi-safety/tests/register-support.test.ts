@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import {
   buildTurnTraceRecord,
@@ -7,9 +7,9 @@ import {
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
+  type TurnTraceSegments,
   traceSpan,
   turnTraceEnabled,
-  type TurnTraceSegments,
 } from "../src/register-support.ts";
 import type { SandboxPolicy } from "../src/sandbox-policy.ts";
 

@@ -18,7 +18,7 @@ rewrite is not based on it.
 4. [Runtime enforcement and sandbox](#runtime-enforcement-and-sandbox)
 5. [Network boundary, host, and domain patterns](#network-boundary-host-and-domain-patterns)
 6. [The Guardian reviewer](#the-guardian-reviewer)
-7. [Approve-for-me engine and adapters](#approve-for-me-engine-and-adapters)
+7. [Approve-for-me engine and adapters](#engine-and-adapters)
 8. [Delegation and session lifecycle](#delegation-and-session-lifecycle)
 9. [Configuration schema](#configuration-schema)
 10. [Testing](#testing)
@@ -354,7 +354,7 @@ Native Write/Edit recovery uses attempt-local parent-side operation
 evidence from `createSandboxedFileOperations`, not a parsed denied path;
 only access failures before content-write entry can trigger fresh Engine
 review of the frozen complete action. A second failure is terminal
-(`RuntimeDenialPolicy`, `src/approve-for-me-engine.ts:41`).
+(`RuntimeDenialPolicy`, `src/engine.ts:41`).
 
 `bash-outcome.ts` owns the completed-command seam: `captureExitCode`
 captures the child's exit code at the operations wrapper, and
@@ -528,36 +528,36 @@ request source, and ownership (`src/guardian/metrics.ts:5-35`).
 
 ## Approve-for-me engine and adapters
 
-`src/approve-for-me-engine.ts` is the deep, I/O-free decision module. It
+`src/engine.ts` is the deep, I/O-free decision module. It
 owns admission-plan validation, hard policy checks, Guardian review
 routing, exact one-shot grants, denial circuit breaking, `/approve`
 retry handles, and turn/session-scoped permission amendments
-(`createApproveForMeEngine`,
-`src/approve-for-me-engine.ts:1024`).
+(`createEngine`,
+`src/engine.ts:1024`).
 
 Key mechanics:
 
-- **Admission plans** (`src/approve-for-me-engine.ts:51-87`):
+- **Admission plans** (`src/engine.ts:51-87`):
   `allow` / `review { capability | action }` / `deny`. A review with
   requested capabilities is a capability review; with none it is an
   action review.
-- **`requestCovered`** (`src/approve-for-me-engine.ts:829`) is the
+- **`requestCovered`** (`src/engine.ts:829`) is the
   authorization predicate: a filesystem read is covered unless denied; a
   write must be inside `allowWrite` and outside deny rules; a network
   host must match `allowedDomains` (or `network_access` whole-network
   authority) and not match `deniedDomains`. A network request with a
   port or protocol constraint is **not** sandbox-enforceable
-  (`sandboxCanEnforce`, `src/approve-for-me-engine.ts:868`).
+  (`sandboxCanEnforce`, `src/engine.ts:868`).
 - **One-shot grants.** The Engine deletes the armed retry record *before*
   the adapter is entered — the atomic one-shot spend
-  (`src/approve-for-me-engine.ts:1472`). `/approve` authorizes one
+  (`src/engine.ts:1472`). `/approve` authorizes one
   exact retry of a recent denial; the handle is single-use
-  (`armRetry`, `src/approve-for-me-engine.ts:420`).
+  (`armRetry`, `src/engine.ts:420`).
 - **Denial circuit breaker.** Defaults: 3 consecutive denials, a 50-
-  denial window, 10 denials in window (`src/approve-for-me-engine.ts:537-539`).
+  denial window, 10 denials in window (`src/engine.ts:537-539`).
   When tripped the auto state reports `paused: true` and the UI shows
   the circuit as open; a success resets the counters
-  (`src/approve-for-me-engine.ts:1066-1078`).
+  (`src/engine.ts:1066-1078`).
 - **Network authority freezes at attempt creation after review**, not at
   invocation submission: a still-reviewing invocation may see an
   intervening turn grant (`src/register.ts:2230`).
@@ -565,14 +565,14 @@ Key mechanics:
   mutates grants, or poisons a working config
   (`src/register.ts:2786-2840`).
 
-`src/pi-approve-for-me-adapters.ts` translates the host's static risk
+`src/pi-guardian-adapters.ts` translates the host's static risk
 result into an `AdmissionPlan` (`admissionPlanFromRiskDecision`,
-`src/pi-approve-for-me-adapters.ts:105`) and adapts the Guardian
+`src/pi-guardian-adapters.ts:105`) and adapts the Guardian
 implementation. The Engine owns authorization; adapters own only host
 integration and enforcement. A prompt that becomes `kind:"review"` must
 carry non-empty residuals — missing stamps are replaced with
 `other_explicit_review`, never mapped to allow/skip
-(`src/pi-approve-for-me-adapters.ts:101-104`).
+(`src/pi-guardian-adapters.ts:101-104`).
 
 `src/pi-safety.ts` is the host-facing facade: it captures the action
 identity at Pi ingress (`captureAction`, `PiCapturedAction`), exposes
@@ -725,8 +725,8 @@ The suites cover, by area: the static risk chain
 `shell-ast-differential.test.ts` — the V1/V2 differential gate that
 keeps "tree-sitter never looser than the lexer" true), the policy layer
 (`risk-policy.test.ts`, `config.test.ts`, `config-path.test.ts`), the
-Engine (`approve-for-me-engine.test.ts`,
-`approve-for-me-engine-native-retry.test.ts`), Guardian
+Engine (`engine.test.ts`,
+`engine-native-retry.test.ts`), Guardian
 (`guardian-worker.test.ts`, `guardian-tools.test.ts`,
 `guardian-session.test.ts`, `auto-reviewer.test.ts`,
 `guardian-diagnostic.test.ts`), sandbox enforcement

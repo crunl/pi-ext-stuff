@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createApproveForMeEngine, type Invocation } from "../src/approve-for-me-engine.ts";
+import type { TurnSnapshot } from "../src/engine.ts";
+import { createEngine, type Invocation } from "../src/engine.ts";
 import { PiSafetyRuntime } from "../src/pi-safety.ts";
-import type { TurnSnapshot } from "../src/approve-for-me-engine.ts";
 
 /**
  * Steady-state heap probe: N full Engine turns must not grow heapUsed.
  *
- * This deliberately drives createApproveForMeEngine directly (the same
- * pattern as approve-for-me-engine-native-retry.test.ts), NOT the register
+ * This deliberately drives createEngine directly (the same
+ * pattern as engine-native-retry.test.ts), NOT the register
  * harness: vi.fn() call history grows with N and would dominate any heap
  * delta. Bounded retainers that are expected and correct:
  * - retryRecords/denialNotices survive turn close (capped at 10) for /approve
@@ -43,7 +43,7 @@ const gcFn = globalThis.gc;
 const gc: () => void =
   typeof gcFn === "function" ? () => gcFn.call(globalThis, {}) : () => undefined;
 
-async function runTurn(engine: ReturnType<typeof createApproveForMeEngine>, turnId: number) {
+async function runTurn(engine: ReturnType<typeof createEngine>, turnId: number) {
   const turn = engine.beginTurn(snapshot(turnId));
   await turn.execute(invocation(`call-${turnId}`));
   turn.close("soak turn done");
@@ -51,7 +51,7 @@ async function runTurn(engine: ReturnType<typeof createApproveForMeEngine>, turn
 
 describe("Engine heap steady state", () => {
   it("does not grow heapUsed across 50 closed turns", async () => {
-    const engine = createApproveForMeEngine();
+    const engine = createEngine();
     // Warmup: compile paths, parser caches, first allocations.
     for (let i = 1; i <= 5; i += 1) await runTurn(engine, i);
     gc();
@@ -70,7 +70,7 @@ describe("Engine heap steady state", () => {
   });
 
   it("keeps session-level denial bookkeeping bounded across turns", async () => {
-    const engine = createApproveForMeEngine();
+    const engine = createEngine();
     for (let i = 1; i <= 30; i += 1) await runTurn(engine, i);
     // The cap lives in the Engine (MAX_DENIAL_NOTICES = 10); a turn loop
     // with zero denials must record nothing at all.

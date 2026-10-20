@@ -2,10 +2,10 @@ import { resolve } from "node:path";
 
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import {
-  type ApproveForMeEngine,
   type AutoState,
-  createApproveForMeEngine,
+  createEngine,
   type DenialNotice,
+  type Engine,
   type AdmissionPlan as EngineAdmissionPlan,
   type CapabilityAuthorizationDecision as EngineCapabilityAuthorizationDecision,
   type CapabilityAuthorizationInput as EngineCapabilityAuthorizationInput,
@@ -26,9 +26,9 @@ import {
   type RuntimeDenialPolicy,
   type TurnHandle,
   type TurnSnapshot,
-} from "./approve-for-me-engine.ts";
+} from "./engine.ts";
 import { ensureNonEmptyResiduals } from "./permissions/residual.ts";
-import { admissionPlanFromRiskDecision } from "./pi-approve-for-me-adapters.ts";
+import { admissionPlanFromRiskDecision } from "./pi-guardian-adapters.ts";
 import type { ReviewUi } from "./review-presenter.ts";
 import { ReviewPresenter, type ReviewStatusBinding } from "./review-presenter.ts";
 import type { RiskDecision } from "./risk-policy.ts";
@@ -286,7 +286,7 @@ function retryChoice(
 }
 
 export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<ReviewContext> {
-  private engine: ApproveForMeEngine<ReviewContext>;
+  private engine: Engine<ReviewContext>;
   private readonly presenter: ReviewPresenter;
   private readonly options: PiSafetyOptions<ReviewContext>;
   private activeTurn: TurnHandle<ReviewContext> | undefined;
@@ -298,7 +298,7 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
    * byte-identical on closeNestedTurn.
    */
   private nestedLevels: Array<{
-    engine: ApproveForMeEngine<ReviewContext>;
+    engine: Engine<ReviewContext>;
     turn: TurnHandle<ReviewContext> | undefined;
     context: ExtensionContext | undefined;
   }> = [];
@@ -309,8 +309,8 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
     this.engine = this.createEngine();
   }
 
-  private createEngine(): ApproveForMeEngine<ReviewContext> {
-    return createApproveForMeEngine<ReviewContext>({
+  private createEngine(): Engine<ReviewContext> {
+    return createEngine<ReviewContext>({
       guardian: this.options.guardian,
       policy: this.options.policy,
       onReviewEvent: (event) => this.handleReviewEvent(event),

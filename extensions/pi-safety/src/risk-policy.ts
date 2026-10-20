@@ -1,5 +1,5 @@
-import type { BlockRecoverability } from "./approve-for-me-engine.ts";
 import type { SafetyConfig } from "./config.ts";
+import type { BlockRecoverability } from "./engine.ts";
 import { createFilesystemPolicy, defaultProtectedWritePaths } from "./filesystem-policy.ts";
 import { inspectRepositoryGitMetadata, readRepositoryRemoteHosts } from "./git-metadata.ts";
 import { normalizePermissionAmendment } from "./permission-amendment.ts";

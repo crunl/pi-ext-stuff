@@ -20,7 +20,7 @@ import type { DelegationScope } from "./delegation-policy.ts";
 import { checkDelegationNetwork, checkDelegationWrite } from "./delegation-policy.ts";
 import { resolvePolicyPath } from "./filesystem-policy.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
-import type { PiGuardianReviewContext } from "./pi-approve-for-me-adapters.ts";
+import type { PiGuardianReviewContext } from "./pi-guardian-adapters.ts";
 import type { PiAction, PiActionOutcome, PiSafetyRuntime } from "./pi-safety.ts";
 import type { EffectiveExecutionContext, PreparedPermissionExecution } from "./register-support.ts";
 import { policyDeniedError } from "./register-support.ts";

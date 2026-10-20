@@ -1,4 +1,4 @@
-import type { ReviewEvent } from "../approve-for-me-engine.ts";
+import type { ReviewEvent } from "../engine.ts";
 import type { AutoReviewerFailureKind } from "./errors.ts";
 
 /** Codex-aligned terminal_status vocabulary. */

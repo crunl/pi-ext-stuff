@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
-import { admissionPlanFromRiskDecision } from "../src/pi-approve-for-me-adapters.ts";
+import { admissionPlanFromRiskDecision } from "../src/pi-guardian-adapters.ts";
 import {
   evaluateHostFirstRulesOnly,
   evaluateHostRiskRequest,

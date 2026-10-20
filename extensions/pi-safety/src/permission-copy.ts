@@ -1,4 +1,4 @@
-import type { PermissionError } from "./approve-for-me-engine.ts";
+import type { PermissionError } from "./engine.ts";
 import { isPermissionArgumentError } from "./shell-permissions.ts";
 import type { PermissionMode } from "./state.ts";
 

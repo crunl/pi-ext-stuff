@@ -1,6 +1,5 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import type { CapabilityRequestInput, GuardianReviewInput } from "../src/approve-for-me-engine.ts";
 import type {
   AutoReviewApprovalOverride,
   AutoReviewerContext,
@@ -8,11 +7,12 @@ import type {
   AutoReviewResult,
 } from "../src/auto-review-request.ts";
 import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
+import type { CapabilityRequestInput, GuardianReviewInput } from "../src/engine.ts";
 import {
   admissionPlanFromRiskDecision,
   createPiGuardianAdapter,
   type PiGuardianReviewContext,
-} from "../src/pi-approve-for-me-adapters.ts";
+} from "../src/pi-guardian-adapters.ts";
 import type { RiskDecision } from "../src/risk-policy.ts";
 import type { SandboxPolicy } from "../src/sandbox.ts";
 

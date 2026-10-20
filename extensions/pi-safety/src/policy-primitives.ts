@@ -3,7 +3,7 @@
  * helpers with no filesystem, process, or socket I/O of their own.
  *
  * This module exists so the Engine value-closure stays hermetic: everything
- * here is safe to import from `approve-for-me-engine.ts` without dragging
+ * here is safe to import from `engine.ts` without dragging
  * `node:fs`, `node:child_process`, or host packages along. The boundary is
  * pinned by `tests/structure-invariants.test.ts` ("decide-closure purity").
  *

@@ -24,8 +24,8 @@ import {
   normalizeToolCall,
   parseCommandSegments,
 } from "../src/permissions/risk.ts";
-import { deletionTargets } from "../src/permissions/rules.ts";
 import type { CommandSegment } from "../src/permissions/rules.ts";
+import { deletionTargets } from "../src/permissions/rules.ts";
 import { installShellAstParser, shellAstParserInstalled } from "../src/permissions/shell-ast.ts";
 import { astFrontEndEngaged } from "../src/permissions/shell-segment.ts";
 import {

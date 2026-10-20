@@ -1,6 +1,6 @@
-import type { CapabilityRequest } from "./approve-for-me-engine.ts";
 import type { SafetyConfig } from "./config.ts";
 import { type DelegationEnvelope, isNetworkCovered, isWriteCovered } from "./delegation.ts";
+import type { CapabilityRequest } from "./engine.ts";
 import type { PermissionMode } from "./state.ts";
 
 /**

@@ -9,8 +9,8 @@
  *
  * It lives outside `src/permissions/` on purpose: `tests/structure-invariants.test.ts`
  * forbids `node:fs` and `node:child_process` imports in the propose layer (except
- * `paths.ts`), and `tests/approve-for-me-engine.test.ts` closes the value graph
- * reachable from `src/approve-for-me-engine.ts`. Nothing here is imported by either.
+ * `paths.ts`), and `tests/engine.test.ts` closes the value graph
+ * reachable from `src/engine.ts`. Nothing here is imported by either.
  */
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";

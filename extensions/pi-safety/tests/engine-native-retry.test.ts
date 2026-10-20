@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
-  createApproveForMeEngine,
+  createEngine,
   type ExecutionAttempt,
   type GuardianDecision,
   type GuardianReviewInput,
@@ -11,7 +11,7 @@ import {
   type NativeActionFailure,
   type RuntimeOutcome,
   type TurnSnapshot,
-} from "../src/approve-for-me-engine.ts";
+} from "../src/engine.ts";
 import { PiSafetyRuntime } from "../src/pi-safety.ts";
 
 const snapshot = (): TurnSnapshot => ({
@@ -91,7 +91,7 @@ describe("Engine native preparation recovery", () => {
         ]);
         return approved();
       });
-      const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+      const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
       const leases: ExecutionAttempt["lease"][] = [];
       const execute = vi.fn(async (attempt: ExecutionAttempt): Promise<RuntimeOutcome<string>> => {
         leases.push(attempt.lease);
@@ -143,7 +143,7 @@ describe("Engine native preparation recovery", () => {
       const outcome = failed(path, mkdir ? "mkdir" : "access");
       outcome.failure.error = `${code}: ${mkdir ? "file already exists" : "no such file or directory"}, ${outcome.failure.operation} '${outcome.failure.path}'`;
       const review = vi.fn(async () => approved());
-      const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+      const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
       const execute = vi.fn(async () => outcome);
       expect(await turn.execute(invocation(execute, path, mkdir ? "write" : "edit"))).toMatchObject(
         {
@@ -168,7 +168,7 @@ describe("Engine native preparation recovery", () => {
     ["missing Linux root", { mkdirScopeSupported: false }],
   ])("does not review or replay %s", async (_name, overrides) => {
     const review = vi.fn(async () => approved());
-    const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+    const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
     const execute = vi.fn(async () => ({ ...failed(), ...overrides }) as NativeActionFailure);
     const result = await turn.execute(invocation(execute));
     expect(result).toMatchObject({
@@ -192,7 +192,7 @@ describe("Engine native preparation recovery", () => {
     "/write-secret/file",
   ])("rejects broad, denied, covered or glob root for %s", async (path) => {
     const review = vi.fn(async () => approved());
-    const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+    const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
     const execute = vi.fn(async () => failed(path));
     expect(await turn.execute(invocation(execute, path))).toMatchObject({ kind: "blocked" });
     expect(execute).toHaveBeenCalledOnce();
@@ -201,7 +201,7 @@ describe("Engine native preparation recovery", () => {
 
   it.each(["access", "read"] as const)("preserves denyRead for Edit %s", async (operation) => {
     const review = vi.fn(async () => approved());
-    const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+    const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
     const execute = vi.fn(async () => failed("/read-secret/file", operation));
     expect(await turn.execute(invocation(execute, "/read-secret/file", "edit"))).toMatchObject({
       kind: "blocked",
@@ -215,7 +215,7 @@ describe("Engine native preparation recovery", () => {
     "rejects unsupported native ownership/declaration %s",
     async (kind) => {
       const review = vi.fn(async () => approved());
-      const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+      const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
       const execute = vi.fn(async () => failed());
       const action = invocation(execute);
       if (kind === "bash") action.call.tool = "bash";
@@ -239,7 +239,7 @@ describe("Engine native preparation recovery", () => {
         if (kind === "failure") throw new Error("review infrastructure failed");
         return kind === "deny" ? { kind: "deny", rationale: "refused" } : approved();
       });
-      const engine = createApproveForMeEngine({
+      const engine = createEngine({
         guardian: { review },
         policy: {
           check: () =>
@@ -267,7 +267,7 @@ describe("Engine native preparation recovery", () => {
     async (kind) => {
       const controller = new AbortController();
       const review = vi.fn(async () => approved());
-      const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+      const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
       const execute = vi.fn(async () => {
         if (kind === "cancel") controller.abort();
         else turn.close();
@@ -295,7 +295,7 @@ describe("Engine native preparation recovery", () => {
       }),
     );
     const stateChanged = vi.fn();
-    const turn = createApproveForMeEngine({
+    const turn = createEngine({
       guardian: { review },
       maxConsecutiveDenials: 2,
       onAutoStateChange: stateChanged,
@@ -334,9 +334,7 @@ describe("Engine native preparation recovery", () => {
         ? { kind: "deny" as const, reason: "file-only ceiling" }
         : { kind: "allow" as const },
     );
-    const turn = createApproveForMeEngine({ guardian: { review }, policy: { check } }).beginTurn(
-      snapshot(),
-    );
+    const turn = createEngine({ guardian: { review }, policy: { check } }).beginTurn(snapshot());
     const execute = vi.fn(async () => failed());
     expect(await turn.execute(invocation(execute))).toMatchObject({
       kind: "blocked",
@@ -348,7 +346,7 @@ describe("Engine native preparation recovery", () => {
 
   it("terminates the second failure and preserves both errors", async () => {
     const review = vi.fn(async () => approved());
-    const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+    const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
     const execute = vi.fn(
       async (): Promise<RuntimeOutcome<string>> =>
         execute.mock.calls.length === 1
@@ -370,7 +368,7 @@ describe("Engine native preparation recovery", () => {
 
   it("keeps concurrent invocation evidence and roots separate", async () => {
     const review = vi.fn(async () => approved());
-    const turn = createApproveForMeEngine({ guardian: { review } }).beginTurn(snapshot());
+    const turn = createEngine({ guardian: { review } }).beginTurn(snapshot());
     const actions = ["/one/file", "/two/file"].map((path) => {
       let ordinal = 0;
       const action = invocation(async (attempt) => {

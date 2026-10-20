@@ -1,6 +1,14 @@
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import {
+  cloneInvocation,
+  cloneInvocationCall,
+  cloneLease,
+  clonePolicy,
+  cloneSnapshot,
+} from "./engine-clone.ts";
+import { callFingerprint, invocationFingerprint, retryFingerprint } from "./engine-fingerprint.ts";
+import {
   isExactLocalNetworkAllowed,
   matchesNetworkDomainPattern,
 } from "./network-domain-pattern.ts";
@@ -18,14 +26,6 @@ import {
   projectExecutionNetwork,
   type SandboxPolicy,
 } from "./sandbox-policy.ts";
-import {
-  cloneInvocation,
-  cloneInvocationCall,
-  cloneLease,
-  clonePolicy,
-  cloneSnapshot,
-} from "./engine-clone.ts";
-import { callFingerprint, invocationFingerprint, retryFingerprint } from "./engine-fingerprint.ts";
 import { errorMessage, isRecord } from "./unknown-value.ts";
 
 // Keep the historical Engine export for host adapters and third-party callers.
@@ -352,7 +352,7 @@ export interface DenialNotice {
   readonly handle: RetryHandle;
 }
 
-interface ApproveForMeEngineOptions<ReviewContext = undefined> {
+interface EngineOptions<ReviewContext = undefined> {
   guardian?: GuardianAdapter<ReviewContext>;
   policy?: PermissionPolicy;
   onDenial?: (notice: DenialNotice) => void;
@@ -405,7 +405,7 @@ export interface PermissionStateView {
   readonly pendingConnections: number;
 }
 
-export interface ApproveForMeEngine<ReviewContext = undefined> {
+export interface Engine<ReviewContext = undefined> {
   beginTurn(snapshot: TurnSnapshot): TurnHandle<ReviewContext>;
   /**
    * Step-boundary mode apply (Codex-like). Patches only mode and related
@@ -870,9 +870,9 @@ function leaseWithAdditionalRequests(
   return next;
 }
 
-export function createApproveForMeEngine<ReviewContext = undefined>(
-  options: ApproveForMeEngineOptions<ReviewContext> = {},
-): ApproveForMeEngine<ReviewContext> {
+export function createEngine<ReviewContext = undefined>(
+  options: EngineOptions<ReviewContext> = {},
+): Engine<ReviewContext> {
   let generation = 0;
   let active: TurnState | undefined;
   let sessionKey: string | undefined;

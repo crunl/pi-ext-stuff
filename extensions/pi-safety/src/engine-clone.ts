@@ -9,7 +9,7 @@
  *
  * These live apart from the Engine so the copy rules can be read in one place.
  * Every import below is `import type`, so this module adds no runtime edge back
- * to `approve-for-me-engine.ts` and the value graph stays acyclic.
+ * to `engine.ts` and the value graph stays acyclic.
  */
 import { resolve } from "node:path";
 import type {
@@ -19,7 +19,7 @@ import type {
   InvocationCall,
   PermissionAmendment,
   TurnSnapshot,
-} from "./approve-for-me-engine.ts";
+} from "./engine.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 export function clonePolicy(policy: SandboxPolicy | undefined): SandboxPolicy | undefined {
