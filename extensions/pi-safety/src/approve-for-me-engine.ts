@@ -309,15 +309,13 @@ type PermissionErrorCode =
  *
  * - `fix-arguments`: the tool call itself is malformed. Retry the same intent
  *   with corrected arguments.
- * - `transient`: reading policy state failed. The action was never judged, so a
- *   retry may succeed.
  * - `no`: the action was proven unsafe or denied by configuration. Retrying the
  *   same action cannot succeed.
  *
  * It is declared here rather than in the static layer because it is part of the
  * Engine's error contract; the static layer classifies, the Engine carries it.
  */
-export type BlockRecoverability = "fix-arguments" | "transient" | "no";
+export type BlockRecoverability = "fix-arguments" | "no";
 
 export interface PermissionError {
   code: PermissionErrorCode;
@@ -754,12 +752,7 @@ function normalizeAdmission(
     // `recoverable` is producer-side classification, not request data: it must
     // survive normalization or the renderer falls back to sniffing the reason.
     const recoverable = raw.recoverable;
-    if (
-      recoverable !== undefined &&
-      recoverable !== "fix-arguments" &&
-      recoverable !== "transient" &&
-      recoverable !== "no"
-    ) {
+    if (recoverable !== undefined && recoverable !== "fix-arguments" && recoverable !== "no") {
       return { ok: false };
     }
     return {

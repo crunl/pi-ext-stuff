@@ -321,14 +321,13 @@ export async function evaluateRiskRequest(
   // by this flag, while `classifyRisk` treats those operations as `Skip`.
   const gitMetadata = usesImplicitGitNetwork ? await inspectRepositoryGitMetadata(cwd) : undefined;
   if (gitMetadata && !gitMetadata.ok) {
-    // Only a failed filesystem read is retryable. "repository not found",
-    // symlinked metadata, unexpected ownership and unparsable config are
-    // verdicts about the repository, which no retry can change.
+    // Every refusal the inspection produces is a verdict about the repository,
+    // which no retry can change, so it is never retryable.
     return {
       action: "block",
       risk: "Forbidden",
       reason: gitMetadata.reason,
-      recoverable: gitMetadata.transient === true ? "transient" : "no",
+      recoverable: "no",
     };
   }
   if (usesImplicitGitNetwork && gitMetadata?.ok) {
@@ -337,13 +336,11 @@ export async function evaluateRiskRequest(
       gitNetwork?.directImplicitPurpose === "push" ? "push" : "fetch",
     );
     if (!remoteHosts.ok) {
-      // Same split as above: a failed read is retryable, a parsed rejection of
-      // the config contents is not.
       return {
         action: "block",
         risk: "Forbidden",
         reason: remoteHosts.reason,
-        recoverable: remoteHosts.transient === true ? "transient" : "no",
+        recoverable: "no",
       };
     }
     request.networkTargets = [
@@ -456,11 +453,13 @@ export async function evaluateRiskRequest(
   const grantsWriteRoots = filesystemWriteRoots.length > 0;
   const packetRisk = risk === "Skip" && grantsWriteRoots ? "NeedsApproval" : risk;
 
+  const ruleAsks = rule?.decision === "ask";
+
   // Rule deny is not a gate here: it is checked earlier, before the external
   // branch, so that a deny rule also covers tools that never reach this point.
   const verdict = decide(
     [() => protectedPathReason],
-    [() => (rule?.decision === "ask" ? RULE_ASK_REASON : undefined)],
+    [() => (ruleAsks ? RULE_ASK_REASON : undefined)],
     [
       () =>
         rule?.decision === "allow" && risk !== "Forbidden" && !grantsWriteRoots
@@ -482,17 +481,16 @@ export async function evaluateRiskRequest(
   return {
     action: "prompt",
     risk: packetRisk,
-    reason:
-      rule?.decision === "ask"
-        ? RULE_ASK_REASON
-        : // This names where the dangerous argv itself was found, so it
-          // belongs in the review packet the Guardian reads.
-          classification.dangerousSubstitution !== undefined
-          ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
-          : `${packetRisk} operation`,
+    reason: ruleAsks
+      ? RULE_ASK_REASON
+      : // This names where the dangerous argv itself was found, so it
+        // belongs in the review packet the Guardian reads.
+        classification.dangerousSubstitution !== undefined
+        ? `Dangerous command inside shell substitution: ${classification.dangerousSubstitution}`
+        : `${packetRisk} operation`,
     summary: summarize(tool, input),
     residuals: residualsForPrompt({
-      ruleAsk: rule?.decision === "ask",
+      ruleAsk: ruleAsks,
       risk: packetRisk,
       writeUncovered: grantsWriteRoots || writeOutsideRoots,
       actionReview: packetRisk !== "Skip" && !grantsWriteRoots,

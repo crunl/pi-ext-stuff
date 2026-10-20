@@ -128,15 +128,6 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
           "Fix the tool-call arguments and retry the same command. The command itself was not evaluated or refused.",
         ].join("\n");
       }
-      if (error.recoverable === "transient") {
-        // The policy state could not be read, so nothing was judged about the
-        // action. Saying "cannot be overridden" here would be a false wall.
-        return [
-          "This action could not be evaluated because the permission policy state could not be read.",
-          `Reason: ${reason}`,
-          "The action was not refused on its own merits. Retry once; if the same failure recurs, stop and ask the user.",
-        ].join("\n");
-      }
       return [
         "This action is blocked by the active permission policy.",
         `Reason: ${reason}`,

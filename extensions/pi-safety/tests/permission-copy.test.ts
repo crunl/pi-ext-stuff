@@ -83,18 +83,6 @@ describe("permission copy", () => {
     expect(message).not.toContain("Fix the tool-call arguments");
   });
 
-  it("reads a transient policy-read failure as retryable, not as a wall", () => {
-    const message = renderPermissionErrorForAgent({
-      code: "policy-denied",
-      reason: "unsafe Git metadata: EACCES: permission denied",
-      recoverable: "transient",
-    });
-
-    expect(message).toContain("could not be evaluated");
-    expect(message).toContain("Retry once");
-    expect(message).not.toContain("cannot be overridden through Auto-review");
-  });
-
   it("prefers the producer's classification over the reason text", () => {
     // A reason that looks like an argument error but was classified as a
     // deterministic deny must render as the policy wall.

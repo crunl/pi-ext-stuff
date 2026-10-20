@@ -166,7 +166,12 @@ describe("ApprovalDisposition policy gate", () => {
     // `.agents` is a default protected write path, so the protected-path gate
     // fires while the argv itself is a plain, provable-safe write.
     await expect(
-      evaluateRiskRequest("write", { path: join(cwd, ".agents/note.md"), content: "x" }, cwd, config()),
+      evaluateRiskRequest(
+        "write",
+        { path: join(cwd, ".agents/note.md"), content: "x" },
+        cwd,
+        config(),
+      ),
     ).resolves.toMatchObject({
       action: "block",
       reason: expect.stringContaining("protected"),
@@ -189,12 +194,7 @@ describe("ApprovalDisposition policy gate", () => {
     // An ask rule outranks the proof gate: a provably safe argv still becomes
     // an action review, because the user asked for one.
     const askSafe = config({ rules: [{ action: "ask", tool: "bash", pattern: "printf *" }] });
-    const asked = await evaluateRiskRequest(
-      "bash",
-      { command: "printf hi" },
-      cwd,
-      askSafe,
-    );
+    const asked = await evaluateRiskRequest("bash", { command: "printf hi" }, cwd, askSafe);
     expect(asked).toMatchObject({
       action: "prompt",
       risk: "Skip",
@@ -820,6 +820,24 @@ describe("ApprovalDisposition policy gate", () => {
     );
     expect(decision).toMatchObject({ action: "allow", risk: "Skip" });
     expect(decision).not.toHaveProperty("networkHosts");
+  });
+
+  it("refuses broken Git metadata as deterministic, never as retryable", async () => {
+    // A dangling `gitdir:` pointer makes discovery fail after the implicit
+    // remote is established, which is the only path that inspects repository
+    // metadata. That failure is a fact about the working copy, so the agent
+    // must not be told a retry could succeed.
+    const cwd = await mkdtemp(join(tmpdir(), "pi-safety-default-"));
+    await writeFile(join(cwd, ".git"), "gitdir: /nonexistent/pi-safety-target\n");
+
+    await expect(
+      evaluateRiskRequest("bash", { command: "git push origin main" }, cwd, config()),
+    ).resolves.toMatchObject({
+      action: "block",
+      risk: "Forbidden",
+      reason: expect.stringContaining("unsafe Git metadata"),
+      recoverable: "no",
+    });
   });
 
   it("keeps a mandatory rule review mandatory for an implicit Git push", async () => {
