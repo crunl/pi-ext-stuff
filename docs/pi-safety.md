@@ -249,10 +249,10 @@ The remaining decision flow (`src/risk-policy.ts:377-519`):
   (`src/risk-policy.ts:433-496`).
 
 Host-first B (`read`/`grep`/`find`/`ls`) does **not** enter this chain:
-`evaluateHostFirstRulesOnly` (`src/risk-policy.ts:194`) honours only a
+`evaluateDenyRulesOnly` (`src/risk-policy.ts:246`) honours only a
 configured `rules[]` deny. `ask`/`allow`/no-match on that channel are
 ignored — no Engine authorization, no Guardian, no sandbox ownership
-(`src/risk-policy.ts:191-193`, `src/register.ts:2619-2636`).
+(`src/risk-policy.ts:242-245`, `src/register.ts:1491`).
 
 ## Runtime enforcement and sandbox
 

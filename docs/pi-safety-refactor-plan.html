@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-safety 重构计划（目标架构）</title>
+<style>
+  :root {
+    --bg: #fdfdfc;
+    --ink: #1e1e1e;
+    --muted: #75757a;
+    --rule: #e6e6e3;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+            "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+    --green-bg: #b2f2bb; --green-ink: #2f9e44;
+    --yellow-bg: #ffec99; --yellow-ink: #f08c00;
+    --red-bg: #ffc9c9; --red-ink: #e03131;
+    --blue-bg: #a5d8ff; --blue-ink: #1971c2;
+    --layer-bg: #f1f3f5; --layer-ink: #495057;
+    --purple: #5f3dc4;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 15.5px; line-height: 1.78;
+    padding: 44px 24px 110px;
+    background-image: radial-gradient(circle, rgba(0,0,0,0.05) 1px, transparent 1px);
+    background-size: 24px 24px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  .masthead {
+    background: #fff; border-radius: 16px; padding: 30px 34px 26px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 10px 34px rgba(0,0,0,0.07);
+    margin-bottom: 22px;
+  }
+  h1 {
+    font-size: 28px; font-weight: 650; letter-spacing: -0.2px;
+    margin: 0 0 10px; line-height: 1.35;
+  }
+  .status {
+    display: inline-block; font-family: var(--mono); font-size: 11.5px;
+    letter-spacing: 0.6px; text-transform: uppercase;
+    background: var(--yellow-bg); color: var(--yellow-ink);
+    border: 1.5px solid var(--yellow-ink); border-radius: 999px;
+    padding: 3px 12px; margin-bottom: 14px;
+  }
+  .status.done { background: var(--green-bg); color: var(--green-ink); border-color: var(--green-ink); }
+  .lede { color: var(--muted); font-size: 15px; margin: 0; }
+  .lede code { font-size: 13.5px; }
+
+  .toc {
+    background: #fff; border-radius: 16px; padding: 22px 30px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 10px 34px rgba(0,0,0,0.07);
+    margin-bottom: 22px;
+  }
+  .toc h2 {
+    font-size: 12px; font-family: var(--mono); letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted);
+    margin: 0 0 12px; font-weight: 600;
+  }
+  .toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 34px; }
+  .toc li { margin: 0 0 6px; break-inside: avoid; }
+  .toc a { color: var(--ink); text-decoration: none; border-bottom: 1px solid transparent; }
+  .toc a:hover { color: var(--blue-ink); border-bottom-color: var(--blue-ink); }
+  .toc .sub-list { list-style: none; padding-left: 0; margin: 4px 0 8px; }
+  .toc .sub-list li { font-size: 13.5px; color: var(--muted); }
+
+  section.doc {
+    background: #fff; border-radius: 16px; padding: 32px 36px 30px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 10px 34px rgba(0,0,0,0.07);
+    margin-bottom: 22px;
+  }
+  h2 {
+    font-size: 21px; font-weight: 650; letter-spacing: -0.15px;
+    margin: 0 0 6px; padding-bottom: 12px; border-bottom: 2px solid var(--rule);
+  }
+  h2 .num { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-right: 11px; font-weight: 500; }
+  h3 { font-size: 16.5px; font-weight: 650; margin: 30px 0 10px; letter-spacing: -0.1px; }
+  h3 .num { font-family: var(--mono); color: var(--muted); margin-right: 9px; }
+  h4 { font-size: 14.5px; font-weight: 650; margin: 22px 0 8px; color: var(--layer-ink); }
+  p { margin: 0 0 15px; }
+  ul, ol { margin: 0 0 15px; padding-left: 22px; }
+  li { margin-bottom: 7px; }
+  li > ul, li > ol { margin-top: 7px; margin-bottom: 0; }
+
+  a { color: var(--blue-ink); text-decoration: none; border-bottom: 1px solid rgba(25,113,194,0.3); }
+  a:hover { border-bottom-color: var(--blue-ink); }
+
+  code {
+    font-family: var(--mono); font-size: 13.2px;
+    background: var(--layer-bg); border-radius: 4px; padding: 1.5px 5px; color: #2b2b2b;
+  }
+  pre {
+    font-family: var(--mono); font-size: 13px; line-height: 1.62;
+    background: var(--layer-bg); border-radius: 10px; padding: 16px 18px;
+    overflow-x: auto; margin: 0 0 18px; color: #2b2b2b;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .tbl-scroll { overflow-x: auto; margin: 0 0 18px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.8px; line-height: 1.62; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 13px; border-bottom: 1px solid var(--rule); }
+  thead th {
+    background: var(--layer-bg); color: var(--layer-ink);
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.5px;
+    text-transform: uppercase; font-weight: 600;
+    border-bottom: 2px solid var(--layer-ink); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #fbfbfa; }
+  td code { font-size: 12.4px; }
+
+  .callout { border-radius: 10px; padding: 16px 20px; margin: 0 0 18px; font-size: 14.5px; }
+  .callout > :last-child { margin-bottom: 0; }
+  .callout .tag {
+    display: inline-block; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.8px; text-transform: uppercase; font-weight: 700;
+    padding: 2px 9px; border-radius: 999px; margin-bottom: 9px;
+  }
+  .callout.contract { background: #f3f0ff; border-left: 4px solid var(--purple); }
+  .callout.contract .tag { background: var(--purple); color: #fff; }
+  .callout.debunk { background: #fff5f5; border-left: 4px solid var(--red-ink); }
+  .callout.debunk .tag { background: var(--red-ink); color: #fff; }
+  .callout.note { background: var(--layer-bg); border-left: 4px solid var(--layer-ink); }
+  .callout.note .tag { background: var(--layer-ink); color: #fff; }
+  .callout.decision { background: #fffbea; border-left: 4px solid var(--yellow-ink); }
+  .callout.decision .tag { background: var(--yellow-ink); color: #fff; }
+
+  blockquote {
+    margin: 0 0 18px; padding: 18px 24px; background: var(--layer-bg);
+    border-radius: 10px; border-left: 4px solid var(--blue-ink);
+    font-size: 16px; font-weight: 600; line-height: 1.7; letter-spacing: -0.1px;
+  }
+  blockquote p { margin: 0; }
+
+  .chip {
+    display: inline-block; font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.5px; padding: 1px 8px; border-radius: 999px;
+    border: 1.5px solid; font-weight: 600; vertical-align: 1px;
+  }
+  .chip.green { background: var(--green-bg); border-color: var(--green-ink); color: var(--green-ink); }
+  .chip.yellow { background: var(--yellow-bg); border-color: var(--yellow-ink); color: var(--yellow-ink); }
+  .chip.red { background: var(--red-bg); border-color: var(--red-ink); color: var(--red-ink); }
+  .chip.blue { background: var(--blue-bg); border-color: var(--blue-ink); color: var(--blue-ink); }
+  .chip.layer { background: var(--layer-bg); border-color: var(--layer-ink); color: var(--layer-ink); }
+  .chip.purple { background: #f3f0ff; border-color: var(--purple); color: var(--purple); }
+
+  .legend {
+    display: flex; gap: 10px 22px; flex-wrap: wrap;
+    padding: 16px 20px; background: var(--layer-bg); border-radius: 10px;
+    margin: 0 0 18px; font-size: 13.5px; color: var(--layer-ink);
+  }
+  .legend span { display: flex; align-items: center; gap: 8px; }
+  .sw { width: 22px; height: 14px; border-radius: 3px; border: 1.5px solid; flex: none; }
+  .sw.plain { background: #fff; border-color: var(--layer-ink); }
+  .sw.layer { background: var(--layer-bg); border-color: var(--layer-ink); }
+  .sw.blue { background: var(--blue-bg); border-color: var(--blue-ink); }
+  .sw.yellow { background: var(--yellow-bg); border-color: var(--yellow-ink); }
+  .sw.green { background: var(--green-bg); border-color: var(--green-ink); }
+  .sw.red { background: var(--red-bg); border-color: var(--red-ink); }
+  .sw.purple { background: #f3f0ff; border-color: var(--purple); }
+
+  .figlink {
+    display: block; padding: 18px 22px; border-radius: 12px;
+    background: var(--layer-bg); border: 1.5px dashed var(--purple);
+    color: var(--ink); text-decoration: none; margin: 0 0 20px;
+  }
+  .figlink:hover { background: #f3f0ff; border-bottom-style: dashed; }
+  .figlink .ttl { font-weight: 650; color: var(--purple); font-size: 15px; }
+  .figlink .dsc { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .figlink code { background: rgba(255,255,255,0.7); }
+
+  .strike { color: var(--red-ink); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  .keep { color: var(--green-ink); font-weight: 600; }
+  .new { color: var(--purple); font-weight: 650; }
+
+  footer {
+    text-align: center; color: var(--muted); font-size: 12.5px;
+    padding: 22px 0 0; font-family: var(--mono); line-height: 1.85;
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 24px 12px 70px; font-size: 15px; }
+    section.doc, .masthead, .toc { padding: 22px 20px; }
+    .toc ol { columns: 1; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="status">plan · reviewed 2026-10-20</div>
+  <h1>pi-safety 重构计划</h1>
+  <p class="lede">
+    <strong>目标架构</strong>：安全门控 · 无人工审批 · LLM reviewer 为默认审批者 ·
+    <code>request_permissions</code> 为唯一额外权限入口。<br>
+    <strong>计划日期</strong> 2026-10-20 · <strong>重构基线</strong> <code>b9b9ab0</code>（engine 改名完成后）<br>
+    <strong>文档状态</strong>：已完成三轴独立评审（安全 / 内部一致性 / 事实准确），意见已吸收。
+  </p>
+</header>
+
+<a class="figlink" href="./diagrams/pi-safety-target-flow.html">
+  <div class="ttl">配套图：pi-safety 目标架构流程图</div>
+  <div class="dsc">
+    <code>docs/diagrams/pi-safety-target-flow.html</code> —— 目标门模型、四个 deny 终点、
+    L1 前置、engine 容器画法的权威渲染件。冲突时以渲染件的节点/边语义为准。
+  </div>
+</a>
+
+<nav class="toc">
+  <h2>目录</h2>
+  <ol>
+    <li><a href="#s1">目标架构</a>
+      <ul class="sub-list">
+        <li><a href="#s1-1">1.1 五条硬约束</a></li>
+        <li><a href="#s1-2">1.2 非目标与既有决策</a></li>
+      </ul>
+    </li>
+    <li><a href="#s2">现状锚点</a>
+      <ul class="sub-list">
+        <li><a href="#s2-1">2.1 人工干预面现在有哪些</a></li>
+        <li><a href="#s2-2">2.2 图例语义表</a></li>
+        <li><a href="#s2-3">2.3 engine 状态分层</a></li>
+        <li><a href="#s2-4">2.4 硬约束清单</a></li>
+      </ul>
+    </li>
+    <li><a href="#s3">两条行为契约</a>
+      <ul class="sub-list">
+        <li><a href="#s3-1">3.1 模式切换在 turn 边界生效</a></li>
+        <li><a href="#s3-2">3.2 ESC 终止整个 session</a></li>
+      </ul>
+    </li>
+    <li><a href="#s4">分块实施设计</a>
+      <ul class="sub-list">
+        <li><a href="#s4-1">4.1 L1 前置只判 deny</a></li>
+        <li><a href="#s4-2">4.2 门模型语义逐条定义</a></li>
+        <li><a href="#s4-3">4.3 渲染件待办</a></li>
+        <li><a href="#s4-4">4.4 engine 不需要重构</a></li>
+        <li><a href="#s4-5">4.5 人工审批面清理清单</a></li>
+      </ul>
+    </li>
+    <li><a href="#s5">顺序</a></li>
+    <li><a href="#s6">决策表</a></li>
+    <li><a href="#s7">不变量</a></li>
+    <li><a href="#s8">验证</a></li>
+  </ol>
+</nav>
+
+<!-- ============================== 1 ============================== -->
+<section class="doc" id="s1">
+  <h2><span class="num">1</span>目标架构</h2>
+
+  <h3 id="s1-1"><span class="num">1.1</span>五条硬约束</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:52px">#</th><th style="width:220px">约束</th><th>内容</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="chip purple">1</span></td>
+        <td><strong>LLM reviewer 是默认审批者</strong></td>
+        <td>常规批准权在 LLM reviewer。唯一例外：用户通过 <code>rules[]</code> 的 <code>allow</code> <strong>配置</strong>预先声明安全（见 4.1.3）</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">2</span></td>
+        <td><strong>零用户审批面板</strong></td>
+        <td>重构后 pi-safety 不含任何运行时用户审批 UI。含 <code>/approve</code> 的 <code>ui.select</code>、<code>ui.confirm</code>、<code>ui.prompt</code> 及一切「ask the user」文案全删</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">3</span></td>
+        <td><strong><code>request_permissions</code> 是唯一额外权限入口</strong></td>
+        <td>除它之外不存在第二条扩权通道；不设 escalation（<code>67ca74f</code>）</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">4</span></td>
+        <td><strong>sandbox 仍由 pi 沙箱强制</strong></td>
+        <td>reviewer 不能授予 host 逃逸能力，只能在沙箱约束内放行</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">5</span></td>
+        <td><strong>yolo 绕开 reviewer 与 sandbox，但绕不开 L1</strong></td>
+        <td>用户配置的 deny 在 yolo 前仍拦得住</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>配置不是审批面板。</strong>约束 2 禁止的是<strong>运行时</strong>弹窗交互。
+    <code>rules[]</code> 是用户事先写在配置里的静态声明，写一次长期生效，不打断任何 turn——两者性质不同，不冲突。</p>
+  </div>
+
+  <h3 id="s1-2"><span class="num">1.2</span>非目标与既有决策</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:250px">项</th><th style="width:150px">决定</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>escalation</code></td>
+        <td><span class="chip red">删</span></td>
+        <td><code>67ca74f</code> 已删 <code>escalation-policy.ts</code>；但 <code>PolicyRiskLevel</code> 的 <code>"escalation"</code> 词表项保留（<code>engine-fingerprint.ts</code> 参与 review 指纹）</td>
+      </tr>
+      <tr>
+        <td><code>transient</code> 标记</td>
+        <td><span class="chip red">删</span></td>
+        <td><code>c848cb8</code> 已删整条链路（<code>declassify-transient.ts</code>）</td>
+      </tr>
+      <tr>
+        <td><code>failed</code> 出口</td>
+        <td><span class="chip yellow">不新增</span></td>
+        <td>deny 携带 <code>recoverable</code>；四个 deny 终点不合并</td>
+      </tr>
+      <tr>
+        <td>域名白名单网络边界</td>
+        <td><span class="chip yellow">不新增</span></td>
+        <td><code>allowedDomains: []</code> 保持「不做进一步限制」</td>
+      </tr>
+      <tr>
+        <td>git 元数据 deny 名单</td>
+        <td><span class="chip yellow">本轮不扩</span></td>
+        <td>见 <code>security/git-metadata-policy.md</code></td>
+      </tr>
+      <tr>
+        <td>审批缓存</td>
+        <td><span class="chip green">保留</span></td>
+        <td>五重指纹，仅 preview 来源可读</td>
+      </tr>
+      <tr>
+        <td>engine 授权逻辑</td>
+        <td><span class="chip green">不重构</span></td>
+        <td>见 4.4</td>
+      </tr>
+      <tr>
+        <td><strong><code>request_permissions</code> 是否受 deny 约束</strong></td>
+        <td><span class="chip yellow">不受</span><br><span class="new">产品决策 2026-10-20</span></td>
+        <td><code>evaluateRiskRequest</code> 在 <code>risk-policy.ts:288-294</code> 提前 return 进 <code>evaluateRequestPermissions</code>，不查 <code>matchRules</code>。保持现状：用户 deny 规则对它无效</td>
+      </tr>
+      <tr>
+        <td><strong>外来工具（MCP / 其他扩展注册）</strong></td>
+        <td><span class="chip yellow">完全不管</span><br><span class="new">产品决策 2026-10-20</span></td>
+        <td><code>register.ts:2316-2326</code> 早退，既不沙箱也不评审。<strong>但必须删掉 <code>src/permissions/rules.ts:140</code> 谎称 <code>mcp__*</code> 能覆盖 MCP 的注释</strong>（见 4.2.9）</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================== 2 ============================== -->
+<section class="doc" id="s2">
+  <h2><span class="num">2</span>现状锚点</h2>
+
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>2 节描述现状；4 节描述目标；冲突时以 4 节为准。</strong></p>
+  </div>
+
+  <h3 id="s2-1"><span class="num">2.1</span>人工干预面现在有哪些</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:230px">面</th><th style="width:230px">位置</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>/approve</code> 命令</td><td><code>register.ts:2346-2400</code></td><td><span class="chip red">删</span>（4.5）</td></tr>
+      <tr><td>2</td><td><code>ui.select("Auto-review denials")</code></td><td><code>pi-safety.ts:506</code>（唯一一处 <code>.select(</code>）</td><td><span class="chip red">删</span>（4.5）</td></tr>
+      <tr><td>3</td><td><code>approvalOverride</code> 信任通道</td><td><code>engine.ts:253</code></td><td><span class="chip red">删</span>（4.5）</td></tr>
+      <tr><td>4</td><td>deny 文案「ask the user」</td><td><code>permission-copy.ts:92,102,114,173</code>；<code>register-tool-copy.ts:11,14</code></td><td><span class="chip yellow">改写</span>（4.5）</td></tr>
+      <tr><td>5</td><td><code>request_permissions</code> 主动扩权</td><td><code>register-request-permissions.ts</code></td><td><span class="chip green">保留</span>（约束 3）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>注入点</strong>：reviewer 在 <code>register.ts:266</code>（<code>guardian: createPiGuardianAdapter(autoReviewer)</code>）注入，
+    可被 <code>options.autoReviewer</code> 覆盖（<code>:223</code>）。</p>
+  </div>
+
+  <h3 id="s2-2"><span class="num">2.2</span>图例语义表（实施后必须一致）</h3>
+  <div class="legend">
+    <span><i class="sw blue"></i>蓝 · 决策</span>
+    <span><i class="sw yellow"></i>黄 · 沙箱</span>
+    <span><i class="sw green"></i>绿 · 放行</span>
+    <span><i class="sw red"></i>红 · 终止</span>
+    <span><i class="sw layer"></i>灰 · 数据</span>
+    <span><i class="sw purple"></i>紫 · 审批</span>
+    <span><i class="sw plain"></i>实线 · 顺序 / 依赖</span>
+    <span>┄┄ 虚线 · 路径存在性</span>
+    <span>─ 无箭头 · 同容器</span>
+  </div>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:120px">视觉</th><th style="width:170px">语义</th><th>节点</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip yellow">黄</span></td><td>沙箱</td><td><code>sbxA</code>、<code>sbxN</code>、<code>sbx</code>、<code>rSbx</code>、<code>lease</code></td></tr>
+      <tr><td><span class="chip red">红</span></td><td>终止</td><td><code>blocked</code>、<code>vDeny</code>、<code>ret</code>、<code>rret</code></td></tr>
+      <tr><td><span class="chip blue">蓝</span></td><td>决策</td><td><code>eCall</code>、<code>toolCall</code>、<code>g1</code>、<code>g2</code>、<code>g3</code>、<code>ruleEval</code>、<code>kExec</code>、<code>arb</code></td></tr>
+      <tr><td><span class="chip green">绿</span></td><td>放行</td><td><code>exec</code>、<code>vAllow</code>、<code>vAsk</code>、<code>rAllow</code>、<code>rp</code>、<code>rret2</code>、<code>done</code>、<code>grant</code>、<code>ext</code></td></tr>
+      <tr><td><span class="chip layer">灰</span></td><td>数据</td><td><code>cfg</code>、<code>input</code>、<code>logs</code>、<code>sig</code>、<code>deny</code></td></tr>
+      <tr><td><span class="chip purple">紫</span></td><td>审批</td><td><code>rrev</code>、<code>pnl</code>、<code>arule</code></td></tr>
+      <tr><td colspan="2"><strong>实线</strong></td><td>顺序 / 依赖</td></tr>
+      <tr><td colspan="2"><strong>虚线</strong></td><td><strong>路径存在性</strong>（可能不走）：<code>g1 ⇢ toolCall</code>、<code>g2 ⇢ vDeny</code>、<code>vAsk ⇢ rret</code>、<code>rSbx ⇢ rret2</code>、<code>rp ⇢ rret</code>、<code>g3 ⇢ rrev</code></td></tr>
+      <tr><td colspan="2"><strong>无箭头线</strong></td><td>同容器（纯视觉）：<code>leash</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>一色一义</strong>：红只表示终止，不表示「有害」「拒绝」。<code>vAsk</code> 画绿不画红（见 4.2.3）。
+    <strong>见 4.2.1</strong>：<code>allow</code>/<code>ask</code> 不进 L1。</p>
+  </div>
+
+  <div class="callout debunk">
+    <div class="tag">resolved</div>
+    <p><strong><code>vDeny</code> 无出口</strong>（三轴评审 C1 的处置）：红 = 终止，<code>vDeny</code> 是纯终局节点。<br>
+    <code>writeOutsideRoots</code>（<code>register.ts:1795-1812</code>）不是 deny，是<strong>在沙箱内继续执行</strong>的路径——
+    它不画成 <code>vDeny</code> 的放行边，否则破坏「一色一义」。正确画法是作为
+    <code>vAllow → sbxA</code> 路径上的<strong>标注</strong>（badge），不是节点出口。</p>
+  </div>
+
+  <h3 id="s2-3"><span class="num">2.3</span>engine 状态分层</h3>
+  <p>engine <strong>保留为容器</strong>（有状态核心，不拆）。状态分三层：</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:110px">层</th><th>状态</th><th style="width:170px">生命周期</th><th style="width:110px">处置</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>进程级</strong></td>
+        <td><code>generation:876</code>、<code>active:877</code>、<code>sessionKey:878</code>、<code>configKey:879</code>、<code>circuitOpen:883</code>、<code>reviewSequence:887</code>、<code>reviewControllers:888</code>、<code>inFlightCallIds:889</code>、<code>inFlightAttempts:890</code></td>
+        <td>进程级，跨 turn 保持</td>
+        <td><span class="chip green">保留</span></td>
+      </tr>
+      <tr>
+        <td><strong>进程级</strong></td>
+        <td><code>retrySequence:880</code>、<code>retryRecords:884</code>、<code>denialNotices:885</code>、<code>armedRetry:886</code></td>
+        <td>同上</td>
+        <td><span class="chip red">删</span>（4.5）</td>
+      </tr>
+      <tr>
+        <td><strong>Turn 级</strong></td>
+        <td><code>TurnState:426</code>（<code>generation:427</code>、<code>snapshot:428</code>、<code>turnNetworkHosts:429</code>、<code>turnNetworkAll:430</code>、<code>turnWriteRoots:431</code>、<code>grants:432</code>、<code>approvals:433</code>、<code>closed:434</code>）</td>
+        <td>turn 级</td>
+        <td><span class="chip green">保留</span>（与模式切换契约一致）</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><strong>熔断与统计</strong>：<code>denialWindow:881</code>、<code>consecutiveDenials:882</code>、
+  <code>recordDenialStats</code>（<code>engine.ts:911</code>）<strong>保留</strong>——它们支撑 deny 熔断，
+  属 4.2 的「多计数」观测数据，不是人工审批面。</p>
+  <p><strong>审批缓存</strong>：<code>readApprovalCache:1337-1374</code>（仅 preview 来源可读）、
+  <code>consumeGrant:1314-1320</code>、<code>requestCovered:744</code> <strong>保留</strong>。
+  缓存注释明确「manual-retry 路径永不读取」（<code>:448</code>）。</p>
+
+  <h3 id="s2-4"><span class="num">2.4</span>硬约束清单（实施时每步保持绿）</h3>
+  <ul>
+    <li><code>sandbox-policy.ts</code> 在 engine value-closure 内禁止 <code>node:fs</code>；闭包内禁止 <code>sandbox.ts</code></li>
+    <li>host 包白名单仅 <code>["src/guardian-tools.ts", "src/register.ts"]</code>（<code>tests/structure-invariants.test.ts:367</code>）</li>
+    <li>结构不变量测试全绿（<code>tests/structure-invariants.test.ts</code>）</li>
+    <li><strong>零用户审批面板</strong>（见 7）</li>
+  </ul>
+</section>
+
+<!-- ============================== 3 ============================== -->
+<section class="doc" id="s3">
+  <h2><span class="num">3</span>两条行为契约</h2>
+
+  <h3 id="s3-1"><span class="num">3.1</span>模式切换在 turn 边界生效</h3>
+  <blockquote><p>用户在 turn 进行中切换 <code>auto ↔ yolo</code> 时，当前 turn 继续使用<strong>进入 turn 时的模式快照</strong>；
+  新模式从下一个 turn 的 <code>turn_start</code> 起生效。</p></blockquote>
+
+  <p><strong>为什么不是 turn 内生效</strong>（三条真实原因）：</p>
+  <ol>
+    <li><strong>pi 无批次级事件</strong>：<code>executeToolCalls</code>（<code>agent-loop.ts:508-523</code>）默认并行执行，
+    无 <code>tools_before_batch</code> 之类的通知，<code>before_tool_call</code> 是每调用粒度，无法在批次边界插入刷新。</li>
+    <li><strong>并行批次内授权会分裂</strong>：<code>executeToolCallsParallel</code>（<code>agent-loop.ts:586-650</code>）
+    prepare 串行（<code>:601-635</code>）、执行 <code>Promise.all</code>（<code>:637-639</code>）——同批工具可能各拿各的模式快照。
+    更糟的是 SRT 是<strong>进程级单例</strong>（<code>sandbox-policy.ts:281</code>），两个工具会互相踩 <code>activate()</code>。</li>
+    <li><strong><code>message_end</code> 不是安全接缝</strong>：它在 UI 分发/落盘前被 <code>await</code>（<code>agent-loop.ts:942-944</code>），
+    静止性不保证——SRT 有 15 秒排空窗口（<code>srt-coordinator.ts:19</code>
+    <code>SRT_DRAIN_TIMEOUT_MS = 15_000</code>），并发 subagent 共享同一个 SRT manager。</li>
+  </ol>
+
+  <div class="callout note">
+    <div class="tag">known weakness</div>
+    <p><strong>已知弱点</strong>（不修，记录在案）：状态栏 turn 内中途可能显示期望模式，而实际快照仍旧——
+    用户看到的和生效的会有短暂不一致。</p>
+  </div>
+
+  <p><strong>唯一未来路径</strong>：pi 上游增加 <code>tools_before_batch</code> 事件。届时可改为批次前刷新，契约随之收紧。</p>
+
+  <div class="callout debunk">
+    <div class="tag">debunked</div>
+    <p><strong>被否决的说法</strong>（不重复采信）：「<code>message_end</code> 是静止点」「turn 内刷新不会分裂」
+    「SRT 冲突可以靠锁解决」——三条都已在论证中被推翻。</p>
+  </div>
+
+  <h3 id="s3-2"><span class="num">3.2</span>ESC 终止整个 session</h3>
+  <blockquote><p>ESC（<code>app.interrupt</code>）终止整个 session 的工作，不保证「立即可重试」。</p></blockquote>
+
+  <p><strong>六层链路</strong>（已核实）：<code>keybindings.md:124</code>
+  <code>app.interrupt = escape</code> → <code>agent-session.ts:2464</code>（含
+  <code>await waitForIdle()</code>）→ <code>agent.ts:341</code> → <code>agent-loop.ts:809</code> signal →
+  <code>bash.ts:141-144</code> 杀进程树 / <code>:155-158</code> 返回 <code>128+signal</code> →
+  <code>agent-loop.ts:581</code> break。</p>
+
+  <p><strong>三条 engine 残留</strong>（属清理时序问题，排计划末尾，不影响契约）：</p>
+  <ol>
+    <li>abort reason 被丢弃，不进入审计链</li>
+    <li><code>abortAttempts</code> / <code>abortReviews</code> 不对称</li>
+    <li>ESC 不走 <code>invalidate:2506</code>，旧 generation 状态可能残留到下一个 turn</li>
+  </ol>
+</section>
+
+<!-- ============================== 4 ============================== -->
+<section class="doc" id="s4">
+  <h2><span class="num">4</span>分块实施设计</h2>
+
+  <h3 id="s4-1"><span class="num">4.1</span>L1 前置只判 <code>deny</code></h3>
+  <p><strong>结论</strong>：<code>allow</code>/<code>ask</code> 不能进 L1，只有 <code>deny</code> 可以。
+  <strong>L1 不替代 <code>evaluateManagedRisk</code>，只在其前叠加。</strong></p>
+
+  <p><strong>现状缺口</strong>：bash / write / edit 是 <code>PI_OWNED_TOOL_NAMES</code> 的成员，
+  在 <code>register.ts:2316</code> 的 <code>tool_call</code> 早退。host-first（read / grep / find / ls）在
+  <code>register.ts:1448-1465</code> 走 <code>evaluateHostFirstRulesOnly</code>（只认 <code>deny</code>）；
+  受管工具在 yolo 下<strong>完全不查规则</strong>：</p>
+  <ul>
+    <li>bash：<code>register.ts:1592-1602</code> yolo 下 <code>risk = undefined</code>，<code>evaluateManagedRisk</code> 根本不调用</li>
+    <li>write/edit：<code>riskForFileMutation:1777</code> yolo 直接返回 <code>undefined</code></li>
+    <li>engine 也不是第二道防线：<code>engine.ts:1078-1080</code> yolo 下直接 <code>return { kind: "approve" }</code></li>
+  </ul>
+  <p>结果：<code>register.ts:1447-1449</code> 注释承诺「a deny rule wins in every mode」，
+  <strong>但只在 host-first 路径成立</strong>。</p>
+
+  <h4>4.1.1 为什么 <code>ask</code> 不能进 L1</h4>
+  <p><code>ask</code> 的定义是<strong>强制进 LLM reviewer</strong>（<code>risk-policy.ts:456-462</code> 的 force-review 门）。
+  若 L1 前置短路 <code>ask</code>：</p>
+  <ul>
+    <li>在 <strong>yolo</strong> 下：yolo 已绕开 reviewer，<code>ask</code> 无从「强制 review」，只剩强制阻断——
+    <strong>与约束 5「yolo 绕开 reviewer」直接冲突</strong>。</li>
+    <li>在 <strong>auto</strong> 下：L1 提前短路会绕开 <code>decide()</code> 的门序（deny → force-review → allow），
+    语义重复且易分叉。</li>
+  </ul>
+  <p><strong>落点</strong>：<code>ask</code> 留在 L2（<code>risk-policy.ts:456-462</code>）。</p>
+
+  <h4>4.1.2 为什么 <code>allow</code> 不能进 L1</h4>
+  <p><code>allow</code> 的语义是<strong>用户声明安全 → 沙箱内直接执行</strong>（4.1.3）。它有两个依赖，
+  只有 L2 判定完才知道：</p>
+  <ol>
+    <li><strong><code>Forbidden</code> 仍优先</strong>：<code>risk-policy.ts:465-468</code> 的 allow 门条件是
+    <code>decision === "allow" &amp;&amp; risk !== "Forbidden"</code>。<code>Forbidden</code> 是不可被
+    <code>allow</code> 覆盖的硬阻断。</li>
+    <li><strong>写根判定</strong>：<code>!grantsWriteRoots</code>——动作请求写根时 <code>allow</code> 不生效。</li>
+  </ol>
+  <p>若 L1 提前放行 <code>allow</code>，这两条都会被绕过。</p>
+
+  <h4>4.1.3 <code>allow</code> 的语义（产品决策 2026-10-20）</h4>
+  <div class="callout decision">
+    <div class="tag">product decision · 2026-10-20</div>
+    <p><strong><code>allow</code> = 用户在配置里预先声明「这个安全」→ 直接在 sandbox 里跑，不进 LLM reviewer。</strong></p>
+    <ul>
+      <li><strong>不绕沙箱</strong>：<code>allow</code> 只免除 reviewer，不解除沙箱约束（lease 仍是
+      <code>sandboxed</code>，不是 <code>unrestricted</code>）。</li>
+      <li><strong>不覆盖硬阻断</strong>：<code>Forbidden</code>、deny 规则、写根判定照旧优先。</li>
+      <li><strong>不违背约束 2</strong>：<code>rules[]</code> 是事先写好的静态配置，不是运行时审批面板。</li>
+      <li><strong>reviewer 的定位因此是「默认审批者」而非「唯一审批者」</strong>——用户用
+      <code>allow</code> 预先批准，用 <code>deny</code> 预先否决，运行时只有 reviewer 在裁决。</li>
+    </ul>
+  </div>
+
+  <h4>4.1.4 实施：<code>tool_call</code> 单接缝（三轴研究结论）</h4>
+  <p><strong>接缝放在 <code>pi.on("tool_call")</code> 内、<code>PI_OWNED_TOOL_NAMES</code> 早退之前</strong>
+  （<code>register.ts:2316</code>），一处覆盖 bash / write / edit / host-first / subagent。</p>
+
+  <div class="callout debunk">
+    <div class="tag">overturned</div>
+    <p><strong>为什么不是 3 个 execute 入口</strong>（两个独立 subagent 收敛到同一结论）：</p>
+    <div class="tbl-scroll">
+    <table>
+      <thead><tr><th style="width:120px"></th><th>3 个调用点（原设计）</th><th><code>tool_call</code> 单接缝</th></tr></thead>
+      <tbody>
+        <tr><td><strong>遗忘点</strong></td><td>3 处「记得调」</td><td>1 处</td></tr>
+        <tr><td><strong>未来工具</strong></td><td>新注册的工具静默绕过 L1</td><td>自动覆盖</td></tr>
+        <tr><td><strong>错误传播</strong></td><td>两套</td><td>一套</td></tr>
+        <tr><td><strong>测试面</strong></td><td>碎片化，要测过接口摸内部</td><td>所有工具走同一接口</td></tr>
+        <tr><td><strong>产品决策吻合</strong></td><td>要单独把 <code>request_permissions</code> 摘出来</td><td>钩子里一个过滤条件</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p><strong>决定性证据</strong>：<code>ToolCallEventResult</code>（pi <code>core/extensions/types.d.ts:1089</code>）
+    原生就是拦截结构 <code>{ block?: boolean; reason?: string; terminate?: boolean }</code>。<br>
+    而 <code>evaluateHostFirstRulesOnly</code> 返回的正是 <code>{ block: true; reason } | undefined</code>——
+    <strong>形状天然吻合，不需要适配</strong>。这接口本来就是为拦截准备的。</p>
+  </div>
+
+  <p><strong>代码形状</strong>：</p>
+<pre><code>pi.on("tool_call", async (event, ctx) =&gt; {
+  if (event.toolName !== "request_permissions") {          // 产品决策：豁免
+    const denial = evaluateDenyRulesOnly(event.toolName, event.input, cwd, config);
+    if (denial) return { block: true, reason: denial.reason };
+  }
+  if (PI_OWNED_TOOL_NAMES.has(event.toolName)) return;     // bash/write/edit
+  if (PI_HOST_FIRST_TOOL_NAMES.has(event.toolName) ||
+      DELEGATED_TOOL_NAMES.has(event.toolName)) {
+    return evaluateHostFirstToolCall(event, ctx);
+  }
+  return;                                                   // 外来工具：不拦
+});</code></pre>
+  <p><strong>两个豁免在同一处断言</strong>（而非「哪里没调」的涌现结果）：
+  <code>request_permissions</code> 豁免 = 那一个 <code>!==</code> 条件；外来工具豁免 = 落到最后的 <code>return</code>。</p>
+
+  <h4>4.1.5 函数改名与去重</h4>
+  <p><strong>改名</strong>：<code>evaluateHostFirstRulesOnly</code> → <strong><code>evaluateDenyRulesOnly</code></strong>。</p>
+  <div class="callout note">
+    <div class="tag">interface defect</div>
+    <p><strong>名实不符是真实的接口缺陷，不是美观问题</strong>：函数体内<strong>零 host-first 专属逻辑</strong>，
+    就是 <code>normalizeToolCall</code> + <code>matchRules</code> + 只认 <code>deny</code>。名字说「host-first 专用」，
+    调用方却必须读实现才知道 <code>HostFirst</code> 是历史误称。</p>
+  </div>
+  <p><strong>去重</strong>：L1 移到钩子后 host-first 会被查两次。按 locality 原则只留一处——
+  但 <code>evaluateHostFirstToolCall</code> 还背着 <code>checkDelegateSpawn</code>（<code>register.ts:1469-1484</code>），
+  不能整块删，只能去掉内部那次 L1。</p>
+  <p><strong>删除测试（deletion test）</strong>：当前<strong>只有 1 个生产调用方</strong>（<code>register.ts:1450</code>）。
+  <code>risk-policy.ts:271</code> 是废弃包装，其注释 <code>:262-263</code> 自陈「Not used by register.ts host-first path」。
+  另有 4 处测试调用。</p>
+
+  <h4>4.1.6 L1 deny 的返回形状</h4>
+  <p>命中 deny 时返回 <code>{ block: true, reason }</code>（钩子层）或抛 <code>policyDeniedError</code>
+  （<code>register-support.ts:76</code>，工具包装层），<code>recoverable: "no"</code>。这是<strong>配置级否决</strong>，无重试路径。</p>
+  <p><strong>测试面随接缝统一</strong>——所有工具走同一形状，不需要测过接口摸内部：</p>
+<pre><code>const blocked = await invoke(app, "tool_call", {
+  type: "tool_call", toolName: "bash", input: { command: "rm -rf /" },
+});
+expect(blocked).toMatchObject({ block: true });</code></pre>
+
+  <h3 id="s4-2"><span class="num">4.2</span>门模型语义逐条定义</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:190px">语义</th><th>决定</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>allow</code>/<code>ask</code> 不进 L1</td><td><strong>不画进目标图</strong>。L1 只画 <code>deny</code> 一条虚线到 <code>vDeny</code>（见 4.1）</td></tr>
+      <tr><td>2</td><td>L2 硬阻断</td><td>git network / git metadata / remote hosts / extra write roots / protected-path → <code>vDeny</code>，全部 <code>recoverable: "no"</code></td></tr>
+      <tr><td>3</td><td><code>ask</code> 的语义</td><td><strong>强制进 reviewer</strong>，不是弹窗。<code>vAsk</code> 画绿（它不是终止）</td></tr>
+      <tr><td>4</td><td><code>writeOutsideRoots</code></td><td><code>register.ts:1795-1812</code> 设 flag <strong>后继续在沙箱内执行</strong>。画成 <code>vAllow → sbxA</code> 路径上的<strong>标注</strong>，不画成 <code>vDeny</code> 的出口（见 2.2）</td></tr>
+      <tr><td>5</td><td><code>{kind:"failed"}</code></td><td><strong>不是出口</strong>，是工具返回形状。<strong>不画进目标图</strong></td></tr>
+      <tr><td>6</td><td><code>sbxA</code> 的出口</td><td>两个：<code>exec</code> 与 <code>rret2</code>。<code>runtimeDenialPolicy: "terminal"</code>（<code>register.ts:1646</code>）vs <code>"review-and-retry"</code>（write/edit <code>:1877</code>）用边标注区分，不新增节点</td></tr>
+      <tr><td>7</td><td><code>rret2</code> 的语义</td><td>沙箱内执行被拒（如 SRT 失败）后的返回，<code>recoverable</code> 由上游决定</td></tr>
+      <tr><td>8</td><td><code>ext</code> 的语义</td><td>外部副作用（网络 / 写 host），从 <code>exec</code> 虚线到 <code>ext</code></td></tr>
+      <tr><td>9</td><td><strong>外来工具<br>（MCP / 其他扩展）</strong></td>
+          <td><strong>完全不管</strong>（产品决策）。<strong>但必须删掉 <code>src/permissions/rules.ts:140</code> 的误导注释</strong>——
+          它宣称 <code>mcp__*</code> 能覆盖 MCP 工具，而外来工具在 <code>register.ts:2316-2326</code> 早退，
+          <code>matchRules</code> 根本不跑。留着就是配置面在撒谎</td></tr>
+      <tr><td>10</td><td><code>grant</code> 的出口</td><td><strong>不是唯一出口</strong>。<code>grant</code> 后仍可 <code>rret</code>（如 reviewer 后续拒绝）</td></tr>
+      <tr><td>11</td><td><strong>形状非法</strong></td><td><code>rp → rret</code> 直连边（v4 的画法），不是 <code>rp → rpr → rret</code></td></tr>
+      <tr><td>12</td><td><code>arb</code> 的位置</td><td>裁决点在 <code>g3</code> 之后、<code>exec</code> 之前</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 id="s4-3"><span class="num">4.3</span>渲染件待办</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:320px">项</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>writeOutsideRoots</code> 标注（4.2 第 4 行）</td><td><span class="chip red">待补</span>（渲染件 <code>writeOutside</code> 零命中）</td></tr>
+      <tr><td>2</td><td><code>g2 ⇢ vDeny</code> 虚线</td><td><span class="chip green">v4 已如此</span>；实施时保持</td></tr>
+      <tr><td>3</td><td><code>rp → rret</code> 直连边</td><td><span class="chip green">v4 已修</span>，见 4.2.11</td></tr>
+      <tr><td>4</td><td>4.2 第 6、10、12 行的边标注</td><td><span class="chip red">待补</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 id="s4-4"><span class="num">4.4</span>engine 授权逻辑不需要重构</h3>
+  <p>engine 的授权判定（<code>authorizeInlineCapability:2303</code>、
+  <code>authorizeCapability</code> 注入点 <code>:1503</code>）<strong>保持不动</strong>。
+  engine 是有状态容器，只做<strong>减法</strong>（4.5 删除人工审批面状态）。</p>
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>例外</strong>：4.5 的删除会触碰 <code>engine.ts</code>，但那是<strong>移除服务链</strong>，
+    不是重构授权逻辑。</p>
+  </div>
+
+  <h3 id="s4-5"><span class="num">4.5</span>人工审批面清理清单</h3>
+  <div class="callout contract">
+    <div class="tag">principle</div>
+    <p><strong>处置原则</strong>：删的是「服务 <code>/approve</code> 人工重试」的那一半；
+    <code>recordDenial</code> 的<strong>统计那一半必须保留</strong>（它喂 deny 熔断，见 2.3）。</p>
+  </div>
+
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:290px">符号</th><th style="width:230px">位置</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>pi.registerCommand("approve")</code></td><td><code>register.ts:2346-2400</code></td><td>删</td></tr>
+      <tr><td>2</td><td><code>recoverDeniedAction</code> 实现</td><td><code>pi-safety.ts:494-520</code></td><td>删</td></tr>
+      <tr><td>3</td><td><code>recoverDeniedAction</code> 声明</td><td><code>pi-safety.ts:258</code></td><td>删</td></tr>
+      <tr><td>4</td><td><code>RecoverDeniedActionResult</code></td><td><code>pi-safety.ts:209</code></td><td>删</td></tr>
+      <tr><td>5</td><td><code>retryChoice</code> helper</td><td><code>pi-safety.ts:275-288</code></td><td>删</td></tr>
+      <tr><td>6</td><td><code>ui.select("Auto-review denials")</code></td><td><code>pi-safety.ts:506</code></td><td>删</td></tr>
+      <tr><td>7</td><td><code>retrySequence</code></td><td><code>engine.ts:880</code></td><td>删</td></tr>
+      <tr><td>8</td><td><code>retryRecords</code></td><td><code>engine.ts:884</code></td><td>删</td></tr>
+      <tr><td>9</td><td><code>RetryRecord</code> 接口</td><td><code>engine.ts:477</code></td><td>删</td></tr>
+      <tr><td>10</td><td><code>denialNotices</code></td><td><code>engine.ts:885</code></td><td>删</td></tr>
+      <tr><td>11</td><td><code>MAX_DENIAL_NOTICES</code></td><td><code>engine.ts:540</code></td><td>删（否则 unused 报错）</td></tr>
+      <tr><td>12</td><td><code>armedRetry</code></td><td><code>engine.ts:886</code></td><td>删</td></tr>
+      <tr><td>13</td><td><code>listDenials</code> 接口</td><td><code>engine.ts:421</code></td><td>删</td></tr>
+      <tr><td>14</td><td><code>armRetry</code> 接口</td><td><code>engine.ts:423</code></td><td>删</td></tr>
+      <tr><td>15</td><td><code>RetryHandle</code></td><td><code>engine.ts:248</code></td><td>删</td></tr>
+      <tr><td>16</td><td><code>DenialNotice</code></td><td><code>engine.ts:348</code></td><td>删</td></tr>
+      <tr><td>17</td><td><strong><code>onDenial</code> 声明</strong></td><td><code>engine.ts:358</code></td><td>删（已核实全仓无消费方）</td></tr>
+      <tr><td>18</td><td><strong><code>onDenial</code> 调用</strong></td><td><code>engine.ts:1005-1009</code></td><td>删</td></tr>
+      <tr><td>19</td><td><code>consumeArmedRetry</code></td><td><code>engine.ts:895-897</code></td><td>删</td></tr>
+      <tr><td>20</td><td><code>makeRetryHandle</code></td><td><code>engine.ts:948-953</code></td><td>删</td></tr>
+      <tr><td>21</td><td><code>armRetry</code> 实现</td><td><code>engine.ts:2421-2439</code></td><td>删</td></tr>
+      <tr><td>22</td><td><code>listDenials</code> 实现</td><td><code>engine.ts:2414</code></td><td>删</td></tr>
+      <tr><td>23</td><td>cleanup 中 retry 相关</td><td><code>engine.ts:2450-2451</code>、<code>:2512-2514</code></td><td>删</td></tr>
+      <tr><td>24</td><td><strong>engine 工厂返回对象</strong></td><td><code>engine.ts:2547</code></td><td>改（去掉 <code>listDenials</code>/<code>armRetry</code>）</td></tr>
+      <tr><td>25</td><td><strong><code>recordDenial</code> 的 retry/notice 半</strong></td><td><code>engine.ts:957-1011</code></td><td><strong>改写，不整删</strong>（<code>:969</code> 的 <code>recordDenialStats()</code> 必须留）</td></tr>
+      <tr><td>26</td><td><strong><code>blocked(..., retryHandle)</code> 两处</strong></td><td><code>engine.ts:2074</code>、<code>:2218</code></td><td>改为 <code>blocked(error)</code></td></tr>
+      <tr><td>27</td><td><strong><code>retryFingerprint</code></strong></td><td><code>engine-fingerprint.ts:58</code></td><td>删（4 处调用全在 retry 链上）</td></tr>
+      <tr><td>28</td><td><strong><code>"manual-retry"</code> source + <code>ApprovalOverride</code></strong></td><td><code>engine.ts:2043</code>、<code>:2153</code>、<code>:2044-2047</code></td><td>删</td></tr>
+      <tr><td>29</td><td><strong><code>renderExactRetryInstruction</code></strong></td><td><code>permission-copy.ts:252</code></td><td>删</td></tr>
+      <tr><td>30</td><td><strong>approve 专用 notice kinds</strong></td><td><code>permission-copy.ts:42-45</code>（<code>approve-requires-mode</code>/<code>-requires-ui</code>/<code>-empty</code>/<code>-stale</code>）、渲染 <code>:218-225</code></td><td>删</td></tr>
+      <tr><td>31</td><td><strong><code>tests/register.test.ts:4124</code></strong>（断言 <code>pi-safety-auto-override</code>）</td><td>—</td><td>删</td></tr>
+      <tr><td>32</td><td>deny 文案「ask the user」</td><td><code>permission-copy.ts:92,102,114,173</code></td><td>改写（见下）</td></tr>
+      <tr><td>33</td><td><strong>「求用户切 yolo」话术</strong></td><td><code>register-tool-copy.ts:11,14</code></td><td><strong>删</strong>（真的人工绕过指令，不能只洗 "ask the user"）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout note">
+    <div class="tag">note</div>
+    <p><strong>不在清单内</strong>：<code>src/engine-clone.ts</code> <strong>不要动</strong>——它只有
+    <code>runtimeDenialPolicy</code>（<code>:68-88</code>，执行后沙箱拒绝策略），与 retry / denial 链无关。</p>
+  </div>
+
+  <div class="callout debunk">
+    <div class="tag">hidden referencers</div>
+    <p><strong>隐性引用者</strong>（符号 grep 抓不到，不在上面 33 项内，但删完必须一并改）：</p>
+    <div class="tbl-scroll">
+    <table>
+      <thead><tr><th style="width:110px">类别</th><th style="width:330px">引用者</th><th>为什么漏掉</th></tr></thead>
+      <tbody>
+        <tr><td><strong>测试（大）</strong></td><td><code>tests/engine.test.ts</code>（<strong>66 处</strong>：<code>import RetryHandle:14</code>、断言 <code>:843-2231</code>）</td><td>只列了 <code>tests/register.test.ts</code></td></tr>
+        <tr><td><strong>源码</strong></td><td><code>src/pi-guardian-adapters.ts</code>（<strong>4 处</strong> <code>approvalOverride</code>）</td><td><strong>不在步骤 2 的 9 文件清单里</strong></td></tr>
+        <tr><td><strong>字符串臂</strong></td><td><code>src/permissions/residual.ts:84-85,102-103</code>（<code>"manual-retry"</code> switch case）</td><td>字符串不是符号，grep 不到</td></tr>
+        <tr><td><strong>测试（其余）</strong></td><td><code>pi-safety</code>、<code>pi-safety-nesting</code>、<code>heap-soak</code>、<code>engine-native-retry</code>、<code>permissions-residual</code>、<code>pi-guardian-adapters</code>、<code>auto-review-request</code>、<code>auto-reviewer</code> 各测试文件</td><td>只列了 2 个测试文件</td></tr>
+        <tr><td><strong>字符串断言</strong></td><td><code>permission-copy.test.ts:26</code> 断言 <code>"stop and ask the user"</code>；<code>register.test.ts:726</code> 断言 <code>"switch to yolo"</code></td><td>断言的是文案，不是符号</td></tr>
+        <tr><td><strong>Outcome 形状</strong></td><td><code>engine.ts:345</code>、<code>blocked()</code> helper <code>:1049-1052</code></td><td>原表只列了 2 处调用点</td></tr>
+        <tr><td><strong>文档</strong></td><td><code>README.md:20,52,118</code>、<code>README.zh-CN.md:11,40,72</code>、<code>AGENTS.md:159,243</code>、<code>APPEND_SYSTEM.md</code></td><td>都在教用户 <code>/approve</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p><strong>教训</strong>：删除清单若按<strong>符号名 grep</strong> 产出，会系统性漏掉三类东西——
+    <strong>字符串字面量</strong>、<strong>switch case 臂</strong>、<strong>测试断言的文案</strong>。</p>
+  </div>
+
+  <div class="callout debunk">
+    <div class="tag">critical</div>
+    <p><strong>信任通道必须一起拆</strong>：<code>approvalOverride</code> + <code>"manual-retry"</code> +
+    <code>AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX</code>
+    （<code>auto-review-request.ts:104-105</code>）是一条「用户已批准」的 developer 权威通道
+    （<code>renderAutoReviewTrustedContext:203-214</code>）。
+    只删锁不拆通道 = 留下一个<strong>无人认证的伪造批准口</strong>，比保留 <code>/approve</code> 更危险。</p>
+  </div>
+
+  <p><strong>文案改写原则</strong>：</p>
+  <ul>
+    <li><code>review-denied</code>（<code>permission-copy.ts:92</code>）、
+    <code>circuit-open</code>（<code>:173</code>）分支<strong>只写「停止」</strong>，不写「等 reviewer 裁决」——
+    前者 reviewer 已终局拒绝，后者 reviewer 不可用，「等待」等于对非确定性审批者再掷一次骰子。</li>
+    <li><code>permission-copy.ts:102,114</code> 可写「等待 reviewer 裁决」（review 尚未终局）。</li>
+  </ul>
+</section>
+
+<!-- ============================== 5 ============================== -->
+<section class="doc" id="s5">
+  <h2><span class="num">5</span>顺序</h2>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:200px">步骤</th><th style="width:290px">触碰文件</th><th>验证</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="chip purple">1</span></td>
+        <td><strong>L1 前置</strong>：<code>pi.on("tool_call")</code> 单接缝（见 4.1.4）+ 改名 <code>evaluateDenyRulesOnly</code></td>
+        <td><code>src/register.ts</code>、<code>src/risk-policy.ts</code>（<strong>不碰 <code>register-request-permissions.ts</code></strong>）</td>
+        <td><strong>auto 与 yolo</strong> 两模式下 deny 都拦得住 bash/write/edit；<code>request_permissions</code> 不受影响；委托包络在 auto 下仍生效</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">2</span></td>
+        <td><strong>拆 <code>/approve</code> 服务链</strong>（4.5 全 33 项 + 隐性引用者），拆成 <strong>4 个各自落绿的切口</strong></td>
+        <td>见 4.5 完整清单（含全部测试文件）</td>
+        <td>每个切口后 <code>tsc</code> + 全量测试绿；grep 符号<strong>且字符串</strong>零命中</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">3</span></td>
+        <td><strong><code>"prompt"</code> → <code>"review"</code> 改名</strong></td>
+        <td><code>src/risk-policy.ts</code>、<code>src/pi-guardian-adapters.ts</code>、<code>src/auto-review-request.ts</code>、<strong><code>src/register.ts</code></strong>、<strong><code>src/register-request-permissions.ts</code></strong>、相关测试</td>
+        <td><code>tsc</code> 干净（<strong>注意 3 处比较点</strong>：<code>register.ts:1607</code>、<code>:1803</code>、<code>register-request-permissions.ts:135</code>）</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">4</span></td>
+        <td><strong>渲染件补分支</strong>（4.3 第 1、4 项 + 4.2 标「待补」的行）</td>
+        <td><code>docs/diagrams/pi-safety-target-flow.html</code></td>
+        <td>按 <strong>4.2 行号清单</strong>逐行断言存在</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">5</span></td>
+        <td><strong>文档对齐</strong></td>
+        <td><code>docs/pi-safety.md</code>、<code>extensions/pi-safety/AGENTS.md</code>、<code>README.md</code>、<code>README.zh-CN.md</code>、<code>APPEND_SYSTEM.md</code>、<code>security/git-metadata-policy.md</code></td>
+        <td>无「ask the user」；无 <code>/approve</code> 引用</td>
+      </tr>
+      <tr>
+        <td><span class="chip purple">6</span></td>
+        <td><strong>（可选）ESC 清理</strong>（3.2 三条残留）</td>
+        <td><code>src/engine.ts</code></td>
+        <td>3.2 契约不变</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout note">
+    <div class="tag">scope</div>
+    <p><strong>步骤 3 的触碰清单</strong>：<code>"prompt"</code> 不只被<strong>构造</strong>，还被<strong>比较</strong>。
+    只改 union 成员不改那 3 处比较点，<code>tsc</code> 直接红。</p>
+    <p><strong>步骤 2 的触碰清单</strong>：<code>tests/structure-invariants.test.ts</code> 引用了
+    <code>retryHandle</code> 等符号，<strong>必须一并改</strong>——它正是 2.4 宣称「必须保持绿」的那个文件。</p>
+  </div>
+</section>
+
+<!-- ============================== 6 ============================== -->
+<section class="doc" id="s6">
+  <h2><span class="num">6</span>决策表</h2>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:250px">决策</th><th style="width:230px">结论</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td>escalation</td><td><span class="chip red">删</span></td><td><code>67ca74f</code></td></tr>
+      <tr><td>门模型</td><td>三组门；<code>Forbidden</code> 不是 deny 门</td><td><code>279eef3</code></td></tr>
+      <tr><td><code>host-admitted</code></td><td><span class="chip green">保留</span></td><td>—</td></tr>
+      <tr><td><code>escalatedGitDestinationUnbound</code></td><td><span class="strike">删除</span> <strong>已完成</strong>（<code>src/</code> grep 零命中）</td><td>—</td></tr>
+      <tr><td><code>transient</code> 链路</td><td><span class="strike">整条删除</span> <strong>已完成</strong>（<code>src/</code> grep 零命中）</td><td><code>c848cb8</code></td></tr>
+      <tr><td><code>failed</code> 出口</td><td>不新增，也不画进目标图</td><td>4.2 第 5 行</td></tr>
+      <tr><td>审批缓存</td><td><span class="chip green">保留</span></td><td>2.3</td></tr>
+      <tr><td><code>"escalation"</code> 词表项</td><td><span class="chip green">保留</span></td><td><code>engine-fingerprint.ts</code></td></tr>
+      <tr><td>engine 是否重构</td><td><strong>不</strong></td><td>4.4</td></tr>
+      <tr><td>engine 画法</td><td>画容器</td><td>—</td></tr>
+      <tr><td><code>vDeny</code> 出口</td><td><strong>无出口</strong>，<code>writeOutsideRoots</code> 画标注不画边</td><td>2.2 / 4.2 第 4 行</td></tr>
+      <tr><td><code>action:"prompt"</code></td><td>改名 <code>review</code></td><td>4.5 命名修正（<strong>不是</strong> 4.1）</td></tr>
+      <tr><td><code>allow</code> 语义</td><td>用户声明安全 → 沙箱内跑，跳过 reviewer</td><td>4.1.3（<span class="new">产品决策 2026-10-20</span>）</td></tr>
+      <tr><td>L1 接缝</td><td><strong><code>tool_call</code> 单接缝</strong>（非 3 个 execute 入口）</td><td>4.1.4（三轴研究）</td></tr>
+      <tr><td>L1 复用</td><td>复用 <code>evaluateHostFirstRulesOnly</code> 并<strong>改名 <code>evaluateDenyRulesOnly</code></strong></td><td>4.1.5</td></tr>
+      <tr><td><code>request_permissions</code> 受 deny 约束</td><td><strong>不受</strong></td><td>1.2（<span class="new">产品决策 2026-10-20</span>）</td></tr>
+      <tr><td>外来工具</td><td><strong>完全不管</strong>，但删 <code>rules.ts</code> 误导注释</td><td>4.2 第 9 行</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================== 7 ============================== -->
+<section class="doc" id="s7">
+  <h2><span class="num">7</span>不变量</h2>
+  <ul>
+    <li><code>sandbox-policy.ts</code> 在 engine value-closure 内禁止 <code>node:fs</code>；闭包内禁止 <code>sandbox.ts</code></li>
+    <li>host 包白名单仅 <code>["src/guardian-tools.ts", "src/register.ts"]</code></li>
+    <li><strong>零用户审批面板</strong>：<code>grep -rn '\.select(\|\.confirm(\|\.prompt(' extensions/pi-safety/src/</code> <strong>零命中</strong></li>
+    <li><strong><code>/approve</code> 服务链零残留</strong>：<code>RetryHandle|armRetry|listDenials|DenialNotice|onDenial|retryRecords|armedRetry|retryFingerprint|MAX_DENIAL_NOTICES|ApprovalOverride|manual-retry|manual_retry|recoverDeniedAction|retryChoice|renderExactRetryInstruction|approvalOverride</code> <strong>零命中</strong></li>
+    <li>L1 只判 <code>deny</code>：<code>allow</code>/<code>ask</code> 不出现在 L1 路径</li>
+  </ul>
+  <div class="callout contract">
+    <div class="tag">invariant</div>
+    <p><strong>必须是结构不变量测试，不能只靠 grep</strong>：grep 是一次性检查，跑一次就失效。
+    零面板不变量应加进 <code>tests/structure-invariants.test.ts</code>（归属<strong>步骤 2</strong>）。</p>
+  </div>
+</section>
+
+<!-- ============================== 8 ============================== -->
+<section class="doc" id="s8">
+  <h2><span class="num">8</span>验证</h2>
+  <div class="callout note">
+    <div class="tag">falsifiability</div>
+    <p><strong>「能失败」才算检查。</strong>标 <span class="chip red">⚠️</span> 的项在补齐对应测试/断言前是<strong>不可证伪</strong>的——
+    照原样跑会通过，但什么也证明不了。</p>
+  </div>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:44px">#</th><th style="width:250px">检查</th><th style="width:210px">命令 / 依据</th><th style="width:70px">归属</th><th>能否证伪</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>L1 deny 在 <strong>auto 与 yolo</strong> 下都拦得住 bash/write/edit</td><td><code>tool_call</code> 事件级行为测试（形状见 4.1.6）</td><td>步骤 1</td><td><span class="chip red">⚠️</span> 需新写；现有 yolo deny 覆盖走 engine <code>policy.check</code> 而非 <code>config.rules</code></td></tr>
+      <tr><td>2</td><td><strong>委托包络在 auto 模式下仍生效</strong></td><td>行为测试</td><td>步骤 1</td><td><span class="chip red">⚠️</span> 需新写；yolo 下 <code>delegation-policy.ts:104</code> 直接放行</td></tr>
+      <tr><td>3</td><td><code>request_permissions</code> 不受 deny 影响（回归）</td><td>行为测试</td><td>步骤 1</td><td><span class="chip red">⚠️</span> 需新写；<strong>步骤 1 不碰它，否则必然红</strong></td></tr>
+      <tr><td>4</td><td><code>/approve</code> 服务链零残留</td><td><code>grep -rn '…' extensions/pi-safety/{src,tests}</code></td><td>步骤 2</td><td><strong>必须锚定路径</strong>；全局跑会命中本计划文档自己</td></tr>
+      <tr><td>5</td><td>结构不变量测试绿</td><td><code>tests/structure-invariants.test.ts</code></td><td>步骤 2</td><td><span class="chip green">真可证伪</span></td></tr>
+      <tr><td>6</td><td><code>tsc</code> 干净（含 3 处 <code>"prompt"</code> 比较点）</td><td><code>tsc --noEmit</code></td><td>步骤 3</td><td><span class="chip green">真可证伪</span></td></tr>
+      <tr><td>7</td><td>渲染件 4.2 标「待补」的行<strong>逐行断言存在</strong></td><td>按<strong>下表具体 id</strong> grep</td><td>步骤 4</td><td><span class="chip red">⚠️</span> 原写法空的；必须给断言字符串</td></tr>
+      <tr><td>8</td><td>文档无「ask the user」/ <code>/approve</code> 引用</td><td>对 <strong>6 份文档</strong> grep</td><td>步骤 5</td><td>原清单漏了 <code>README*</code>、<code>AGENTS.md</code>、<code>APPEND_SYSTEM.md</code></td></tr>
+      <tr><td>9</td><td>无 <code>mcp__*</code> 误导注释</td><td><code>grep -n 'mcp__' src/permissions/rules.ts</code></td><td>步骤 2</td><td><strong>原路径错</strong>：<code>src/rules.ts</code> 不存在，真路径 <code>src/permissions/rules.ts:140</code></td></tr>
+      <tr><td>10</td><td>全量测试</td><td><code>pnpm -C extensions/pi-safety test</code></td><td>每步</td><td>真可证伪（但证伪不了 L1 缺失/图错/文档旧）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><strong>检查 7 的具体断言字符串</strong>（补齐后才能当检查用）：</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th style="width:150px">4.2 行</th><th>要在渲染件里 grep 的内容</th></tr></thead>
+    <tbody>
+      <tr><td>4（<code>writeOutsideRoots</code>）</td><td><code>writeOutside</code> 当前零命中，必须新增</td></tr>
+      <tr><td>6（<code>sbxA</code> 出口）</td><td><code>runtimeDenialPolicy</code>、<code>review-and-retry</code> 边标注</td></tr>
+      <tr><td>10（<code>grant</code> 非唯一出口）</td><td><code>grant</code> → <code>rret</code> 边</td></tr>
+      <tr><td>12（<code>arb</code> 位置）</td><td><code>arb</code> 位于 <code>g3</code> 与 <code>exec</code> 之间</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  pi-safety refactor plan · 目标架构 · 2026-10-20 · 基线 <code>b9b9ab0</code><br>
+  第一轮（安全 / 内部一致性 / 事实准确）：方向对，但按原样实施会编译不过。<br>
+  已吸收：2 个 P0 编译缺陷 · 12 项删除清单遗漏 · 9 处行号错 · 7 处一致性问题 · 6 条安全问题<br>
+  第二轮（接缝 / 执行风险 / 替代设计，配 deep-module 词汇）：推翻了 §4.1.4 的接缝选择。<br>
+  三条产品决策由用户于 2026-10-20 拍板。
+</footer>
+
+</div>
+</body>
+</html>

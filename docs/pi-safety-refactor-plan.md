@@ -1,451 +1,484 @@
-# pi-safety 重构：链路最简骨架
+# pi-safety 重构计划
 
-Status: **第 2、3 步已落地；第 1、4 步判定无需改动**（见 7 节）。第 8 节的命令
-模型分层未开始。基线：`npm run check` 零错误，1805 tests 通过 1 跳过，biome 干净。
+> **目标架构**：安全门控 · 无人工审批 · LLM reviewer 为默认审批者 · `request_permissions` 为唯一额外权限入口
+>
+> **计划日期**：2026-10-20 · **重构基线**：`b9b9ab0`（engine 改名完成后）
+> **文档状态**：已完成三轴独立评审（安全 / 内部一致性 / 事实准确），评审意见已吸收
+> **配套图**：[`diagrams/pi-safety-target-flow.html`](./diagrams/pi-safety-target-flow.html)（目标架构流程图）
+> **HTML 版**：[`pi-safety-refactor-plan.html`](./pi-safety-refactor-plan.html)
 
-所有路径相对 `extensions/pi-safety/`。规模基线：`src/` 58 个模块 24,459 行，
-`tests/` 27,925 行。
+---
 
-## 0. 为什么重构
+## 目录
 
-现行模型是**人类在环**：静态分析证明不了安全 → 弹窗问人类；需要更高权限 →
-弹窗问人类。人类是最终权威，所以代码里到处是「把这个决定交回人类」的通道。
+<div class="doc-toc">
 
-目标模型是**人类完全出环**：
+- [1. 目标架构](#1-目标架构)
+  - [1.1 五条硬约束](#11-五条硬约束)
+  - [1.2 非目标与既有决策](#12-非目标与既有决策)
+- [2. 现状锚点](#2-现状锚点)
+  - [2.1 人工干预面现在有哪些](#21-人工干预面现在有哪些)
+  - [2.2 图例语义表（实施后必须一致）](#22-图例语义表实施后必须一致)
+  - [2.3 engine 状态分层](#23-engine-状态分层)
+  - [2.4 硬约束清单（实施时每步保持绿）](#24-硬约束清单实施时每步保持绿)
+- [3. 两条行为契约](#3-两条行为契约)
+  - [3.1 模式切换在 turn 边界生效](#31-模式切换在-turn-边界生效)
+  - [3.2 ESC 终止整个 session](#32-esc-终止整个-session)
+- [4. 分块实施设计](#4-分块实施设计)
+  - [4.1 L1 前置只判 `deny`](#41-l1-前置只判-deny)
+  - [4.2 门模型语义逐条定义](#42-门模型语义逐条定义)
+  - [4.3 渲染件待办](#43-渲染件待办)
+  - [4.4 engine 授权逻辑不需要重构](#44-engine-授权逻辑不需要重构)
+  - [4.5 人工审批面清理清单](#45-人工审批面清理清单)
+- [5. 顺序](#5-顺序)
+- [6. 决策表](#6-决策表)
+- [7. 不变量](#7-不变量)
+- [8. 验证](#8-验证)
 
-> 安全门控 · 无人工审批 · LLM reviewer 是唯一审批者 ·
-> `request_permissions` 是唯一的额外权限入口
+</div>
 
-这不是功能增删，是权威来源的替换。它推出四条硬约束：
+---
 
-| 约束 | 理由 |
-| --- | --- |
-| 不设 escalation | escalation 的本质就是「把决定交回人类」，人类不在环里，这条通道不存在 |
-| 静态层必须保留 `deny` 出口 | 否则所有证明不了安全的都推给 LLM，LLM 成为万能背锅侠 |
-| `request_permissions` 是唯一额外权限入口 | 没有「人类说可以就可以」了，扩权必须显式请求、显式被审 |
-| yolo 必须保留 | 它是唯一让人重新回到环里的开关，代价是放弃静态分析与 LLM 裁决 |
+## 1. 目标架构
 
-要绕沙箱就切 yolo。不提供第三条路。
+### 1.1 五条硬约束
 
-## 1. 目标链路
+| # | 约束 | 内容 |
+|---|---|---|
+| 1 | **LLM reviewer 是默认审批者** | 常规批准权在 LLM reviewer。唯一例外：用户通过 `rules[]` 的 `allow` **配置**预先声明安全（见 4.1.3） |
+| 2 | **零用户审批面板** | 重构后 pi-safety 不含任何运行时用户审批 UI。含 `/approve` 的 `ui.select`、`ui.confirm`、`ui.prompt` 及一切「ask the user」文案全删 |
+| 3 | **`request_permissions` 是唯一额外权限入口** | 除它之外不存在第二条扩权通道；不设 escalation（`67ca74f`） |
+| 4 | **sandbox 仍由 pi 沙箱强制** | reviewer 不能授予 host 逃逸能力，只能在沙箱约束内放行 |
+| 5 | **yolo 绕开 reviewer 与 sandbox，但绕不开 L1** | 用户配置的 deny 在 yolo 前仍拦得住 |
 
-一次工具调用穿过四层，每层只有一个职责：
+> **配置不是审批面板**：约束 2 禁止的是**运行时**弹窗交互。`rules[]` 是用户事先写在配置里的静态声明，写一次长期生效，不打断任何 turn——两者性质不同，不冲突。
 
-```text
-  tool_call event
-        |
-        v
-+-- L1 gate: user deny --------+--hit--> blocked  (yolo included)
-|   tool name + cmd pattern    |
-+------------------------------+
-        | miss
-        v
-+-- mode === yolo ? -----------+--yes--> bare run (no sandbox, no L2, no L3)
-+------------------------------+
-        | no
-        v
-+-- L2 static risk analysis ---+--deny-> blocked
-|   1. prove dangerous         |
-|   2. prove safe              |
-|   3. neither  --> review     |
-+------------------------------+
-        | review
-        v
-+-- L3 LLM reviewer -----------+--deny-> return
-|   sole approver              |
-|   turn-scoped cache hit skips|
-+------------------------------+
-        | approve
-        v
-+-- L4 SRT sandboxed exec -----+
-+------------------------------+
+### 1.2 非目标与既有决策
 
-  side path (does not execute a command):
-  request_permissions --> L3 reviewer --approve-->
-      widen turn sandbox scope (not a bypass; cleared at turn end)
-```
+| 项 | 决定 | 说明 |
+|---|---|---|
+| `escalation` | **删** | `67ca74f` 已删 `escalation-policy.ts`；但 `PolicyRiskLevel` 的 `"escalation"` 词表项保留（`engine-fingerprint.ts` 参与 review 指纹） |
+| `transient` 标记 | **删** | `c848cb8` 已删整条链路（`declassify-transient.ts`） |
+| `failed` 出口 | **不新增** | deny 携带 `recoverable`；四个 deny 终点不合并 |
+| 域名白名单网络边界 | **不新增** | `allowedDomains: []` 保持「不做进一步限制」 |
+| git 元数据 deny 名单 | **本轮不扩** | 见 `security/git-metadata-policy.md` |
+| 审批缓存 | **保留** | 五重指纹，仅 preview 来源可读 |
+| engine 授权逻辑 | **不重构** | 见 4.4 |
+| **`request_permissions` 是否受 deny 约束** | **不受**（产品决策 2026-10-20） | `evaluateRiskRequest` 在 `risk-policy.ts:288-294` 提前 return 进 `evaluateRequestPermissions`，不查 `matchRules`。保持现状：用户 deny 规则对它无效 |
+| **外来工具（MCP / 其他扩展注册）** | **完全不管**（产品决策 2026-10-20） | `register.ts:2316-2326` 早退，既不沙箱也不评审。**但必须删掉 `src/permissions/rules.ts:140` 谎称 `mcp__*` 能覆盖 MCP 的注释**（见 4.2.9） |
 
-两层 deny 必须分开，这是整个设计的接缝。L1 在 yolo 判断**之前**，所以两种模式
-都生效；L2 被 yolo 跳过。合成一层则 yolo 要么失去「用户明令禁止仍然有效」，
-要么失去「裸跑」语义。
+---
 
-## 2. L2 静态层：从分类器改为有序证明
+## 2. 现状锚点
 
-### 2.1 现在的病灶
+> **2 节描述现状；4 节描述目标；冲突时以 4 节为准。**
 
-`risk-policy.ts:228` `evaluateRiskRequest(tool: string, input: Record<string, unknown>, ...)`
-—— 函数不知道自己处理什么工具，类型信息在边界处丢失，后续全靠字符串匹配：
+### 2.1 人工干预面现在有哪些
 
-```ts
-if (request.operation === "execute" && gitNetwork?.unsafeReason)
-if (tool.toLowerCase() !== "bash" || command === undefined)
-if (typeof input.command === "string")
-```
+| # | 面 | 位置 | 处置 |
+|---|---|---|---|
+| 1 | `/approve` 命令 | `register.ts:2346-2400` | **删**（4.5） |
+| 2 | `ui.select("Auto-review denials")` | `pi-safety.ts:506`（唯一一处 `.select(`） | **删**（4.5） |
+| 3 | `approvalOverride` 信任通道 | `engine.ts:253` | **删**（4.5） |
+| 4 | deny 文案「ask the user」 | `permission-copy.ts:92,102,114,173`；`register-tool-copy.ts:11,14` | **改写**（4.5） |
+| 5 | `request_permissions` 主动扩权 | `register-request-permissions.ts` | **保留**（约束 3） |
 
-由此产生四个连锁问题：
+> **注入点**：reviewer 在 `register.ts:266`（`guardian: createPiGuardianAdapter(autoReviewer)`）注入，可被 `options.autoReviewer` 覆盖（`:223`）。
 
-**默认方向错了。** 现在先算 `risk`，再用五路析取式判断是否需要审批：
+### 2.2 图例语义表（实施后必须一致）
 
-```ts
-const wouldPrompt = promptedByRule || risk !== "Skip" || escalationRequested || ...;
-```
+| 视觉 | 语义 | 节点 |
+|---|---|---|
+| **黄** | 沙箱 | `sbxA`、`sbxN`、`sbx`、`rSbx`、`lease` |
+| **红** | 终止 | `blocked`、`vDeny`、`ret`、`rret` |
+| **蓝** | 决策 | `eCall`、`toolCall`、`g1`、`g2`、`g3`、`ruleEval`、`kExec`、`arb` |
+| **绿** | 放行 | `exec`、`vAllow`、`vAsk`、`rAllow`、`rp`、`rret2`、`done`、`grant`、`ext` |
+| **灰** | 数据 | `cfg`、`input`、`logs`、`sig`、`deny` |
+| **紫** | 审批 | `rrev`、`pnl`、`arule` |
+| **实线** | 顺序 / 依赖 | — |
+| **虚线** | **路径存在性**（可能不走） | `g1 ⇢ toolCall`、`g2 ⇢ vDeny`、`vAsk ⇢ rret`、`rSbx ⇢ rret2`、`rp ⇢ rret`、`g3 ⇢ rrev` |
+| **无箭头线** | 同容器（纯视觉） | `leash` |
 
-最后一行 `return { action: "allow", risk, reason: "Low-risk operation" }` 表明
-**默认是 allow**。fail-closed 系统里默认应当是 review。
+> **一色一义**：红只表示终止，不表示「有害」「拒绝」。vAsk 画绿不画红（见 4.2.3）。
+> **见 4.2.1**：`allow`/`ask` 不进 L1。
 
-**`NeedsApproval` 被当成裁决。** 它实际是「没有任何裁决」的落空状态，却被建模成
-`ApprovalDisposition` 三值之一。
+> **`vDeny` 无出口**（三轴评审 C1 的处置）：红 = 终止，`vDeny` 是纯终局节点。
+> `writeOutsideRoots`（`register.ts:1795-1812`）不是 deny，是**在沙箱内继续执行**的路径——它不画成 `vDeny` 的放行边，否则破坏「一色一义」。正确画法是作为 `vAllow → sbxA` 路径上的**标注**（badge），不是节点出口。
 
-**可变升级污染判断。** `if (filesystemWriteRoots.length > 0 && risk === "Skip") risk = "NeedsApproval"`
-—— 额外写根是*授权*，不是*证明问题*，不该改变裁决。
+### 2.3 engine 状态分层
 
-**注释取代结构。** 最长的注释块 20 余行解释 `escalatedGitDestinationUnbound` 为何
-存在。注释写得好，但它存在本身说明这个判断无法从代码结构读出。
+engine **保留为容器**（有状态核心，不拆）。状态分三层：
 
-### 2.2 目标形态
+| 层 | 状态 | 生命周期 | 处置 |
+|---|---|---|---|
+| **进程级** | `generation:876`、`active:877`、`sessionKey:878`、`configKey:879`、`circuitOpen:883`、`reviewSequence:887`、`reviewControllers:888`、`inFlightCallIds:889`、`inFlightAttempts:890` | 进程级，跨 turn 保持 | **保留** |
+| **进程级** | `retrySequence:880`、`retryRecords:884`、`denialNotices:885`、`armedRetry:886` | 同上 | **删**（4.5） |
+| **Turn 级** | `TurnState:426`（`generation:427`、`snapshot:428`、`turnNetworkHosts:429`、`turnNetworkAll:430`、`turnWriteRoots:431`、`grants:432`、`approvals:433`、`closed:434`） | turn 级 | **保留**（与模式切换契约一致） |
 
-核心是一个 10 行 helper 加两组谓词：
+**熔断与统计**：`denialWindow:881`、`consecutiveDenials:882`、`recordDenialStats`（`engine.ts:911`）**保留**——它们支撑 deny 熔断，属 4.2 的「多计数」观测数据，不是人工审批面。
 
-```ts
-type Recoverability = "fix-arguments" | "transient" | "no";
+**审批缓存**：`readApprovalCache:1337-1374`（仅 preview 来源可读）、`consumeGrant:1314-1320`、`requestCovered:744` **保留**。缓存注释明确「manual-retry 路径永不读取」（`:448`）。
 
-type Verdict =
-  | { kind: "deny";   reason: string; recoverable: Recoverability }
-  | { kind: "allow";  reason: string }
-  | { kind: "review"; reason: string; packet: ReviewPacket };
+### 2.4 硬约束清单（实施时每步保持绿）
 
-type Gate = (req: Request, ctx: GateContext) => string | undefined;
+- `sandbox-policy.ts` 在 engine value-closure 内禁止 `node:fs`；闭包内禁止 `sandbox.ts`
+- host 包白名单仅 `["src/guardian-tools.ts", "src/register.ts"]`（`tests/structure-invariants.test.ts:367`）
+- 结构不变量测试全绿（`tests/structure-invariants.test.ts`）
+- **零用户审批面板**（见 7）
 
-function decide(denyGates, allowGates, req, ctx): Verdict {
-  for (const gate of denyGates) {
-    const reason = gate(req, ctx);
-    if (reason) return { kind: "deny", reason, recoverable: gate.recoverable };
+---
+
+## 3. 两条行为契约
+
+### 3.1 模式切换在 turn 边界生效
+
+**契约**：用户在 turn 进行中切换 `auto ↔ yolo` 时，当前 turn 继续使用**进入 turn 时的模式快照**；新模式从下一个 turn 的 `turn_start` 起生效。
+
+**为什么不是 turn 内生效**（三条真实原因）：
+
+1. **pi 无批次级事件**：`executeToolCalls`（`agent-loop.ts:508-523`）默认并行执行，无 `tools_before_batch` 之类的通知，`before_tool_call` 是每调用粒度，无法在批次边界插入刷新。
+2. **并行批次内授权会分裂**：`executeToolCallsParallel`（`agent-loop.ts:586-650`）prepare 串行（`:601-635`）、执行 `Promise.all`（`:637-639`）——同批工具可能各拿各的模式快照。更糟的是 SRT 是**进程级单例**（`sandbox-policy.ts:281`），两个工具会互相踩 `activate()`。
+3. **`message_end` 不是安全接缝**：它在 UI 分发/落盘前被 `await`（`agent-loop.ts:942-944`），静止性不保证——SRT 有 15 秒排空窗口（`srt-coordinator.ts:19` `SRT_DRAIN_TIMEOUT_MS = 15_000`），并发 subagent 共享同一个 SRT manager。
+
+**已知弱点**（不修，记录在案）：状态栏 turn 内中途可能显示期望模式，而实际快照仍旧——用户看到的和生效的会有短暂不一致。
+
+**唯一未来路径**：pi 上游增加 `tools_before_batch` 事件。届时可改为批次前刷新，契约随之收紧。
+
+> **被否决的说法**（不重复采信）：「`message_end` 是静止点」「turn 内刷新不会分裂」「SRT 冲突可以靠锁解决」——三条都已在论证中被推翻。
+
+### 3.2 ESC 终止整个 session
+
+**契约**：ESC（`app.interrupt`）终止整个 session 的工作，不保证「立即可重试」。
+
+**六层链路**（已核实）：`keybindings.md:124` `app.interrupt = escape` → `agent-session.ts:2464`（含 `await waitForIdle()`）→ `agent.ts:341` → `agent-loop.ts:809` signal → `bash.ts:141-144` 杀进程树 / `:155-158` 返回 `128+signal` → `agent-loop.ts:581` break。
+
+**三条 engine 残留**（属清理时序问题，排计划末尾，不影响契约）：
+
+1. abort reason 被丢弃，不进入审计链
+2. `abortAttempts` / `abortReviews` 不对称
+3. ESC 不走 `invalidate:2506`，旧 generation 状态可能残留到下一个 turn
+
+---
+---
+
+## 4. 分块实施设计
+
+### 4.1 L1 前置只判 `deny`
+
+**结论**：`allow`/`ask` 不能进 L1，只有 `deny` 可以。**L1 不替代 `evaluateManagedRisk`，只在其前叠加。**
+
+**现状缺口**：bash / write / edit 是 `PI_OWNED_TOOL_NAMES` 的成员，在 `register.ts:2316` 的 `tool_call` 早退。host-first（read / grep / find / ls）在 `register.ts:1448-1465` 走 `evaluateHostFirstRulesOnly`（只认 `deny`）；受管工具在 yolo 下**完全不查规则**：
+
+- bash：`register.ts:1592-1602` yolo 下 `risk = undefined`，`evaluateManagedRisk` 根本不调用
+- write/edit：`riskForFileMutation:1777` yolo 直接返回 `undefined`
+- engine 也不是第二道防线：`engine.ts:1078-1080` yolo 下直接 `return { kind: "approve" }`
+
+结果：`register.ts:1447-1449` 注释承诺「a deny rule wins in every mode」，**但只在 host-first 路径成立**。
+
+#### 4.1.1 为什么 `ask` 不能进 L1
+
+`ask` 的定义是**强制进 LLM reviewer**（`risk-policy.ts:456-462` 的 force-review 门）。若 L1 前置短路 `ask`：
+
+- 在 **yolo** 下：yolo 已绕开 reviewer，`ask` 无从「强制 review」，只剩强制阻断——**与约束 5「yolo 绕开 reviewer」直接冲突**。
+- 在 **auto** 下：L1 提前短路会绕开 `decide()` 的门序（deny → force-review → allow），语义重复且易分叉。
+
+**落点**：`ask` 留在 L2（`risk-policy.ts:456-462`）。
+
+#### 4.1.2 为什么 `allow` 不能进 L1
+
+`allow` 的语义是**用户声明安全 → 沙箱内直接执行**（4.1.3）。它有两个依赖，只有 L2 判定完才知道：
+
+1. **`Forbidden` 仍优先**：`risk-policy.ts:465-468` 的 allow 门条件是 `decision === "allow" && risk !== "Forbidden"`。`Forbidden` 是不可被 `allow` 覆盖的硬阻断。
+2. **写根判定**：`!grantsWriteRoots`——动作请求写根时 `allow` 不生效。
+
+若 L1 提前放行 `allow`，这两条都会被绕过。
+
+#### 4.1.3 `allow` 的语义（产品决策 2026-10-20）
+
+> **`allow` = 用户在配置里预先声明「这个安全」→ 直接在 sandbox 里跑，不进 LLM reviewer。**
+
+- **不绕沙箱**：`allow` 只免除 reviewer，不解除沙箱约束（lease 仍是 `sandboxed`，不是 `unrestricted`）。
+- **不覆盖硬阻断**：`Forbidden`、deny 规则、写根判定照旧优先。
+- **不违背约束 2**：`rules[]` 是事先写好的静态配置，不是运行时审批面板。
+- **reviewer 的定位因此是「默认审批者」而非「唯一审批者」**——用户用 `allow` 预先批准，用 `deny` 预先否决，运行时只有 reviewer 在裁决。
+
+#### 4.1.4 实施：`tool_call` 单接缝（三轴研究结论）
+
+**接缝放在 `pi.on("tool_call")` 内、`PI_OWNED_TOOL_NAMES` 早退之前**（`register.ts:2316`），
+一处覆盖 bash / write / edit / host-first / subagent。
+
+> **为什么不是 3 个 execute 入口**（两个独立 subagent 收敛到同一结论）：
+>
+> | | 3 个调用点（原设计） | `tool_call` 单接缝 |
+> |---|---|---|
+> | 遗忘点 | 3 处「记得调」 | 1 处 |
+> | 未来工具 | 新注册的工具静默绕过 L1 | 自动覆盖 |
+> | 错误传播 | 两套（`throw policyDeniedError` vs 返回 `{block}`） | 一套 |
+> | 测试面 | 碎片化，要测过接口摸内部 | 所有工具走同一接口 |
+> | 产品决策吻合 | 要单独把 `request_permissions` 摘出来 | 钩子里一个过滤条件 |
+>
+> **决定性证据**：`ToolCallEventResult`（pi `core/extensions/types.d.ts:1089`）原生就是拦截结构：
+> `{ block?: boolean; reason?: string; terminate?: boolean }`。
+> 而 `evaluateHostFirstRulesOnly` 返回的正是 `{ block: true; reason } | undefined`——**形状天然吻合，不需要适配**。
+> 这接口本来就是为拦截准备的，不是「能塞进去」。
+
+**代码形状**：
+
+```typescript
+pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
+  // L1：deny 规则，auto 与 yolo 都拦得住（在任何 mode 分支之前）
+  if (event.toolName !== "request_permissions") {
+    const denial = evaluateDenyRulesOnly(event.toolName, event.input, cwd, config);
+    if (denial) return { block: true, reason: denial.reason };
   }
-  for (const gate of allowGates) {
-    const reason = gate(req, ctx);
-    if (reason) return { kind: "allow", reason };
+
+  if (PI_OWNED_TOOL_NAMES.has(event.toolName)) return;           // bash/write/edit
+  if (PI_HOST_FIRST_TOOL_NAMES.has(event.toolName) ||
+      DELEGATED_TOOL_NAMES.has(event.toolName)) {
+    return evaluateHostFirstToolCall(event, ctx);                  // read/grep/find/ls/subagent
   }
-  return { kind: "review", reason: "No proof", packet: buildPacket(req, ctx) };
-}
+  return;                                                          // 外来工具：不拦（产品决策）
+});
 ```
 
-两组独立数组、顺序求值。「deny 优先于 allow」由结构保证，不靠行序维持。
-review 是落空分支，不需要计算。
-
-门列表：
-
-```text
-deny : userRuleDeny → dangerousGitNetwork → protectedPath → malformedShape
-allow: userRuleAllow → provenSafeArgv
-review: 以上都不命中
-```
-
-每个 deny 门自带 `recoverable`，见 2.6。
-
-### 2.3 关键发现：不需要重写分类器
-
-`classifyRiskWithCause` 已恰好输出三个状态，一一对应门模型出口：
-
-| 分类器输出 | 门模型 |
-| --- | --- |
-| `Forbidden` | **不是 deny**：仍进 review packet（见下方修正） |
-| `Skip` | allow 门命中 |
-| `NeedsApproval` | 两门都不命中 → 落空为 review |
-
-所以这一步是**重新接线**，不是重写分类逻辑。`classifyRiskWithCause` 原样保留，
-从「返回 disposition 给调用方判断」变成「在门内部被调用」。
-
-> **实施修正（第 3 步）**：上表最初把 `Forbidden` 写成「deny 门命中」，与代码
-> 不符。`classifyRiskWithCause` 返回 `Forbidden` 时，`evaluateRiskRequest` 的
-> 现有行为是 `prompt`（例：私有地址的 WebFetch 目标进 review），不是 `block`。
-> deny 门只承接那批显式 `action: "block"` 的拒绝；把它们混为一谈会变成行为变更。
-
-### 2.4 这个形状删掉什么
-
-- `wouldPrompt` 五路析取式整体消失
-- `ApprovalDisposition` 从三值减为两值（`Forbidden` / `Skip`）；`NeedsApproval` 不再是
-  一种裁决，只是「没有任何裁决」的落空状态，由 `review` 分支承担
-- `risk` 可变升级消失，额外写根只进 packet
-- `writeOutsideRoots` 不再是决策输入（沙箱运行时裁决它）
-- `operation === "external"` 兼容分支（规则拆成两门后自然消失）
-
-### 2.5 唯一真实风险
-
-`provenSafeArgv` 是新增安全面：每加一条，就多一个不过审就执行的命令。
-
-**必须从当前 `Skip` 集合机械提取，不能从空开始。** 从空开始会让每条 bash 命令
-触发一次 LLM 调用，不可接受。
-
-之后只允许从实际观察到的误判里加，一次一条，每条配测试。乐观地往里填等于把
-`needsApproval` 偷偷变成直接运行。
-
-### 2.6 不新增 `failed` 出口，改为给 deny 加可恢复性
-
-曾考虑给静态层加第四个出口 `failed`，区分「输入形状错误 / 环境错误」与真正的
-安全 deny。核实后结论：**不新增出口，改为在 deny 上携带可恢复性维度。**
-
-#### 依据：14 处 block 点的实际分类
-
-`risk-policy.ts` 中全部 14 处 `action: "block"` 都返回 `risk: "Forbidden"`，
-但安全含义截然不同：
-
-| 类型 | 数量 | 例子 |
-| --- | --- | --- |
-| 输入形状 / 参数错误 | 4 | `isSupportedPermissionRequestShape` 失败、`request_permissions` 空权限、escalation 参数格式错 |
-| 策略配置读取失败 | 4 | `gitMetadata`、`remoteHosts`、`additionalWriteRoots`、路径判定 |
-| 真正的危险证明 | 2 | 危险 Git 网络调用、路径命中保护模式 |
-| 用户配置 deny | 1 | `matchRules` |
-| 待删（escalation） | 3 | 随第 2 步删除 |
-
-若新增 `failed` 出口，它要么只能装第一类，要么退化为「所有非 deny 的 block」
-垃圾桶——后者正是 `blocked` 现在的问题。
-
-#### `failed` 的职责已被错误码体系承担
-
-系统已有 14 个 `PermissionErrorCode`，每个码对应不同的模型提示文本
-（`permission-copy.ts:79`）。这不是一堵墙，而是按可恢复性分流：
-
-| 错误码 | 模型看到的行为 |
-| --- | --- |
-| `policy-denied` + 参数错误 | 修参数重试同一命令，命令本身未被评估 |
-| `policy-denied` 其他 | 被权限策略阻止，无法通过 Auto-review 覆盖 |
-| `review-denied` | 不得用绕过手段达成同一目标 |
-| `review-timeout` | 可重试一次，或询问用户 |
-| `review-unavailable` | 瞬时故障则重试 |
-| `circuit-open` | 停下来询问用户 |
-
-其中 `policy-denied` 内部还有一层细分：`isPermissionArgumentError(reason)` 把
-参数格式错误渲染成「可修的参数错误，不是策略墙」（`permission-copy.ts:116-124`）。
-
-**这就是 `failed` 想做的事，而且做得更细。**
-
-#### 现存缺陷：用文本匹配替代类型
-
-`isPermissionArgumentError(reason)` 在猜字符串。静态层知道每一处 block 属于哪类，
-但只把 `reason: string` 传下去，下游再反推。
-
-修法：
-
-```ts
-{ action: "block"; risk: "Forbidden"; reason: string;
-  recoverable: "fix-arguments" | "transient" | "no" }
-```
-
-三值对应三种模型行为：
-
-- `fix-arguments` — 4 处输入形状错误，模型应改参数重试
-- `transient` — 4 处配置读取失败，可能是瞬时故障
-- `no` — 危险证明 + 用户 deny + 待删的 escalation，不该重试
-
-`isPermissionArgumentError(reason)` 的字符串嗅探随之删除，分流由类型保证。
-
-#### 为什么不动错误码体系
-
-`PermissionErrorCode` 是面向模型的稳定契约，改它影响面太大。`recoverable` 是
-静态层内部的新信息，只在构造 block 时用，在 `register-support.ts:96` 那层映射
-成对应错误码。
-
-#### 「deny → return」是否合适
-
-合适，链路（`block` → `blocked({code, reason})` → `renderPermissionErrorForAgent`
-→ 模型）本身没问题，问题只在 `reason` 是文本而非结构化信息。
-
-`review-denied` 的提示值得保留：
-
-> 不得用工作绕过、间接执行或策略规避达成同一结果。只能用明显更安全的替代方案，
-> 或用户在被明确告知风险后批准。否则停下来询问用户。
-
-这是把「deny」与「换个办法试试」区分开的正确做法。
-
-## 3. L3 LLM reviewer
-
-guardian 保留，且从「人类不在时的兜底」变成**唯一决策组件**。
-
-### 3.1 当前审批缓存
-
-键是调用指纹，五重校验，任何一项漂移即 miss（`engine.ts:1491-1528`）：
-
-```text
-key                        = invocationFingerprint(调用身份，不含 call id)
-entry.reviewKind           = "capability-grant" | "action-exercise"
-entry.requestedFingerprint = 请求的权限范围
-entry.basePolicyFingerprint= turn 开始的沙箱基线
-entry.evidenceFingerprint  = risk + reason + summary
-```
-
-六条前置条件缺一不可：`source === "preview"`、`ownership === "sandbox-owned"`、
-`snapshot.mode === "auto"`、非 elevated、熔断器关闭、turn 仍有效。
-
-设计上有一处刻意取舍：**证据指纹含 risk/reason/summary，不含对话记录**。注释写明
-「the live host transcript is deliberately NOT here」——engine 看不到 host 对话，
-transcript 增长无法在 engine 侧做成键。同一 turn 内即使对话变了，只要命令、范围、
-策略、风险判定不变，就复用第一次裁决。
-
-`reviewKind` 分区是有意为之：批准一个权限范围 ≠ 批准用这个范围执行某个动作。
-
-**新模型下缓存是否保留**：缓存前提是「同 turn 内、同动作、同证据 → 裁决不变」，
-LLM 作为唯一审批者时这个前提依然成立。倾向保留，省 LLM 调用，五重指纹已足够保守。
-
-### 3.2 要改的两处
-
-**`staticRisk` 的传法。** 现在把静态层结论直接塞进 `GuardianPermissionContext`
-（`auto-review-request.ts:82-83`）。Codex 的 guardian 不接收这个。若 LLM 是唯一
-审批者，它应独立判断——但完全不传又浪费信号。建议传，且在 prompt 里明确标注
-「参考信号，非结论」，要求独立验证。
-
-**`executionMode` 三值收敛。** 现在 `"sandboxed" | "escalated" | "host-admitted"`
-（`auto-review-request.ts:57`）。删 escalation 后只剩 `sandboxed`，字段可去掉。
-
-## 4. 删除 escalation
-
-不是「暂时关闭」，是这条路径不该存在。
-
-要删的：
-
-- `CapabilityLease.mode` 的 `"escalated"`（`engine.ts:106`）
-- `escalation-policy.ts` 整个模块（78 行）
-- `register.ts:66,357,789` 的 `escalationEligibility` 消费点
-- `register.ts:2102` 工具描述里「git 元数据写入用 require_escalated」那段
-- `GuardianPermissionContext.executionMode` 的 `"escalated"`
-- `RiskDecision` prompt 分支的 `executionMode?: "escalated"`
-- `escalationRequested` 及其 5 处读取点
-
-`src/` 中 `escalated` 相关引用 57 处（不含 `escalatedGitDestinationUnbound`）。
-
-### 4.1 git 元数据（本轮不处理）
-
-沙箱内写 `.git/hooks`、`.git/config` 现在走 `require_escalated`（工具描述告诉模型
-「这个要用 require_escalated」）。删除 escalation 后模型只剩两条路：被沙箱拒绝，
-或切 yolo。
-
-这符合设计意图。`register.ts:2102` 的描述文本、`.git` 指针文件、deny 名单范围
-（HEAD / packed-refs / worktrees / modules / info 当前均不 deny）**均不在第 1–4 步
-范围内**，留待后续单独处理。
-
-## 5. `request_permissions` 保持扩大沙箱
-
-与 Codex `RequestPermissionProfile` 语义一致：只扩大权限，不脱离沙箱。
-
-批准后写 `turnWriteRoots` / `turnNetworkHosts`，turn 级有效，`closeState` 清除
-（`engine.ts:1185-1200`）。
-
-若改成裸跑授权，权限清单失去约束力，且与已删除的 escalation 重复。
-
-它与 `bash` 是两个独立工具：`request_permissions` 不执行命令。批准后虚线影响
-后续 `bash` 的沙箱策略，而非控制流。
-
-## 6. engine 保留
-
-不是投影层，是有状态核心。独占职责：
-
-- turn 生命周期（`beginTurn` / `closeState` / `refreshTurnMode`）
-- 审批缓存（`readApprovalCache` / `writeApprovalCache`）
-- turn 级授权累积（`turnWriteRoots` / `turnNetworkHosts` / `grants`）
-- 拒绝重试与熔断器（`retryRecords` / `denialWindow` / `circuitOpen`）
-- lease 派生与执行尝试（`leaseWithRequests` / `executeAttempt`）
-- 并发中止（`abortAttempts` / `abortReviews`）
-
-这些状态无处安放：`turnWriteRoots` 是 request_permissions 批准后写的，`approvals`
-是 LLM 裁决缓存，`snapshot` 是 turn 开始冻结的执行形态。
-
-可瘦身的是 `CapabilityLease` 四种模式 → 两种（删 `escalated` / `host-admitted`），
-以及两个 deny 构建器合并。
-
-## 7. 迁移顺序
-
-**关键约束**：`structure-invariants.test.ts` 强制两条结构不变量——
-`sandbox-policy.ts` 在 engine value-closure 内禁止 `node:fs`（`:188-221`），
-闭包内禁止出现 `sandbox.ts`（`:337-346`）。每一步都必须让它保持绿。
-
-四步，每步独立可合、独立可回退：
-
-### 第 1 步：数据形状收敛（低风险）—— 已判定跳过
-
-原计划把 16 个 `allowWrite` 载体收敛为 1 个 `FilesystemPolicy` 类型。查证后跳过：
-`SandboxPolicy.filesystem` 已经是统一形状，而 16 个 `allowWrite` 载体分属 4 种
-不同语义（配置解析 11、策略派生 7、消费 6、`srt-enforcer.ts:135` 刻意注入
-`$TMPDIR` 2、prompt 文本 2）。强行合并会破坏现有分层，收益为零。
-
-### 第 2 步：删 escalation（中风险，改动面广）—— 已完成
-
-按第 4 节清单全部删除，外加 `escalatedGitDestinationUnbound`（决策模型 0.99：
-沙箱内每个连接由运行时 NetworkBoundary 逐端点授权，该谓词在无 escalation 后没有
-消费点）。净删 1885 行；`src/` 与 `tests/` 中 `require_escalated` 归零，
-`npm run check` / 1800 tests / biome 全绿。保留 `host-admitted`（0.98：host-first
-工具有真实消费点）。
-
-### 第 3 步：静态层改门模型（中风险）—— 已完成
-
-`decide(denyGates, forceReviewGates, allowGates)` 用三组有序谓词替换了
-`wouldPrompt` 析取式和末尾的裸 `allow` return。落空即 review，不会变成 allow。
-
-两处与本节原设想不同，以实际代码为准：
-
-1. **`Forbidden` 不映射到 deny 门。** 分类器返回 `Forbidden` 时当前行为是
-   `prompt`（如私有 WebFetch 目标），并未变成 `block`。deny 门只承接那批显式
-   `action: "block"` 的拒绝。若按原表接线会变成行为变更。
-2. **需要第三组 `forceReviewGates`。** `rule ask` 不能被证明安全的 allow 门
-   抵消，否则用户明确要求的审批会被悄悄跳过。它单独成组，落在 deny 之后、
-   allow 之前。
-
-`recoverable` 按 2.6 实现：`fix-arguments | transient | no` 在 deny 产生处标定，
-经 `AdmissionPlan` → `PermissionError` 传到渲染层。
-
-**行为等价，现有断言一条未改**（唯一的两处改动是新字段参与 `toEqual` 的期望值
-与测试 fixture 补字段）。新增 2 条测试锁定门序与落空语义。
-
-### 第 4 步：lease 模式收敛 + deny 构建器合并（低风险）—— 已由第 2 步达成
-
-`CapabilityLease.mode` 现在恰好是 `sandboxed | host-admitted | unrestricted`，
-没有第四种。原计划删掉 `host-admitted`，决策模型以 0.98 置信度否决：host-first
-工具（`read`/`grep`/`find`/`ls`）由 host 自己执行，与沙箱内执行是不同的事实，
-压成同一模式会让 Guardian 拿到错的 `sandboxEnforcesAction`。
-
-「两个 deny 构建器」核实后不存在：`createSandboxRuntimeConfig` 是唯一的 deny
-组装点（`projectDeny(denyWrite) + protectedRuntimeDeny + metadataDenyWrite`），
-`createFilesystemPolicy` 只做配置投影。没有可合并的重复。
-
-### 7.1 关于 worktree
-
-**不用 worktree，直接在分支上分四次提交。** 理由：
-
-- worktree 适合并行开发互不干扰，但这四步严格串行（第 4 步依赖第 2 步）
-- 每步都能独立通过全量测试，普通提交 + 独立回退更简单
-- 某步做砸时 `git revert` 单提交比清理 worktree 干净
-
-若第 3 步风险被判定过高，可只给它开 worktree 做实验，验证通过后合回。
-
-## 8. 命令模型分层（第 3 步之后，独立进行）
-
-第 2 节的门模型**依赖现有 `request` 形状**，可直接做。真正消除「类型信息在边界
-丢失」需要改 `normalizeToolCall` 的返回类型，那是另一件事：
-
-```text
-第一层  命令模型（纯类型，无策略）
-        type Command = { kind: "bash"; argv } | { kind: "write"; paths } | ...
-
-第二层  纯谓词（无 IO、无配置）
-        isDangerousGitNetwork(command): reason | undefined
-
-第三层  组合（唯一有 IO 的地方）
-        readRepositoryRemoteHosts / resolveAdditionalWriteRoots / 组装 packet
-```
-
-**顺序不能反。** 门模型依赖现有形状；命令模型改变形状会让门模型跟着改。先做门
-模型（谓词收现有 `request`），再单独做命令模型（换谓词签名），每步测试都绿。
-
-若反过来先改命令模型，会同时改类型定义、约 15 个 `request.operation` 收窄点、
-6 个谓词签名和主体逻辑，失败时无法判断来自哪一层。
-
-## 9. 待定
-
-1. `refreshTurnMode` 清 `approvals` 对当前 turn 的实际效果——工具调用读的是 turn
-   开始时冻结的 `executionSnapshot`，而非 `active.snapshot.mode`，这个清空可能无效
-2. 审批缓存在新模型下的最终去留
-
-### 9.1 已决定
-
-- **git 相关暂不处理。** `register.ts:2102` 的工具描述、`.git/hooks` 与 `.git/config`
-  的写入路径都不在第 1–4 步范围内。escalation 删除后它们会自然落到「沙箱拒绝」或
-  「切 yolo」两条路，符合设计意图；描述文本的改写留到后续单独处理。
-- **不新增 `failed` 出口**，改为给 deny 携带 `recoverable`，详见 2.6。
+**两个豁免在同一处断言**（而非「哪里没调」的涌现结果）：
+`request_permissions` 豁免 = 那一个 `!==` 条件；外来工具豁免 = 落到最后的 `return`。
+
+#### 4.1.5 函数改名与去重
+
+**改名**：`evaluateHostFirstRulesOnly` → **`evaluateDenyRulesOnly`**。
+
+> **名实不符是真实的接口缺陷，不是美观问题**：函数体内**零 host-first 专属逻辑**，
+> 就是 `normalizeToolCall` + `matchRules` + 只认 `deny`。名字说「host-first 专用」，
+> 调用方却必须读实现才知道 `HostFirst` 是历史误称——按 deep-module 判据，这破坏接口完整性。
+> 应改名为真职责。
+
+**去重**：L1 移到钩子后 host-first 会被查两次（钩子一次 + `evaluateHostFirstToolCall` 内部一次）。
+按 locality 原则只留一处——但 `evaluateHostFirstToolCall` 还背着 `checkDelegateSpawn`
+（subagent 的委托检查，`register.ts:1469-1484`），不能整块删，只能去掉内部那次 L1。
+
+**删除测试（deletion test）**：当前**只有 1 个生产调用方**（`register.ts:1450`）。
+`risk-policy.ts:271` 是废弃包装，其注释 `:262-263` 自陈「Not used by register.ts host-first path
+after foreign A / host-first B cut」。另有 4 处测试调用（`tests/risk-policy.test.ts`）。
+
+#### 4.1.6 L1 deny 的返回形状
+
+命中 deny 时返回 `{ block: true, reason }`（钩子层）或抛 `policyDeniedError`
+（`register-support.ts:76`，工具包装层），`recoverable: "no"`（与 4.2 第 2 行的 L2 硬阻断一致）。
+这是**配置级否决**，无重试路径。
+
+> **测试面随接缝统一**——所有工具走同一形状，不需要测过接口摸内部：
+>
+> ```typescript
+> const blocked = await invoke(app, "tool_call", {
+>   type: "tool_call", toolName: "bash", input: { command: "rm -rf /" },
+> });
+> expect(blocked).toMatchObject({ block: true });
+> ```
+
+### 4.2 门模型语义逐条定义
+
+| # | 语义 | 决定 |
+|---|---|---|
+| 1 | `allow`/`ask` 不进 L1 | **不画进目标图**。L1 只画 `deny` 一条虚线到 `vDeny`（见 4.1） |
+| 2 | L2 硬阻断 | git network / git metadata / remote hosts / extra write roots / protected-path → `vDeny`，全部 `recoverable: "no"` |
+| 3 | `ask` 的语义 | **强制进 reviewer**，不是弹窗。`vAsk` 画绿（它不是终止） |
+| 4 | `writeOutsideRoots` | `register.ts:1795-1812` 设 flag **后继续在沙箱内执行**。画成 `vAllow → sbxA` 路径上的**标注**，不画成 `vDeny` 的出口（见 2.2） |
+| 5 | `{kind:"failed"}` | **不是出口**，是工具返回形状。**不画进目标图** |
+| 6 | `sbxA` 的出口 | 两个：`exec` 与 `rret2`。`runtimeDenialPolicy: "terminal"`（`register.ts:1646`）vs `"review-and-retry"`（write/edit `:1877`）用边标注区分，不新增节点 |
+| 7 | `rret2` 的语义 | 沙箱内执行被拒（如 SRT 失败）后的返回，`recoverable` 由上游决定 |
+| 8 | `ext` 的语义 | 外部副作用（网络 / 写 host），从 `exec` 虚线到 `ext` |
+| 9 | **外来工具（MCP / 其他扩展）** | **完全不管**（产品决策）。**但必须删掉 `src/permissions/rules.ts:140` 的误导注释**——它宣称 `mcp__*` 能覆盖 MCP 工具，而外来工具在 `register.ts:2316-2326` 早退，`matchRules` 根本不跑。留着就是配置面在撒谎 |
+| 10 | `grant` 的出口 | **不是唯一出口**。`grant` 后仍可 `rret`（如 reviewer 后续拒绝） |
+| 11 | **形状非法** | `rp → rret` 直连边（v4 的画法），不是 `rp → rpr → rret` |
+| 12 | `arb` 的位置 | 裁决点在 `g3` 之后、`exec` 之前 |
+
+### 4.3 渲染件待办
+
+| # | 项 | 状态 |
+|---|---|---|
+| 1 | `writeOutsideRoots` 标注（4.2 第 4 行） | **待补**（渲染件 `writeOutside` 零命中） |
+| 2 | `g2 ⇢ vDeny` 虚线 | v4 已如此；实施时保持 |
+| 3 | `rp → rret` 直连边 | v4 已修，见 4.2.11 |
+| 4 | 4.2 第 6、10、12 行的边标注 | **待补** |
+
+### 4.4 engine 授权逻辑不需要重构
+
+engine 的授权判定（`authorizeInlineCapability:2303`、`authorizeCapability` 注入点 `:1503`）**保持不动**。engine 是有状态容器，只做**减法**（4.5 删除人工审批面状态）。
+
+> 例外：4.5 的删除会触碰 `engine.ts`，但那是**移除服务链**，不是重构授权逻辑。
+
+### 4.5 人工审批面清理清单
+
+> **处置原则**：删的是「服务 `/approve` 人工重试」的那一半；`recordDenial` 的**统计那一半必须保留**（它喂 deny 熔断，见 2.3）。
+
+| # | 符号 | 位置 | 处置 |
+|---|---|---|---|
+| 1 | `pi.registerCommand("approve")` | `register.ts:2346-2400` | 删 |
+| 2 | `recoverDeniedAction` 实现 | `pi-safety.ts:494-520` | 删 |
+| 3 | `recoverDeniedAction` 声明 | `pi-safety.ts:258` | 删 |
+| 4 | `RecoverDeniedActionResult` | `pi-safety.ts:209` | 删 |
+| 5 | `retryChoice` helper | `pi-safety.ts:275-288` | 删 |
+| 6 | `ui.select("Auto-review denials")` | `pi-safety.ts:506` | 删 |
+| 7 | `retrySequence` | `engine.ts:880` | 删 |
+| 8 | `retryRecords` | `engine.ts:884` | 删 |
+| 9 | `RetryRecord` 接口 | `engine.ts:477` | 删 |
+| 10 | `denialNotices` | `engine.ts:885` | 删 |
+| 11 | `MAX_DENIAL_NOTICES` | `engine.ts:540` | 删（否则 unused 报错） |
+| 12 | `armedRetry` | `engine.ts:886` | 删 |
+| 13 | `listDenials` 接口 | `engine.ts:421` | 删 |
+| 14 | `armRetry` 接口 | `engine.ts:423` | 删 |
+| 15 | `RetryHandle` | `engine.ts:248` | 删 |
+| 16 | `DenialNotice` | `engine.ts:348` | 删 |
+| 17 | **`onDenial` 声明** | `engine.ts:358` | 删（已核实全仓无消费方） |
+| 18 | **`onDenial` 调用** | `engine.ts:1005-1009` | 删 |
+| 19 | `consumeArmedRetry` | `engine.ts:895-897` | 删 |
+| 20 | `makeRetryHandle` | `engine.ts:948-953` | 删 |
+| 21 | `armRetry` 实现 | `engine.ts:2421-2439` | 删 |
+| 22 | `listDenials` 实现 | `engine.ts:2414` | 删 |
+| 23 | cleanup 中 retry 相关 | `engine.ts:2450-2451`、`:2512-2514` | 删 |
+| 24 | **engine 工厂返回对象** | `engine.ts:2547` | 改（去掉 `listDenials`/`armRetry`） |
+| 25 | **`recordDenial` 的 retry/notice 半** | `engine.ts:957-1011` | **改写，不整删**（`:969` 的 `recordDenialStats()` 必须留） |
+| 26 | **`blocked(..., retryHandle)` 两处** | `engine.ts:2074`、`:2218` | 改为 `blocked(error)` |
+| 27 | **`retryFingerprint`** | `engine-fingerprint.ts:58` | 删（4 处调用全在 retry 链上） |
+| 28 | **`"manual-retry"` source + `ApprovalOverride`** | `engine.ts:2043`、`:2153`、`:2044-2047` | 删 |
+| 29 | **`renderExactRetryInstruction`** | `permission-copy.ts:252` | 删 |
+| 30 | **approve 专用 notice kinds** | `permission-copy.ts:42-45`（`approve-requires-mode`/`-requires-ui`/`-empty`/`-stale`）、渲染 `:218-225` | 删 |
+| 31 | **`tests/register.test.ts:4124`**（断言 `pi-safety-auto-override`） | — | 删 |
+| 32 | deny 文案「ask the user」 | `permission-copy.ts:92,102,114,173` | 改写（见下） |
+| 33 | **「求用户切 yolo」话术** | `register-tool-copy.ts:11,14` | **删**（真的人工绕过指令，不能只洗 "ask the user"） |
+
+> **不在清单内**：`src/engine-clone.ts` **不要动**——它只有 `runtimeDenialPolicy`（`:68-88`，执行后沙箱拒绝策略），与 retry / denial 链无关。
+
+**隐性引用者**（符号 grep 抓不到，不在上面 33 项内，但删完必须一并改）：
+
+| 类别 | 引用者 | 为什么漏掉 |
+|---|---|---|
+| **测试（大）** | `tests/engine.test.ts`（**66 处**：`import RetryHandle:14`、`armRetry`/`listDenials`/`retryHandle`/`manual-retry`/`approvalOverride` 断言 `:843-2231`） | 只列了 `tests/register.test.ts` |
+| **源码** | `src/pi-guardian-adapters.ts`（**4 处** `approvalOverride`、`approvalOverrideFromEngine`） | **不在步骤 2 的 9 文件清单里**（只在步骤 3） |
+| **字符串臂** | `src/permissions/residual.ts:84-85,102-103`（`"manual-retry"` switch case）、词表 `:11` `"manual_retry"` | 字符串不是符号，grep 不到 |
+| **测试（其余）** | `tests/{pi-safety:199,pi-safety-nesting:104,107,heap-soak:77,engine-native-retry:259,312,permissions-residual:28,131,pi-guardian-adapters:349-363,auto-review-request:359-398,auto-reviewer:5,310-320}.test.ts` | 只列了 2 个测试文件 |
+| **字符串断言** | `tests/permission-copy.test.ts:26` 断言 `"stop and ask the user"`；`tests/register.test.ts:726` 断言 `"switch to yolo"` | 断言的是文案，不是符号 |
+| **Outcome 形状** | `src/engine.ts:345`（`{ kind: "blocked"; retryHandle?: RetryHandle }`）、`blocked()` helper `:1049-1052` | 原表只列了 2 处调用点 |
+| **请求字段** | `src/auto-review-request.ts:92,130,159,203`（`approvalOverride`） | 原表只列了 prefix 两行 |
+| **文档** | `extensions/pi-safety/{README.md:20,52,118, README.zh-CN.md:11,40,72, AGENTS.md:159,243}`、`APPEND_SYSTEM.md` | 都在教用户 `/approve` |
+
+> **教训**：删除清单若按**符号名 grep** 产出，会系统性漏掉三类东西——**字符串字面量**、
+> **switch case 臂**、**测试断言的文案**。本轮补的就是这三类。
+
+> **信任通道必须一起拆**：`approvalOverride` + `"manual-retry"` + `AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX`（`auto-review-request.ts:104-105`）是一条「用户已批准」的 developer 权威通道（`renderAutoReviewTrustedContext:203-214`）。只删锁不拆通道 = 留下一个**无人认证的伪造批准口**，比保留 `/approve` 更危险。
+
+**文案改写原则**：
+
+- `review-denied`（`permission-copy.ts:92`）、`circuit-open`（`:173`）分支**只写「停止」**，不写「等 reviewer 裁决」——前者 reviewer 已终局拒绝，后者 reviewer 不可用，「等待」等于对非确定性审批者再掷一次骰子。
+- `permission-copy.ts:102,114` 可写「等待 reviewer 裁决」（review 尚未终局）。
+
+---
+
+## 5. 顺序
+
+| # | 步骤 | 触碰文件 | 验证 |
+|---|---|---|---|
+| 1 | **L1 前置**：`pi.on("tool_call")` 单接缝（见 4.1.4）+ 函数改名 `evaluateDenyRulesOnly` | `src/register.ts`、`src/risk-policy.ts` | **auto 与 yolo** 两模式下 deny 都拦得住 bash/write/edit；`request_permissions` 不受影响；委托包络在 auto 下仍生效 |
+| 2 | **拆 `/approve` 服务链**（4.5 全 33 项 + 隐性引用者），拆成 4 个各自落绿的切口 | 见 4.5 的完整清单（含测试） | 每个切口后 `tsc` + 全量测试绿；grep 全清单符号**且字符串**零命中 |
+| 3 | **`"prompt"` → `"review"` 改名** | `src/risk-policy.ts`、`src/pi-guardian-adapters.ts`、`src/auto-review-request.ts`、**`src/register.ts`**、**`src/register-request-permissions.ts`**、相关测试 | `tsc` 干净（**注意 3 处比较点**：`register.ts:1607`、`:1803`、`register-request-permissions.ts:135`） |
+| 4 | **渲染件补分支**（4.3 第 1、4 项 + 4.2 标「待补」的行） | `docs/diagrams/pi-safety-target-flow.html` | 按 **4.2 行号清单**逐行断言存在 |
+| 5 | **文档对齐**（含 README 与 AGENTS） | `docs/pi-safety.md`、`extensions/pi-safety/AGENTS.md`、`extensions/pi-safety/README.md`、`extensions/pi-safety/README.zh-CN.md`、`APPEND_SYSTEM.md`、`security/git-metadata-policy.md` | 无「ask the user」；无 `/approve` 引用 |
+| 6 | **（可选）ESC 清理**（3.2 三条残留） | `src/engine.ts` | 3.2 契约不变 |
+
+> **步骤 1 不要碰 `register-request-permissions.ts`**：产品决策（1.2）是
+> `request_permissions` 不受 deny 约束。原计划把它当第三入口是**自相矛盾**——照做会让 §8 检查 3 必然红。
+>
+> **步骤 2 拆成 4 个各自落绿的切口**（互不阻断，每步可提交）：
+>
+> | 切口 | 内容 | 必须同 commit 的原因 |
+> |---|---|---|
+> | 2a | engine retry 状态 + `approvalOverride` 信任通道 | 两者互相引用，拆开必红 |
+> | 2b | `recoverDeniedAction` UI 链 + `ui.select` | — |
+> | 2c | 文案改写（含 `register-tool-copy.ts` 的 yolo 话术） | 同步改断言字符串的测试 |
+> | 2d | approve 命令 + 专用 notice kind | — |
+>
+> **步骤 2 的隐性引用者**（符号 grep 抓不到，必须一并改）：
+> `tests/engine.test.ts`（**66 处**）、`src/pi-guardian-adapters.ts`（4 处 `approvalOverride`，
+> 压根不在原 9 文件清单里）、`src/permissions/residual.ts` 的 `"manual-retry"` **switch 字符串臂**
+> （`:84-85`、`:102-103`）、以及 `tests/{pi-safety,pi-safety-nesting,heap-soak,engine-native-retry,
+> permissions-residual,pi-guardian-adapters,auto-review-request,auto-reviewer,permission-copy}.test.ts`。
+> **字符串断言**（`tests/permission-copy.test.ts:26` 的 `"stop and ask the user"`、
+> `tests/register.test.ts:726` 的 `"switch to yolo"`）是最大盲区。
+>
+> **步骤 3 的触碰清单**：`"prompt"` 不只被**构造**，还被**比较**。只改 union 成员不改那 3 处比较点，`tsc` 直接红。
+
+---
+
+## 6. 决策表
+
+| 决策 | 结论 | 依据 |
+|---|---|---|
+| escalation | 删 | `67ca74f` |
+| 门模型 | 三组门；`Forbidden` 不是 deny 门 | `279eef3` |
+| `host-admitted` | 保留 | — |
+| `escalatedGitDestinationUnbound` | ~~删除~~ **已完成**（`src/` grep 零命中） | — |
+| `transient` 链路 | ~~整条删除~~ **已完成**（`src/` grep 零命中） | `c848cb8` |
+| `failed` 出口 | 不新增，也不画进目标图 | 4.2 第 5 行 |
+| 审批缓存 | 保留 | 2.3 |
+| `"escalation"` 词表项 | 保留 | `engine-fingerprint.ts` |
+| engine 是否重构 | **不** | 4.4 |
+| engine 画法 | 画容器 | — |
+| `vDeny` 出口 | **无出口**，`writeOutsideRoots` 画标注不画边 | 2.2 / 4.2 第 4 行 |
+| `action:"prompt"` | 改名 `review` | 4.5 命名修正（**不是** 4.1） |
+| `allow` 语义 | 用户声明安全 → 沙箱内跑，跳过 reviewer | 4.1.3（产品决策 2026-10-20） |
+| L1 接缝 | **`tool_call` 单接缝**（非 3 个 execute 入口） | 4.1.4（三轴研究） |
+| L1 复用 | 复用 `evaluateHostFirstRulesOnly` 并**改名 `evaluateDenyRulesOnly`** | 4.1.5 |
+| `request_permissions` 受 deny 约束 | **不受** | 1.2（产品决策 2026-10-20） |
+| 外来工具 | **完全不管**，但删 `rules.ts` 误导注释 | 4.2 第 9 行 |
+
+---
+
+## 7. 不变量
+
+- `sandbox-policy.ts` 在 engine value-closure 内禁止 `node:fs`；闭包内禁止 `sandbox.ts`
+- host 包白名单仅 `["src/guardian-tools.ts", "src/register.ts"]`
+- **零用户审批面板**：`grep -rn '\.select(\|\.confirm(\|\.prompt(' extensions/pi-safety/src/` **零命中**
+- **`/approve` 服务链零残留**：`RetryHandle|armRetry|listDenials|DenialNotice|onDenial|retryRecords|armedRetry|retryFingerprint|MAX_DENIAL_NOTICES|ApprovalOverride|manual-retry|manual_retry|recoverDeniedAction|retryChoice|renderExactRetryInstruction|approvalOverride` **零命中**
+- L1 只判 `deny`：`allow`/`ask` 不出现在 L1 路径
+
+> **必须是结构不变量测试，不能只靠 grep**：grep 是一次性检查，跑一次就失效。零面板不变量应加进 `tests/structure-invariants.test.ts`（归属**步骤 2**）。
+
+---
+
+## 8. 验证
+
+> **「能失败」才算检查。** 表中标 ⚠️ 的项在补齐对应测试/断言前是**不可证伪**的——
+> 照原样跑会通过，但什么也证明不了。
+
+| # | 检查 | 命令 / 依据 | 归属 | 能否证伪 |
+|---|---|---|---|---|
+| 1 | L1 deny 在 **auto 与 yolo** 下都拦得住 bash/write/edit | `tool_call` 事件级行为测试（形状见 4.1.6） | 步骤 1 | ⚠️ 需新写；现有 yolo deny 覆盖（`engine.test.ts:2495`）走 engine `policy.check` 而非 `config.rules`，L1 哪怕没写它也绿 |
+| 2 | **委托包络在 auto 模式下仍生效** | 行为测试 | 步骤 1 | ⚠️ 需新写；yolo 下 `delegation-policy.ts:104` 直接放行，测了是空的 |
+| 3 | `request_permissions` 不受 deny 影响（回归） | 行为测试 | 步骤 1 | ⚠️ 需新写；**注意：步骤 1 不碰它，否则这条必然红** |
+| 4 | `/approve` 服务链零残留 | `grep -rn '<符号>' extensions/pi-safety/src extensions/pi-safety/tests` | 步骤 2 | **必须锚定路径**；repo 全局跑会命中本计划文档自己 |
+| 5 | 结构不变量测试绿 | `tests/structure-invariants.test.ts` | 步骤 2 | 真可证伪 |
+| 6 | `tsc` 干净（含 3 处 `"prompt"` 比较点） | `tsc --noEmit`` | 步骤 3 | 真可证伪 |
+| 7 | 渲染件 4.2 标「待补」的行**逐行断言存在** | 按 **下表的具体 id/字符串** grep | 步骤 4 | ⚠️ 原写法空的；必须给具体断言字符串 |
+| 8 | 文档无「ask the user」/ `/approve` 引用 | 对 **6 份文档** grep：`docs/pi-safety.md`、`extensions/pi-safety/{AGENTS.md,README.md,README.zh-CN.md}`、`APPEND_SYSTEM.md`、`security/git-metadata-policy.md` | 步骤 5 | 原清单漏了 `README*`、`AGENTS.md`、`APPEND_SYSTEM.md`（它们都在教用户 `/approve`） |
+| 9 | 无 `mcp__*` 误导注释 | `grep -n 'mcp__' extensions/pi-safety/src/permissions/rules.ts` | 步骤 2 | **原路径错**：`src/rules.ts` 不存在，真路径是 `src/permissions/rules.ts:140`。对不存在的路径 grep 永远通过 |
+| 10 | 全量测试 | `pnpm -C extensions/pi-safety test` | 每步 | 真可证伪（但证伪不了 L1 缺失/图错/文档旧） |
+
+**检查 7 的具体断言字符串**（补齐后才能当检查用）：
+
+| 4.2 行 | 要在渲染件里 grep 的内容 |
+|---|---|
+| 4（`writeOutsideRoots`） | `writeOutside` 当前零命中，必须新增 |
+| 6（`sbxA` 出口） | `runtimeDenialPolicy`、`review-and-retry` 边标注 |
+| 10（`grant` 非唯一出口） | `grant` → `rret` 边 |
+| 12（`arb` 位置） | `arb` 位于 `g3` 与 `exec` 之间 |
+
+---
+
+> **两轮独立研究**（2026-10-20）：
+> **第一轮**（安全 / 内部一致性 / 事实准确）——「方向对，但按原样实施会编译不过」。
+> 已吸收：2 个 P0 编译缺陷、12 项删除清单遗漏、9 处行号错、7 处一致性问题、6 条安全问题。
+> **第二轮**（接缝位置 / 执行风险 / 替代设计，配 `codebase-design` deep-module 词汇）——
+> 推翻了 §4.1.4 的接缝选择：两个独立 subagent 收敛到 `tool_call` 单接缝；
+> 执行风险轴找出 16 项隐性引用者与 3 条空检查。
+> 三条产品决策（`request_permissions` 不受约束 / 外来工具不管 / `allow` = 声明安全）由用户于 2026-10-20 拍板。

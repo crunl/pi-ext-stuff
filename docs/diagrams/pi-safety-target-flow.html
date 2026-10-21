@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-safety 判定流</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Architects+Daughter&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fdfdfc;
+    --ink: #1e1e1e;
+    --muted: #75757a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --hand: "Architects Daughter", "Comic Sans MS", cursive;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--hand);
+    padding: 44px 28px 90px;
+    background-image: radial-gradient(circle, rgba(0,0,0,0.05) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .wrap { max-width: 1420px; margin: 0 auto; }
+  h1 { font-size: 31px; font-weight: 400; margin: 0 0 6px; letter-spacing: 0.3px; }
+  .sub { color: var(--muted); font-size: 15.5px; margin: 0 0 30px; }
+
+  .canvas {
+    background: #fff; border-radius: 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 10px 34px rgba(0,0,0,0.08);
+    padding: 26px 22px; overflow: auto;
+  }
+  .canvas svg { display: block; margin: 0 auto; }
+
+  .legend {
+    display: flex; gap: 28px; flex-wrap: wrap;
+    margin-top: 24px; font-size: 14.5px; color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 9px; }
+  .sw { width: 24px; height: 15px; border-radius: 3px; border: 1.5px solid; }
+  .sw.allow { background: #b2f2bb; border-color: #2f9e44; }
+  .sw.review { background: #ffec99; border-color: #f08c00; }
+  .sw.deny { background: #ffc9c9; border-color: #e03131; }
+  .sw.blue { background: #a5d8ff; border-color: #1971c2; }
+  .sw.layer { background: #f1f3f5; border-color: #495057; }
+  .sw.skip { background: #fff; border: 1.5px dashed #e03131; }
+  .sw.engine { background: #fff; border: 1.5px dashed #5f3dc4; }
+
+  .loading { color: var(--muted); font-size: 15px; padding: 60px; text-align: center; }
+  .err {
+    color: #e03131; font-family: var(--mono); font-size: 13px;
+    padding: 20px; background: #fff5f5; border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>pi-safety 判定流</h1>
+  <p class="sub">两层 deny，两个独立工具</p>
+
+  <div class="canvas" id="canvas">
+    <div class="loading" id="loading">绘制中…</div>
+  </div>
+
+  <div class="legend">
+    <span><i class="sw layer"></i>检查层</span>
+    <span><i class="sw blue"></i>判定结果</span>
+    <span><i class="sw review"></i>LLM 裁决</span>
+    <span><i class="sw allow"></i>执行</span>
+    <span><i class="sw deny"></i>终止 / 拒绝</span>
+    <span><i class="sw skip"></i>yolo 下不存在</span>
+    <span><i class="sw engine"></i>engine 容器</span>
+  </div>
+</div>
+
+<script type="module">
+const loading = document.getElementById("loading");
+const canvas = document.getElementById("canvas");
+
+let dagre, rough;
+try {
+  dagre = (await import("https://esm.sh/@dagrejs/dagre@1.1.4")).default;
+  rough = (await import("https://esm.sh/roughjs@4.6.6")).default;
+} catch (e) {
+  loading.className = "err";
+  loading.textContent = "无法加载绘图库（需访问 esm.sh）：" + e.message;
+  throw e;
+}
+
+// One colour, one meaning. A node is exactly one of: an input, a gate, a
+// verdict, an LLM decision, an effect, or a terminal. Green had been doing
+// double duty as "approved" and "executes", which is how a verdict and an
+// action came to share a colour.
+const PAL = {
+  plain:  { fill: "#ffffff", stroke: "#343a40" }, // input
+  layer:  { fill: "#f1f3f5", stroke: "#495057" }, // gate / layer
+  blue:   { fill: "#a5d8ff", stroke: "#1971c2" }, // verdict
+  yellow: { fill: "#ffec99", stroke: "#f08c00" }, // LLM decision
+  green:  { fill: "#b2f2bb", stroke: "#2f9e44" }, // effect / execution
+  red:    { fill: "#ffc9c9", stroke: "#e03131" }, // terminal
+};
+
+/* ============ graph 1: bash flow ============ */
+const G1_NODES = [
+  { id: "start",   label: "bash / write / edit",   sub: "",                        color: "plain",  w: 200, h: 54 },
+  { id: "l1",      label: "第一层 · 用户配置 deny",  sub: "tool 名 + 命令文本 pattern", color: "layer",  w: 262, h: 66 },
+  { id: "blocked", label: "deny",                  sub: "用户预先裁决",              color: "red",    w: 140, h: 56, tag: "L1" },
+  { id: "yolo",    label: "mode === yolo ?",       sub: "",                        color: "blue",   w: 178, h: 54 },
+  { id: "l2",      label: "第二层 · 静态风险分析",   sub: "shell AST · 路径 · git",    color: "layer",  w: 262, h: 66 },
+  { id: "bare",    label: "裸跑",                   sub: "无沙箱",                    color: "green",  w: 132, h: 54 },
+  { id: "vAllow",  label: "allow",                 sub: "证明安全",                  color: "blue",   w: 138, h: 58 },
+  { id: "vNeeds",  label: "needsApproval",         sub: "无法证明",                  color: "yellow", w: 162, h: 58 },
+  { id: "vDeny",   label: "deny",                  sub: "证明危险 · 参数非法", color: "red", w: 186, h: 58, tag: "L2" },
+  { id: "review",  label: "LLM reviewer",          sub: "approve / deny",           color: "yellow", w: 176, h: 58 },
+  { id: "sbxA",    label: "SRT 沙箱执行",           sub: "mode: sandboxed · 所有获批路径", color: "green", w: 258, h: 58 },
+  { id: "ret",     label: "deny",                  sub: "reviewer 拒绝",             color: "red",    w: 152, h: 54, tag: "RV" },
+];
+
+const G1_EDGES = [
+  { from: "start",  to: "l1" },
+  { from: "l1",     to: "blocked", label: "命中",   color: "red" },
+  { from: "l1",     to: "yolo",    label: "未命中" },
+  { from: "yolo",   to: "bare",    label: "是",     color: "green" },
+  { from: "yolo",   to: "l2",      label: "否" },
+  { from: "l2",     to: "vAllow",  label: "allow",  color: "green" },
+  { from: "l2",     to: "vNeeds",  label: "needs",  color: "yellow" },
+  { from: "l2",     to: "vDeny",   label: "deny",   color: "red", dashed: true },
+  { from: "vAllow", to: "sbxA" },
+  { from: "vNeeds", to: "review" },
+  { from: "review", to: "sbxA",    label: "批准",   color: "green" },
+  { from: "review", to: "ret",     label: "拒绝",   color: "red" },
+];
+
+/* ============ graph 2: request_permissions ============ */
+const G2_NODES = [
+  { id: "rp",    label: "request_permissions", sub: "独立工具 · 不执行命令", color: "plain",  w: 232, h: 66 },
+  { id: "rpr",   label: "LLM reviewer",        sub: "看权限清单 + 理由",     color: "yellow", w: 196, h: 58 },
+  { id: "grant", label: "turnWriteRoots / turnNetworkHosts", sub: "放宽沙箱（turn 级有效 · 非 bypass）", color: "green",  w: 288, h: 58 },
+  { id: "rret",  label: "deny",            sub: "request_permissions 拒绝", color: "red",  w: 196, h: 54, tag: "RP" },
+];
+
+const G2_EDGES = [
+  { from: "rp",    to: "rret",  label: "形状非法", color: "red" },
+  { from: "rp",    to: "rpr" },
+  { from: "rpr",   to: "grant", label: "批准", color: "green" },
+  { from: "rpr",   to: "rret",  label: "拒绝", color: "red" },
+];
+
+/* ============ layout ============ */
+const BLEED = 12; // stroke jitter clearance allowance
+
+function layout(nodes, edges, opts = {}) {
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({
+    rankdir: "TB",
+    nodesep: opts.nodesep ?? 46,
+    ranksep: opts.ranksep ?? 72,
+    marginx: 0,
+    marginy: 0,
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+  for (const n of nodes) g.setNode(n.id, { width: n.w + BLEED, height: n.h + BLEED });
+  for (const e of edges) g.setEdge(e.from, e.to);
+  dagre.layout(g);
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    const p = g.node(n.id);
+    minX = Math.min(minX, p.x - (n.w + BLEED) / 2);
+    maxX = Math.max(maxX, p.x + (n.w + BLEED) / 2);
+    minY = Math.min(minY, p.y - (n.h + BLEED) / 2);
+    maxY = Math.max(maxY, p.y + (n.h + BLEED) / 2);
+  }
+  return { g, nodes, edges, minX, minY, w: maxX - minX, h: maxY - minY };
+}
+
+const L1 = layout(G1_NODES, G1_EDGES, { nodesep: 54, ranksep: 82 });
+const L2 = layout(G2_NODES, G2_EDGES, { nodesep: 46, ranksep: 76 });
+
+/* ============ compose ============ */
+const PAD = 28;
+const GAP = 56;
+const EXTRA_BOT = 8;
+// room above the first node for the engine container's title band
+const TOP_BAND = 54;
+
+const panelW = Math.max(L1.w, L2.w);
+const totalW = PAD * 2 + panelW;
+const totalH = PAD * 2 + TOP_BAND + L1.h + GAP + L2.h + EXTRA_BOT;
+
+const L1_OX = PAD + (panelW - L1.w) / 2;
+const L1_OY = PAD + TOP_BAND;
+const L2_OX = PAD + (panelW - L2.w) / 2;
+const L2_OY = PAD + TOP_BAND + L1.h + GAP;
+
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.createElementNS(NS, "svg");
+svg.setAttribute("width", totalW);
+svg.setAttribute("height", totalH);
+svg.setAttribute("viewBox", `0 0 ${totalW} ${totalH}`);
+const rc = rough.svg(svg);
+loading.remove();
+
+const RECT = { roughness: 1.1, bowing: 0.9, strokeWidth: 1.7 };
+
+function strokeOf(color) {
+  return PAL[color]?.stroke ?? "#343a40";
+}
+
+function drawGraph(L, ox, oy) {
+  // edges behind nodes
+  for (const e of L.edges) {
+    const ep = L.g.edge(e.from, e.to);
+    if (!ep?.points?.length) continue;
+    const stroke = strokeOf(e.color);
+    const pts = ep.points.map((p) => ({ x: p.x - L.minX + ox, y: p.y - L.minY + oy }));
+
+    let d = `M ${pts[0].x} ${pts[0].y}`;
+    for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x} ${pts[i].y}`;
+    svg.appendChild(rc.path(d, {
+      stroke, strokeWidth: 1.7, roughness: 1.0,
+      ...(e.dashed ? { strokeLineDash: [7, 5] } : {}),
+    }));
+
+    // arrowhead
+    const last = pts[pts.length - 1];
+    const prev = pts[pts.length - 2] ?? last;
+    const ang = Math.atan2(last.y - prev.y, last.x - prev.x);
+    for (const off of [-0.44, 0.44]) {
+      const a = ang + Math.PI + off;
+      svg.appendChild(rc.line(
+        last.x, last.y,
+        last.x + Math.cos(a) * 11, last.y + Math.sin(a) * 11,
+        { stroke, strokeWidth: 1.7, roughness: 0.6 },
+      ));
+    }
+
+    if (e.label) {
+      // walk the polyline for a spot that clears every node box
+      const boxes = L.nodes.map((n) => {
+        const np = L.g.node(n.id);
+        return {
+          x: np.x - n.w / 2 - L.minX + ox,
+          y: np.y - n.h / 2 - L.minY + oy,
+          w: n.w,
+          h: n.h,
+        };
+      });
+      const probe = document.createElementNS(NS, "text");
+      probe.setAttribute("font-family", "Architects Daughter, cursive");
+      probe.setAttribute("font-size", "13");
+      probe.textContent = e.label;
+      svg.appendChild(probe);
+      const lw = probe.getBBox().width;
+      const lh = 18;
+      svg.removeChild(probe);
+
+      const clearAt = (px, py) => {
+        const lx = px + 10;
+        const ly = py - lh + 4;
+        return !boxes.some(
+          (b) =>
+            lx < b.x + b.w + 3 &&
+            lx + lw > b.x - 3 &&
+            ly < b.y + b.h + 3 &&
+            ly + lh > b.y - 3,
+        );
+      };
+
+      // sample along the path, prefer the middle, fall back outward
+      const samples = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+        const steps = Math.max(1, Math.round(segLen / 6));
+        for (let s = 0; s <= steps; s++) {
+          samples.push({ x: a.x + ((b.x - a.x) * s) / steps, y: a.y + ((b.y - a.y) * s) / steps });
+        }
+      }
+      const midIdx = Math.floor(samples.length / 2);
+      let spot = samples[midIdx];
+      for (let d = 0; d < samples.length; d++) {
+        const cands = [samples[midIdx + d], samples[midIdx - d]].filter(Boolean);
+        const hit = cands.find((c) => clearAt(c.x, c.y));
+        if (hit) { spot = hit; break; }
+      }
+
+      const t = document.createElementNS(NS, "text");
+      t.setAttribute("data-edge-label", `${e.from}->${e.to}`);
+      t.setAttribute("x", spot.x + 10);
+      t.setAttribute("y", spot.y - 8);
+      t.setAttribute("font-family", "Architects Daughter, cursive");
+      t.setAttribute("font-size", "13");
+      t.setAttribute("fill", stroke);
+      t.setAttribute("paint-order", "stroke");
+      t.setAttribute("stroke", "#fff");
+      t.setAttribute("stroke-width", "4.5");
+      t.setAttribute("stroke-linejoin", "round");
+      t.textContent = e.label;
+      svg.appendChild(t);
+    }
+  }
+
+  // nodes
+  for (const n of L.nodes) {
+    const p = L.g.node(n.id);
+    const x = p.x - n.w / 2 - L.minX + ox;
+    const y = p.y - n.h / 2 - L.minY + oy;
+    const cx = p.x - L.minX + ox;
+    const cy = p.y - L.minY + oy;
+    const pal = PAL[n.color] ?? PAL.plain;
+
+    const rect = rc.rectangle(x, y, n.w, n.h, {
+      ...RECT, fill: pal.fill, fillStyle: "solid", stroke: pal.stroke,
+      ...(n.dashed ? { strokeLineDash: [8, 6] } : {}),
+    });
+    rect.setAttribute("data-node", n.id);
+    rect.setAttribute("data-bx", `${x} ${y} ${n.w} ${n.h}`);
+    svg.appendChild(rect);
+
+    if (n.tag) {
+      const tag = document.createElementNS(NS, "text");
+      tag.setAttribute("x", x + 7);
+      tag.setAttribute("y", y + 15);
+      tag.setAttribute("font-family", "ui-monospace, Menlo, monospace");
+      tag.setAttribute("font-size", "9.5");
+      tag.setAttribute("font-weight", "600");
+      tag.setAttribute("fill", pal.stroke);
+      tag.setAttribute("opacity", "0.75");
+      tag.textContent = n.tag;
+      svg.appendChild(tag);
+    }
+
+    const t1 = document.createElementNS(NS, "text");
+    t1.setAttribute("data-label", n.id);
+    t1.setAttribute("x", cx);
+    t1.setAttribute("y", cy + (n.sub ? -4 : 5));
+    t1.setAttribute("text-anchor", "middle");
+    t1.setAttribute("font-family", "Architects Daughter, cursive");
+    t1.setAttribute("font-size", n.id === "l1" || n.id === "l2" ? "15.5" : "14.5");
+    t1.setAttribute("fill", "#1e1e1e");
+    t1.textContent = n.label;
+    svg.appendChild(t1);
+
+    if (n.sub) {
+      const t2 = document.createElementNS(NS, "text");
+      t2.setAttribute("x", cx);
+      t2.setAttribute("y", cy + 16);
+      t2.setAttribute("text-anchor", "middle");
+      t2.setAttribute("font-family", "ui-monospace, Menlo, monospace");
+      t2.setAttribute("font-size", "10.5");
+      t2.setAttribute("fill", "#63636e");
+      t2.textContent = n.sub;
+      svg.appendChild(t2);
+    }
+  }
+}
+
+drawGraph(L1, L1_OX, L1_OY);
+drawGraph(L2, L2_OX, L2_OY);
+
+/* ============ panel titles ============ */
+function panelTitle(text, x, y, color) {
+  const t = document.createElementNS(NS, "text");
+  t.setAttribute("x", x);
+  t.setAttribute("y", y);
+  t.setAttribute("font-family", "Architects Daughter, cursive");
+  t.setAttribute("font-size", "13.5");
+  t.setAttribute("letter-spacing", "1.6");
+  t.setAttribute("fill", color);
+  t.textContent = text;
+  svg.appendChild(t);
+}
+
+/* ============ cross-panel connector ============ */
+// from grant (lower panel) back up to sbxA (upper panel), routed in the gap
+const gNode = L2.g.node("grant");
+const aNode = L1.g.node("sbxA");
+const grantNode = L2.nodes.find((n) => n.id === "grant");
+const sbxNode = L1.nodes.find((n) => n.id === "sbxA");
+
+const grantCx = L2_OX + (gNode.x - L2.minX);
+const grantTop = L2_OY + (gNode.y - (grantNode.h + BLEED) / 2 - L2.minY);
+
+const sbxCx = L1_OX + (aNode.x - L1.minX);
+const sbxBot = L1_OY + (aNode.y + (sbxNode.h + BLEED) / 2 - L1.minY);
+
+// Route: grant top -> up into the inter-panel gap -> left -> up into sbxA bottom
+const laneY = L2_OY - GAP / 2;
+const d = `M ${grantCx} ${grantTop - 4} L ${grantCx} ${laneY} L ${sbxCx} ${laneY} L ${sbxCx} ${sbxBot + 8}`;
+svg.appendChild(rc.path(d, {
+  stroke: "#2f9e44", strokeWidth: 1.6, roughness: 1.0, strokeLineDash: [7, 6],
+}));
+
+// Arrowhead pointing up into sbxA
+svg.appendChild(rc.line(sbxCx, sbxBot + 6, sbxCx - 6, sbxBot + 16, { stroke: "#2f9e44", strokeWidth: 1.6, roughness: 0.6 }));
+svg.appendChild(rc.line(sbxCx, sbxBot + 6, sbxCx + 6, sbxBot + 16, { stroke: "#2f9e44", strokeWidth: 1.6, roughness: 0.6 }));
+
+const lbl = document.createElementNS(NS, "text");
+lbl.setAttribute("x", grantCx + 14);
+lbl.setAttribute("y", laneY - 8);
+lbl.setAttribute("text-anchor", "start");
+lbl.setAttribute("font-family", "Architects Daughter, cursive");
+lbl.setAttribute("font-size", "12.5");
+lbl.setAttribute("fill", "#2f9e44");
+lbl.setAttribute("paint-order", "stroke");
+lbl.setAttribute("stroke", "#fff");
+lbl.setAttribute("stroke-width", "4.5");
+lbl.setAttribute("stroke-linejoin", "round");
+lbl.textContent = "放宽沙箱范围（turn 级有效 · 静态层不可见）";
+svg.appendChild(lbl);
+
+/** Absolute position of one side of a node, in composed coordinates. */
+function anchor(L, ox, oy, id, side) {
+  const p = L.g.node(id);
+  const n = L.nodes.find((x) => x.id === id);
+  const cx = ox + (p.x - L.minX);
+  const cy = oy + (p.y - L.minY);
+  const halfW = (n.w + BLEED) / 2;
+  const halfH = (n.h + BLEED) / 2;
+  if (side === "top") return { x: cx, y: cy - halfH };
+  if (side === "bottom") return { x: cx, y: cy + halfH };
+  if (side === "left") return { x: cx - halfW, y: cy };
+  return { x: cx + halfW, y: cy };
+}
+
+/* ============ engine container ============ */
+// `approve-for-me-engine.ts` wraps every admission decision below. It is not a
+// step: it holds turn state, the capability lease that can short-circuit review,
+// the approval cache, and the callback the sandbox re-enters mid-execution.
+// Drawn as a container because a node in the pipeline would misplace it.
+const engineX = PAD / 2;
+const engineY = PAD / 2;
+const engineW = totalW - PAD;
+const engineH = totalH - PAD + 4;
+
+const engineRect = rc.rectangle(engineX, engineY, engineW, engineH, {
+  stroke: "#5f3dc4",
+  strokeWidth: 1.8,
+  fill: "none",
+  roughness: 1.2,
+  strokeLineDash: [10, 7],
+});
+engineRect.setAttribute("data-node", "engine-container");
+svg.insertBefore(engineRect, svg.firstChild);
+
+const engineTitle = document.createElementNS(NS, "text");
+engineTitle.setAttribute("x", engineX + 6);
+engineTitle.setAttribute("y", engineY + 26);
+engineTitle.setAttribute("font-family", "Architects Daughter, cursive");
+engineTitle.setAttribute("font-size", "15px");
+engineTitle.setAttribute("fill", "#5f3dc4");
+engineTitle.textContent = "Engine · 有状态容器（turn / lease / 审批缓存 / 执行中回调）";
+svg.insertBefore(engineTitle, svg.firstChild);
+
+// The one thing a linear flow cannot show: execution re-enters the engine to
+// authorize each connection it makes. The target is the container, not a node,
+// because the authorization lives in engine state rather than in a step.
+const cbFrom = anchor(L1, L1_OX, L1_OY, "sbxA", "left");
+const cbY = cbFrom.y;
+svg.appendChild(rc.path(
+  `M ${cbFrom.x - 4} ${cbY} L ${engineX + 8} ${cbY}`,
+  { stroke: "#5f3dc4", strokeWidth: 1.5, roughness: 1.0, strokeLineDash: [6, 5] },
+));
+for (const off of [-0.44, 0.44]) {
+  const a = Math.PI + off; // pointing left, into the container border
+  svg.appendChild(rc.line(engineX + 8, cbY,
+    engineX + 8 + Math.cos(a) * 10, cbY + Math.sin(a) * 10,
+    { stroke: "#5f3dc4", strokeWidth: 1.5, roughness: 0.6 }));
+}
+const cbLabel = document.createElementNS(NS, "text");
+cbLabel.setAttribute("x", (cbFrom.x + engineX) / 2);
+cbLabel.setAttribute("y", cbY - 7);
+cbLabel.setAttribute("text-anchor", "middle");
+cbLabel.setAttribute("font-family", "Architects Daughter, cursive");
+cbLabel.setAttribute("font-size", "11.5px");
+cbLabel.setAttribute("fill", "#5f3dc4");
+cbLabel.setAttribute("paint-order", "stroke");
+cbLabel.setAttribute("stroke", "#fff");
+cbLabel.setAttribute("stroke-width", "4.5");
+cbLabel.textContent = "逐连接回调";
+svg.appendChild(cbLabel);
+
+canvas.appendChild(svg);
+</script>
+</body>
+</html>
