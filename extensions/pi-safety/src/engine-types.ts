@@ -74,7 +74,6 @@ export interface TurnSnapshot {
   configFingerprint: string;
   baseSandboxPolicy?: SandboxPolicy;
   sandboxReady?: boolean;
-  transcript?: readonly unknown[];
 }
 
 /** The effective lease supplied to a concrete execution Adapter. */
@@ -165,7 +164,6 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
   risk?: AdmissionRisk;
   baseline: CapabilityLease;
   effective: CapabilityLease;
-  transcript: readonly unknown[];
   reason?: string;
   summary?: string;
   justification?: string;

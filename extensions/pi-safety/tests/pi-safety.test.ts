@@ -19,7 +19,6 @@ const baseSnapshot: PiTurnSnapshot = {
     network: { allowedDomains: [], deniedDomains: [] },
   },
   sandboxReady: true,
-  transcript: [],
 };
 
 function testUi() {

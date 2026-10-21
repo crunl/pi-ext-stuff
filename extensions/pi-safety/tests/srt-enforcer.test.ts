@@ -22,15 +22,15 @@ import {
   type SrtRuntimeLike,
   SrtSandboxManager,
 } from "../src/sandbox/srt-enforcer.ts";
-import {
-  createGuardianEvidenceScope,
-  createSandboxedReadOnlyCommandRunner,
-  type SandboxExecutionRequest,
-  type SandboxExecutionResult,
-  type SandboxNetworkAuthorization,
-  type SandboxNetworkEndpoint,
-  type SandboxPolicy,
+import type {
+  SandboxExecutionRequest,
+  SandboxExecutionResult,
+  SandboxNetworkAuthorization,
+  SandboxNetworkEndpoint,
+  SandboxPolicy,
 } from "../src/sandbox.ts";
+import { createSandboxedReadOnlyCommandRunner } from "../src/sandbox-guardian.ts";
+import { createGuardianEvidenceScope } from "../src/sandbox-policy.ts";
 
 const basePolicy = (): SandboxPolicy => ({
   filesystem: { allowWrite: [], denyRead: [], denyWrite: [] },

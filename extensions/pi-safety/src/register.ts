@@ -106,11 +106,20 @@ import {
 } from "./policy-primitives.ts";
 import { registerRequestPermissionsTool } from "./register-request-permissions.ts";
 import {
+  type ActivationRecord,
+  createRegistrationScopedState,
+  createReloadScopedState,
+  createTurnScopedState,
+  type SandboxState,
+} from "./register-state.ts";
+import {
   ACTIVE_PERMISSION_CONTEXT_UNAVAILABLE,
   ActivationSupersededError,
   abortLiveTurn,
   configKey,
   DELEGATED_TOOL_NAMES,
+  type EffectiveExecutionContext,
+  type ExecutablePermissionMode,
   flushTurnTrace,
   guardianTranscriptEntryFromMessage,
   isActivationSupersededError,
@@ -118,7 +127,9 @@ import {
   PERMISSION_MODE_CHANGED_REASON,
   PI_HOST_FIRST_TOOL_NAMES,
   PI_OWNED_TOOL_NAMES,
+  type PreparedPermissionExecution,
   policyDeniedError,
+  presentedPermissionError,
   requiresNetworkQuiescence,
   requiresSandbox,
   stableSessionId,
@@ -158,7 +169,6 @@ import {
   permissionedBashParameters,
   preparePermissionedBashArguments,
 } from "./shell-permissions.ts";
-import type { PermissionMode } from "./state.ts";
 import {
   activateTreeSitterShellParser,
   treeSitterShellFailure,
@@ -183,18 +193,6 @@ export interface RegisterExtensionOptions {
   riskEvaluator?: typeof evaluateRiskRequest;
   networkBoundary?: NetworkBoundary;
 }
-
-type ExecutablePermissionMode = PermissionMode;
-
-interface EffectiveExecutionContext {
-  snapshot: PermissionExecutionSnapshot;
-  mode: ExecutablePermissionMode;
-  config: SafetyConfig;
-  baseSandboxConfig?: SandboxPolicy;
-  sandboxReady: boolean;
-}
-
-const guardianFallbackNoticeKeys = new Set<string>();
 
 /**
  * Guardian review evidence: the transcript handed to the reviewer, and the
@@ -277,37 +275,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   const managedRiskEvaluator = options.riskEvaluator ?? evaluateRiskRequest;
   const autoReviewer =
     options.autoReviewer ?? new PiAutoReviewer(undefined, options.guardianSessionManager);
-  // Cluster A (activation): written by commitActivation/activateWithSandbox/
-  // activateConfigUnlocked, read by every tool's prepare + snapshot. The
-  // sandbox pair below is the split bottleneck: activation writes, per-tool
-  // reads (prepare, snapshot, sandbox health) — never separate them.
-  let loaded: LoadedSafetyConfig | undefined;
-  let loadedKey: string | undefined;
-  let configFailure: Error | undefined;
-  let activationFailure: { key: string; error: Error } | undefined;
-  let modeRuntime: PermissionModeRuntime | undefined;
-  // Cluster C (review evidence): Guardian transcript dual-track + activation
-  // notice. shellParserFailureReported is activation/startup, not review.
-  /** One Shell AST parser activation failure notice per registration. */
-  let shellParserFailureReported = false;
+  // The three state lifetimes this registration composes. Each factory owns one
+  // cluster and its invariant; registerExtension only instantiates and wires
+  // them. Declarations and the reasoning live in ./register-state.ts.
+  const reloadState = createReloadScopedState();
+  const turnState = createTurnScopedState();
+  const registrationState = createRegistrationScopedState();
   const evidence = createGuardianEvidence();
-  // Cluster B (turn enforcement): cycle writes intent, turn_start/prepare/
-  // agent_start apply it. pendingModeRefresh is the flag, pendingMode the
-  // value; they clear together everywhere EXCEPT agent_start align (which
-  // clears the flag only — the stale value is masked by the flag at read).
-  /** Set by a mid-turn cycle; cleared when the step boundary actually applies it. */
-  let pendingModeRefresh = false;
-  /**
-   * The desired mode a mid-turn cycle asked for while enforcement stays on the
-   * old snapshot. Shown in the TUI immediately (with a pending marker) so the
-   * display tracks intent; enforcement still flips only at the step boundary.
-   * Cleared together with `pendingModeRefresh` (see exception above).
-   */
-  let pendingMode: PermissionMode | undefined;
   /** Report one activation failure per registration, on whichever ctx learns of it first. */
   const reportShellParserActivationFailure = (ctx: ExtensionContext): void => {
-    if (shellParserFailureReported) return;
-    shellParserFailureReported = true;
+    if (!registrationState.claimShellParserFailureNotice()) return;
     const failure = treeSitterShellFailure();
     const notice = renderPermissionNotice({
       kind: "shell-parser-activation-failed",
@@ -320,12 +297,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     policy: {
       check: ({ requested, phase }) => {
         if (phase !== "runtime") return { kind: "allow" };
-        if (!loaded || !modeRuntime)
+        const activation = reloadState.activation();
+        const runtime = reloadState.modeRuntime();
+        if (!activation || !runtime)
           return { kind: "deny", reason: "Permission context unavailable" };
         const violation = checkRequestedCapabilities(
           requested,
-          modeRuntime.mode,
-          loaded.config,
+          runtime.mode,
+          activation.loaded.config,
           delegationScope(),
         );
         return violation ? { kind: "deny", reason: violation } : { kind: "allow" };
@@ -350,7 +329,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     },
     onAutoStateChange: (state, ctx, newlyPaused) => {
-      modeRuntime?.applyAutoState(state);
+      reloadState.modeRuntime()?.applyAutoState(state);
       if (!newlyPaused || !ctx) return;
       if (ctx.hasUI) {
         try {
@@ -378,12 +357,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     | undefined;
   const session = new PermissionSession();
-  let baseSandboxConfig: SandboxPolicy | undefined;
-  let sandboxState:
-    | { kind: "pending" }
-    | { kind: "disabled" }
-    | { kind: "ready"; profile: LoadedSafetyConfig["config"]["sandbox"]["profile"] }
-    | { kind: "failed"; error: string } = { kind: "pending" };
 
   /**
    * A cached `sandboxReady` bit is a lifecycle fact, not proof that the SRT
@@ -391,7 +364,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * test adapters without one retain the existing ready-state behaviour.
    */
   const sandboxManagerHealthy = (): boolean => {
-    if (sandboxState.kind !== "ready") return false;
+    if (reloadState.sandboxState().kind !== "ready") return false;
     if (typeof sandboxManager.isHealthy !== "function") return true;
     try {
       return sandboxManager.isHealthy();
@@ -410,12 +383,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const appliedMode =
       session.currentExecutionSnapshot()?.mode ??
       session.getExecutionSnapshot()?.mode ??
-      modeRuntime?.mode ??
+      reloadState.modeRuntime()?.mode ??
       "auto";
-    const pending =
-      pendingModeRefresh && pendingMode !== undefined && pendingMode !== appliedMode
-        ? pendingMode
-        : undefined;
+    const pending = turnState.pendingAgainst(appliedMode);
     const label = pending
       ? `${permissionModeLabel(pending)} (pending)`
       : permissionModeLabel(appliedMode);
@@ -451,26 +421,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     cancelInFlightModeTransition();
     evidence.reset();
     session.resetTurn();
-    pendingModeRefresh = false;
-    pendingMode = undefined;
+    turnState.clear();
     invalidatePermissionContext(reason);
   };
 
-  const ensureModeRuntime = (config: SafetyConfig): PermissionModeRuntime => {
-    modeRuntime ??= new PermissionModeRuntime(config, pi.appendEntry.bind(pi));
-    return modeRuntime;
-  };
+  const ensureModeRuntime = (config: SafetyConfig): PermissionModeRuntime =>
+    reloadState.ensureModeRuntime(() => new PermissionModeRuntime(config, pi.appendEntry.bind(pi)));
 
   const captureExecutionSnapshot = (turnId: number): PermissionExecutionSnapshot | undefined => {
     const existing = session.getExecutionSnapshot();
     if (existing) return existing;
-    if (!loaded || !modeRuntime) return undefined;
+    const activation = reloadState.activation();
+    const runtime = reloadState.modeRuntime();
+    if (!activation || !runtime) return undefined;
     const snapshot: PermissionExecutionSnapshot = {
       turnId,
-      mode: modeRuntime.mode,
-      config: loaded.config,
-      baseSandboxConfig,
-      sandboxReady: sandboxState.kind === "ready",
+      mode: runtime.mode,
+      config: activation.loaded.config,
+      baseSandboxConfig: activation.baseSandboxConfig,
+      sandboxReady: reloadState.sandboxState().kind === "ready",
     };
     session.setExecutionSnapshot(snapshot);
     return snapshot;
@@ -509,7 +478,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     snapshot: PermissionExecutionSnapshot,
   ): EffectiveExecutionContext | undefined => {
     if (!isCurrentExecutionSnapshot(snapshot)) return undefined;
-    if (!loaded || fingerprintConfig(loaded.config) !== fingerprintConfig(snapshot.config)) {
+    const activation = reloadState.activation();
+    if (
+      !activation ||
+      fingerprintConfig(activation.loaded.config) !== fingerprintConfig(snapshot.config)
+    ) {
       return undefined;
     }
     return {
@@ -808,7 +781,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         ? overrides.baseSandboxPolicy
         : executionSnapshot.baseSandboxConfig,
     sandboxReady: executionSnapshot.sandboxReady,
-    transcript: currentGuardianTranscriptSnapshot(),
   });
 
   const beginPermissionTurn = (
@@ -832,20 +804,9 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return await loadSafetyConfig(agentDir);
     } catch (error: unknown) {
       assertActivationCurrent(expectedGeneration);
-      configFailure = error instanceof Error ? error : new Error(String(error));
+      reloadState.recordConfigFailure(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
-  };
-
-  type ActivationPrior = {
-    loaded: LoadedSafetyConfig | undefined;
-    loadedKey: string | undefined;
-    baseSandboxConfig: SandboxPolicy | undefined;
-    sandboxState:
-      | { kind: "pending" }
-      | { kind: "disabled" }
-      | { kind: "ready"; profile: LoadedSafetyConfig["config"]["sandbox"]["profile"] }
-      | { kind: "failed"; error: string };
   };
 
   const commitActivation = (
@@ -853,19 +814,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     key: string,
     candidate: LoadedSafetyConfig,
     candidateSandbox: SandboxPolicy | undefined,
-    nextSandboxState: ActivationPrior["sandboxState"],
+    nextSandboxState: SandboxState,
     force: boolean,
   ): LoadedSafetyConfig => {
-    activationFailure = undefined;
-    configFailure = undefined;
     if (force) {
       invalidatePermissions("permission context changed");
       invalidatePermissionContext("permission context changed");
     }
-    loaded = candidate;
-    loadedKey = key;
-    baseSandboxConfig = candidateSandbox;
-    sandboxState = nextSandboxState;
+    reloadState.commit(
+      {
+        loaded: candidate,
+        key,
+        baseSandboxConfig: candidateSandbox,
+      },
+      nextSandboxState,
+    );
     setDefaultStatus(ctx);
     if (candidateSandbox?.network.macosTls === "system" && ctx.hasUI) {
       try {
@@ -890,7 +853,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     key: string,
     candidate: LoadedSafetyConfig,
     candidateSandbox: SandboxPolicy | undefined,
-    previous: ActivationPrior,
+    previous: ActivationRecord | undefined,
     force: boolean,
     expectedGeneration: number,
   ): Promise<LoadedSafetyConfig> => {
@@ -909,8 +872,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       }
     } catch (error: unknown) {
       assertActivationCurrent(expectedGeneration);
+      // Readiness for the rollback is the live backend state, not a copy hung on
+      // the record: `publishSandbox` may have moved the backend to `disabled`
+      // under an unchanged config, and a rollback must not re-activate a sandbox
+      // the record still calls ready.
+      const previousSandboxState = reloadState.sandboxState();
+      let rollbackSandboxState: SandboxState;
       try {
-        if (previous.sandboxState.kind === "ready" && previous.baseSandboxConfig) {
+        if (previousSandboxState.kind === "ready" && previous?.baseSandboxConfig) {
           if (sandboxManager.activate) {
             await sandboxManager.activate(previous.baseSandboxConfig);
           } else {
@@ -918,32 +887,27 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             await sandboxManager.initialize(previous.baseSandboxConfig);
           }
           assertActivationCurrent(expectedGeneration);
-          sandboxState = previous.sandboxState;
-        } else if (previous.sandboxState.kind === "disabled") {
+          rollbackSandboxState = previousSandboxState;
+        } else if (previousSandboxState.kind === "disabled") {
           await sandboxManager.reset();
-          sandboxState = previous.sandboxState;
+          rollbackSandboxState = previousSandboxState;
         } else {
           await sandboxManager.reset();
           const message = error instanceof Error ? error.message : String(error);
-          sandboxState = { kind: "failed", error: message };
+          rollbackSandboxState = { kind: "failed", error: message };
         }
       } catch (rollbackError: unknown) {
         assertActivationCurrent(expectedGeneration);
         const message =
           rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        sandboxState = { kind: "failed", error: `rollback failed: ${message}` };
+        rollbackSandboxState = { kind: "failed", error: `rollback failed: ${message}` };
       }
       assertActivationCurrent(expectedGeneration);
-      loaded = previous.loaded;
-      loadedKey = previous.loadedKey;
-      baseSandboxConfig = previous.baseSandboxConfig;
-      if (!previous.loaded) {
-        const message = error instanceof Error ? error.message : String(error);
-        activationFailure = {
-          key,
-          error: new Error(message),
-        };
-      }
+      const failure = error instanceof Error ? error : new Error(String(error));
+      // The record itself never carries a failed sandbox state forward: either
+      // the previous activation is restored intact, or nothing is live and the
+      // failure is latched against this key.
+      reloadState.rollback(previous, key, failure, rollbackSandboxState);
       throw error;
     }
     return commitActivation(
@@ -970,22 +934,32 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // session's cached policy and synthesize a compatibility snapshot.
     assertActivationCurrent(expectedGeneration);
     const key = configKey(ctx);
+    const configFailure = reloadState.configFailure();
     if (!force && configFailure) throw configFailure;
-    const cachedMode = targetMode ?? (modeRuntime ? modeRuntime.mode : undefined);
-    if (!force && loaded && loadedKey === key) {
-      const effectiveCachedMode = cachedMode ?? "auto";
-      if (!requiresSandbox(effectiveCachedMode, loaded.config) || sandboxState.kind === "ready") {
-        if (!requiresSandbox(effectiveCachedMode, loaded.config) && sandboxState.kind === "ready") {
-          await sandboxManager.reset();
-          assertActivationCurrent(expectedGeneration);
-          sandboxState = { kind: "disabled" };
-          baseSandboxConfig = undefined;
+    const cachedMode = targetMode ?? reloadState.modeRuntime()?.mode;
+    if (!force && reloadState.isLive(key)) {
+      const activation = reloadState.liveFor(key);
+      if (activation !== undefined) {
+        const effectiveCachedMode = cachedMode ?? "auto";
+        // The shortcut may only answer for a sandbox the backend actually
+        // holds: a reload whose activation and rollback both failed restores
+        // the config while leaving the backend failed, and this read must see
+        // that so the next prepare retries instead of serving a dead backend.
+        const sandboxState = reloadState.sandboxState();
+        const sandboxRequired = requiresSandbox(effectiveCachedMode, activation.loaded.config);
+        if (!sandboxRequired || sandboxState.kind === "ready") {
+          if (!sandboxRequired && sandboxState.kind === "ready") {
+            await sandboxManager.reset();
+            assertActivationCurrent(expectedGeneration);
+            reloadState.publishSandbox({ kind: "disabled" }, undefined);
+          }
+          return activation.loaded;
         }
-        return loaded;
       }
     }
-    if (!force && activationFailure?.key === key && cachedMode !== "yolo") {
-      throw activationFailure.error;
+    const activationFailure = reloadState.activationFailure(key);
+    if (!force && activationFailure && cachedMode !== "yolo") {
+      throw activationFailure;
     }
 
     const candidate = await loadActivationCandidate(candidateOverride, expectedGeneration);
@@ -994,12 +968,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // shared sandbox runtime for the new generation.
     assertActivationCurrent(expectedGeneration);
     const effectiveMode = cachedMode ?? "auto";
-    const previous: ActivationPrior = {
-      loaded,
-      loadedKey,
-      baseSandboxConfig,
-      sandboxState,
-    };
+    const previous = reloadState.activation();
     if (!requiresSandbox(effectiveMode, candidate.config)) {
       assertActivationCurrent(expectedGeneration);
       await sandboxManager.reset();
@@ -1043,21 +1012,26 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (!force && !candidateOverride && targetMode !== "yolo") {
       const cached = await sandboxLifecycleLease.runShared(async () => {
         assertActivationCurrent(expectedGeneration);
+        const configFailure = reloadState.configFailure();
         if (configFailure) throw configFailure;
+        const activation = reloadState.activation();
         if (
-          loaded &&
-          loadedKey === configKey(ctx) &&
-          requiresSandbox(targetMode ?? modeRuntime?.mode ?? "auto", loaded.config) &&
-          sandboxState.kind === "ready"
+          activation !== undefined &&
+          reloadState.isLive(configKey(ctx)) &&
+          requiresSandbox(
+            targetMode ?? reloadState.modeRuntime()?.mode ?? "auto",
+            activation.loaded.config,
+          ) &&
+          reloadState.sandboxState().kind === "ready"
         ) {
           if (
-            loaded.config.sandbox.network.access?.kind === "explicit" &&
+            activation.loaded.config.sandbox.network.access?.kind === "explicit" &&
             !sandboxManagerHealthy()
           ) {
             const reason = "Sandbox executor is unavailable or poisoned";
             throw Object.assign(new Error(reason), { code: "enforcement-unavailable", reason });
           }
-          return loaded;
+          return activation.loaded;
         }
         return undefined;
       });
@@ -1123,11 +1097,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   type EditOnUpdate = Parameters<EditInstance["execute"]>[3];
   type EditResult = Awaited<ReturnType<EditInstance["execute"]>>;
 
-  interface PreparedPermissionExecution {
-    executionSnapshot: PermissionExecutionSnapshot;
-    executionContext: EffectiveExecutionContext;
-  }
-
   /**
    * Codex step-boundary mode apply. Desired mode is `modeRuntime.mode`;
    * applied mode is the live execution snapshot. Divergence is resolved only
@@ -1139,20 +1108,21 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
    * nested turns, and the Auto denial circuit at the step boundary.
    */
   const applyPendingTurnModeRefresh = async (ctx: ExtensionContext): Promise<void> => {
-    if (!modeRuntime || !loaded) return;
+    const runtime = reloadState.modeRuntime();
+    const activation = reloadState.activation();
+    if (!runtime || !activation) return;
     if (session.getTurnPhase() !== "active") return;
     const snapshot = session.currentExecutionSnapshot() ?? session.getExecutionSnapshot();
     if (!snapshot) return;
-    const targetMode = modeRuntime.mode;
+    const targetMode = runtime.mode;
     if (snapshot.mode === targetMode) {
-      pendingModeRefresh = false;
-      pendingMode = undefined;
+      turnState.clear();
       return;
     }
 
     const generation = session.getGeneration();
     if (!session.isCurrentGeneration(generation)) return;
-    const config = loaded.config;
+    const config = activation.loaded.config;
 
     try {
       if (requiresSandbox(targetMode, config)) {
@@ -1163,13 +1133,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
           return;
         }
         // A second cycle may have flipped desired mode during the await.
-        if (modeRuntime.mode !== targetMode) return;
-        if (sandboxState.kind !== "ready") {
+        if (reloadState.modeRuntime()?.mode !== targetMode) return;
+        if (reloadState.sandboxState().kind !== "ready") {
           throw Object.assign(new Error("Sandbox executor is unavailable or poisoned"), {
             code: "enforcement-unavailable",
             reason: "Sandbox executor is unavailable or poisoned",
           });
         }
+        const baseSandboxConfig = reloadState.baseSandboxConfig();
         session.refreshExecutionSnapshotMode(targetMode, {
           sandboxReady: true,
           baseSandboxConfig,
@@ -1196,11 +1167,10 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         if (!session.isCurrentGeneration(generation) || session.getTurnPhase() !== "active") {
           return;
         }
-        if (modeRuntime.mode !== targetMode) return;
+        if (reloadState.modeRuntime()?.mode !== targetMode) return;
       }
       // Mode actually applied at this step boundary: retire deferred Guardian trunk.
-      pendingModeRefresh = false;
-      pendingMode = undefined;
+      turnState.clear();
       if (evidence.consumeInvalidationAfterModeChange()) {
         invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
       }
@@ -1228,20 +1198,20 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): Promise<PreparedPermissionExecution> => {
     // Sole-interpreter ready barrier: always on, memoized. A failure leaves every
     // bash command failing closed to review; it cannot block a request.
-    if (!shellParserFailureReported && !(await activateTreeSitterShellParser())) {
+    if (!(await activateTreeSitterShellParser())) {
       reportShellParserActivationFailure(ctx);
     }
     // Host turns apply at turn_start. Direct tool-hook paths without lifecycle
     // events drain here; same-step tools after a host turn_start keep the
     // prior applied mode until the next step boundary.
-    if (pendingModeRefresh && !session.hasObservedLifecycle()) {
+    if (turnState.pending() && !session.hasObservedLifecycle()) {
       await applyPendingTurnModeRefresh(ctx);
     }
     const activationGeneration = session.getGeneration();
     const appliedMode =
       session.currentExecutionSnapshot()?.mode ??
       session.getExecutionSnapshot()?.mode ??
-      modeRuntime?.mode;
+      reloadState.modeRuntime()?.mode;
     await activateConfig(ctx, false, appliedMode, undefined, activationGeneration);
     assertActivationCurrent(activationGeneration);
     const executionSnapshot = ensureExecutionSnapshot(ctx);
@@ -1251,7 +1221,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // Activation can repair a stale sandboxReady bit minted before SRT came up.
     const ready =
       requiresSandbox(executionSnapshot.mode, executionSnapshot.config) &&
-      sandboxState.kind === "ready";
+      reloadState.sandboxState().kind === "ready";
     if (executionSnapshot.sandboxReady !== ready) {
       session.refreshExecutionSnapshotMode(executionSnapshot.mode, { sandboxReady: ready });
       permissions.refreshTurnMode({
@@ -1325,8 +1295,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             activeProvider: guardian.provider,
             activeModel: guardian.model,
           });
-          if (!guardianFallbackNoticeKeys.has(noticeKey)) {
-            guardianFallbackNoticeKeys.add(noticeKey);
+          if (registrationState.claimGuardianFallbackNotice(noticeKey)) {
             try {
               ctx.ui.notify(
                 renderPermissionNotice({
@@ -1353,20 +1322,15 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (outcome.kind === "completed") return outcome.value;
     if (outcome.kind === "failed") {
       const reason = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-      const permissionError = {
-        code: "execution-failed" as const,
+      throw presentedPermissionError({
+        code: "execution-failed",
         reason,
         ...(outcome.effectsMayHaveOccurred === true
           ? { effectsMayHaveOccurred: true as const }
           : {}),
-      };
-      const error = new Error(renderPermissionErrorForAgent(permissionError));
-      Object.assign(error, permissionError);
-      throw error;
+      });
     }
-    const error = new Error(renderPermissionErrorForAgent(outcome.error));
-    Object.assign(error, outcome.error);
-    throw error;
+    throw presentedPermissionError(outcome.error);
   };
 
   const createSandboxNetworkAuthorizer =
@@ -1541,9 +1505,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       );
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error);
-      const presented = new Error(renderPermissionErrorForAgent({ code: "policy-error", reason }));
-      Object.assign(presented, { code: "policy-error", reason });
-      throw presented;
+      throw presentedPermissionError({ code: "policy-error", reason });
     }
   };
 
@@ -2135,7 +2097,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         : renderPermissionNotice({
             kind: "sandbox-activation-failed",
             reason: message,
-            recovery: sandboxState.kind === "failed" ? "unavailable" : "restored",
+            recovery: reloadState.sandboxState().kind === "failed" ? "unavailable" : "restored",
           });
     setDefaultStatus(ctx);
     if (ctx.hasUI) ctx.ui.notify(notice, "error");
@@ -2167,7 +2129,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       candidate = await loadSafetyConfig(agentDir);
     } catch (error: unknown) {
       if (!session.isCurrentGeneration(generation)) return;
-      configFailure = error instanceof Error ? error : new Error(String(error));
+      reloadState.recordConfigFailure(error instanceof Error ? error : new Error(String(error)));
       reportPermissionSetupError(ctx, error);
       return;
     }
@@ -2177,7 +2139,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       const restoredMode = restoredRuntime.mode;
       await activateConfig(ctx, true, restoredMode, candidate, generation);
       if (!session.isCurrentGeneration(generation)) return;
-      modeRuntime = restoredRuntime;
+      reloadState.installModeRuntime(restoredRuntime);
       setDefaultStatus(ctx);
     } catch (error: unknown) {
       if (!session.isCurrentGeneration(generation)) return;
@@ -2192,20 +2154,25 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   pi.on("session_tree", (_event, ctx) => {
     resetBranchPermissionContext("session tree changed");
     return session.runModeMutation(async (generation) => {
-      if (loaded && modeRuntime && session.isCurrentGeneration(generation)) {
-        const previousMode = modeRuntime.mode;
-        const restoredRuntime = new PermissionModeRuntime(loaded.config, pi.appendEntry.bind(pi));
-        restoredRuntime.restore(ctx.sessionManager.getBranch(), loaded.config);
+      const activation = reloadState.activation();
+      const runtime = reloadState.modeRuntime();
+      if (activation && runtime && session.isCurrentGeneration(generation)) {
+        const previousMode = runtime.mode;
+        const restoredRuntime = new PermissionModeRuntime(
+          activation.loaded.config,
+          pi.appendEntry.bind(pi),
+        );
+        restoredRuntime.restore(ctx.sessionManager.getBranch(), activation.loaded.config);
         const restoredMode = restoredRuntime.mode;
         try {
-          await activateConfig(ctx, false, restoredMode, loaded, generation);
+          await activateConfig(ctx, false, restoredMode, activation.loaded, generation);
         } catch (error: unknown) {
           if (!session.isCurrentGeneration(generation)) return;
           reportPermissionSetupError(ctx, error);
           return;
         }
         if (!session.isCurrentGeneration(generation)) return;
-        modeRuntime = restoredRuntime;
+        reloadState.installModeRuntime(restoredRuntime);
         setDefaultStatus(ctx);
         // A tree switch is an explicit context invalidation. Do not carry an
         // unrestricted YOLO execution into the newly restored branch.
@@ -2231,11 +2198,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     evidence.clearInvalidationAfterModeChange();
     invalidatePermissionContext("session shutdown");
     await sandboxLifecycleLease.runExclusive(async () => {
-      sandboxState = { kind: "pending" };
+      reloadState.publishSandbox({ kind: "pending" }, undefined);
       try {
         await sandboxManager.reset();
       } catch {
-        // Fail closed: sandboxState stays pending so any racing activation
+        // Fail closed: the state stays pending so any racing activation
         // refuses. Swallowing here does not clear the SRT poison latch; the
         // host already reports handler errors via its own listener.
       }
@@ -2292,16 +2259,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         return;
       }
     }
-    modeRuntime?.beginAgentTurn();
+    reloadState.modeRuntime()?.beginAgentTurn();
     // A prior mid-turn cycle may have left SRT on the old mode. Align before
     // minting so the fresh snapshot's sandboxReady bit is truthful.
-    pendingModeRefresh = false;
+    turnState.alignAtAgentStart();
     const activationGeneration = session.getGeneration();
-    if (modeRuntime && session.isCurrentTurn(startingTurnId)) {
+    const agentStartRuntime = reloadState.modeRuntime();
+    if (agentStartRuntime && session.isCurrentTurn(startingTurnId)) {
       try {
-        await activateConfig(ctx, false, modeRuntime.mode, undefined, activationGeneration);
+        await activateConfig(ctx, false, agentStartRuntime.mode, undefined, activationGeneration);
       } catch {
-        // Fail closed: capture the actual sandboxState so tools refuse if SRT is down.
+        // Fail closed: capture the actual sandbox state so tools refuse if SRT is down.
       }
     }
     if (
@@ -2443,7 +2411,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       // [Extension issues] at startup/reload.
       const generation = session.getGeneration();
       try {
-        let runtime = modeRuntime;
+        let runtime = reloadState.modeRuntime();
         if (!runtime) {
           const initial = await activateConfig(ctx, false, undefined, undefined, generation);
           if (!session.isCurrentGeneration(generation)) return;
@@ -2451,8 +2419,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         }
         const targetMode = nextMode(runtime.mode);
         runtime.activate(targetMode, { preserveAutoTransientState: true });
-        pendingModeRefresh = true;
-        pendingMode = targetMode;
+        turnState.request(targetMode);
         deferGuardianInvalidationForModeChange(true);
         setDefaultStatus(ctx);
       } catch (error: unknown) {
@@ -2477,7 +2444,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         try {
           invalidatePermissions(PERMISSION_MODE_CHANGED_REASON);
           invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
-          let runtime = modeRuntime;
+          let runtime = reloadState.modeRuntime();
           if (!runtime) {
             const initial = await activateConfig(ctx, false, undefined, undefined, generation);
             if (!session.isCurrentGeneration(generation)) {
@@ -2549,12 +2516,16 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         }
         // Inspection never activates, mutates grants or poisons a working config.
         const authority = permissions.inspect();
+        const activation = reloadState.activation();
+        const sandboxState = reloadState.sandboxState();
         const state = {
           configured,
           activeGeneration: session.getGeneration(),
-          activeConfigFingerprint: loaded ? fingerprintConfig(loaded.config) : undefined,
+          activeConfigFingerprint: activation
+            ? fingerprintConfig(activation.loaded.config)
+            : undefined,
           activation: sandboxState,
-          mode: modeRuntime?.mode ?? "unknown",
+          mode: reloadState.modeRuntime()?.mode ?? "unknown",
           authority,
           baselineNetwork: authority?.baseline
             ? describeExecutionNetwork(authority.baseline)
@@ -2579,7 +2550,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       return session.runModeMutation(async (generation) => {
         let candidateLoaded = false;
         try {
-          const previousMode = modeRuntime ? modeRuntime.mode : undefined;
+          const previousMode = reloadState.modeRuntime()?.mode;
           const candidate = await loadSafetyConfig(agentDir);
           candidateLoaded = true;
           const candidateFingerprint = fingerprintConfig(candidate.config);
@@ -2595,17 +2566,18 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
                 entry !== null &&
                 (entry as { customType?: unknown }).customType === "pi-safety-state",
             );
+          const currentRuntime = reloadState.modeRuntime();
           const restoredRuntime =
-            !modeRuntime ||
+            !currentRuntime ||
             hasRecordedState ||
-            modeRuntime.snapshot().configFingerprint !== candidateFingerprint
+            currentRuntime.snapshot().configFingerprint !== candidateFingerprint
               ? new PermissionModeRuntime(candidate.config, pi.appendEntry.bind(pi))
               : undefined;
           restoredRuntime?.restore(ctx.sessionManager.getBranch(), candidate.config);
-          const targetMode = (restoredRuntime ?? modeRuntime)?.mode ?? "auto";
+          const targetMode = (restoredRuntime ?? currentRuntime)?.mode ?? "auto";
           const result = await activateConfig(ctx, true, targetMode, candidate, generation);
           if (!session.isCurrentGeneration(generation)) return;
-          if (restoredRuntime) modeRuntime = restoredRuntime;
+          if (restoredRuntime) reloadState.installModeRuntime(restoredRuntime);
           const config = result.config;
           const runtime = ensureModeRuntime(config);
           setDefaultStatus(ctx);
@@ -2627,17 +2599,17 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
             }
             return;
           }
+          const summarySandboxState = reloadState.sandboxState();
           const sandboxSummary =
-            sandboxState.kind === "ready"
-              ? `${sandboxState.profile} sandbox on`
-              : sandboxState.kind === "disabled"
+            summarySandboxState.kind === "ready"
+              ? `${summarySandboxState.profile} sandbox on`
+              : summarySandboxState.kind === "disabled"
                 ? "sandbox off"
-                : sandboxState.kind === "failed"
-                  ? `sandbox error: ${sandboxState.error}`
+                : summarySandboxState.kind === "failed"
+                  ? `sandbox error: ${summarySandboxState.error}`
                   : "sandbox pending";
-          const networkView = baseSandboxConfig
-            ? describeExecutionNetwork(baseSandboxConfig)
-            : undefined;
+          const currentPolicy = reloadState.baseSandboxConfig();
+          const networkView = currentPolicy ? describeExecutionNetwork(currentPolicy) : undefined;
           const networkSummary = networkView
             ? `; ${networkView.requestPath}, required ${networkView.required.kind}, TLS ${networkView.effectiveTls} (configured ${networkView.configuredTls})${networkView.helperEgressRisk ? "; WARNING: startup trustd/helper egress bypasses destination/ticket enforcement" : ""}${networkView.localBindingAndInbound ? "; bind/inbound and raw loopback enabled" : ""}; backend execution/native enforcement not attested`
             : "";
@@ -2671,9 +2643,11 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         } catch (error: unknown) {
           if (!session.isCurrentGeneration(generation)) return;
           if (!candidateLoaded) {
-            configFailure = error instanceof Error ? error : new Error(String(error));
+            reloadState.recordConfigFailure(
+              error instanceof Error ? error : new Error(String(error)),
+            );
           }
-          if (modeRuntime?.mode === "yolo") abortLiveTurn(ctx);
+          if (reloadState.modeRuntime()?.mode === "yolo") abortLiveTurn(ctx);
           reportPermissionSetupError(ctx, error);
         }
       });

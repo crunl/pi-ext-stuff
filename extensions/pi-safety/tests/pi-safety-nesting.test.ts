@@ -19,7 +19,6 @@ function snapshot(turnId: string, allowWrite: string[] = ["/workspace"]): PiTurn
       network: { allowedDomains: [], deniedDomains: [] },
     },
     sandboxReady: true,
-    transcript: [],
   };
 }
 

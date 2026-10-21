@@ -2432,6 +2432,52 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(0);
   });
 
+  it("re-attempts activation on the next prepare when the reload and its rollback both failed", async () => {
+    const app = await makeHarness({
+      useRealBashTool: true,
+      useRealPermissionRuntime: true,
+    });
+    await startSession(app);
+    await startAgent(app);
+    // Config A is live and its sandbox is up.
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(1);
+
+    await writeFile(
+      join(app.agentDir, "safety.json"),
+      JSON.stringify({
+        sandbox: {
+          network: {
+            access: { kind: "explicit", transport: "proxy" },
+            allowedDomains: ["api.example.com"],
+          },
+        },
+      }),
+    );
+    // The reload's activation of B fails, and so does its re-activation of A.
+    app.sandboxManager.initialize
+      .mockRejectedValueOnce(new Error("activation of B failed"))
+      .mockRejectedValueOnce(new Error("re-activation of A failed"));
+    await app.commands.get("permissions")!.handler("", app.context);
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(3);
+    expect(app.notify).toHaveBeenCalledWith(
+      expect.stringContaining("previous sandbox could not be restored"),
+      "error",
+    );
+
+    // Config A is live again, but the backend was left failed. The cache
+    // shortcut may only answer for a sandbox the backend actually holds, so
+    // the next prepare has to try again instead of serving A's config for the
+    // rest of the session.
+    await rm(join(app.agentDir, "safety.json"));
+    const retried = await executeBash(app, "retry-activation", "printf again").then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(app.sandboxManager.initialize).toHaveBeenCalledTimes(4);
+    expect(retried).toBeUndefined();
+    expect(app.sandboxManager.execute).toHaveBeenCalledOnce();
+  });
+
   it.each(["unchanged", "generation", "fault"])(
     "queues cached preparation behind an existing exclusive writer (%s)",
     async (mutation) => {

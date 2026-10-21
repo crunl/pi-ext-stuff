@@ -110,7 +110,6 @@ function reviewInput(
     source: "preview",
     baseline: { mode: "sandboxed", policy: basePolicy },
     effective: { mode: "sandboxed", policy: basePolicy },
-    transcript: [{ role: "user", content: "Run the tests." }],
     context: guardianContext(),
     ...overrides,
   };
@@ -381,13 +380,18 @@ describe("createPiGuardianAdapter", () => {
     expect(review.mock.calls[0]?.[2]).toBe(controller.signal);
   });
 
-  it("uses the immutable action-admission transcript snapshot", async () => {
+  // The input type has no `transcript` field of its own, so "the adapter reads
+  // the snapshot and not a stray input field" is now a compile-time fact and
+  // there is no negative control left to assert. What this still verifies is the
+  // other half: the snapshot reaches the reviewer as `untrustedTranscript`.
+  it("flows the context transcript to the reviewer as untrustedTranscript", async () => {
     const { reviewer, review } = createReviewer();
     const adapter = createPiGuardianAdapter(reviewer);
 
+    // The reviewer input carries no transcript of its own — the adapter may
+    // only read the frozen action-admission snapshot in `context`.
     await adapter.review(
       reviewInput({
-        transcript: [{ role: "user", content: "Stale turn-start evidence." }],
         context: guardianContext({
           transcript: [{ role: "user", content: "Current action authorization." }],
         }),

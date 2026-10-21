@@ -28,7 +28,7 @@ import {
   type SandboxExecutionResult,
   type SandboxManagerLike,
   type SandboxPolicy,
-} from "../src/sandbox.ts";
+} from "../src/sandbox-policy.ts";
 
 function guardianEvidenceScope(cwd: string, denyRead: readonly string[] = []) {
   return createGuardianEvidenceScope(cwd, {

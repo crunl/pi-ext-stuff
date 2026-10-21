@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GuardianWorkerClient } from "../src/guardian-worker-client.ts";
-import { createGuardianEvidenceScope } from "../src/sandbox.ts";
+import { createGuardianEvidenceScope } from "../src/sandbox-policy.ts";
 
 /**
  * Guardian worker RSS probe. The worker is a separate child process

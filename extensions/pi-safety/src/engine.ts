@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import {
+  createDenialCircuit,
+  type DenialCircuit,
+  type DenialCircuitPolicy,
+} from "./denial-circuit.ts";
+import {
   cloneInvocation,
   cloneInvocationCall,
   cloneLease,
@@ -215,9 +220,6 @@ type ResolvedAdmission =
     }
   | { kind: "deny"; reason: string; recoverable?: BlockRecoverability };
 
-const DEFAULT_MAX_CONSECUTIVE_DENIALS = 3;
-const DEFAULT_DENIAL_WINDOW_SIZE = 50;
-const DEFAULT_MAX_WINDOW_DENIALS = 10;
 const MAX_DENIAL_NOTICES = 10;
 
 function nativeFailureEvidence(outcome: NativeActionFailure): string {
@@ -559,9 +561,15 @@ export function createEngine<ReviewContext = undefined>(
   let sessionKey: string | undefined;
   let configKey: string | undefined;
   let retrySequence = 0;
-  let denialWindow: boolean[] = [];
-  let consecutiveDenials = 0;
-  let circuitOpen = false;
+  // The circuit's counters and its gate are one fact, so the Engine holds the
+  // module, never the pieces. Resets replace the instance instead of clearing
+  // fields: that is the state's lifetime seam.
+  const circuitPolicy: Partial<DenialCircuitPolicy> = {
+    maxConsecutiveDenials: options.maxConsecutiveDenials,
+    denialWindowSize: options.denialWindowSize,
+    maxWindowDenials: options.maxWindowDenials,
+  };
+  let circuit: DenialCircuit = createDenialCircuit(circuitPolicy);
   const retryRecords = new Map<string, RetryRecord>();
   const denialNotices: DenialNotice[] = [];
   let armedRetry: { record: RetryRecord; denialId: string } | undefined;
@@ -569,9 +577,6 @@ export function createEngine<ReviewContext = undefined>(
   const reviewControllers = new Set<AbortController>();
   const inFlightCallIds = new Set<string>();
   const inFlightAttempts = new Map<string, InFlightAttempt<ReviewContext>>();
-  const maxConsecutiveDenials = options.maxConsecutiveDenials ?? DEFAULT_MAX_CONSECUTIVE_DENIALS;
-  const denialWindowSize = options.denialWindowSize ?? DEFAULT_DENIAL_WINDOW_SIZE;
-  const maxWindowDenials = options.maxWindowDenials ?? DEFAULT_MAX_WINDOW_DENIALS;
 
   const consumeArmedRetry = (armedRecord: { record: RetryRecord; denialId: string }): void => {
     armedRetry = undefined;
@@ -582,30 +587,17 @@ export function createEngine<ReviewContext = undefined>(
     if (noticeIndex >= 0) denialNotices.splice(noticeIndex, 1);
   };
 
-  const recordWindow = (denied: boolean): void => {
-    denialWindow.push(denied);
-    if (denialWindow.length > denialWindowSize) {
-      denialWindow.splice(0, denialWindow.length - denialWindowSize);
-    }
-  };
-
   const recordDenialStats = (): void => {
-    recordWindow(true);
-    consecutiveDenials += 1;
-    if (
-      consecutiveDenials >= maxConsecutiveDenials ||
-      denialWindow.filter(Boolean).length >= maxWindowDenials
-    ) {
-      circuitOpen = true;
-    }
+    circuit.recordDenial();
     emitAutoStateChange();
   };
 
   const emitAutoStateChange = (): void => {
+    const readout = circuit.readout();
     options.onAutoStateChange?.({
-      consecutiveDenials,
-      recentDenials: denialWindow.filter(Boolean).length,
-      paused: circuitOpen,
+      consecutiveDenials: readout.consecutiveDenials,
+      recentDenials: readout.recentDenials,
+      paused: circuit.open(),
     });
   };
 
@@ -620,9 +612,7 @@ export function createEngine<ReviewContext = undefined>(
   };
 
   const recordNonDenial = (): void => {
-    recordWindow(false);
-    consecutiveDenials = 0;
-    circuitOpen = false;
+    circuit.recordSuccess();
     emitAutoStateChange();
   };
 
@@ -759,7 +749,7 @@ export function createEngine<ReviewContext = undefined>(
     if (state.snapshot.mode === "yolo") {
       return { kind: "approve", rationale: "Bypass permissions is active" };
     }
-    if (circuitOpen) return { code: "circuit-open", reason: "Auto-review circuit is open" };
+    if (circuit.open()) return { code: "circuit-open", reason: "Auto-review circuit is open" };
     const reviewId = `review-${++reviewSequence}`;
     const displaySummary = review.summary?.trim() || undefined;
     const reviewStartTs = Date.now();
@@ -825,7 +815,6 @@ export function createEngine<ReviewContext = undefined>(
             review.effective === undefined
               ? leaseWithRequests(state, request.ownership, review.requested)
               : cloneLease(review.effective),
-          transcript: structuredClone(state.snapshot.transcript ?? []),
           reason: review.reason,
           summary: review.summary,
           ...(review.justification === undefined ? {} : { justification: review.justification }),
@@ -1028,7 +1017,7 @@ export function createEngine<ReviewContext = undefined>(
     if (request.ownership !== "sandbox-owned") return undefined;
     if (state.snapshot.mode !== "auto") return undefined;
     if (elevated) return undefined;
-    if (circuitOpen) return undefined;
+    if (circuit.open()) return undefined;
     if (!isCurrent(state)) return undefined;
     // Fingerprinting must never throw out of the execution path: an
     // unhashable input misses instead of rejecting the invocation.
@@ -2131,16 +2120,12 @@ export function createEngine<ReviewContext = undefined>(
       armedRetry = undefined;
       retryRecords.clear();
       denialNotices.length = 0;
-      circuitOpen = false;
-      consecutiveDenials = 0;
-      denialWindow = [];
+      circuit = createDenialCircuit(circuitPolicy);
     }
     sessionKey = nextSessionKey;
     configKey = snapshot.configFingerprint;
     // Breaker state and all capability amendments belong to one turn.
-    circuitOpen = false;
-    consecutiveDenials = 0;
-    denialWindow = [];
+    circuit = createDenialCircuit(circuitPolicy);
     emitAutoStateChange();
     const state: TurnState = {
       generation: ++generation,
@@ -2193,9 +2178,7 @@ export function createEngine<ReviewContext = undefined>(
     retryRecords.clear();
     denialNotices.length = 0;
     armedRetry = undefined;
-    denialWindow = [];
-    consecutiveDenials = 0;
-    circuitOpen = false;
+    circuit = createDenialCircuit(circuitPolicy);
     abortReviews(reason);
   };
 

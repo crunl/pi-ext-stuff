@@ -11,7 +11,7 @@ import {
   GuardianWorkerProtocolError,
   GuardianWorkerTimeoutError,
 } from "../src/guardian-worker-client.ts";
-import { createGuardianEvidenceScope } from "../src/sandbox.ts";
+import { createGuardianEvidenceScope } from "../src/sandbox-policy.ts";
 
 const temporaryDirectories: string[] = [];
 

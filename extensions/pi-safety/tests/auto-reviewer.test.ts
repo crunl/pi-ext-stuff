@@ -8,7 +8,7 @@ import {
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
 import { fingerprintValue } from "../src/policy-primitives.ts";
-import { createGuardianEvidenceScope, type SandboxPolicy } from "../src/sandbox.ts";
+import { createGuardianEvidenceScope, type SandboxPolicy } from "../src/sandbox-policy.ts";
 
 const request = {
   toolCallId: "review-1",

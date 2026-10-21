@@ -35,7 +35,7 @@ export function cloneLease(lease: CapabilityLease): CapabilityLease {
   };
 }
 
-export function cloneMetadata(metadata: unknown): InvocationCall["metadata"] {
+function cloneMetadata(metadata: unknown): InvocationCall["metadata"] {
   if (metadata === undefined) return undefined;
   try {
     return structuredClone(metadata);
@@ -102,6 +102,5 @@ export function cloneSnapshot(snapshot: TurnSnapshot): TurnSnapshot {
     configFingerprint: snapshot.configFingerprint,
     baseSandboxPolicy: clonePolicy(snapshot.baseSandboxPolicy),
     sandboxReady: snapshot.sandboxReady,
-    transcript: snapshot.transcript === undefined ? [] : structuredClone(snapshot.transcript),
   };
 }

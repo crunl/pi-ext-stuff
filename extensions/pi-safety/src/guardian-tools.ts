@@ -33,7 +33,7 @@ import {
   createSandboxedGuardianFileOperations,
   createSandboxedReadOnlyCommandRunner,
   type SandboxedCommandResult,
-} from "./sandbox.ts";
+} from "./sandbox-guardian.ts";
 import {
   copyGuardianEvidenceScope,
   createGuardianReadOnlySandboxConfig,

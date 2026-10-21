@@ -6,13 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-policy.ts";
 import {
-  copyGuardianEvidenceScope,
-  createGuardianEvidenceScope,
-  createGuardianReadOnlySandboxConfig,
   createSandboxedBashOperations,
   createSandboxedFileOperations,
-  createSandboxedGuardianFileOperations,
-  createSandboxedReadOnlyCommandRunner,
   createSandboxRuntimeConfig,
   DEFAULT_BASH_TIMEOUT_MS,
   DEFAULT_FILE_OPERATION_TIMEOUT_MS,
@@ -21,6 +16,15 @@ import {
   type SandboxPolicy,
   withAdditionalWriteRoots,
 } from "../src/sandbox.ts";
+import {
+  createSandboxedGuardianFileOperations,
+  createSandboxedReadOnlyCommandRunner,
+} from "../src/sandbox-guardian.ts";
+import {
+  copyGuardianEvidenceScope,
+  createGuardianEvidenceScope,
+  createGuardianReadOnlySandboxConfig,
+} from "../src/sandbox-policy.ts";
 
 const guardianEvidenceScope = createGuardianEvidenceScope(process.cwd(), {
   filesystem: {

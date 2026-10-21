@@ -35,7 +35,6 @@ function snapshot(overrides: Partial<Parameters<Engine["beginTurn"]>[0]> = {}) {
     configFingerprint: "config-1",
     baseSandboxPolicy: basePolicy,
     sandboxReady: true,
-    transcript: [],
     ...overrides,
   };
 }
