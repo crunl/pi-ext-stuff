@@ -2715,6 +2715,31 @@ describe("Engine public seam", () => {
     });
   });
 
+  // closeState clears the attempt bookkeeping but must leave the call-id guard
+  // alone: an executor that is still running still owns its tool-call ID. If
+  // closing the turn released the ID, a retry or a late duplicate could start a
+  // second executor for a call the host still considers running.
+  it("retains in-flight call-id ownership across turn close", async () => {
+    let release: (value: RuntimeOutcome<unknown>) => void = () => undefined;
+    const pending = new Promise<RuntimeOutcome<unknown>>((resolve) => {
+      release = resolve;
+    });
+    const { engine } = makeEngine(async () => ({ kind: "approve", rationale: "unused" }));
+    const first = engine.beginTurn(snapshot());
+    const executor = vi.fn(() => pending);
+    const firstPromise = first.execute(call(executor));
+    await vi.waitFor(() => expect(executor).toHaveBeenCalledOnce());
+    first.close();
+
+    const second = engine.beginTurn(snapshot({ turnId: "turn-2" }));
+    const concurrent = await second.execute(call(vi.fn(async () => completed("must wait"))));
+    expect(concurrent.kind).toBe("blocked");
+    if (concurrent.kind === "blocked") expect(concurrent.error.code).toBe("concurrent-invocation");
+
+    release(completed("settled late"));
+    await firstPromise;
+  });
+
   it("invalidates a late Guardian result and never executes a stale grant", async () => {
     let release!: (value: { kind: "approve"; rationale: string }) => void;
     const pending = new Promise<{ kind: "approve"; rationale: string }>((resolve) => {

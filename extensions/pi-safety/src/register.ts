@@ -199,6 +199,63 @@ interface EffectiveExecutionContext {
 
 const guardianFallbackNoticeKeys = new Set<string>();
 
+/**
+ * Guardian review evidence: the transcript handed to the reviewer, and the
+ * Delta-cursor epoch that tells it when a cached cursor is no longer valid.
+ *
+ * The fallback transcript exists because interactive input arrives before any
+ * assistant message. Reading while both are populated is deliberately a write:
+ * the fallback is displaced and the epoch advances, because a consumer that
+ * switched between the two logs cannot keep a Delta cursor across the switch.
+ * Owning all four facts in one place keeps that write from being reordered
+ * against the appends.
+ */
+function createGuardianEvidence() {
+  let transcript: GuardianTranscriptEntry[] = [];
+  let cursorEpoch = 0;
+  let inputFallback: GuardianTranscriptEntry[] = [];
+  let invalidationAfterModeChange = false;
+  return {
+    reset(): void {
+      transcript = [];
+      cursorEpoch += 1;
+      inputFallback = [];
+      invalidationAfterModeChange = false;
+    },
+    appendInput(text: string): void {
+      const appended = appendGuardianTranscript(inputFallback, { role: "user", content: text });
+      inputFallback = appended.entries;
+      if (appended.truncated) cursorEpoch += 1;
+    },
+    appendMessage(entry: GuardianTranscriptEntry): void {
+      const appended = appendGuardianTranscript(transcript, entry);
+      transcript = appended.entries;
+      if (appended.truncated) cursorEpoch += 1;
+    },
+    currentRaw(): GuardianTranscriptEntry[] {
+      if (transcript.length > 0 && inputFallback.length > 0) {
+        cursorEpoch += 1;
+        inputFallback = [];
+      }
+      return transcript.length > 0 ? transcript : inputFallback;
+    },
+    get epoch(): number {
+      return cursorEpoch;
+    },
+    markInvalidationAfterModeChange(): void {
+      invalidationAfterModeChange = true;
+    },
+    clearInvalidationAfterModeChange(): void {
+      invalidationAfterModeChange = false;
+    },
+    consumeInvalidationAfterModeChange(): boolean {
+      const pending = invalidationAfterModeChange;
+      invalidationAfterModeChange = false;
+      return pending;
+    },
+  };
+}
+
 export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
   // Guide lifecycle contract (extensions.md:58-60) forbids load-time
@@ -236,10 +293,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // notice. shellParserFailureReported is activation/startup, not review.
   /** One Shell AST parser activation failure notice per registration. */
   let shellParserFailureReported = false;
-  let guardianTranscript: GuardianTranscriptEntry[] = [];
-  let guardianTranscriptEpoch = 0;
-  let inputFallbackTranscript: GuardianTranscriptEntry[] = [];
-  let guardianInvalidationAfterModeChange = false;
+  const evidence = createGuardianEvidence();
   // Cluster B (turn enforcement): cycle writes intent, turn_start/prepare/
   // agent_start apply it. pendingModeRefresh is the flag, pendingMode the
   // value; they clear together everywhere EXCEPT agent_start align (which
@@ -398,10 +452,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     invalidatePermissions(reason);
     session.bumpGeneration();
     cancelInFlightModeTransition();
-    guardianTranscript = [];
-    guardianTranscriptEpoch += 1;
-    inputFallbackTranscript = [];
-    guardianInvalidationAfterModeChange = false;
+    evidence.reset();
     session.resetTurn();
     pendingModeRefresh = false;
     pendingMode = undefined;
@@ -716,8 +767,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     const closingTurnId = session.finishNestedTurn();
     if (closingTurnId === undefined) return undefined;
     permissions.closeTurn(reason);
-    if (guardianInvalidationAfterModeChange) {
-      guardianInvalidationAfterModeChange = false;
+    if (evidence.consumeInvalidationAfterModeChange()) {
       invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
     }
     // Ending a Pi turn revokes Engine grants and in-flight authorization, but
@@ -734,21 +784,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // ended while the mutation was awaiting sandbox activation, invalidate now
     // rather than allowing the stale trunk into the next turn.
     if (session.getTurnPhase() === "active") {
-      guardianInvalidationAfterModeChange = true;
+      evidence.markInvalidationAfterModeChange();
       return;
     }
-    guardianInvalidationAfterModeChange = false;
+    evidence.clearInvalidationAfterModeChange();
     invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
   };
 
-  const currentRawGuardianTranscript = (): GuardianTranscriptEntry[] => {
-    // Switching between fallback and the real log invalidates the Delta cursor.
-    if (guardianTranscript.length > 0 && inputFallbackTranscript.length > 0) {
-      guardianTranscriptEpoch += 1;
-      inputFallbackTranscript = [];
-    }
-    return guardianTranscript.length > 0 ? guardianTranscript : inputFallbackTranscript;
-  };
+  const currentRawGuardianTranscript = (): GuardianTranscriptEntry[] => evidence.currentRaw();
 
   const currentGuardianTranscriptSnapshot = (): GuardianTranscriptEntry[] =>
     boundGuardianTranscript(currentRawGuardianTranscript());
@@ -1161,8 +1204,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       // Mode actually applied at this step boundary: retire deferred Guardian trunk.
       pendingModeRefresh = false;
       pendingMode = undefined;
-      if (guardianInvalidationAfterModeChange) {
-        guardianInvalidationAfterModeChange = false;
+      if (evidence.consumeInvalidationAfterModeChange()) {
         invalidatePermissionContext(PERMISSION_MODE_CHANGED_REASON);
       }
       // The applied mode may just have changed (this path only runs when the
@@ -1250,7 +1292,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       event,
       transcript,
       rawTranscript: currentRawGuardianTranscript(),
-      transcriptEpoch: guardianTranscriptEpoch,
+      transcriptEpoch: evidence.epoch,
       autoReviewerContext: {
         modelRegistry: ctx.modelRegistry,
         activeModel: ctx.model,
@@ -2189,7 +2231,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     session.bumpGeneration();
     cancelInFlightModeTransition();
     session.resetTurn();
-    guardianInvalidationAfterModeChange = false;
+    evidence.clearInvalidationAfterModeChange();
     invalidatePermissionContext("session shutdown");
     await sandboxLifecycleLease.runExclusive(async () => {
       sandboxState = { kind: "pending" };
@@ -2205,21 +2247,14 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
 
   pi.on("input", (event) => {
     if ((event.source === "interactive" || event.source === "rpc") && event.text.length > 0) {
-      const appended = appendGuardianTranscript(inputFallbackTranscript, {
-        role: "user",
-        content: event.text,
-      });
-      inputFallbackTranscript = appended.entries;
-      if (appended.truncated) guardianTranscriptEpoch += 1;
+      evidence.appendInput(event.text);
     }
   });
 
   pi.on("message_end", (event) => {
     const entry = guardianTranscriptEntryFromMessage(event.message);
     if (entry) {
-      const appended = appendGuardianTranscript(guardianTranscript, entry);
-      guardianTranscript = appended.entries;
-      if (appended.truncated) guardianTranscriptEpoch += 1;
+      evidence.appendMessage(entry);
     }
   });
 

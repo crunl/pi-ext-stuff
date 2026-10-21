@@ -2152,6 +2152,36 @@ describe("Permission mode registration", () => {
     expect(app.bareBashExecute).not.toHaveBeenCalled();
   });
 
+  // Mirror of the test below. The two mode-apply paths are ordered in opposite
+  // directions on purpose: the sandbox path activates before publishing so a
+  // failure leaves the old mode live (fail closed), while the yolo path
+  // publishes before tearing the sandbox down so a failure leaves the
+  // authorization already switched. Flipping either order flips that guarantee.
+  it("keeps the yolo authorization live when the step-boundary teardown fails", async () => {
+    const app = await makeHarness({
+      risk: () => lowRisk(),
+      sandboxResetErrorAfter: 2,
+    });
+    await startSession(app);
+    await startAgent(app);
+    await executeBash(app, "auto-before-failed-upshift", "printf auto");
+    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
+
+    const shortcut = app.shortcuts.get("shift+tab");
+    if (!shortcut) throw new Error("missing shift+tab shortcut");
+    await shortcut.handler(app.context);
+    await startTurn(app, 1);
+    expect(app.notify).toHaveBeenCalledWith(expect.stringContaining("failed"), "error");
+
+    // The publish precedes the teardown on this path, so the applied snapshot
+    // is already yolo and the next boundary has nothing left to apply. Had the
+    // teardown run first (the sandbox path's order), the snapshot would still
+    // be auto and this boundary would retry the activation and fail again.
+    const reported = app.notify.mock.calls.length;
+    await startTurn(app, 2);
+    expect(app.notify.mock.calls.length).toBe(reported);
+  });
+
   it("leaves the applied mode unchanged when the step-boundary auto activation fails", async () => {
     const app = await makeHarness({
       risk: () => lowRisk(),
@@ -4671,5 +4701,68 @@ describe("Shell AST parser prewarm and ready barrier", () => {
     await startAgent(app);
     await executeBash(app, "always-on-bash", "printf on");
     expect(shellAstParserInstalled()).toBe(true);
+  });
+});
+
+describe("Guardian transcript epoch", () => {
+  // The epoch is a Delta-cursor invalidation counter, not a counter of anything
+  // user-visible: branch resets and transcript truncation bump it too. So these
+  // assert the delta caused by one specific event, never an absolute value.
+  // Returns the epoch as a hard number. Letting it come back as
+  // `number | undefined` would let `before === undefined` pass an
+  // `after === before + 1` assertion, which is exactly the regression the
+  // callers below exist to catch.
+  const driveReview = async (
+    app: Awaited<ReturnType<typeof makeHarness>>,
+    id: string,
+    expectedCount: number,
+  ): Promise<number> => {
+    await executeBash(app, id, `printf ${id}`);
+    await vi.waitFor(() => expect(app.reviewInputs).toHaveLength(expectedCount));
+    const epoch = app.reviewInputs.at(-1)?.transcriptMeta?.epoch;
+    if (typeof epoch !== "number") {
+      throw new Error(`review input ${expectedCount} carries no transcript epoch`);
+    }
+    return epoch;
+  };
+
+  it("bumps the epoch once when the real log displaces the fallback", async () => {
+    const app = await makeHarness({
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+      review: async () => approved(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    // Only the fallback is populated, so a read has nothing to displace.
+    await invoke(app, "input", { source: "interactive", text: "run the thing" });
+    const before = await driveReview(app, "epoch-before", 1);
+
+    // Now both logs are populated. Reading displaces the fallback and must
+    // invalidate the reviewer's Delta cursor — a write hidden inside a read.
+    await invoke(app, "message_end", {
+      message: { role: "assistant", content: [{ type: "text", text: "on it" }] },
+    });
+    const after = await driveReview(app, "epoch-after", 2);
+
+    expect(after).toBe(before + 1);
+  });
+
+  it("does not bump the epoch again once the fallback is gone", async () => {
+    const app = await makeHarness({
+      risk: (tool) => (tool === "bash" ? promptRisk() : undefined),
+      review: async () => approved(),
+    });
+    await startSession(app);
+    await startAgent(app);
+
+    await invoke(app, "input", { source: "interactive", text: "run the thing" });
+    await invoke(app, "message_end", {
+      message: { role: "assistant", content: [{ type: "text", text: "on it" }] },
+    });
+    const first = await driveReview(app, "epoch-first", 1);
+    const second = await driveReview(app, "epoch-second", 2);
+
+    expect(second).toBe(first);
   });
 });
