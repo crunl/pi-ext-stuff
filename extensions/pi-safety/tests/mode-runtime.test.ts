@@ -125,6 +125,32 @@ describe("PermissionModeRuntime", () => {
     expect(runtime.snapshot()).not.toHaveProperty("pendingMode");
   });
 
+  it("strips a legacy unknown key on restore instead of carrying it forward", () => {
+    const appendEntry = vi.fn();
+    const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, appendEntry);
+    const configFingerprint = runtime.snapshot().configFingerprint;
+    // Persisted state is an external boundary: an older build wrote this key,
+    // and nothing about the entry is validated field-by-field on the way in.
+    const legacy = {
+      ...(stateEntry("yolo", configFingerprint) as { data: Record<string, unknown> }).data,
+      pendingMode: "auto",
+    };
+
+    runtime.restore(
+      [{ type: "custom", customType: "pi-safety-state", data: legacy }],
+      DEFAULT_CONFIG,
+    );
+
+    expect(runtime.mode).toBe("yolo");
+    expect(runtime.snapshot()).not.toHaveProperty("pendingMode");
+    // Any later write must not resurrect it: the scrub happens once, at ingress.
+    runtime.activate("yolo", { preserveAutoTransientState: true });
+    expect(appendEntry).toHaveBeenLastCalledWith(
+      "pi-safety-state",
+      expect.not.objectContaining({ pendingMode: expect.anything() }),
+    );
+  });
+
   it("coerces an unsupported persisted mode to auto during restore", () => {
     const runtime = new PermissionModeRuntime(DEFAULT_CONFIG, vi.fn());
     const configFingerprint = runtime.snapshot().configFingerprint;

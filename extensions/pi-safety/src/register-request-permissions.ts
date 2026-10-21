@@ -16,6 +16,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { type TSchema, Type } from "typebox";
+import type { DelegationEnvelope } from "./delegation.ts";
 import type { DelegationScope } from "./delegation-policy.ts";
 import { checkDelegationNetwork, checkDelegationWrite } from "./delegation-policy.ts";
 import { resolvePolicyPath } from "./filesystem-policy.ts";
@@ -61,7 +62,7 @@ export interface RequestPermissionsToolDeps {
   ) => PiGuardianReviewContext;
   readonly delegationScope: () => DelegationScope;
   readonly currentGuardianTranscriptSnapshot: () => GuardianTranscriptEntry[];
-  readonly session: { activeDelegationCeiling(): unknown };
+  readonly session: { activeDelegationCeiling(): DelegationEnvelope | undefined };
   readonly permissions: Pick<PiSafetyRuntime<PiGuardianReviewContext>, "captureAction">;
 }
 

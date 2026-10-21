@@ -36,6 +36,26 @@ function isSessionState(value: unknown): value is PermissionSessionState {
   );
 }
 
+/**
+ * Rebuild the state from the fields this module owns, dropping everything else.
+ *
+ * A persisted entry is an external boundary: it was written by a different
+ * build of this extension (or by a build that carried a field since removed),
+ * so its keys are input, not truth. Validation only checks the fields that must
+ * be present; it cannot see a field that should not be, and `structuredClone`
+ * would carry one into the live state and re-persist it forever. Naming every
+ * field here is the point: a removed key cannot ride through because nothing
+ * copies the entry wholesale.
+ */
+function normalizedSessionState(value: PermissionSessionState): PermissionSessionState {
+  return {
+    mode: value.mode,
+    auto: { consecutiveDenials: value.auto.consecutiveDenials, paused: value.auto.paused },
+    sandboxProfile: value.sandboxProfile,
+    configFingerprint: value.configFingerprint,
+  };
+}
+
 export function createPermissionSessionState(config: SafetyConfig): PermissionSessionState {
   return {
     mode: "auto",
@@ -65,7 +85,7 @@ export function reducePermissionEntries(
       reportMalformed(entry);
       continue;
     }
-    state = structuredClone(candidate.data);
+    state = normalizedSessionState(candidate.data);
     if (!isPermissionMode(state.mode)) state.mode = "auto"; // unsupported persisted mode restores as auto
   }
   return state;

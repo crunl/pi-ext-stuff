@@ -8,6 +8,7 @@ import {
   type PermissionPolicy,
 } from "./engine.ts";
 import type {
+  BlockRecoverability,
   DenialNotice,
   Engine,
   AdmissionPlan as EngineAdmissionPlan,
@@ -120,6 +121,8 @@ export interface PiAction<Result, ReviewContext = undefined, Input = unknown> {
 interface PiPermissionError {
   readonly code: PermissionError["code"];
   readonly reason: string;
+  /** Static-layer classification carried through so the renderer need not sniff the reason. */
+  readonly recoverable?: BlockRecoverability;
   readonly request?: PiCapabilityRequest;
   readonly effectsMayHaveOccurred?: true;
   readonly retryAttempted?: true;
@@ -144,6 +147,9 @@ function fromEngineExecutionOutcome<T>(outcome: ExecutionOutcome<T>): PiExecutio
     error: {
       code: outcome.error.code,
       reason: outcome.error.reason,
+      ...(outcome.error.recoverable === undefined
+        ? {}
+        : { recoverable: outcome.error.recoverable }),
       ...(outcome.error.request === undefined ? {} : { request: outcome.error.request }),
       ...(outcome.error.effectsMayHaveOccurred === true
         ? { effectsMayHaveOccurred: true as const }

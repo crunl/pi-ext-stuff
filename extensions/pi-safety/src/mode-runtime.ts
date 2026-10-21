@@ -10,12 +10,6 @@ import {
 
 type AutoState = PermissionSessionState["auto"];
 
-function functionalState(state: PermissionSessionState): PermissionSessionState {
-  const normalized = structuredClone(state);
-  delete (normalized as PermissionSessionState & { pendingMode?: PermissionMode }).pendingMode;
-  return normalized;
-}
-
 interface PermissionModeActivationOptions {
   preserveAutoTransientState?: boolean;
 }
@@ -38,7 +32,7 @@ export class PermissionModeRuntime {
     config: SafetyConfig,
     private readonly appendEntry: ExtensionAPI["appendEntry"],
   ) {
-    this.state = functionalState(createPermissionSessionState(config));
+    this.state = structuredClone(createPermissionSessionState(config));
   }
 
   get mode(): PermissionMode {
@@ -89,7 +83,7 @@ export class PermissionModeRuntime {
   }
 
   restore(entries: readonly unknown[], config: SafetyConfig): void {
-    this.state = functionalState(restorePermissionState(entries, config));
+    this.state = structuredClone(restorePermissionState(entries, config));
   }
 
   snapshot(): PermissionSessionState {
