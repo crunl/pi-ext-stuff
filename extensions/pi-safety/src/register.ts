@@ -136,11 +136,8 @@ import {
   type ReviewPartialResult,
   type ReviewRenderResult,
 } from "./review-renderer.ts";
-import {
-  evaluateHostFirstRulesOnly,
-  evaluateRiskRequest,
-  type RiskDecision,
-} from "./risk-policy.ts";
+import { evaluateDenyRulesOnly, evaluateRiskRequest, type RiskDecision } from "./risk-policy.ts";
+import { SRT_DRAIN_TIMEOUT_MS } from "./sandbox/srt-coordinator.ts";
 import { SrtSandboxManager } from "./sandbox/srt-enforcer.ts";
 import {
   createSandboxedBashOperations,
@@ -730,7 +727,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
       try {
         if (!sandboxManager.waitForIdle)
           throw new Error("Backend cannot drain unmediated networking before delegation");
-        await sandboxManager.waitForIdle(AbortSignal.timeout(15_000));
+        await sandboxManager.waitForIdle(AbortSignal.timeout(SRT_DRAIN_TIMEOUT_MS));
         if (
           !session.isCurrentGeneration(generation) ||
           session.currentExecutionSnapshot() !== parent
@@ -1491,7 +1488,7 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     // Yolo drops friction, not intent: a configured deny rule is the
     // user's explicit persistent intent, so it wins in every mode. The
     // yolo bypass below still skips the spawn gate and every later check.
-    const denial = evaluateHostFirstRulesOnly(
+    const denial = evaluateDenyRulesOnly(
       event.toolName,
       structuredClone(event.input) as Record<string, unknown>,
       resolve(ctx.cwd),

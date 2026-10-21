@@ -378,4 +378,16 @@ describe("layer boundaries named by the import-graph review", () => {
     expect(existsSync("src/guardian-worker-limits.mjs")).toBe(true);
     expect(existsSync("src/guardian-worker-limits.d.mts")).toBe(true);
   });
+
+  // The circuit-interrupted notice quotes a window size to the user, while the
+  // Engine enforces options.denialWindowSize ?? its own default. Both must read
+  // the same declaration, or the number shown can silently stop matching the
+  // number enforced and no test would notice: register.ts and pi-safety.ts do
+  // not import each other.
+  it("the denial window the Engine enforces is the one the notice reports", async () => {
+    const registration = await readFile("src/pi-safety.ts", "utf8");
+    const presentation = await readFile("src/register.ts", "utf8");
+    expect(registration).toMatch(/denialWindowSize:\s*GUARDIAN_DENIAL_WINDOW_SIZE/);
+    expect(presentation).toMatch(/windowSize:\s*GUARDIAN_DENIAL_WINDOW_SIZE/);
+  });
 });

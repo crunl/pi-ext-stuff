@@ -316,6 +316,12 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
     return createEngine<ReviewContext>({
       guardian: this.options.guardian,
       policy: this.options.policy,
+      // The denial window is reported to the user in the circuit-interrupted
+      // notice (register.ts renders GUARDIAN_DENIAL_WINDOW_SIZE). Passing the
+      // same declaration here is what keeps that number true: without it the
+      // Engine falls back to its own default and the two can drift apart
+      // silently, since no test binds them.
+      denialWindowSize: GUARDIAN_DENIAL_WINDOW_SIZE,
       onReviewEvent: (event) => this.handleReviewEvent(event),
       onAutoStateChange: (state) => this.handleAutoStateChange(state),
     });

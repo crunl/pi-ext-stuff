@@ -6,7 +6,7 @@ import { DEFAULT_CONFIG, type SafetyConfig } from "../src/config.ts";
 import { packageRoot } from "../src/filesystem-policy.ts";
 import { admissionPlanFromRiskDecision } from "../src/pi-guardian-adapters.ts";
 import {
-  evaluateHostFirstRulesOnly,
+  evaluateDenyRulesOnly,
   evaluateHostRiskRequest,
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
@@ -300,14 +300,14 @@ describe("ApprovalDisposition policy gate", () => {
         action: "allow",
         risk: "Skip",
       });
-      expect(evaluateHostFirstRulesOnly(tool, input, cwd, config())).toBeUndefined();
+      expect(evaluateDenyRulesOnly(tool, input, cwd, config())).toBeUndefined();
     }
 
     const askOnly = config({
       rules: [{ action: "ask", tool: "WebFetch", pattern: "*example.com*" }],
     });
     expect(
-      evaluateHostFirstRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
+      evaluateDenyRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
     ).toBeUndefined();
     await expect(
       evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
@@ -317,7 +317,7 @@ describe("ApprovalDisposition policy gate", () => {
       rules: [{ action: "deny", tool: "read", pattern: "*/Library/*" }],
     });
     expect(
-      evaluateHostFirstRulesOnly(
+      evaluateDenyRulesOnly(
         "read",
         { path: "/Users/example/Library/Preferences/x" },
         cwd,
@@ -2209,7 +2209,7 @@ describe("RiskDecision residual stamps", () => {
       rules: [{ action: "ask", tool: "WebFetch", pattern: "*example.com*" }],
     });
     expect(
-      evaluateHostFirstRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
+      evaluateDenyRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
     ).toBeUndefined();
     await expect(
       evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),

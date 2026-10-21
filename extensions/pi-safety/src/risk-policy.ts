@@ -243,7 +243,7 @@ function decide(
  * Host-first B: only configured `rules` deny blocks. ask/allow/no-match do
  * not enter Engine or Guardian — host-first tools have no sandbox ownership.
  */
-export function evaluateHostFirstRulesOnly(
+export function evaluateDenyRulesOnly(
   tool: string,
   input: Record<string, unknown>,
   cwd: string,
@@ -259,7 +259,7 @@ export function evaluateHostFirstRulesOnly(
 
 /**
  * Compatibility RiskDecision shape for host-first tools under product scope B.
- * Prefer `evaluateHostFirstRulesOnly` at production call sites. Not used by
+ * Prefer `evaluateDenyRulesOnly` at production call sites. Not used by
  * register.ts host-first path after foreign A / host-first B cut.
  */
 export async function evaluateHostRiskRequest(
@@ -268,7 +268,7 @@ export async function evaluateHostRiskRequest(
   cwd: string,
   config: SafetyConfig,
 ): Promise<RiskDecision> {
-  const denial = evaluateHostFirstRulesOnly(tool, input, cwd, config);
+  const denial = evaluateDenyRulesOnly(tool, input, cwd, config);
   if (denial) {
     return { action: "block", risk: "Forbidden", reason: denial.reason, recoverable: "no" };
   }
@@ -373,7 +373,7 @@ export async function evaluateRiskRequest(
   }
   if (request.operation === "external") {
     // Product scope 2026-09-19: owned tools do not produce operation=external;
-    // host-first B uses evaluateHostFirstRulesOnly and foreign A is out of
+    // host-first B uses evaluateDenyRulesOnly and foreign A is out of
     // tool_call governance. This branch is compatibility-only — do not route
     // host-first/foreign here to resurrect host-admission review. It sits
     // outside the gate list because it never reaches classification: an
