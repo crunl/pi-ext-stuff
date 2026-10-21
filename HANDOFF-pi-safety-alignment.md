@@ -45,7 +45,7 @@
 | 文件 | 行数 | 角色 |
 |---|---|---|
 | `extensions/pi-safety/src/permissions/risk.ts` | 414 | **核心分类决策引擎**（对齐重点）。Tier 1 `:291-311`（注释 `:291-302` + 代码 `:303-311`），Tier 2 `:312`，Tier 3 `:327`，Tier 4a `:340-375`，Tier 4b `:376` |
-| `extensions/pi-safety/src/risk-policy.ts` | 519 | 风险策略。5 个导出：`:21` `RiskDecision`、`:44` `isSupportedPermissionRequestShape`、`:194` `evaluateHostFirstRulesOnly`、`:213` `evaluateHostRiskRequest`、`:230` `evaluateRiskRequest` |
+| `extensions/pi-safety/src/risk-policy.ts` | 479 | 风险策略。4 个导出：`:19` `RiskDecision`、`:46` `isSupportedPermissionRequestShape`、`:246` `evaluateDenyRulesOnly`、`:260` `evaluateRiskRequest` |
 | `extensions/pi-safety/src/permissions/shell-lexer.ts` | 724 | shell 词法分析 |
 | `extensions/pi-safety/src/permissions/rules.ts` | 130 | 规则注册表 |
 | `extensions/pi-safety/src/permissions/dangerous-commands.ts` | 61 | 危险命令判定（`isDangerousWords` 在 `:47-61`） |

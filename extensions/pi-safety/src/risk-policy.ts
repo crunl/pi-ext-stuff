@@ -252,31 +252,9 @@ export function evaluateDenyRulesOnly(
   const request = normalizeToolCall(tool, input, cwd);
   const match = matchRules(request, config.rules);
   if (match?.decision === "deny") {
-    return { block: true, reason: "Denied by permissions rule" };
+    return { block: true, reason: RULE_DENY_REASON };
   }
   return undefined;
-}
-
-/**
- * Compatibility RiskDecision shape for host-first tools under product scope B.
- * Prefer `evaluateDenyRulesOnly` at production call sites. Not used by
- * register.ts host-first path after foreign A / host-first B cut.
- */
-export async function evaluateHostRiskRequest(
-  tool: string,
-  input: Record<string, unknown>,
-  cwd: string,
-  config: SafetyConfig,
-): Promise<RiskDecision> {
-  const denial = evaluateDenyRulesOnly(tool, input, cwd, config);
-  if (denial) {
-    return { action: "block", risk: "Forbidden", reason: denial.reason, recoverable: "no" };
-  }
-  return {
-    action: "allow",
-    risk: "Skip",
-    reason: "Host tool policy",
-  };
 }
 
 export async function evaluateRiskRequest(

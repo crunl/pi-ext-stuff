@@ -40,12 +40,7 @@ export function isResidualSignal(value: unknown): value is ResidualSignal {
 }
 
 /** Where a review came from. */
-export const REVIEW_SOURCES = [
-  "preview",
-  "inline",
-  "permission-amendment",
-  "manual-retry",
-] as const;
+const REVIEW_SOURCES = ["preview", "inline", "permission-amendment", "manual-retry"] as const;
 
 export type ReviewSource = (typeof REVIEW_SOURCES)[number];
 

@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SafetyConfig } from "./config.ts";
-import type { BlockRecoverability } from "./engine-types.ts";
+import type { BlockRecoverability, PermissionError } from "./engine-types.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import { renderPermissionErrorForAgent } from "./permission-copy.ts";
 import type { PermissionExecutionSnapshot } from "./permission-session.ts";
@@ -73,17 +73,21 @@ export function nextMode(mode: PermissionMode): PermissionMode {
   return mode === "auto" ? "yolo" : "auto";
 }
 
+/**
+ * Render the agent-facing message and keep the machine-readable fields on the
+ * thrown value. One constructor so every denial carries the same field set:
+ * per-site copies drop fields silently as the shape grows.
+ */
+export function presentedPermissionError(error: PermissionError): Error {
+  return Object.assign(new Error(renderPermissionErrorForAgent(error)), error);
+}
+
 export function policyDeniedError(reason: string, recoverable?: BlockRecoverability): Error {
-  return Object.assign(
-    new Error(
-      renderPermissionErrorForAgent({
-        code: "policy-denied",
-        reason,
-        ...(recoverable === undefined ? {} : { recoverable }),
-      }),
-    ),
-    { code: "policy-denied", reason, ...(recoverable === undefined ? {} : { recoverable }) },
-  );
+  return presentedPermissionError({
+    code: "policy-denied",
+    reason,
+    ...(recoverable === undefined ? {} : { recoverable }),
+  });
 }
 
 export class ActivationSupersededError extends Error {
@@ -168,7 +172,7 @@ export function configKey(ctx: Pick<ExtensionContext, "cwd">): string {
  * `review` segment (LLM wait) is recorded separately so it can be
  * subtracted — extension_ms never includes it.
  */
-export const TURN_TRACE_ENV = "PI_SAFETY_TRACE";
+const TURN_TRACE_ENV = "PI_SAFETY_TRACE";
 
 /** The mode a registered tool actually executes under after activation. */
 export type ExecutablePermissionMode = PermissionMode;
@@ -196,10 +200,8 @@ export interface TurnTraceSegments {
   capture?: number;
   prepare?: number;
   risk?: number;
-  admit?: number;
   review?: number;
   execute?: number;
-  diagnose?: number;
 }
 
 export function turnTraceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

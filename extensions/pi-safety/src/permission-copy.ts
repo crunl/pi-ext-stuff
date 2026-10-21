@@ -1,8 +1,8 @@
-import type { PermissionError } from "./engine-types.ts";
+import type { PermissionError, ReviewEvent } from "./engine-types.ts";
 import { isPermissionArgumentError } from "./shell-permissions.ts";
 import type { PermissionMode } from "./state.ts";
 
-type ReviewStatus = "reviewing" | "approved" | "denied" | "aborted" | "timed-out" | "failed";
+type ReviewStatus = ReviewEvent["status"];
 
 /**
  * The copy layer deliberately ignores review identity.  Identity is owned by

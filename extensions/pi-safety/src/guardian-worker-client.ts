@@ -3,7 +3,12 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_STDERR_BYTES } from "./guardian-worker-limits.mjs";
+import {
+  MAX_FRAME_BYTES,
+  MAX_ID_LENGTH,
+  MAX_REQUEST_BYTES,
+  MAX_STDERR_BYTES,
+} from "./guardian-worker-limits.mjs";
 import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox-policy.ts";
 
 /**
@@ -14,16 +19,12 @@ import { copyGuardianEvidenceScope, type GuardianEvidenceScope } from "./sandbox
  */
 
 const DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS = 30_000;
-const GUARDIAN_WORKER_MAX_FRAME_BYTES = MAX_FRAME_BYTES;
-const GUARDIAN_WORKER_MAX_REQUEST_BYTES = MAX_REQUEST_BYTES;
-const GUARDIAN_WORKER_MAX_STDERR_BYTES = MAX_STDERR_BYTES;
 
 const DEFAULT_WORKER_PATH = fileURLToPath(new URL("./guardian-worker.mjs", import.meta.url));
 const WORKER_TERMINATE_WAIT_MS = 1_000;
 // Pristine SRT reset bridge may take up to ~1.5s. Keep graceful shutdown
 // separate from hard request cancellation and leave bounded recovery margin.
 const WORKER_SHUTDOWN_TIMEOUT_MS = 3_000;
-const MAX_ID_LENGTH = 128;
 const MAX_ERROR_CHARACTERS = 2_000;
 
 const FAILURE_STAGES = [
@@ -360,8 +361,8 @@ export class GuardianWorkerClient {
     this.workerPath = options.workerPath ?? DEFAULT_WORKER_PATH;
     this.timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_GUARDIAN_WORKER_TIMEOUT_MS);
     this.maxFrameBytes = Math.min(
-      GUARDIAN_WORKER_MAX_FRAME_BYTES,
-      Math.max(4 * 1024, Math.floor(options.maxFrameBytes ?? GUARDIAN_WORKER_MAX_FRAME_BYTES)),
+      MAX_FRAME_BYTES,
+      Math.max(4 * 1024, Math.floor(options.maxFrameBytes ?? MAX_FRAME_BYTES)),
     );
     this.spawnProcess =
       options.spawnProcess ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
@@ -399,7 +400,7 @@ export class GuardianWorkerClient {
     const id = `g-${++this.sequence}`;
     if (id.length > MAX_ID_LENGTH) throw new GuardianWorkerProtocolError("request id overflow");
     const maxStdoutBytes = boundedOutput(request.maxStdoutBytes, 5 * 1024 * 1024);
-    const maxStderrBytes = boundedOutput(request.maxStderrBytes, GUARDIAN_WORKER_MAX_STDERR_BYTES);
+    const maxStderrBytes = boundedOutput(request.maxStderrBytes, MAX_STDERR_BYTES);
     const requestFrame = frame({
       type: "execute",
       id,
@@ -415,10 +416,7 @@ export class GuardianWorkerClient {
       maxStdoutBytes,
       maxStderrBytes,
     });
-    if (
-      Buffer.byteLength(requestFrame) >
-      Math.min(this.maxFrameBytes, GUARDIAN_WORKER_MAX_REQUEST_BYTES)
-    ) {
+    if (Buffer.byteLength(requestFrame) > Math.min(this.maxFrameBytes, MAX_REQUEST_BYTES)) {
       throw new GuardianWorkerProtocolError("request exceeds the Guardian worker bound");
     }
 
@@ -586,10 +584,7 @@ export class GuardianWorkerClient {
       id,
       evidenceScope: this.evidenceScope,
     });
-    if (
-      Buffer.byteLength(requestFrame) >
-      Math.min(this.maxFrameBytes, GUARDIAN_WORKER_MAX_REQUEST_BYTES)
-    ) {
+    if (Buffer.byteLength(requestFrame) > Math.min(this.maxFrameBytes, MAX_REQUEST_BYTES)) {
       const error = new GuardianWorkerProtocolError("bootstrap exceeds the worker bound");
       await this.terminate(error);
       throw error;
@@ -659,7 +654,7 @@ export class GuardianWorkerClient {
 
   private onStderr(chunk: string | Buffer): void {
     this.stderrBytes += Buffer.byteLength(chunk.toString());
-    if (this.stderrBytes > GUARDIAN_WORKER_MAX_STDERR_BYTES) {
+    if (this.stderrBytes > MAX_STDERR_BYTES) {
       void this.terminate(new GuardianWorkerProtocolError("worker stderr exceeds the bound"));
     }
   }

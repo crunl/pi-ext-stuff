@@ -5,7 +5,12 @@ import { access, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, normalize, parse } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-import { MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_STDERR_BYTES } from "./guardian-worker-limits.mjs";
+import {
+  MAX_FRAME_BYTES,
+  MAX_ID_LENGTH,
+  MAX_REQUEST_BYTES,
+  MAX_STDERR_BYTES,
+} from "./guardian-worker-limits.mjs";
 
 // This file is intentionally self-contained aside from guardian-worker-limits.mjs.
 // Pi loads the extension through jiti, so a worker that imports the extension's
@@ -18,7 +23,6 @@ const MAX_STDOUT_BYTES = 5 * 1024 * 1024;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_PENDING_REQUESTS = 16;
-const MAX_ID_LENGTH = 128;
 
 const workerEnvironment = {
   PATH: process.platform === "win32" ? (process.env.Path ?? "") : "/usr/bin:/bin:/usr/sbin:/sbin",

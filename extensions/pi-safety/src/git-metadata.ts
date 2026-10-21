@@ -16,8 +16,6 @@ type GitMetadataResult =
 
 type GitMetadataProtectionResult = { ok: true; roots: string[] } | GitMetadataFailure;
 
-type GitMetadataInspectionResult = GitMetadataResult;
-
 function isFilesystemRoot(path: string): boolean {
   return path === parse(path).root;
 }
@@ -117,10 +115,7 @@ function filesystemErrorReason(error: unknown): string {
   return error instanceof Error ? error.message : "Git metadata filesystem error";
 }
 
-async function inspectGitMetadata(
-  cwd: string,
-  searchParents: boolean,
-): Promise<GitMetadataInspectionResult> {
+async function inspectGitMetadata(cwd: string, searchParents: boolean): Promise<GitMetadataResult> {
   let directory = resolve(cwd);
   const root = parse(directory).root;
   while (true) {

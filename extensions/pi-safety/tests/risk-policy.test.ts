@@ -7,7 +7,6 @@ import { packageRoot } from "../src/filesystem-policy.ts";
 import { admissionPlanFromRiskDecision } from "../src/pi-guardian-adapters.ts";
 import {
   evaluateDenyRulesOnly,
-  evaluateHostRiskRequest,
   evaluateRiskRequest,
   isSupportedPermissionRequestShape,
 } from "../src/risk-policy.ts";
@@ -296,10 +295,6 @@ describe("ApprovalDisposition policy gate", () => {
       ["apply_patch", { path: "/outside/file", content: "updated" }],
       ["powershell", { command: "Remove-Item -Recurse C:\\\\workspace" }],
     ] as const) {
-      await expect(evaluateHostRiskRequest(tool, input, cwd, config())).resolves.toMatchObject({
-        action: "allow",
-        risk: "Skip",
-      });
       expect(evaluateDenyRulesOnly(tool, input, cwd, config())).toBeUndefined();
     }
 
@@ -309,9 +304,6 @@ describe("ApprovalDisposition policy gate", () => {
     expect(
       evaluateDenyRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
     ).toBeUndefined();
-    await expect(
-      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, askOnly),
-    ).resolves.toMatchObject({ action: "allow", risk: "Skip" });
 
     const denyRules = config({
       rules: [{ action: "deny", tool: "read", pattern: "*/Library/*" }],
@@ -324,14 +316,6 @@ describe("ApprovalDisposition policy gate", () => {
         denyRules,
       ),
     ).toMatchObject({ block: true, reason: "Denied by permissions rule" });
-    await expect(
-      evaluateHostRiskRequest(
-        "read",
-        { path: "/Users/example/Library/Preferences/x" },
-        cwd,
-        denyRules,
-      ),
-    ).resolves.toMatchObject({ action: "block", risk: "Forbidden" });
   });
 
   it("allows ordinary workspace reads and writes", async () => {
@@ -2211,9 +2195,6 @@ describe("RiskDecision residual stamps", () => {
     expect(
       evaluateDenyRulesOnly("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
     ).toBeUndefined();
-    await expect(
-      evaluateHostRiskRequest("WebFetch", { url: "https://example.com/docs" }, cwd, hostConfig),
-    ).resolves.toMatchObject({ action: "allow" });
 
     const bashConfig = config({
       rules: [{ action: "ask", tool: "bash", pattern: "npm test*" }],
