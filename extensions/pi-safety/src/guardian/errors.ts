@@ -6,12 +6,14 @@ import type { AutoReviewResult } from "../auto-review-request.ts";
 
 export type GuardianReviewIdentity = NonNullable<AutoReviewResult["guardian"]>;
 
-export type AutoReviewerFailureKind =
-  | "unavailable"
-  | "timeout"
-  | "cancelled"
-  | "provider"
-  | "parse";
+const AUTO_REVIEWER_FAILURE_KINDS = [
+  "unavailable",
+  "timeout",
+  "cancelled",
+  "provider",
+  "parse",
+] as const;
+export type AutoReviewerFailureKind = (typeof AUTO_REVIEWER_FAILURE_KINDS)[number];
 
 export class AutoReviewerFailure extends Error {
   constructor(

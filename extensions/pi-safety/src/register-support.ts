@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SafetyConfig } from "./config.ts";
-import type { BlockRecoverability } from "./engine.ts";
+import type { BlockRecoverability } from "./engine-types.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import { renderPermissionErrorForAgent } from "./permission-copy.ts";
 import type { PermissionExecutionSnapshot } from "./permission-session.ts";

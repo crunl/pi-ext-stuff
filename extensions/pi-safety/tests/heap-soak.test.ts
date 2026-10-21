@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { TurnSnapshot } from "../src/engine.ts";
-import { createEngine, type Invocation } from "../src/engine.ts";
+import { createEngine } from "../src/engine.ts";
+import type { Invocation, TurnSnapshot } from "../src/engine-types.ts";
 import { PiSafetyRuntime } from "../src/pi-safety.ts";
 
 /**

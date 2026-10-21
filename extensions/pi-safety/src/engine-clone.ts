@@ -8,8 +8,9 @@
  * instead of a half-copied action later.
  *
  * These live apart from the Engine so the copy rules can be read in one place.
- * Every import below is `import type`, so this module adds no runtime edge back
- * to `engine.ts` and the value graph stays acyclic.
+ * Every import below is `import type` and comes from `engine-types.ts`, so this
+ * module is off the Engine's value graph *and* its type graph. Importing from
+ * `engine.ts` here would reintroduce the cycle this split exists to remove.
  */
 import { resolve } from "node:path";
 import type {
@@ -19,7 +20,7 @@ import type {
   InvocationCall,
   PermissionAmendment,
   TurnSnapshot,
-} from "./engine.ts";
+} from "./engine-types.ts";
 import type { SandboxPolicy } from "./sandbox-policy.ts";
 
 export function clonePolicy(policy: SandboxPolicy | undefined): SandboxPolicy | undefined {

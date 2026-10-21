@@ -1,20 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  type AdmissionPlan,
-  type CapabilityRequest,
-  type CapabilityRequestInput,
-  createEngine,
-  type Engine,
-  type ExecutionAttempt,
-  type GuardianDecision,
-  type GuardianReviewInput,
-  type Invocation,
-  type InvocationCall,
-  matchesNetworkDomainPattern,
-  type RetryHandle,
-  type ReviewEvent,
-  type RuntimeOutcome,
-} from "../src/engine.ts";
+import { createEngine, type GuardianDecision, matchesNetworkDomainPattern } from "../src/engine.ts";
+import type {
+  AdmissionPlan,
+  CapabilityRequest,
+  CapabilityRequestInput,
+  Engine,
+  ExecutionAttempt,
+  GuardianReviewInput,
+  Invocation,
+  InvocationCall,
+  RetryHandle,
+  ReviewEvent,
+  RuntimeOutcome,
+} from "../src/engine-types.ts";
 
 const basePolicy = {
   filesystem: {

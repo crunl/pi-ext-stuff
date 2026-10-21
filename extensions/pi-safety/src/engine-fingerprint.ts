@@ -13,8 +13,8 @@
  *   to replay the old envelope.
  *
  * Keeping them together makes those differences comparable at a glance. They
- * are pure; every `import type` here keeps this module off the runtime graph of
- * `engine.ts`.
+ * are pure, and every import here is `import type` from `engine-types.ts`, which
+ * keeps this module off the Engine's value graph *and* its type graph.
  */
 import { resolve } from "node:path";
 import type {
@@ -22,7 +22,7 @@ import type {
   InvocationCall,
   InvocationOwnership,
   TurnSnapshot,
-} from "./engine.ts";
+} from "./engine-types.ts";
 import { fingerprintValue } from "./policy-primitives.ts";
 
 /** The snapshot fields that make a turn's identity; nothing else is read. */

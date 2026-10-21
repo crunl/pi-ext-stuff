@@ -13,17 +13,14 @@ import {
   AutoReviewerFailure,
   type TrustedAutoReviewerContext,
 } from "./auto-reviewer.ts";
-import type {
-  AdmissionPlan,
-  CapabilityRequestInput,
-  GuardianAdapter,
-  GuardianReviewInput,
-} from "./engine.ts";
+import type { GuardianAdapter } from "./engine.ts";
+import type { AdmissionPlan, CapabilityRequestInput, GuardianReviewInput } from "./engine-types.ts";
 import type { GuardianTranscriptEntry } from "./guardian-transcript.ts";
 import {
   ensureNonEmptyResiduals,
   mapReviewSource,
   type ResidualSignal,
+  type ReviewSourceTag,
   residualSignalsForReviewSource,
 } from "./permissions/residual.ts";
 import { fingerprintValue } from "./policy-primitives.ts";
@@ -276,7 +273,7 @@ function promptDecisionFromEngine(
 
 function observationalReviewMetrics(input: GuardianReviewInput<PiGuardianReviewContext>): {
   staticRisk: string;
-  reviewSource: string;
+  reviewSource: ReviewSourceTag;
   residualSignals: ResidualSignal[];
 } {
   return {

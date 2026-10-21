@@ -1,4 +1,5 @@
-import type { ReviewEvent } from "../engine.ts";
+import type { ReviewEvent } from "../engine-types.ts";
+import { REVIEW_SOURCE_UNCLASSIFIED, type ReviewSourceTag } from "../permissions/residual.ts";
 import type { AutoReviewerFailureKind } from "./errors.ts";
 
 /** Codex-aligned terminal_status vocabulary. */
@@ -280,7 +281,7 @@ export function buildGuardianMetricsRecord(input: {
   guardianModel?: string;
   guardianReasoningEffort?: string;
   staticRisk?: string;
-  reviewSource?: string;
+  reviewSource?: ReviewSourceTag;
   residualSignals?: readonly string[];
   durationMs: number;
   tokenUsage?: {
@@ -313,7 +314,7 @@ export function buildGuardianMetricsRecord(input: {
     guardian_model: sanitizeMetricTag(input.guardianModel),
     guardian_reasoning_effort: sanitizeMetricTag(input.guardianReasoningEffort),
     static_risk: sanitizeMetricTag(input.staticRisk ?? "none"),
-    review_source: sanitizeMetricTag(input.reviewSource ?? "unknown"),
+    review_source: sanitizeMetricTag(input.reviewSource ?? REVIEW_SOURCE_UNCLASSIFIED),
     ...(residualSignals.length > 0 ? { residual_signals: Object.freeze(residualSignals) } : {}),
     duration_ms: Math.max(0, Math.round(input.durationMs)),
     token_usage: Object.freeze({

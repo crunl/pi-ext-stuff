@@ -8,7 +8,7 @@ import {
   checkRequestedCapabilities,
   type DelegationScope,
 } from "../src/delegation-policy.ts";
-import type { CapabilityRequest } from "../src/engine.ts";
+import type { CapabilityRequest } from "../src/engine-types.ts";
 import type { PermissionMode } from "../src/state.ts";
 
 /**

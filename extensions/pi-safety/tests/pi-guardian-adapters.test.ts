@@ -7,7 +7,7 @@ import type {
   AutoReviewResult,
 } from "../src/auto-review-request.ts";
 import { type AutoReviewer, AutoReviewerFailure } from "../src/auto-reviewer.ts";
-import type { CapabilityRequestInput, GuardianReviewInput } from "../src/engine.ts";
+import type { CapabilityRequestInput, GuardianReviewInput } from "../src/engine-types.ts";
 import {
   admissionPlanFromRiskDecision,
   createPiGuardianAdapter,

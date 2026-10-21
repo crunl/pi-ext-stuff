@@ -220,7 +220,7 @@ describe("layer boundaries named by the import-graph review", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("only the engine declares the authority-minting names", async () => {
+  it("only engine-types declares the authority-minting names", async () => {
     const declarers = new Set<string>();
     for (const file of await collectTs("src")) {
       const text = await readFile(file, "utf8");
@@ -230,7 +230,7 @@ describe("layer boundaries named by the import-graph review", () => {
         declarers.add(file.replace(/\\/g, "/"));
       }
     }
-    expect([...declarers].sort()).toEqual(["src/engine.ts"]);
+    expect([...declarers].sort()).toEqual(["src/engine-types.ts"]);
   });
 
   it("propose layer never touches authority names and owns no I/O but paths.ts", async () => {

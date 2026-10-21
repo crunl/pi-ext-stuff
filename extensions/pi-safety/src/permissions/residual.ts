@@ -39,6 +39,27 @@ export function isResidualSignal(value: unknown): value is ResidualSignal {
   return typeof value === "string" && (RESIDUAL_SIGNALS as readonly string[]).includes(value);
 }
 
+/** Where a review came from. */
+export const REVIEW_SOURCES = [
+  "preview",
+  "inline",
+  "permission-amendment",
+  "manual-retry",
+] as const;
+
+export type ReviewSource = (typeof REVIEW_SOURCES)[number];
+
+/**
+ * Metrics-only bucket for a source this vocabulary does not recognise. It is
+ * not a review source: it caps metrics cardinality when an untrusted source
+ * string arrives, and it is distinct from `none`, which means there was no
+ * value at all. Declared once so the classifier and the metrics builder share
+ * one spelling.
+ */
+export const REVIEW_SOURCE_UNCLASSIFIED = "unknown" as const;
+
+export type ReviewSourceTag = ReviewSource | typeof REVIEW_SOURCE_UNCLASSIFIED;
+
 export function hasResiduals(value: readonly ResidualSignal[] | null | undefined): boolean {
   return Array.isArray(value) && value.length > 0;
 }
@@ -94,7 +115,7 @@ export function residualSignalsForReviewSource(source: string | undefined): Resi
   }
 }
 
-export function mapReviewSource(source: string | undefined): string {
+export function mapReviewSource(source: string | undefined): ReviewSourceTag {
   switch (source) {
     case "preview":
     case "inline":
@@ -102,7 +123,7 @@ export function mapReviewSource(source: string | undefined): string {
     case "manual-retry":
       return source;
     default:
-      return "unknown";
+      return REVIEW_SOURCE_UNCLASSIFIED;
   }
 }
 

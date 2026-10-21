@@ -2,16 +2,15 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import {
-  createEngine,
-  type ExecutionAttempt,
-  type GuardianDecision,
-  type GuardianReviewInput,
-  type Invocation,
-  type NativeActionFailure,
-  type RuntimeOutcome,
-  type TurnSnapshot,
-} from "../src/engine.ts";
+import { createEngine, type GuardianDecision } from "../src/engine.ts";
+import type {
+  ExecutionAttempt,
+  GuardianReviewInput,
+  Invocation,
+  NativeActionFailure,
+  RuntimeOutcome,
+  TurnSnapshot,
+} from "../src/engine-types.ts";
 import { PiSafetyRuntime } from "../src/pi-safety.ts";
 
 const snapshot = (): TurnSnapshot => ({

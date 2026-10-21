@@ -59,7 +59,6 @@ import {
   checkRequestedCapabilities,
   type DelegationScope,
 } from "./delegation-policy.ts";
-import { matchesNetworkDomainPattern } from "./engine.ts";
 import {
   defaultProtectedWritePaths,
   expandSymlinkAliases,
@@ -76,7 +75,10 @@ import {
 } from "./guardian-transcript.ts";
 import { PermissionModeRuntime } from "./mode-runtime.ts";
 import { NetworkBoundary } from "./network-boundary.ts";
-import { isExactLocalNetworkAllowed } from "./network-domain-pattern.ts";
+import {
+  isExactLocalNetworkAllowed,
+  matchesNetworkDomainPattern,
+} from "./network-domain-pattern.ts";
 import {
   permissionModeLabel,
   renderExactRetryInstruction,
