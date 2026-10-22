@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-safety tool call 链路</title>
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --ink: #1c1c1e;
+    --muted: #6c6c72;
+    --hair: #e3e3e1;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --static: #2f6fb0;
+    --static-bg: #eaf2fa;
+    --llm: #b26a00;
+    --llm-bg: #fdf2dd;
+    --enforce: #1f7a4d;
+    --enforce-bg: #e6f4ec;
+    --host: #6b4dc4;
+    --host-bg: #f0ecfa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans);
+    padding: 48px 26px 100px; line-height: 1.62; font-size: 15px;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 29px; font-weight: 600; margin: 0 0 6px; letter-spacing: .2px; }
+  h2 {
+    font-size: 19px; font-weight: 600; margin: 52px 0 16px;
+    padding-bottom: 9px; border-bottom: 1.5px solid var(--hair);
+  }
+  .sub { color: var(--muted); font-size: 14.5px; margin: 0 0 8px; }
+  .note {
+    background: #fff; border: 1px solid var(--hair); border-left: 3px solid var(--static);
+    border-radius: 7px; padding: 14px 18px; margin: 22px 0; font-size: 14.5px;
+  }
+  .note.warn { border-left-color: var(--host); }
+  code { font-family: var(--mono); font-size: .885em; background: #f2f2f0;
+         padding: 1.5px 5px; border-radius: 4px; border: 1px solid var(--hair);
+         white-space: nowrap; }
+  .where { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+  .kind {
+    display: inline-block; font-size: 10.5px; padding: 1px 8px; border-radius: 4px;
+    font-weight: 600; letter-spacing: .4px;
+  }
+  .kind.s { color: var(--static); background: var(--static-bg); }
+  .kind.l { color: var(--llm); background: var(--llm-bg); }
+  .kind.e { color: var(--enforce); background: var(--enforce-bg); }
+  .kind.h { color: var(--host); background: var(--host-bg); }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: 18px 0;
+    background: #fff; border: 1px solid var(--hair); border-radius: 9px;
+    overflow: hidden; font-size: 13.8px;
+  }
+  th, td { padding: 10px 13px; text-align: left; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  th { background: #f6f6f4; font-weight: 600; font-size: 12.5px; letter-spacing: .3px; color: #45454a; }
+  tr:last-child td { border-bottom: none; }
+
+  /* call chain */
+  .chain { margin: 24px 0; }
+  .hop {
+    display: grid; grid-template-columns: 46px 1fr; gap: 13px;
+    align-items: start;
+  }
+  .hop-lane {
+    display: flex; flex-direction: column; align-items: center;
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+  }
+  .dot {
+    width: 27px; height: 27px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 11.5px; color: #fff; background: var(--ink);
+  }
+  .dot.s { background: var(--static); }
+  .dot.l { background: var(--llm); }
+  .dot.e { background: var(--enforce); }
+  .dot.h { background: var(--host); }
+  .stem { width: 2px; flex: 1 1 auto; min-height: 16px; background: var(--hair); }
+  .hop-body {
+    background: #fff; border: 1px solid var(--hair); border-radius: 9px;
+    padding: 11px 15px; margin-bottom: 2px;
+  }
+  .call { font-family: var(--mono); font-size: 12.8px; line-height: 1.75; }
+  .call .arrow { color: var(--muted); padding: 0 4px; }
+  .hop-body .meta { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
+  .tag {
+    display: inline-block; font-family: var(--mono); font-size: 10px;
+    padding: 0 6px; border-radius: 3px; margin-right: 6px;
+    border: 1px solid var(--hair); color: var(--muted);
+  }
+  .tag.async { border-color: var(--llm); color: var(--llm); background: var(--llm-bg); }
+  .tag.early { border-color: var(--enforce); color: var(--enforce); background: var(--enforce-bg); }
+
+  .split {
+    margin: 14px 0 14px 59px; padding: 13px 17px;
+    background: var(--static-bg); border: 1px solid #cfe0f0;
+    border-radius: 9px; font-size: 13.5px;
+  }
+  .split .title { font-weight: 600; margin-bottom: 6px; color: var(--static); }
+  .split ul { margin: 6px 0; padding-left: 19px; }
+  .split li { margin: 4px 0; }
+
+  ul.tight { margin: 10px 0; padding-left: 20px; }
+  ul.tight li { margin: 5px 0; }
+  .foot { color: var(--muted); font-size: 13px; margin-top: 46px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>pi-safety tool call 链路</h1>
+<p class="sub">以 bash 为例（它是最丰富的一条），从宿主调用到返回结果的实际调用链。行号均已实测。</p>
+
+<div class="note warn">
+<strong>bash 根本不走 <code>tool_call</code> 钩子。</strong>
+两个宿主入口是分开的：<code>pi.on("tool_call")</code>（<code>register.ts:2299</code>）
+第一行就把 <code>{bash, write, edit, request_permissions}</code> 返回掉
+（<code>register.ts:2302</code>，<code>PI_OWNED_TOOL_NAMES</code>）；
+bash 的真入口是 <code>pi.registerTool({label:"bash"})</code>
+（<code>register.ts:2025</code>），<strong>门控全在 <code>execute</code> 自己内部</strong>。
+钩子只管 host-first / delegated / foreign 三类工具。
+</div>
+
+<h2>调用链</h2>
+
+<div class="chain">
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">1</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">host <span class="arrow">→</span> <strong>executePermissionedBash</strong> (id, params, signal, onUpdate, ctx)</div>
+      <div class="meta"><span class="where">register.ts:1541</span>　入口，<code>pi.registerTool</code> 注册于 <code>register.ts:2025</code></div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">2</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">captureAction <span class="arrow">→</span> <strong>preparePermissionExecution</strong></div>
+      <div class="meta"><span class="tag">sync</span>capture 于 <span class="where">register.ts:1551</span>（impl pi-safety.ts）
+      <span class="tag async">async</span>prepare 于 <span class="where">register.ts:1189</span></div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot s">3</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>evaluateManagedRisk</strong>("bash", …) <span class="arrow">→</span> managedRiskEvaluator</div>
+      <div class="meta"><span class="kind s">静态策略层</span>
+      <span class="where">register.ts:1583 → :1474 → :1481</span></div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">4</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">构造 <strong>ToolCallEvent</strong> <span class="arrow">+</span> <strong>createPiGuardianReviewContext</strong></div>
+      <div class="meta"><span class="where">register.ts:1613 / :1619</span>（def :1234）　组装
+      <code>PiAction{kind:"sandbox", risk, reviewContext, execute, reviewStatus}</code></div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">5</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>executePermissionAction</strong> <span class="arrow">→</span> permissions.<strong>submit</strong> <span class="arrow">→</span> admissionForAction</div>
+      <div class="meta"><span class="tag async">async</span>
+      <span class="where">register.ts:1751 → :1302 → pi-safety.ts:400</span>
+      准入由 <span class="where">pi-safety.ts:183 → pi-guardian-adapters.ts:95</span> 推出</div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot s">6</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">turn.<strong>execute</strong> <span class="arrow">→</span> <strong>executeInvocation</strong> <span class="arrow">→</span> <strong>executeInvocationOwned</strong></div>
+      <div class="meta"><span class="tag async">async</span>
+      <span class="where">pi-safety.ts:454 → engine.ts:1763 → :1350</span>
+      句柄建于 <span class="where">engine.ts:1924</span></div>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="title">静态门在这里拦，永不进评审</div>
+    <ul>
+      <li><code>policyCheck</code>（<span class="where">engine.ts:626</span>，调用于 <code>:1494</code> 预览阶段）转发到宿主的 <code>PermissionPolicy</code></li>
+      <li>准入 <code>kind === "deny"</code> → <span class="where">engine.ts:1393</span> <strong>直接返回</strong>，不到 <code>runReview</code></li>
+    </ul>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot s">7</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">读 <strong>readApprovalCache</strong> <span class="arrow">→</span> 未命中则 <strong>runReview</strong></div>
+      <div class="meta"><span class="tag">cache</span><span class="where">engine.ts:~1681</span>
+      <code>cachedApproval ?? (await runReview(...))</code> —— <strong>相同已批动作跳过 LLM</strong>
+      （<span class="where">engine.ts:~1687</span>）</div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot l">8</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>runReview</strong> <span class="arrow">→</span> guardian.<strong>review</strong> <span class="arrow">→</span> autoReviewer.<strong>review</strong></div>
+      <div class="meta"><span class="tag async">async</span>
+      <span class="where">engine.ts:1686 → :643 → :695</span>　适配器
+      <span class="where">pi-guardian-adapters.ts:266 / :289</span>　驱动
+      <span class="where">auto-reviewer.ts:277</span><br>
+      结构化输出经 <code>parseAutoReviewResult</code> → <code>guardianPolicyFloorViolation</code>
+      压上<strong>代码地板</strong>（见「判定流」图）</div>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="title">分支：审查不可用 / 熔断张开</div>
+    <ul>
+      <li>无 guardian：<span class="where">engine.ts:665-678</span> 发 <code>failed</code> 事件，返回 <code>{code:"review-unavailable"}</code></li>
+      <li>熔断张开：<span class="where">engine.ts:656</span> 返回 <code>{code:"circuit-open"}</code>（<strong>在接触 reviewer 之前</strong>）</li>
+      <li>裁决非法：<span class="where">engine.ts:796</span></li>
+      <li>以上一律 <span class="where">engine.ts:1700</span> <code>if ("code" in decision) return blocked(decision)</code></li>
+    </ul>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot e">9</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>executeAttempt</strong> <span class="arrow">→</span> <strong>leaseWithRequests</strong> <span class="arrow">→</span> request.<strong>executor</strong></div>
+      <div class="meta"><span class="tag async">async</span>
+      <span class="where">engine.ts:~1720 → :1025</span>　租约
+      <span class="where">engine.ts:1032 / :471</span> 自 <code>state.snapshot.baseSandboxPolicy</code> 克隆，
+      于 <span class="where">engine.ts:1038-1047</span> <strong>冻结</strong>
+      network / allowedDomains / deniedDomains</div>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="title">分支：执行模式</div>
+    <ul>
+      <li><code>mode === "unrestricted"</code> → <code>localBash().execute(...)</code>（<span class="where">register.ts:~1660</span>）</li>
+      <li>否则 → <code>sandboxLifecycleLease.runShared(...)</code>（<span class="where">register.ts:1703</span>）</li>
+    </ul>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot e">10</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">assertUnmediatedExecutionCurrent <span class="arrow">→</span> sandboxedBash.<strong>execute</strong></div>
+      <div class="meta"><span class="where">register.ts:1704 / :1705</span>　ops =
+      <code>createSandboxedBashOperations(sandboxManager, policy, {networkAuthorize})</code>
+      （<span class="where">register.ts:~1694 → sandbox.ts:132</span>）</div>
+    </div>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot e">11</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>executeSandboxProgram</strong> <span class="arrow">→</span> manager.<strong>execute</strong> <span class="arrow">→</span> SrtSandboxManager.<strong>execute</strong></div>
+      <div class="meta"><span class="tag async">async</span>
+      <span class="where">sandbox.ts:80（调用 :167）→ :88/:91 → sandbox/srt-enforcer.ts:538</span>　
+      策略经 <code>toSrtConfig(policy)</code>（<span class="where">srt-enforcer.ts:123</span>）
+      由 <code>activate</code>/<code>initialize</code>（<code>:441</code>/<code>:470</code>）落成真实约束，
+      每命令再 <code>runtime.updateConfig</code>（<code>:597</code>）</div>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="title">执行中：网络能力逐连接再进评审</div>
+    <ul>
+      <li><code>networkAuthorize</code> <span class="where">→</span> <code>authorizeCapability</code>（<span class="where">register.ts:~1338</span>）<span class="where">→</span> <code>authorizeInlineCapability</code>（<span class="where">engine.ts:1785</span>）</li>
+      <li>已覆盖 → <code>policyCheck</code>（<span class="where">engine.ts:626</span>）；未覆盖 → <code>runReview</code>（<span class="where">engine.ts:1582</span>，修正来源）</li>
+    </ul>
+  </div>
+
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">12</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">returnedBashFailure <span class="arrow">→</span> <strong>diagnoseSandboxedFailure</strong> <span class="arrow">→</span> runtimeDenialOutcome</div>
+      <div class="meta"><span class="where">register.ts:1716 → :~1718 → :~1508</span>　
+      经 <code>sandboxManager.classifyDenial</code> 把沙箱拒绝归类</div>
+    </div>
+  </div>
+
+</div>
+
+<h2>决策变约束：两个边界，不是一个</h2>
+<table>
+  <thead><tr><th style="width:22%">阶段</th><th>发生了什么</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>裁决 → 租约</strong><br><span class="where">engine.ts:471 / :1038-1047</span></td>
+      <td><code>leaseWithRequests</code> 把 <code>baseSandboxPolicy</code> 克隆进 <code>lease.policy</code> 并冻结网络域。这是<strong>内存里的策略对象</strong>，还不是约束。</td>
+    </tr>
+    <tr>
+      <td><strong>租约 → 真实约束</strong><br><span class="where">register.ts:1694 → sandbox.ts:80 → srt-enforcer.ts:123</span></td>
+      <td>策略经 <code>toSrtConfig</code> 交给 SRT，由 <code>activate</code>/<code>initialize</code> 落成内核/代理层的真实限制。<strong>这一层的拒绝任何 LLM 都推不翻。</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+<strong>易画错：<code>src/sandbox-guardian.ts</code> 不在 agent 执行路径上。</strong>
+它是 <strong>reviewer 侧</strong>的只读沙箱
+（<code>createSandboxedReadOnlyCommandRunner</code>，<span class="where">sandbox-guardian.ts:99</span>，
+文件操作 <code>:452</code>），供 guardian 工具取证据用，属于 REVIEW 桶。
+agent 动作的强制约束走上面第二个边界，属 ENFORCE 桶。
+</div>
+
+<h2>拒绝怎么变成宿主看到的东西</h2>
+<div class="chain">
+  <div class="hop">
+    <div class="hop-lane"><div class="dot l">a</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">runReview 拒绝 <span class="arrow">→</span> <strong>recordDenial()</strong> <span class="arrow">→</span> blocked({code:"review-denied", reason})</div>
+      <div class="meta"><span class="where">engine.ts:1699</span>（另一条：修正评审 <code>:1597</code>）</div>
+    </div>
+  </div>
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">b</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>fromEngineExecutionOutcome</strong> <span class="arrow">→</span> executePermissionAction <span class="arrow">→</span> <strong>抛出</strong> presentedPermissionError</div>
+      <div class="meta"><span class="where">pi-safety.ts:454 → register.ts:1306-1317 → register-support.ts:81</span></div>
+    </div>
+  </div>
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">c</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call"><strong>renderPermissionErrorForAgent</strong>(error) <span class="arrow">→</span> 按 error.code 取文案</div>
+      <div class="meta"><span class="where">permission-copy.ts:75</span>（<code>review-denied</code> 分支 <code>:80-95</code>）</div>
+    </div>
+  </div>
+  <div class="hop">
+    <div class="hop-lane"><div class="dot h">d</div><div class="stem"></div></div>
+    <div class="hop-body">
+      <div class="call">宿主看到的是 <strong>thrown Error</strong>，上面挂 <code>{code, reason, effectsMayHaveOccurred?}</code></div>
+      <div class="meta"><span class="where">register-support.ts:82</span> 用 <code>Object.assign(new Error(text), error)</code> 附着</div>
+    </div>
+  </div>
+</div>
+
+<p class="sub">另一种形状：host-first / delegated 工具的拒绝是
+<code>{block:true, reason}</code> 的 <code>ToolCallEventResult</code>
+（<span class="where">register.ts:1442-1449</span>、<code>:1461-1467</code>），
+文案同样出自 <code>renderPermissionErrorForAgent</code>。</p>
+
+<h2>Worker 边界：比想象中窄</h2>
+<table>
+  <thead><tr><th style="width:22%">部分</th><th>在哪跑</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>reviewer 的 LLM 推理</strong></td>
+      <td><strong>进程内。</strong><code>PiAutoReviewer.review</code>（<span class="where">auto-reviewer.ts:277</span>）直接调
+      <code>this.invoke</code>（<code>:266</code>）走 <code>modelRegistry</code>，<strong>无进程边界</strong>。</td>
+    </tr>
+    <tr>
+      <td><strong>reviewer 的取证据工具</strong></td>
+      <td><strong>跨进程。</strong><code>defaultGuardianToolRuntime</code>（<span class="where">auto-reviewer.ts:260</span>）→
+      <code>createGuardianWorkerClient</code>（<span class="where">guardian-tools.ts:948 → guardian-worker-client.ts:1009</span>）
+      → <code>guardian-worker.mjs</code>。</td>
+    </tr>
+    <tr>
+      <td><strong>跨界的唯一函数</strong></td>
+      <td><code>GuardianWorkerClient.execute</code>（<span class="where">guardian-worker-client.ts:371</span>）
+      序列化 JSON 帧写 stdin → worker <code>process.stdin.on("data")</code>
+      （<span class="where">guardian-worker.mjs:903</span>，校验权限指纹 <code>:917</code>）
+      → worker 自己的 SRT（<code>ensureSrt</code> <code>:427</code>）。spawn 目标
+      <code>DEFAULT_WORKER_PATH</code>（<span class="where">guardian-worker-client.ts:23</span>）。</td>
+    </tr>
+    <tr>
+      <td><strong>失败怎么回来</strong></td>
+      <td><code>GuardianWorkerInfrastructureError</code>（<span class="where">guardian-worker-client.ts:104</span>）
+      → 适配器里变 <code>failed</code> verdict（<span class="where">pi-guardian-adapters.ts:308-311</span>）。</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="foot">
+本图依据三路独立实测绘制。标 <code>~</code> 的行号是函数体内的调用偏移，误差 ±6 行，均在已确认的函数体内。
+标 <code>UNVERIFIED</code> 的有：<code>managedRiskEvaluator</code> 的定义行（只确认了调用点
+<span class="where">register.ts:1481</span>）、<code>createIsolatedGuardianToolRuntime</code> 定义行、
+<code>classifyDenial</code> 与 <code>assertUnmediatedExecutionCurrent</code> 的定义行。
+</p>
+
+</div>
+</body>
+</html>
