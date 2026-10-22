@@ -3,7 +3,8 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG } from "../src/config.ts";
+import { DEFAULT_CONFIG, validateSafetyConfig } from "../src/config.ts";
+import { intersectSandboxPolicy } from "../src/delegation.ts";
 import { defaultProtectedWritePaths, packageRoot } from "../src/filesystem-policy.ts";
 import {
   createSandboxedBashOperations,
@@ -476,6 +477,33 @@ describe("sandbox integration", () => {
       "/Users/x1a2h1/.orbstack/run/docker.sock",
     ]);
     expect(openRuntime.network.dangerouslyAllowAllUnixSockets).toBe(false);
+  });
+
+  it("carries the trustd tradeoff from config to policy and a delegated child", () => {
+    // Closed by default: nothing may reach the policy, and trustdAllowed stays false.
+    const defaultRuntime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
+    expect(defaultRuntime.compatibility).toBeUndefined();
+
+    const opted = validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: true } } });
+    const runtime = createSandboxRuntimeConfig(opted.sandbox, "/workspace/project");
+    expect(runtime.compatibility).toEqual({ allowTrustd: true });
+
+    // A delegated child inherits the trade instead of silently losing it when
+    // intersectSandboxPolicy rebuilds the policy without the top-level slice.
+    const child = intersectSandboxPolicy(runtime, {
+      writeRoots: ["/workspace/project"],
+      networkHosts: [],
+    });
+    expect(child.compatibility).toEqual({ allowTrustd: true });
+  });
+
+  it("rejects unknown compatibility keys instead of silently dropping them", () => {
+    expect(() =>
+      validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: true, oops: true } } }),
+    ).toThrow(/sandbox.compatibility/);
+    expect(() => validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: "yes" } } })).toThrow(
+      /allowTrustd/,
+    );
   });
 
   it("keeps Codex-style defaults while resolving protected workspace metadata", () => {
