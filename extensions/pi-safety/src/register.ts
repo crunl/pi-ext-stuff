@@ -66,7 +66,7 @@ import {
 } from "./filesystem-policy.ts";
 import { discoverGitMetadataProtectionRoots } from "./git-metadata.ts";
 import { guardianMetricsRecordFromEvent } from "./guardian/metrics.ts";
-import { GUARDIAN_DENIAL_WINDOW_SIZE, validateGuardianPolicy } from "./guardian-policy.ts";
+import { GUARDIAN_DENIAL_WINDOW_SIZE } from "./guardian-policy.ts";
 import type { GuardianReviewSessionManager } from "./guardian-session.ts";
 import {
   appendGuardianTranscript,
@@ -174,11 +174,6 @@ import {
 } from "./tree-sitter/shell-backend.ts";
 import { errorMessage } from "./unknown-value.ts";
 
-type GuardianPolicySource = (context: {
-  cwd: string;
-  configFingerprint: string;
-}) => string | undefined;
-
 export interface RegisterExtensionOptions {
   agentDir?: string;
   sandboxManager?: SandboxManagerLike;
@@ -188,7 +183,6 @@ export interface RegisterExtensionOptions {
   sandboxLifecycleLease?: Pick<SandboxLifecycleLease, "runShared" | "runExclusive">;
   autoReviewer?: AutoReviewer;
   guardianSessionManager?: GuardianReviewSessionManager;
-  guardianPolicySource?: GuardianPolicySource;
   riskEvaluator?: typeof evaluateRiskRequest;
   networkBoundary?: NetworkBoundary;
 }
@@ -1246,14 +1240,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   ): PiGuardianReviewContext => {
     const configFingerprint = fingerprintConfig(executionContext.config);
     const guardianCwd = canonicalCwd;
-    const suppliedGuardianPolicy = options.guardianPolicySource?.({
-      cwd: guardianCwd,
-      configFingerprint,
-    });
-    const guardianPolicy =
-      suppliedGuardianPolicy === undefined
-        ? undefined
-        : validateGuardianPolicy(suppliedGuardianPolicy);
     return {
       event,
       transcript,
@@ -1263,7 +1249,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
         modelRegistry: ctx.modelRegistry,
         activeModel: ctx.model,
         reviewer: executionContext.config.reviewer,
-        guardianPolicy,
         guardianSession: {
           sessionId: stableSessionId(ctx, session.getGeneration()),
           cwd: guardianCwd,
