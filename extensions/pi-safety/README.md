@@ -16,8 +16,9 @@ so there is **no build step**.
   OS-enforced sandbox (workspace-write by default). Public network access is
   reviewed automatically at the connection boundary.
 - **Guardian reviewer** — an external LLM judge re-examines anything the
-  static policy cannot prove safe. Denied actions can be retried exactly once
-  with `/approve`.
+  static policy cannot prove safe. A denial is terminal for that submission:
+  the agent reports it, and may retry only after you explicitly approve the
+  exact action in conversation.
 
 ## How one tool call flows
 
@@ -49,7 +50,7 @@ they never grant or withhold authority on their own. Each step can only
 | ① prepare | setup | activation + snapshot: mode, policy (once per turn; cached hits are free) | `stale-invocation` |
 | ② static risk | **decision** | provable-safe vs needs-review | `policy-denied` |
 | ③ admission | projection | risk verdict → engine vocabulary, plus shape validation — "a projection, not an authorization decision" | `policy-denied` |
-| ④ guardian | **decision** | approve / deny — skipped when ② proved safe; auto-approved short-circuit in yolo | `review-denied`, retriable via `/approve` |
+| ④ guardian | **decision** | approve / deny — skipped when ② proved safe; auto-approved short-circuit in yolo | `review-denied`, terminal for that submission |
 | ⑤ lease | derivation | which backend executes: sandboxed / host-admitted / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **decision** | kernel says yes/no **while running** | command's own error, or timeout |
 
@@ -115,9 +116,15 @@ Runtime config lives at `~/.pi/agent/safety.json` (or
 a minimal starting point is `sandbox.enabled: true` with the default
 workspace-write profile and empty `rules`.
 
-- `/approve` — authorize one exact retry of a recent auto-review denial.
+- `/permissions` — reload the permission policy, or inspect live authority
+  with `/permissions status` (read-only).
 - `request_permissions` tool — ask for a turn-scoped filesystem or network
   grant instead of retrying blindly.
+
+There is no approval command: only the Guardian reviewer authorizes actions.
+A denial ends that submission. If you then explicitly approve the exact action
+after being told the concrete risk, the agent may retry it, and the reviewer
+weighs your approval as trusted evidence in the transcript.
 
 ## Relationship
 

@@ -10,8 +10,9 @@ import { PiSafetyRuntime } from "../src/pi-safety.ts";
  * pattern as engine-native-retry.test.ts), NOT the register
  * harness: vi.fn() call history grows with N and would dominate any heap
  * delta. Bounded retainers that are expected and correct:
- * - retryRecords/denialNotices survive turn close (capped at 10) for /approve
  * - session-level grants/approvals are cleared by closeState per turn
+ * - denial retention is the circuit's bounded window counters, not an
+ *   Engine-side ledger of denials
  *
  * Run with --expose-gc for a trustworthy delta; without it the assertions
  * use a wider slack to absorb GC noise.

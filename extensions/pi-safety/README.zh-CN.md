@@ -8,7 +8,7 @@
 
 - **权限模式** —— `auto` 让 guardian reviewer 代你批准高风险动作；`yolo` 不受限制地运行。（旧的人工弹窗 `default`/`plan` 模式已退役。）
 - **沙箱化执行** —— `bash` / `write` / `edit` 运行在 OS 强制的沙箱内（默认 workspace-write）。公网访问在连接边界处自动接受评审。
-- **Guardian reviewer** —— 一个外部 LLM 裁判，重新审查静态策略无法证明安全的一切。被拒动作可以用 `/approve` 精确重试一次。
+- **Guardian reviewer** —— 一个外部 LLM 裁判，重新审查静态策略无法证明安全的一切。拒绝对该次提交是终局的：agent 会把拒绝报告给你，只有在你于对话中明确批准该确切动作之后，才可以重试。
 
 ## 一次工具调用如何流动
 
@@ -37,7 +37,7 @@
 | ① prepare | 准备 | 激活 + 快照：mode、policy（每轮一次；缓存命中零成本） | `stale-invocation` |
 | ② static risk | **决策** | 可证明安全 vs 需要评审 | `policy-denied` |
 | ③ admission | 投影 | 风险判定 → engine 词汇，外加调用形态校验——"是投影，不是授权决策" | `policy-denied` |
-| ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 下自动批准短路 | `review-denied`，可经 `/approve` 重试 |
+| ④ guardian | **决策** | 批准 / 拒绝——② 已证明安全时跳过；yolo 下自动批准短路 | `review-denied`，对该次提交终局 |
 | ⑤ lease | 派生 | 由哪个后端执行：sandboxed / host-admitted / unrestricted | `enforcement-unavailable` |
 | ⑥ SRT | **决策** | **运行过程中**内核说行/不行 | 命令自身的错误，或超时 |
 
@@ -69,8 +69,10 @@ pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 
 运行时配置位于 `~/.pi/agent/safety.json`（或 `$PI_CODING_AGENT_DIR/safety.json`）。把 [`config.example.json`](config.example.json) 拷到那里，再按需裁剪——最小起点是 `sandbox.enabled: true` 配默认的 workspace-write profile 和空 `rules`。
 
-- `/approve` —— 授权对最近一次 auto-review 拒绝的精确重试。
+- `/permissions` —— 重新加载权限策略，或用 `/permissions status` 查看当前有效权限（只读）。
 - `request_permissions` 工具 —— 请求一个 turn 范围的文件系统或网络授权，而不是盲目重试。
+
+没有审批命令：只有 Guardian reviewer 会授权动作。拒绝即终结该次提交。如果你在被告知具体风险后明确批准了那个确切的动作，agent 才可以重试，而 reviewer 会把你的批准当作 transcript 中的可信证据来权衡。
 
 ## 与其他扩展的关系
 

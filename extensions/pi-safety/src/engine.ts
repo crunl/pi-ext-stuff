@@ -126,8 +126,8 @@ interface GrantRecord {
  * the call identity without call id (same command re-issued); the entry pins
  * the approved scope and the policy it was approved under, so any drift
  * misses instead of authorizing. Dies with the TurnState — never persisted,
- * never inherited by nested turns (those get a fresh Engine), never read for
- * unrestricted or manual-retry paths.
+ * never inherited by nested turns (those get a fresh Engine), never read
+ * outside `auto` mode or for a non-`preview` review source.
  */
 interface ApprovalCacheEntry {
   readonly requestedFingerprint: string;
@@ -1242,7 +1242,7 @@ export function createEngine<ReviewContext = undefined>(
       },
     );
     if ("code" in decision) return terminal(decision.reason, decision.code);
-    // No capability-only /approve handle: it would lose this failed-action/effects context.
+    // No capability-only handle: it would lose this failed-action/effects context.
     if (decision.kind === "deny") {
       recordDenialStats();
       return terminal(decision.rationale, "review-denied");

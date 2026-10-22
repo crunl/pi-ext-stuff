@@ -18,7 +18,7 @@ rewrite is not based on it.
 4. [Runtime enforcement and sandbox](#runtime-enforcement-and-sandbox)
 5. [Network boundary, host, and domain patterns](#network-boundary-host-and-domain-patterns)
 6. [The Guardian reviewer](#the-guardian-reviewer)
-7. [Approve-for-me engine and adapters](#engine-and-adapters)
+7. [Engine and adapters](#engine-and-adapters)
 8. [Delegation and session lifecycle](#delegation-and-session-lifecycle)
 9. [Configuration schema](#configuration-schema)
 10. [Testing](#testing)
@@ -27,12 +27,12 @@ rewrite is not based on it.
 ## What the extension does
 
 The extension registers four owned tools (`bash`, `write`, `edit`,
-`request_permissions`), two commands (`/approve` and `/permissions` — the
-latter is read-only in its `status` form and a config reload otherwise),
-and a `tool_call` gate for the host-first read tools (`read`, `grep`,
-`find`, `ls`) and `subagent` (`src/register.ts:237`,
-`src/register.ts:243`, `src/register.ts:547`, `src/register.ts:2616-2636`,
-`src/register.ts:2644`, `src/register.ts:2780`).
+`request_permissions`), one command (`/permissions` — read-only in its
+`status` form and a config reload otherwise), and a `tool_call` gate for the
+host-first read tools (`read`, `grep`, `find`, `ls`) and `subagent`
+(`src/register-support.ts:109`, `src/register-support.ts:115`,
+`src/register.ts:1614`, `src/register.ts:2025`, `src/register.ts:2300`,
+`src/register.ts:2425`).
 
 Two permission modes exist (`src/state.ts:5`, `src/modes/controller.ts:3`):
 
@@ -526,14 +526,13 @@ errors, never from message text
 kind (`trunk_new | trunk_reused | ephemeral_forked`), action tag,
 request source, and ownership (`src/guardian/metrics.ts:5-35`).
 
-## Approve-for-me engine and adapters
+## Engine and adapters
 
 `src/engine.ts` is the deep, I/O-free decision module. It
 owns admission-plan validation, hard policy checks, Guardian review
-routing, exact one-shot grants, denial circuit breaking, `/approve`
-retry handles, and turn/session-scoped permission amendments
-(`createEngine`,
-`src/engine.ts:1024`).
+routing, exact one-shot grants, denial circuit breaking, and
+turn/session-scoped permission amendments (`createEngine`,
+`src/engine.ts:526`).
 
 Key mechanics:
 
@@ -548,11 +547,16 @@ Key mechanics:
   authority) and not match `deniedDomains`. A network request with a
   port or protocol constraint is **not** sandbox-enforceable
   (`sandboxCanEnforce`, `src/engine.ts:868`).
-- **One-shot grants.** The Engine deletes the armed retry record *before*
-  the adapter is entered — the atomic one-shot spend
-  (`src/engine.ts:1472`). `/approve` authorizes one
-  exact retry of a recent denial; the handle is single-use
-  (`armRetry`, `src/engine.ts:420`).
+- **One-shot grants.** A Guardian approve arms exactly one grant for that
+  invocation; the Engine deletes it *before* the adapter is entered — the
+  atomic one-shot spend (`consumeGrant`, `src/engine.ts:876`, spend at
+  `src/engine.ts:884`). A denial is terminal for that submission: no grant
+  and no retry handle is created (`recordDenial`, `src/engine.ts:581`), and
+  the agent simply reports it. If the user then explicitly approves that
+  exact action after being told the concrete risk, a fresh submission is
+  reviewed on its own merits — the Guardian reads that approval as trusted
+  evidence in the transcript (`src/guardian-policy.ts:109`), not as a
+  pre-authorized grant.
 - **Denial circuit breaker.** Defaults: 3 consecutive denials, a 50-
   denial window, 10 denials in window (`src/engine.ts:537-539`).
   When tripped the auto state reports `paused: true` and the UI shows

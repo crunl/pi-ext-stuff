@@ -252,8 +252,8 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
   // resource (SandboxConnectGuard listener) is a module singleton that
   // starts in activate(), driven by session_start/activateConfig — so the
   // contract is satisfied without deferring `new`. Lazy ensureX() would be
-  // strictly worse: /permissions, /approve and shift+tab legally touch the
-  // managers before any session_start.
+  // strictly worse: /permissions and shift+tab legally touch the managers
+  // before any session_start.
   const sandboxManager: SandboxManagerLike = options.sandboxManager ?? new SrtSandboxManager();
   const networkBoundary = options.networkBoundary ?? new NetworkBoundary();
   const bashToolFactory = options.bashToolFactory ?? createBashTool;
