@@ -2,7 +2,6 @@ import { resolve } from "node:path";
 
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import {
-  type AutoReviewApprovalOverride,
   type AutoReviewerContext,
   type AutoReviewResult,
   buildAutoReviewRequest,
@@ -51,11 +50,6 @@ export interface PiGuardianReviewContext {
   baseSandboxPolicy?: SandboxPolicy;
   onResult?: (result: AutoReviewResult) => void;
 }
-
-type PiGuardianInput = GuardianReviewInput<PiGuardianReviewContext> & {
-  /** Added by the Engine for the explicit /approve exact retry path. */
-  approvalOverride?: AutoReviewApprovalOverride;
-};
 
 type PromptRiskDecision = Extract<RiskDecision, { action: "prompt" }>;
 
@@ -140,21 +134,7 @@ function transcriptFromEngine(
   return input.context.transcript.filter(isTranscriptEntry).map((entry) => ({ ...entry }));
 }
 
-function approvalOverrideFromEngine(
-  input: GuardianReviewInput<PiGuardianReviewContext>,
-): AutoReviewApprovalOverride | undefined {
-  const candidate = (input as PiGuardianInput).approvalOverride;
-  if (
-    !isRecord(candidate) ||
-    typeof candidate.denialId !== "string" ||
-    typeof candidate.actionFingerprint !== "string"
-  ) {
-    return undefined;
-  }
-  return candidate;
-}
-
-function assertEventMatchesCall(input: PiGuardianInput): void {
+function assertEventMatchesCall(input: GuardianReviewInput<PiGuardianReviewContext>): void {
   const event = input.context.event;
   if (
     event.toolCallId !== input.call.id ||
@@ -288,8 +268,7 @@ export function createPiGuardianAdapter(
 ): GuardianAdapter<PiGuardianReviewContext> {
   return {
     async review(input, signal) {
-      const piInput = input as PiGuardianInput;
-      assertEventMatchesCall(piInput);
+      assertEventMatchesCall(input);
       const decision = promptDecisionFromEngine(input);
       const permissionContext = guardianPermissionContext(input, decision);
       const request = buildAutoReviewRequest(
@@ -298,7 +277,6 @@ export function createPiGuardianAdapter(
         input.call.cwd,
         permissionContext,
         transcriptFromEngine(input),
-        approvalOverrideFromEngine(input),
         input.context.transcriptEpoch,
         input.context.rawTranscript,
       );

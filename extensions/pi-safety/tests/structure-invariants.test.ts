@@ -568,9 +568,7 @@ describe("layer boundaries named by the import-graph review", () => {
     const declarers = new Set<string>();
     for (const file of await collectModules("src")) {
       const text = await readFile(file, "utf8");
-      if (
-        /^\s*export\s+(type|interface)\s+(CapabilityLease|RetryHandle|AdmissionPlan)\b/m.test(text)
-      ) {
+      if (/^\s*export\s+(type|interface)\s+(CapabilityLease|AdmissionPlan)\b/m.test(text)) {
         declarers.add(file.replace(/\\/g, "/"));
       }
     }

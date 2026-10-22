@@ -1,15 +1,23 @@
-import { describe, expect, it } from "vitest";
+import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import * as autoReviewRequest from "../src/auto-review-request.ts";
 import {
   AUTO_REVIEW_SYSTEM_PROMPT,
+  type AutoReviewRequest,
   buildAutoReviewRequest,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
-  renderAutoReviewTrustedContext,
 } from "../src/auto-review-request.ts";
+import type { GuardianReviewInput } from "../src/engine-types.ts";
 import {
   MAX_GUARDIAN_POLICY_CHARACTERS,
   renderGuardianSystemPrompt,
 } from "../src/guardian-policy.ts";
+import {
+  mapReviewSource,
+  REVIEW_SOURCE_UNCLASSIFIED,
+  residualSignalsForReviewSource,
+} from "../src/permissions/residual.ts";
 
 describe("auto review result", () => {
   it("maps a full Codex guardian assessment to the internal result", () => {
@@ -345,7 +353,6 @@ describe("auto review request", () => {
         deniedNetworkHosts: [],
       },
       raw,
-      undefined,
       3,
       raw,
     );
@@ -356,13 +363,20 @@ describe("auto review request", () => {
     expect(request.untrustedTranscript.length).toBeLessThanOrEqual(41);
   });
 
-  it("frames an exact /approve retry as trusted developer context", () => {
+  it('cannot express "the user approved this" anywhere in the request shape', () => {
+    // The manual approval chain is gone, and this pins that it stays gone. A
+    // claim the reviewer can be told to believe is only safe while its
+    // validator exists; both left together, so what this proves is that there
+    // is no longer any way to spell the claim. Three independent channels are
+    // closed here: a request field, a review source, and a developer prefix.
+    const event: ToolCallEvent = {
+      type: "tool_call",
+      toolName: "bash",
+      toolCallId: "claim-probe",
+      input: { command: "git push origin main" },
+    };
     const request = buildAutoReviewRequest(
-      {
-        toolName: "bash",
-        toolCallId: "retry-call",
-        input: { command: "git push origin main" },
-      } as any,
+      event,
       {
         action: "prompt",
         risk: "Forbidden",
@@ -381,22 +395,39 @@ describe("auto review request", () => {
         deniedNetworkHosts: ["localhost"],
       },
       [{ role: "user", content: "push this branch" }],
-      {
-        denialId: "denial-1",
-        actionFingerprint: "exact-action",
-      },
     );
-    const data = JSON.parse(renderAutoReviewPrompt(request));
-    const trustedContext = renderAutoReviewTrustedContext(request);
 
-    expect(data).not.toHaveProperty("trustedDeveloperMessages");
-    expect(trustedContext).toMatch(
-      /^The user has manually approved a specific action that was previously `Rejected`\./,
-    );
-    expect(trustedContext).toContain('"command":"git push origin main"');
-    expect(data.untrustedAction).not.toHaveProperty("approvalOverride");
-    expect(data.permissionContext).not.toHaveProperty("approvalOverride");
-    expect(AUTO_REVIEW_SYSTEM_PROMPT).not.toContain("trustedApprovalOverride");
+    // 1. No request field: the exact key set is pinned, so a new field that
+    //    could carry an approval cannot be added without failing here.
+    expect(Object.keys(request).sort()).toEqual([
+      "permissionContext",
+      "toolCallId",
+      "untrustedAction",
+      "untrustedTranscript",
+    ]);
+    // The type agrees with the runtime shape, so a cast cannot smuggle it in.
+    expectTypeOf<keyof AutoReviewRequest>().not.toEqualTypeOf<"approvalOverride">();
+    expectTypeOf<GuardianReviewInput>().not.toHaveProperty("approvalOverride");
+
+    // 2. No source literal: the retired source no longer classifies as a
+    //    review source, and no residual stamp names a human approval.
+    expect(mapReviewSource("manual-retry")).toBe(REVIEW_SOURCE_UNCLASSIFIED);
+    expect(residualSignalsForReviewSource("manual-retry")).toEqual(["other_explicit_review"]);
+
+    // 3. No developer prefix: the constant is gone from the module, and the
+    //    prompt the reviewer actually receives claims nothing.
+    expect("AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX" in autoReviewRequest).toBe(false);
+    expect("renderAutoReviewTrustedContext" in autoReviewRequest).toBe(false);
+    const rendered = [renderAutoReviewPrompt(request), AUTO_REVIEW_SYSTEM_PROMPT].join("\n");
+    for (const claim of [
+      "manually approved",
+      "post-denial approval marker",
+      "Trusted Developer Authorization",
+      "approvalOverride",
+      "approvedAction",
+    ]) {
+      expect(rendered).not.toContain(claim);
+    }
   });
 
   it.each(["", "   "])("rejects an empty supplied Guardian policy", (policy) => {

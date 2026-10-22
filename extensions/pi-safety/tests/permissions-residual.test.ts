@@ -128,7 +128,6 @@ describe("residual helpers", () => {
   });
 
   it("maps Engine review sources for metrics only", () => {
-    expect(residualSignalsForReviewSource("manual-retry")).toEqual(["manual_retry"]);
     expect(residualSignalsForReviewSource("permission-amendment")).toEqual([
       "permission_amendment",
     ]);
@@ -136,6 +135,10 @@ describe("residual helpers", () => {
     expect(residualSignalsForReviewSource("inline")).toEqual(["other_explicit_review"]);
     expect(mapReviewSource("inline")).toBe("inline");
     expect(mapReviewSource("permission-amendment")).toBe("permission-amendment");
+    // The retired manual approval source no longer classifies: it falls to the
+    // metrics-only unknown bucket, and no residual stamp names a human approval.
+    expect(mapReviewSource("manual-retry")).toBe("unknown");
+    expect(residualSignalsForReviewSource("manual-retry")).toEqual(["other_explicit_review"]);
     expect(mapReviewSource(undefined)).toBe("unknown");
   });
 

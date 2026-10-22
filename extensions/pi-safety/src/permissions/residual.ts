@@ -8,7 +8,6 @@ export const RESIDUAL_SIGNALS = [
   "action_review",
   "host_admission_review",
   "permission_amendment",
-  "manual_retry",
   "native_recovery",
   "inline_network_uncovered",
   "capability_uncovered",
@@ -17,7 +16,12 @@ export const RESIDUAL_SIGNALS = [
   // call site produces these anymore; `escalation` retired with the
   // command-escalation feature). Kept as vocabulary so historical metrics
   // keep their names — production stopped, names kept.
+  // `manual_retry` retired with the manual approval chain (cut 2): the
+  // `manual-retry` review source is gone, so nothing stamps it and no
+  // reviewer can be told a human approved. The name stays in the vocabulary
+  // for the same reason the rest of this block does — historical metrics.
   "escalation",
+  "manual_retry",
   "process_control",
   "env_context_unproven",
   "state_crosses_segments",
@@ -40,7 +44,7 @@ export function isResidualSignal(value: unknown): value is ResidualSignal {
 }
 
 /** Where a review came from. */
-const REVIEW_SOURCES = ["preview", "inline", "permission-amendment", "manual-retry"] as const;
+const REVIEW_SOURCES = ["preview", "inline", "permission-amendment"] as const;
 
 export type ReviewSource = (typeof REVIEW_SOURCES)[number];
 
@@ -97,8 +101,6 @@ export function residualsForPrompt(input: {
  */
 export function residualSignalsForReviewSource(source: string | undefined): ResidualSignal[] {
   switch (source) {
-    case "manual-retry":
-      return ["manual_retry"];
     case "permission-amendment":
       return ["permission_amendment"];
     // Network inline reviews retired; `inline` remains only for native recovery
@@ -115,7 +117,6 @@ export function mapReviewSource(source: string | undefined): ReviewSourceTag {
     case "preview":
     case "inline":
     case "permission-amendment":
-    case "manual-retry":
       return source;
     default:
       return REVIEW_SOURCE_UNCLASSIFIED;

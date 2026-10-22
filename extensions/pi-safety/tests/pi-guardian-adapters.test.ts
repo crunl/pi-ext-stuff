@@ -1,7 +1,6 @@
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type {
-  AutoReviewApprovalOverride,
   AutoReviewerContext,
   AutoReviewRequest,
   AutoReviewResult,
@@ -342,26 +341,6 @@ describe("createPiGuardianAdapter", () => {
     });
   });
 
-  it("passes the Engine-generated manual retry override unchanged", async () => {
-    const { reviewer, review } = createReviewer();
-    const adapter = createPiGuardianAdapter(reviewer);
-    const approvalOverride: AutoReviewApprovalOverride = {
-      denialId: "denial-1",
-      actionFingerprint: "fingerprint-1",
-    };
-    const input = {
-      ...reviewInput({ source: "manual-retry" }),
-      approvalOverride,
-    } as GuardianReviewInput<PiGuardianReviewContext> & {
-      approvalOverride: AutoReviewApprovalOverride;
-    };
-
-    await adapter.review(input);
-
-    const request = review.mock.calls[0]?.[0] as AutoReviewRequest | undefined;
-    expect(request?.approvalOverride).toBe(approvalOverride);
-  });
-
   it("passes the trusted reviewer context and signal through", async () => {
     const { reviewer, review } = createReviewer();
     const adapter = createPiGuardianAdapter(reviewer);
@@ -449,20 +428,6 @@ describe("createPiGuardianAdapter", () => {
         staticRisk: "NeedsApproval",
         reviewSource: "preview",
         residualSignals: ["rule_ask", "risk_not_skip"],
-      },
-    });
-  });
-
-  it("labels manual-retry reviews even when residual stamps are absent", async () => {
-    const result = reviewResult("approve");
-    const { reviewer } = createReviewer(result);
-    const adapter = createPiGuardianAdapter(reviewer);
-
-    const decision = await adapter.review(reviewInput({ source: "manual-retry" }));
-    expect(decision).toMatchObject({
-      metrics: {
-        reviewSource: "manual-retry",
-        residualSignals: ["manual_retry"],
       },
     });
   });

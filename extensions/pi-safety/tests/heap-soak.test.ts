@@ -69,12 +69,12 @@ describe("Engine heap steady state", () => {
     expect(delta).toBeLessThan(slack);
   });
 
-  it("keeps session-level denial bookkeeping bounded across turns", async () => {
+  it("keeps session-level turn bookkeeping out of the denial chain", () => {
     const engine = createEngine();
-    for (let i = 1; i <= 30; i += 1) await runTurn(engine, i);
-    // The cap lives in the Engine (MAX_DENIAL_NOTICES = 10); a turn loop
-    // with zero denials must record nothing at all.
-    expect(engine.listDenials()).toHaveLength(0);
+    for (let i = 1; i <= 30; i += 1) runTurn(engine, i);
+    // The Engine keeps no denial ledger: a loop with zero denials must still
+    // record nothing, and the engine exposes no list of them at all.
+    expect("listDenials" in engine).toBe(false);
   });
 });
 

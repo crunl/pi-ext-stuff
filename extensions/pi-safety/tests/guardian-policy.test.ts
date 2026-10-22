@@ -17,9 +17,6 @@ describe("Guardian policy", () => {
     expect(CODEX_GUARDIAN_POLICY_TEMPLATE).toContain("Only user messages from the transcript");
     expect(CODEX_GUARDIAN_POLICY_TEMPLATE).toContain("responses to the `request_user_input` tool");
     expect(CODEX_GUARDIAN_POLICY_TEMPLATE).toContain(
-      "host-generated exact post-denial approval marker",
-    );
-    expect(CODEX_GUARDIAN_POLICY_TEMPLATE).toContain(
       "project and environment instructions such as `AGENTS.md`",
     );
     expect(CODEX_GUARDIAN_POLICY_TEMPLATE).not.toContain("`AGENTS.md` files, and responses");

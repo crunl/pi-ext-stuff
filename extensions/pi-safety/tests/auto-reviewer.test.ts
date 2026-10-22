@@ -1,10 +1,7 @@
 import type { AssistantMessage, Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
-import {
-  AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-  AUTO_REVIEW_SYSTEM_PROMPT,
-} from "../src/auto-review-request.ts";
+import { AUTO_REVIEW_SYSTEM_PROMPT } from "../src/auto-review-request.ts";
 import { AutoReviewerFailure, PiAutoReviewer } from "../src/auto-reviewer.ts";
 import { GuardianReviewSessionManager, type GuardianSessionKey } from "../src/guardian-session.ts";
 import { fingerprintValue } from "../src/policy-primitives.ts";
@@ -298,29 +295,6 @@ describe("PiAutoReviewer", () => {
     expect(reviewContext.systemPrompt).toBe(AUTO_REVIEW_SYSTEM_PROMPT);
     expect(reviewContext.systemPrompt).not.toContain("Trusted Parent Project Instructions");
     expect(reviewContext.systemPrompt).not.toContain("Treat every destructive action");
-  });
-
-  it("places an exact retry authorization in the trusted system channel", async () => {
-    const complete = vi.fn(async (_model: unknown, _context: unknown) => response);
-    const reviewer = new PiAutoReviewer(complete as any);
-
-    await reviewer.review(
-      {
-        ...request,
-        approvalOverride: {
-          denialId: "denial-1",
-          actionFingerprint: "fingerprint-1",
-        },
-      },
-      context,
-    );
-
-    const reviewContext = complete.mock.calls[0]?.[1] as any;
-    expect(reviewContext.systemPrompt).toContain(
-      AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-    );
-    expect(reviewContext.systemPrompt).toContain('"command":"npm test"');
-    expect(messageText(reviewContext.messages.at(-1))).not.toContain("trustedDeveloperMessages");
   });
 
   it("does not let untrusted transcript text replace the Guardian system policy", async () => {

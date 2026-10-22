@@ -12,11 +12,10 @@ import {
   clonePolicy,
   cloneSnapshot,
 } from "./engine-clone.ts";
-import { callFingerprint, invocationFingerprint, retryFingerprint } from "./engine-fingerprint.ts";
+import { callFingerprint, invocationFingerprint } from "./engine-fingerprint.ts";
 import type {
   AdmissionPlan,
   AdmissionRisk,
-  ApprovalOverride,
   ApproveForMeMode,
   BlockRecoverability,
   CapabilityAuthorizationDecision,
@@ -25,7 +24,6 @@ import type {
   CapabilityRejectionInput,
   CapabilityRequest,
   CapabilityRequestInput,
-  DenialNotice,
   Engine,
   ExecutionOutcome,
   GuardianDecisionMetrics,
@@ -36,7 +34,6 @@ import type {
   NativeActionFailure,
   PermissionError,
   PermissionStateView,
-  RetryHandle,
   ReviewEvent,
   RuntimeOutcome,
   TurnHandle,
@@ -101,7 +98,6 @@ export interface AutoState {
 interface EngineOptions<ReviewContext = undefined> {
   guardian?: GuardianAdapter<ReviewContext>;
   policy?: PermissionPolicy;
-  onDenial?: (notice: DenialNotice) => void;
   onAutoStateChange?: (state: AutoState) => void;
   onReviewEvent?: (event: ReviewEvent) => void;
   maxConsecutiveDenials?: number;
@@ -160,20 +156,6 @@ interface ApprovalCacheEvidence {
   readonly residuals: readonly ResidualSignal[] | undefined;
 }
 
-interface RetryRecord {
-  readonly fingerprint: string;
-  readonly call: InvocationCall;
-  readonly ownership: InvocationOwnership;
-  /** Capabilities the denied review would have granted. */
-  readonly requested: readonly CapabilityRequest[];
-  /** Exact normalized admission scope observed for the denied action. */
-  readonly admissionRequested: readonly CapabilityRequest[];
-  readonly risk?: AdmissionRisk;
-  readonly rationale: string;
-  readonly summary?: string;
-  readonly justification?: string;
-}
-
 interface ReviewRequest {
   readonly source: GuardianReviewInput["source"];
   readonly requested: readonly CapabilityRequest[];
@@ -182,7 +164,6 @@ interface ReviewRequest {
   readonly summary?: string;
   /** Override the derived post-review lease for a retry of an existing attempt. */
   readonly effective?: CapabilityLease;
-  readonly approvalOverride?: ApprovalOverride;
   readonly justification?: string;
   readonly residuals?: readonly ResidualSignal[];
 }
@@ -219,8 +200,6 @@ type ResolvedAdmission =
       residuals?: ResidualSignal[];
     }
   | { kind: "deny"; reason: string; recoverable?: BlockRecoverability };
-
-const MAX_DENIAL_NOTICES = 10;
 
 function nativeFailureEvidence(outcome: NativeActionFailure): string {
   const failure = outcome.failure;
@@ -485,15 +464,6 @@ function requestKey(request: CapabilityRequest): string {
   return fingerprintValue(request);
 }
 
-function sameRequests(
-  left: readonly CapabilityRequest[],
-  right: readonly CapabilityRequest[],
-): boolean {
-  if (left.length !== right.length) return false;
-  const rightKeys = new Set(right.map(requestKey));
-  return left.every((request) => rightKeys.has(requestKey(request)));
-}
-
 function appendUnique(target: string[], values: readonly string[]): void {
   for (const value of values) if (!target.includes(value)) target.push(value);
 }
@@ -560,7 +530,6 @@ export function createEngine<ReviewContext = undefined>(
   let active: TurnState | undefined;
   let sessionKey: string | undefined;
   let configKey: string | undefined;
-  let retrySequence = 0;
   // The circuit's counters and its gate are one fact, so the Engine holds the
   // module, never the pieces. Resets replace the instance instead of clearing
   // fields: that is the state's lifetime seam.
@@ -570,22 +539,10 @@ export function createEngine<ReviewContext = undefined>(
     maxWindowDenials: options.maxWindowDenials,
   };
   let circuit: DenialCircuit = createDenialCircuit(circuitPolicy);
-  const retryRecords = new Map<string, RetryRecord>();
-  const denialNotices: DenialNotice[] = [];
-  let armedRetry: { record: RetryRecord; denialId: string } | undefined;
   let reviewSequence = 0;
   const reviewControllers = new Set<AbortController>();
   const inFlightCallIds = new Set<string>();
   const inFlightAttempts = new Map<string, InFlightAttempt<ReviewContext>>();
-
-  const consumeArmedRetry = (armedRecord: { record: RetryRecord; denialId: string }): void => {
-    armedRetry = undefined;
-    retryRecords.delete(armedRecord.denialId);
-    const noticeIndex = denialNotices.findIndex(
-      (notice) => notice.handle.token === armedRecord.denialId,
-    );
-    if (noticeIndex >= 0) denialNotices.splice(noticeIndex, 1);
-  };
 
   const recordDenialStats = (): void => {
     circuit.recordDenial();
@@ -616,69 +573,13 @@ export function createEngine<ReviewContext = undefined>(
     emitAutoStateChange();
   };
 
-  const makeRetryHandle = (record: RetryRecord): RetryHandle => {
-    const handle: RetryHandle = {
-      token: `retry-${++retrySequence}`,
-      __brand: "pi-safety-retry-handle",
-    };
-    retryRecords.set(handle.token, record);
-    return handle;
-  };
-
-  const recordDenial = (
-    state: TurnState,
-    request: Invocation<unknown, ReviewContext>,
-    denial: {
-      readonly rationale: string;
-      readonly requested: readonly CapabilityRequest[];
-      readonly admissionRequested: readonly CapabilityRequest[];
-      readonly risk?: AdmissionRisk;
-      readonly summary?: string;
-      readonly justification?: string;
-    },
-  ): RetryHandle => {
+  /**
+   * The deny half of a review outcome: it feeds the deny circuit and nothing
+   * else. There is no retry handle and no denial ledger — a denial is terminal
+   * for the invocation that produced it, so there is nothing to arm.
+   */
+  const recordDenial = (): void => {
     recordDenialStats();
-    const frozenRequested = denial.requested.map((item) => structuredClone(item));
-    const frozenAdmissionRequested = denial.admissionRequested.map((item) => structuredClone(item));
-    const retryHandle = makeRetryHandle({
-      fingerprint: retryFingerprint(
-        state.snapshot,
-        request.call,
-        request.ownership,
-        frozenRequested,
-        frozenAdmissionRequested,
-        denial.justification,
-      ),
-      call: cloneInvocationCall(request.call),
-      ownership: request.ownership,
-      requested: frozenRequested,
-      admissionRequested: frozenAdmissionRequested,
-      ...(denial.risk === undefined ? {} : { risk: denial.risk }),
-      rationale: denial.rationale,
-      ...(denial.summary === undefined ? {} : { summary: denial.summary }),
-      ...(denial.justification === undefined ? {} : { justification: denial.justification }),
-    });
-    const notice: DenialNotice = {
-      call: cloneInvocationCall(request.call),
-      ...(denial.summary === undefined ? {} : { summary: denial.summary }),
-      rationale: denial.rationale,
-      handle: retryHandle,
-    };
-    denialNotices.push(notice);
-    if (denialNotices.length > MAX_DENIAL_NOTICES) {
-      const removed = denialNotices.shift();
-      if (removed !== undefined) {
-        const removedRecord = retryRecords.get(removed.handle.token);
-        retryRecords.delete(removed.handle.token);
-        if (armedRetry?.record === removedRecord) armedRetry = undefined;
-      }
-    }
-    options.onDenial?.({
-      ...notice,
-      call: cloneInvocationCall(notice.call),
-      handle: { ...notice.handle },
-    });
-    return retryHandle;
   };
 
   const isCurrent = (state: TurnState): boolean =>
@@ -717,10 +618,9 @@ export function createEngine<ReviewContext = undefined>(
     }
   };
 
-  const blocked = <T>(error: PermissionError, retryHandle?: RetryHandle): ExecutionOutcome<T> => ({
+  const blocked = <T>(error: PermissionError): ExecutionOutcome<T> => ({
     kind: "blocked",
     error,
-    ...(retryHandle === undefined ? {} : { retryHandle }),
   });
 
   const policyCheck = async (request: PermissionPolicyCheck): Promise<PolicyCheckResult> => {
@@ -822,9 +722,6 @@ export function createEngine<ReviewContext = undefined>(
             ? {}
             : { residuals: review.residuals }),
           context: request.reviewContext,
-          ...(review.approvalOverride === undefined
-            ? {}
-            : { approvalOverride: review.approvalOverride }),
         },
         signal,
       );
@@ -1011,12 +908,10 @@ export function createEngine<ReviewContext = undefined>(
     requested: readonly CapabilityRequest[],
     reviewKind: string,
     evidence: ApprovalCacheEvidence,
-    elevated: boolean,
   ): { kind: "approve"; rationale: string } | undefined => {
     if (source !== "preview") return undefined;
     if (request.ownership !== "sandbox-owned") return undefined;
     if (state.snapshot.mode !== "auto") return undefined;
-    if (elevated) return undefined;
     if (circuit.open()) return undefined;
     if (!isCurrent(state)) return undefined;
     // Fingerprinting must never throw out of the execution path: an
@@ -1049,12 +944,10 @@ export function createEngine<ReviewContext = undefined>(
     requested: readonly CapabilityRequest[],
     reviewKind: string,
     evidence: ApprovalCacheEvidence,
-    elevated: boolean,
   ): void => {
     if (source !== "preview") return;
     if (request.ownership !== "sandbox-owned") return;
     if (state.snapshot.mode !== "auto") return;
-    if (elevated) return;
     if (!isCurrent(state)) return;
     let key: string;
     let entry: ApprovalCacheEntry;
@@ -1679,69 +1572,30 @@ export function createEngine<ReviewContext = undefined>(
           reason: `Network policy conflict: ${errorMessage(error)}`,
         });
       }
-      let amendmentRequests = amendment.requests;
-      let amendmentSource: ReviewRequest["source"] = "permission-amendment";
-      let amendmentReason = request.intent.reason;
-      let amendmentSummary: string | undefined = amendment.requests.some(
+      const amendmentRequests = amendment.requests;
+      const amendmentReason = request.intent.reason;
+      const amendmentSummary: string | undefined = amendment.requests.some(
         (item) => item.kind === "network-all",
       )
         ? "Whole-network outbound authority for this turn, subject to hard domain/private/delegation policy"
         : undefined;
-      let amendmentApprovalOverride: ApprovalOverride | undefined;
-      const armed = armedRetry;
-      const armedRecord =
-        armed !== undefined &&
-        armed.record.fingerprint ===
-          retryFingerprint(
-            state.snapshot,
-            request.call,
-            request.ownership,
-            armed.record.requested,
-            amendment.requests,
-          )
-          ? armed
-          : undefined;
-      if (
-        armedRecord !== undefined &&
-        sameRequests(amendmentRequests, armedRecord.record.requested)
-      ) {
-        consumeArmedRetry(armedRecord);
-        amendmentRequests = [...armedRecord.record.requested];
-        amendmentSource = "manual-retry";
-        amendmentReason = armedRecord.record.rationale;
-        amendmentSummary = armedRecord.record.summary;
-        amendmentApprovalOverride = {
-          denialId: armedRecord.denialId,
-          actionFingerprint: armedRecord.record.fingerprint,
-        };
-      }
       const decision = await runReview(
         state,
         request as Invocation<unknown, ReviewContext>,
         baseline,
         {
-          source: amendmentSource,
+          source: "permission-amendment",
           requested: amendmentRequests,
           risk: "NeedsApproval",
           reason: amendmentReason,
           summary: amendmentSummary,
-          residuals:
-            amendmentSource === "manual-retry"
-              ? ["manual_retry", "permission_amendment"]
-              : ["permission_amendment"],
-          approvalOverride: amendmentApprovalOverride,
+          residuals: ["permission_amendment"],
         },
       );
       if ("code" in decision) return blocked(decision);
       if (decision.kind === "deny") {
-        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
-          rationale: decision.rationale,
-          requested: amendmentRequests,
-          admissionRequested: amendment.requests,
-          risk: "NeedsApproval",
-          summary: amendmentReason,
-        });
-        return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
+        recordDenial();
+        return blocked({ code: "review-denied", reason: decision.rationale });
       }
       const amended = await executeAttempt(state, request, amendmentRequests);
       if ("kind" in amended && (amended.kind === "blocked" || amended.kind === "failed"))
@@ -1789,48 +1643,18 @@ export function createEngine<ReviewContext = undefined>(
       );
     }
 
-    let leaseRequested = admission.requested;
-    let reviewRequested =
+    const leaseRequested = admission.requested;
+    const reviewRequested =
       admission.kind === "review" && admission.review === "action"
         ? admission.requested
         : admission.kind === "review"
           ? admission.requested.filter((item) => !requestCovered(baseline, item))
           : [];
-    let reviewSource: ReviewRequest["source"] = "preview";
-    let forcedManualReview = admission.kind === "review" && admission.review === "action";
-    let reviewReason = admission.kind === "review" ? admission.reason : undefined;
-    let reviewSummary = admission.kind === "review" ? admission.summary : undefined;
-    let reviewRisk = admission.kind === "review" ? admission.risk : undefined;
-    let approvalOverride: ApprovalOverride | undefined;
-    const armed = armedRetry;
-    const armedRecord =
-      armed !== undefined &&
-      armed.record.fingerprint ===
-        retryFingerprint(
-          state.snapshot,
-          request.call,
-          request.ownership,
-          armed.record.requested,
-          admission.requested,
-          admission.kind === "review" ? admission.justification : undefined,
-        )
-        ? armed
-        : undefined;
-    if (armedRecord !== undefined) {
-      const record = armedRecord.record;
-      consumeArmedRetry(armedRecord);
-      leaseRequested = [...record.requested];
-      reviewRequested = [...record.requested];
-      reviewSource = "manual-retry";
-      forcedManualReview = true;
-      reviewReason = record.rationale;
-      reviewSummary = record.summary;
-      reviewRisk = record.risk;
-      approvalOverride = {
-        denialId: armedRecord.denialId,
-        actionFingerprint: record.fingerprint,
-      };
-    }
+    const reviewSource: ReviewRequest["source"] = "preview";
+    const forcedManualReview = admission.kind === "review" && admission.review === "action";
+    const reviewReason = admission.kind === "review" ? admission.reason : undefined;
+    const reviewSummary = admission.kind === "review" ? admission.summary : undefined;
+    const reviewRisk = admission.kind === "review" ? admission.risk : undefined;
     if (reviewRequested.length > 0 || forcedManualReview) {
       const policy = await policyCheck({
         call: request.call,
@@ -1856,7 +1680,6 @@ export function createEngine<ReviewContext = undefined>(
           summary: reviewSummary,
           residuals: admission.kind === "review" ? admission.residuals : undefined,
         },
-        approvalOverride !== undefined,
       );
       const decision =
         cachedApproval ??
@@ -1866,7 +1689,6 @@ export function createEngine<ReviewContext = undefined>(
           risk: reviewRisk,
           reason: reviewReason,
           summary: reviewSummary,
-          approvalOverride,
           justification: admission.kind === "review" ? admission.justification : undefined,
           residuals:
             admission.kind === "review" &&
@@ -1877,15 +1699,8 @@ export function createEngine<ReviewContext = undefined>(
         }));
       if ("code" in decision) return blocked(decision);
       if (decision.kind === "deny") {
-        const retryHandle = recordDenial(state, request as Invocation<unknown, ReviewContext>, {
-          rationale: decision.rationale,
-          requested: reviewRequested,
-          admissionRequested: admission.requested,
-          risk: reviewRisk,
-          summary: reviewSummary,
-          justification: admission.kind === "review" ? admission.justification : undefined,
-        });
-        return blocked({ code: "review-denied", reason: decision.rationale }, retryHandle);
+        recordDenial();
+        return blocked({ code: "review-denied", reason: decision.rationale });
       }
       const grant: GrantRecord = {
         callFingerprint: callFingerprint(state.snapshot, request.call, request.ownership),
@@ -1920,7 +1735,6 @@ export function createEngine<ReviewContext = undefined>(
             summary: reviewSummary,
             residuals: admission.kind === "review" ? admission.residuals : undefined,
           },
-          approvalOverride !== undefined,
         );
         return result;
       }
@@ -2081,35 +1895,6 @@ export function createEngine<ReviewContext = undefined>(
     });
   };
 
-  const listDenials = (): readonly DenialNotice[] =>
-    denialNotices.map((notice) => ({
-      ...notice,
-      call: cloneInvocationCall(notice.call),
-      handle: { ...notice.handle },
-    }));
-
-  const armRetry = (handle: RetryHandle): boolean => {
-    const record = retryRecords.get(handle.token);
-    if (!record) return false;
-    if (active && !active.closed) {
-      if (
-        record.fingerprint !==
-        retryFingerprint(
-          active.snapshot,
-          record.call,
-          record.ownership,
-          record.requested,
-          record.admissionRequested,
-          record.justification,
-        )
-      ) {
-        return false;
-      }
-    }
-    armedRetry = { record, denialId: handle.token };
-    return true;
-  };
-
   const beginTurn = (input: TurnSnapshot): TurnHandle<ReviewContext> => {
     const snapshot = cloneSnapshot(input);
     if (active) closeState(active, "turn replaced");
@@ -2117,9 +1902,6 @@ export function createEngine<ReviewContext = undefined>(
     const sessionChanged = sessionKey !== undefined && sessionKey !== nextSessionKey;
     const configChanged = configKey !== undefined && configKey !== snapshot.configFingerprint;
     if (sessionChanged || configChanged) {
-      armedRetry = undefined;
-      retryRecords.clear();
-      denialNotices.length = 0;
       circuit = createDenialCircuit(circuitPolicy);
     }
     sessionKey = nextSessionKey;
@@ -2175,9 +1957,6 @@ export function createEngine<ReviewContext = undefined>(
     active = undefined;
     sessionKey = undefined;
     configKey = undefined;
-    retryRecords.clear();
-    denialNotices.length = 0;
-    armedRetry = undefined;
     circuit = createDenialCircuit(circuitPolicy);
     abortReviews(reason);
   };
@@ -2208,5 +1987,5 @@ export function createEngine<ReviewContext = undefined>(
       pendingConnections: 0,
     });
   };
-  return { beginTurn, refreshTurnMode, invalidate, listDenials, armRetry, inspect };
+  return { beginTurn, refreshTurnMode, invalidate, inspect };
 }

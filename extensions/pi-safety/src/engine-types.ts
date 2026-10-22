@@ -10,7 +10,7 @@
  * two edges into one-way imports.
  *
  * The Engine keeps its private state shapes — `TurnState`, `EngineOptions`,
- * `ApprovalCacheEntry`, `RetryRecord`, `ReviewRequest`, `InFlightAttempt`,
+ * `ApprovalCacheEntry`, `ReviewRequest`, `InFlightAttempt`,
  * `ResolvedAdmission` and friends — in `engine.ts`. Moving them here would
  * mean exporting them, which widens the interface for no caller.
  *
@@ -175,7 +175,6 @@ export interface GuardianReviewInput<ReviewContext = undefined> {
     configFingerprint: string;
     turn: PermissionStateView["turn"];
   };
-  approvalOverride?: ApprovalOverride;
 }
 
 export interface GuardianDecisionMetrics {
@@ -198,16 +197,6 @@ export interface GuardianDecisionMetrics {
     reasoning?: number;
     total?: number;
   };
-}
-
-export interface RetryHandle {
-  readonly token: string;
-  readonly __brand: "pi-safety-retry-handle";
-}
-
-export interface ApprovalOverride {
-  readonly denialId: string;
-  readonly actionFingerprint: string;
 }
 
 export type ReviewEvent =
@@ -291,15 +280,8 @@ export interface PermissionError {
 
 export type ExecutionOutcome<T> =
   | { kind: "completed"; value: T }
-  | { kind: "blocked"; error: PermissionError; retryHandle?: RetryHandle }
+  | { kind: "blocked"; error: PermissionError }
   | { kind: "failed"; error: unknown; effectsMayHaveOccurred?: true };
-
-export interface DenialNotice {
-  readonly call: InvocationCall;
-  readonly summary?: string;
-  readonly rationale: string;
-  readonly handle: RetryHandle;
-}
 
 export interface TurnHandle<ReviewContext = undefined> {
   execute<T>(request: Invocation<T, ReviewContext>): Promise<ExecutionOutcome<T>>;
@@ -356,7 +338,5 @@ export interface Engine<ReviewContext = undefined> {
     baseSandboxPolicy?: SandboxPolicy;
   }): boolean;
   invalidate(reason: string): void;
-  listDenials(): readonly DenialNotice[];
   inspect(): PermissionStateView | undefined;
-  armRetry(handle: RetryHandle): boolean;
 }

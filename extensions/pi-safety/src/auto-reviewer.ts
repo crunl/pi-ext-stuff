@@ -18,7 +18,6 @@ import {
   type AutoReviewResult,
   parseAutoReviewResult,
   renderAutoReviewPrompt,
-  renderAutoReviewTrustedContext,
 } from "./auto-review-request.ts";
 import { AutoReviewerFailure, type GuardianReviewIdentity } from "./guardian/errors.ts";
 import { resolveGuardianModel } from "./guardian-model.ts";
@@ -338,8 +337,7 @@ export class PiAutoReviewer implements AutoReviewer {
         parameters: tool.parameters,
       })),
     });
-    const trustedContext = renderAutoReviewTrustedContext(request);
-    const systemPrompt = renderGuardianSystemPrompt(context.guardianPolicy, trustedContext);
+    const systemPrompt = renderGuardianSystemPrompt(context.guardianPolicy);
     const closeToolRuntime = async (): Promise<void> => {
       await toolRuntime.close?.();
     };

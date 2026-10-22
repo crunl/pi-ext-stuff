@@ -49,11 +49,6 @@ export interface AutoReviewerContext {
   };
 }
 
-export interface AutoReviewApprovalOverride {
-  denialId: string;
-  actionFingerprint: string;
-}
-
 export interface GuardianPermissionContext {
   sandboxProfile: "workspace-write" | "read-only";
   /** Whether this is an ordinary sandbox or a host tool review. */
@@ -89,7 +84,6 @@ export interface AutoReviewRequest {
   untrustedTranscript: GuardianTranscriptEntry[];
   untrustedAction: GuardianAction;
   permissionContext: GuardianPermissionContext;
-  approvalOverride?: AutoReviewApprovalOverride;
   /** Raw append-only log + epoch for Delta-mode prompts. */
   transcriptMeta?: {
     epoch: number;
@@ -100,9 +94,6 @@ export interface AutoReviewRequest {
 type PromptDecision = Extract<RiskDecision, { action: "prompt" }>;
 
 const MAX_ACTION_CHARACTERS = 16_000;
-
-export const AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX =
-  "The user has manually approved a specific action that was previously `Rejected`.";
 
 export const AUTO_REVIEW_SYSTEM_PROMPT = renderGuardianSystemPrompt();
 
@@ -127,7 +118,6 @@ export function buildAutoReviewRequest(
   cwd: string,
   permissionContext: GuardianPermissionContext,
   transcript: readonly GuardianTranscriptEntry[],
-  approvalOverride?: AutoReviewApprovalOverride,
   transcriptEpoch?: number,
   rawTranscript?: readonly GuardianTranscriptEntry[],
 ): AutoReviewRequest {
@@ -156,7 +146,6 @@ export function buildAutoReviewRequest(
     untrustedTranscript: boundGuardianTranscript(rawEntries),
     untrustedAction,
     permissionContext: enrichedPermissionContext,
-    ...(approvalOverride === undefined ? {} : { approvalOverride }),
     ...(transcriptEpoch === undefined
       ? {}
       : { transcriptMeta: { epoch: transcriptEpoch, rawEntries } }),
@@ -197,25 +186,6 @@ export function renderDeltaReviewPrompt(
       rationale: "string",
     },
   });
-}
-
-export function renderAutoReviewTrustedContext(request: AutoReviewRequest): string | undefined {
-  if (request.approvalOverride === undefined) return undefined;
-  return approvedActionContext(
-    serializeAction({
-      untrustedAction: request.untrustedAction,
-      permissionContext: request.permissionContext,
-    }),
-  );
-}
-
-function approvedActionContext(serializedAction: string): string {
-  return [
-    AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-    "",
-    "Approved action:",
-    serializedAction,
-  ].join("\n");
 }
 
 const REVIEWER_DECISION_KEYS = new Set(["outcome", "risk_level", "user_authorization"]);
