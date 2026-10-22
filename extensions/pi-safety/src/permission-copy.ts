@@ -225,8 +225,7 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
 }
 
 export function renderPermissionSummary(summary: PermissionSummary): string {
-  if (summary.mode === "yolo")
-    return "Bypass permissions · sandbox off · approvals off · deny rules still apply";
+  if (summary.mode === "yolo") return "yolo · sandbox off · approvals off · deny rules still apply";
   const reviewer = summary.reviewer
     ? `${summary.reviewer.kind === "active" ? "active reviewer" : "reviewer preference"}: ${summary.reviewer.reference}`
     : "reviewer preference: current session model";
@@ -234,5 +233,5 @@ export function renderPermissionSummary(summary: PermissionSummary): string {
     ? "Auto-review available"
     : "Auto-review unavailable for this turn";
   const writeRoots = summary.writeRoots.length > 0 ? summary.writeRoots.join(", ") : "none";
-  return `${permissionModeLabel(summary.mode)} · ${summary.sandbox} · ${autoReview} · ${reviewer} · ${summary.ruleCount} rules · write roots: ${writeRoots}`;
+  return `${summary.mode} · ${summary.sandbox} · ${autoReview} · ${reviewer} · ${summary.ruleCount} rules · write roots: ${writeRoots}`;
 }

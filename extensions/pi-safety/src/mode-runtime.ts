@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SafetyConfig } from "./config.ts";
-import { permissionModeLabel } from "./permission-copy.ts";
 import {
   createPermissionSessionState,
   type PermissionMode,
@@ -41,10 +40,6 @@ export class PermissionModeRuntime {
 
   get autoState(): AutoState {
     return structuredClone(this.state.auto);
-  }
-
-  get statusLabel(): "Approve for me" | "Bypass permissions" {
-    return permissionModeLabel(this.mode);
   }
 
   /**

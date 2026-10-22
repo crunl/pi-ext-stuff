@@ -1,13 +1,16 @@
 /** Structured permissions-mode state consumed by status UI.
  *
- * Consumers must key visibility/color off `severity`; `label` is display
- * copy emitted atomically by pi-safety's `pi-safety:mode` event.
+ * `mode` is the canonical machine value (`auto` / `yolo`). The display mapping
+ * (`auto` -> "Approve for me", `yolo` -> "Bypass permissions") is applied only
+ * when this event is emitted, and lives only in `label`. Consumers key
+ * visibility/color off `severity` and logic off `mode`; they must not parse
+ * `label` back into a mode.
  */
 
 export type ModeSeverity = "none" | "warning" | "error";
 
 export interface PermissionsModeEvent {
-  mode: string;
+  mode: "auto" | "yolo";
   label: string;
   severity: ModeSeverity;
   /**
@@ -16,15 +19,16 @@ export interface PermissionsModeEvent {
    * enforcement. Consumers may ignore it; the label already carries a
    * pending marker in that case.
    */
-  pending?: string;
+  pending?: "auto" | "yolo";
 }
 
 export function isPermissionsModeEvent(data: unknown): data is PermissionsModeEvent {
   if (typeof data !== "object" || data === null) return false;
   const record = data as Record<string, unknown>;
   return (
-    typeof record.mode === "string" &&
+    (record.mode === "auto" || record.mode === "yolo") &&
     typeof record.label === "string" &&
+    (record.pending === undefined || record.pending === "auto" || record.pending === "yolo") &&
     (record.severity === "none" ||
       record.severity === "warning" ||
       record.severity === "error")

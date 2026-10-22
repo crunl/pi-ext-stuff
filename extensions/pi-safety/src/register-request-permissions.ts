@@ -212,7 +212,7 @@ export function registerRequestPermissionsTool(
                   content: [
                     {
                       type: "text",
-                      text: "Bypass permissions is already active; no additional permission grant was recorded.",
+                      text: "yolo is already active; no additional permission grant was recorded.",
                     },
                   ],
                   details: undefined,

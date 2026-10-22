@@ -2047,7 +2047,7 @@ describe("Permission mode registration", () => {
     await writer;
     await downshift;
     expect(await amendment).toMatchObject({
-      content: [{ text: expect.stringContaining("Bypass permissions is already active") }],
+      content: [{ text: expect.stringContaining("yolo is already active") }],
       // No grant was recorded, so the structured view reports an empty grant.
       structuredContent: { granted: false, networkAll: false, hosts: [], writeRoots: [] },
     });

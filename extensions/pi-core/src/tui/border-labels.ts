@@ -17,29 +17,34 @@ function displayLength(s: string): number {
 }
 
 export interface TopBorderSegments {
-  /** Border run before the badge ("──"); empty when no mode. */
+  /** Border run before the badge ("──"); empty when there is no label. */
   pre: string;
-  /** Badge text ("Auto"), plain — caller decorates. Empty when no mode. */
-  mode: string;
+  /**
+   * Badge text ("Approve for me" / "Bypass permissions"), plain — caller
+   * decorates. Empty when there is no label.
+   */
+  label: string;
   /** Border run after the badge. */
   post: string;
 }
 
 /**
  * Top border: mode badge on the left, plain remainder on the right.
- * `mode` is decorated by the caller with the two powerline caps, so the
- * returned segments are sized against the label width + BADGE_CAP_WIDTH.
- * Returns undefined when there is no mode or nothing fits.
+ * `label` is display copy: the mode itself is `auto`/`yolo`, and only this
+ * badge renders the display form. The caller decorates it with the two
+ * powerline caps, so the returned segments are sized against the label
+ * width + BADGE_CAP_WIDTH.
+ * Returns undefined when there is no label or nothing fits.
  */
 export function buildTopBorder(
   width: number,
-  mode: string | undefined,
+  label: string | undefined,
 ): TopBorderSegments | undefined {
-  const label = mode ?? "";
-  const labelWidth = label.length > 0 ? displayLength(label) + BADGE_CAP_WIDTH : 0;
+  const badgeText = label ?? "";
+  const labelWidth = badgeText.length > 0 ? displayLength(badgeText) + BADGE_CAP_WIDTH : 0;
   const pre = labelWidth > 0 ? "──" : "";
   const leftWidth = pre.length + labelWidth;
   if (leftWidth === 0) return undefined;
   if (leftWidth > width) return undefined;
-  return { pre, mode: label, post: "─".repeat(width - leftWidth) };
+  return { pre, label: badgeText, post: "─".repeat(width - leftWidth) };
 }

@@ -90,7 +90,7 @@ export function chromeEditorLines(
     const top = buildTopBorder(innerWidth, mode?.label);
     if (top !== undefined) {
       const decorate = makeModeBadgeDecorator(mode ? getBadgeFgAnsi(mode.severity) : undefined);
-      const badge = top.mode.length > 0 ? decorate(top.mode) : "";
+      const badge = top.label.length > 0 ? decorate(top.label) : "";
       out[topIdx] = borderColor(top.pre) + badge + borderColor(top.post);
     }
   }
@@ -182,9 +182,10 @@ export function registerEditorChrome(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     if (!isInteractiveTui(ctx)) return;
 
-    // Full Theme (with getFgAnsi) comes from the context — the factory's
-    // `theme` param is pi-tui's EditorTheme subset and has no color
-    // accessors.
+    // SAFETY: Full Theme (with getFgAnsi) comes from the context — the
+    // factory's `theme` param is pi-tui's EditorTheme subset and has no color
+    // accessors, so the extra capability is present at runtime but not in the
+    // declared parameter type.
     const theme = ctx.ui.theme as unknown as {
       getFgAnsi(color: string): string | undefined;
     };

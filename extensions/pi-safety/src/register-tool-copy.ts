@@ -15,4 +15,4 @@ export const permissionedBashPromptGuidelines = [
 ] as const;
 
 export const requestPermissionsDescription =
-  "Request a turn-scoped filesystem or network permission. With Approve for me, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for execution attempts created afterwards in the current turn and does not disable the sandbox. Network authority freezes at attempt creation after action review, not invocation submission; a still-reviewing invocation may see an intervening grant. It does not expand an existing attempt or replay an action. Protected paths and prohibited targets remain blocked.";
+  "Request a turn-scoped filesystem or network permission. In auto mode, eligible requests are evaluated by Auto-review. Approval changes only the requested scope for execution attempts created afterwards in the current turn and does not disable the sandbox. Network authority freezes at attempt creation after action review, not invocation submission; a still-reviewing invocation may see an intervening grant. It does not expand an existing attempt or replay an action. Protected paths and prohibited targets remain blocked.";

@@ -30,7 +30,6 @@ describe("PermissionModeRuntime", () => {
       consecutiveDenials: 0,
       paused: false,
     });
-    expect(runtime.statusLabel).toBe("Approve for me");
     expect(runtime.statusSeverity).toBe("warning");
     expect(appendEntry).not.toHaveBeenCalled();
   });
@@ -93,7 +92,6 @@ describe("PermissionModeRuntime", () => {
     runtime.applyAutoState({ consecutiveDenials: 1, paused: false });
 
     expect(runtime.activate(nextMode(runtime.mode))).toBe("yolo");
-    expect(runtime.statusLabel).toBe("Bypass permissions");
     expect(runtime.statusSeverity).toBe("error");
     expect(runtime.activate(nextMode(runtime.mode))).toBe("auto");
     expect(runtime.autoState).toEqual({ consecutiveDenials: 0, paused: false });

@@ -235,6 +235,6 @@ describe("permission copy", () => {
         ruleCount: 0,
         writeRoots: [],
       }),
-    ).toBe("Bypass permissions · sandbox off · approvals off · deny rules still apply");
+    ).toBe("yolo · sandbox off · approvals off · deny rules still apply");
   });
 });
