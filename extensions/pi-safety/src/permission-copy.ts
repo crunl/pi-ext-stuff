@@ -85,7 +85,7 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
               "Execution had already started; earlier effects may have occurred. Do not replay it blindly.",
             ]
           : []),
-        "The agent must not attempt to achieve the same outcome through a workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative, or if the user explicitly approves the action after being informed of the risk. Otherwise, stop and ask the user.",
+        "The agent must not attempt to achieve the same outcome through a workaround, indirect execution, or policy circumvention. This rejection is final for the action as submitted: do not resubmit it or restate it in a different form in the hope of a different outcome. Proceed only with a materially safer alternative, or after the user has been told the concrete risk and explicitly approves this exact action. Otherwise, stop.",
       ].join("\n");
     case "review-timeout":
       if (effectsMayHaveOccurred) {
@@ -166,7 +166,7 @@ export function renderPermissionErrorForAgent(error: PermissionError): string {
       }
       return `Sandbox enforcement denied the requested capability. The action was not run.\nReason: ${reason}`;
     case "circuit-open":
-      return "Automatic approval review is unavailable for this turn because too many approval requests were denied. Stop and ask the user before attempting another boundary-crossing action.";
+      return "Automatic approval review is unavailable for this turn because too many approval requests were denied. Stop here: any further boundary-crossing action would be refused the same way this turn, so do not attempt one.";
     case "aborted":
       if (effectsMayHaveOccurred) {
         return "Permission handling was aborted after execution started. Earlier effects may have occurred; inspect the result before considering a retry.";

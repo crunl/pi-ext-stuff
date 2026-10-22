@@ -723,7 +723,8 @@ describe("Permission mode registration", () => {
     expect(bashDescription).not.toContain("(sandboxed)");
     expect(bashDescription).toContain("could not lock config file");
     expect(bashDescription).not.toContain("require_escalated");
-    expect(bashDescription).toContain("switch to yolo");
+    expect(bashDescription).toContain("request a narrower write");
+    expect(bashDescription).not.toContain("switch to yolo");
     expect(bashDescription).toContain("PIPESTATUS");
   });
 

@@ -23,7 +23,17 @@ describe("permission copy", () => {
     expect(message).toContain("Reason: The requested destination is not authorized.");
     expect(message).toContain("must not attempt to achieve the same outcome through a workaround");
     expect(message).toContain("materially safer alternative");
-    expect(message).toContain("stop and ask the user");
+    expect(message).toContain("This rejection is final for the action as submitted");
+    expect(message).toMatch(/proceed only with a materially safer alternative, or after the user/i);
+    // The extension can no longer assert "the user approved" on the user's
+    // behalf. The user speaking in chat is still trusted evidence the reviewer
+    // may weigh (guardian-policy.ts), so that route survives -- but only as a
+    // conditional on telling the user the concrete risk first.
+    expect(message).toContain(
+      "after the user has been told the concrete risk and explicitly approves this exact action",
+    );
+    // A terminal rejection offers no retry of its own accord.
+    expect(message).not.toContain("You may retry");
     expect(message).not.toContain("review-denied");
     expect(message).not.toContain("Guardian");
   });
