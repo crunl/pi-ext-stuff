@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type AutoState,
   createEngine,
@@ -9,7 +9,6 @@ import {
 } from "./engine.ts";
 import type {
   BlockRecoverability,
-  DenialNotice,
   Engine,
   AdmissionPlan as EngineAdmissionPlan,
   CapabilityAuthorizationDecision as EngineCapabilityAuthorizationDecision,
@@ -207,18 +206,6 @@ function intentForAction(
   };
 }
 
-interface ExactRetryDispatch {
-  readonly denialId: string;
-  readonly tool: string;
-  readonly serializedInput: string;
-  readonly cwd: string;
-  readonly previousDenial: string;
-}
-
-export type RecoverDeniedActionResult =
-  | { readonly kind: "armed"; readonly dispatch: ExactRetryDispatch }
-  | { readonly kind: "empty" | "cancelled" | "stale" };
-
 interface PiSafetyOptions<ReviewContext = undefined> {
   guardian?: GuardianAdapter<ReviewContext>;
   policy?: PermissionPolicy;
@@ -264,9 +251,7 @@ interface PiSafety<ReviewContext = undefined> {
   captureAction<Input>(call: PiActionCall<Input>): PiCapturedAction<Input>;
   closeTurn(reason?: string): void;
   invalidate(reason: string): void;
-  recoverDeniedAction(ui: ExtensionUIContext): Promise<RecoverDeniedActionResult>;
 }
-
 const NO_ACTIVE_TURN: PermissionError = {
   code: "no-active-turn",
   reason: "No active permission turn is available",
@@ -279,19 +264,6 @@ function reviewUi(context: ExtensionContext | undefined): ReviewUi | undefined {
   // takes ctx.ui directly behind a hasUI guard, so RPC select is unaffected.
   if (context?.mode !== "tui" || !context.hasUI) return undefined;
   return context.ui;
-}
-
-function retryChoice(
-  denial: {
-    call: { tool: string; input: unknown };
-    summary?: string;
-    rationale: string;
-  },
-  index: number,
-): string {
-  const summary = (denial.summary ?? denial.call.tool).replace(/\s+/g, " ").trim().slice(0, 120);
-  const rationale = denial.rationale.replace(/\s+/g, " ").trim().slice(0, 160);
-  return `${index + 1}. ${denial.call.tool}: ${summary} — ${rationale}`;
 }
 
 export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<ReviewContext> {
@@ -504,44 +476,6 @@ export class PiSafetyRuntime<ReviewContext = undefined> implements PiSafety<Revi
     this.circuitPauseNotified = false;
     this.presenter.reset(ui);
     this.engine.invalidate(reason);
-  }
-
-  async recoverDeniedAction(ui: ExtensionUIContext): Promise<RecoverDeniedActionResult> {
-    let denials: DenialNotice[];
-    try {
-      denials = [...this.engine.listDenials()].reverse();
-    } catch {
-      return { kind: "stale" };
-    }
-    if (denials.length === 0) return { kind: "empty" };
-
-    const choices = denials.map((denial, index) => retryChoice(denial, index));
-    let choice: string | undefined;
-    try {
-      choice = await ui.select("Auto-review denials", choices);
-    } catch {
-      return { kind: "cancelled" };
-    }
-    if (choice === undefined) return { kind: "cancelled" };
-    const selectedIndex = choices.indexOf(choice);
-    const denial = selectedIndex < 0 ? undefined : denials[selectedIndex];
-    if (!denial) return { kind: "stale" };
-    let serializedInput: string;
-    try {
-      serializedInput = JSON.stringify(denial.call.input) ?? "null";
-    } catch {
-      return { kind: "stale" };
-    }
-    if (!this.engine.armRetry(denial.handle)) return { kind: "stale" };
-
-    const dispatch: ExactRetryDispatch = Object.freeze({
-      denialId: denial.handle.token,
-      tool: denial.call.tool,
-      serializedInput,
-      cwd: denial.call.cwd,
-      previousDenial: denial.rationale,
-    });
-    return { kind: "armed", dispatch };
   }
 
   private handleReviewEvent(event: ReviewEvent): void {

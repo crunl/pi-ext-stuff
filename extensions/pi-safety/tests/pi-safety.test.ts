@@ -1,11 +1,10 @@
-import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
   type PiAction,
   type PiActionOutcome,
   PiSafetyRuntime,
   type PiTurnSnapshot,
-  type RecoverDeniedActionResult,
 } from "../src/pi-safety.ts";
 
 const baseSnapshot: PiTurnSnapshot = {
@@ -184,30 +183,5 @@ describe("PiSafetyRuntime facade", () => {
     await expect(result).resolves.toEqual({ kind: "completed", value: "safe" });
     expect(originalExecute).toHaveBeenCalledOnce();
     expect(replacementExecute).not.toHaveBeenCalled();
-  });
-
-  it("arms an exact retry and returns only immutable dispatch data", async () => {
-    const runtime = new PiSafetyRuntime({
-      guardian: { review: async () => ({ kind: "deny" as const, rationale: "not allowed" }) },
-    });
-    const ui = testUi();
-    runtime.beginTurn(baseSnapshot, context(ui));
-
-    const blocked = await runtime.submit(reviewedInvocation(runtime, "denied"));
-    expect(blocked).toMatchObject({ kind: "blocked", error: { code: "review-denied" } });
-    const recovery: RecoverDeniedActionResult = await runtime.recoverDeniedAction(
-      ui as unknown as ExtensionUIContext,
-    );
-
-    expect(recovery.kind).toBe("armed");
-    if (recovery.kind !== "armed") return;
-    expect(recovery.dispatch).toMatchObject({
-      denialId: expect.stringMatching(/^retry-/),
-      tool: "mcp_test",
-      serializedInput: JSON.stringify({ value: "denied" }),
-      cwd: "/workspace",
-      previousDenial: "not allowed",
-    });
-    expect(Object.isFrozen(recovery.dispatch)).toBe(true);
   });
 });

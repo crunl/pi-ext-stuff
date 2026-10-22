@@ -4178,40 +4178,6 @@ describe("Permission mode registration", () => {
     expect(app.reviewInputs).toHaveLength(4);
   });
 
-  it("carries /approve across turns to an exact fresh-call retry", async () => {
-    const app = await makeHarness({
-      risk: (tool) =>
-        tool === "bash" ? promptRisk({ networkHosts: ["api.example.com"] }) : undefined,
-      review: (_request, ordinal) =>
-        ordinal === 1 ? denied("Needs user confirmation.") : approved(),
-    });
-    await startSession(app);
-    await startAgent(app);
-
-    await expect(executeBash(app, "original-call", "printf exact")).rejects.toMatchObject({
-      code: "review-denied",
-    });
-    await endAgent(app);
-    const approveCommand = app.commands.get("approve");
-    if (!approveCommand) throw new Error("missing /approve command");
-    await approveCommand.handler("", app.context);
-    expect(app.select).toHaveBeenCalledOnce();
-    expect(app.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ customType: "pi-safety-auto-override" }),
-      { triggerTurn: true },
-    );
-
-    await startAgent(app);
-    await executeBash(app, "fresh-call", "printf exact");
-
-    expect(app.reviewInputs).toHaveLength(2);
-    expect(app.reviewInputs[1]?.toolCallId).toBe("fresh-call");
-    expect(app.reviewInputs[1]?.approvalOverride).toMatchObject({
-      denialId: "retry-1",
-    });
-    expect(app.sandboxBashExecute).toHaveBeenCalledOnce();
-  });
-
   it("notifies and aborts once at three denials, then resets persisted Auto state", async () => {
     const app = await makeHarness({
       risk: (tool) => (tool === "bash" ? promptRisk() : undefined),

@@ -81,7 +81,6 @@ import {
 } from "./network-domain-pattern.ts";
 import {
   permissionModeLabel,
-  renderExactRetryInstruction,
   renderPermissionErrorForAgent,
   renderPermissionNotice,
   renderPermissionSummary,
@@ -2343,58 +2342,6 @@ export function registerExtension(pi: ExtensionAPI, options: RegisterExtensionOp
     if (event.toolName !== "bash" || event.isError) return undefined;
     const exitCode = commandExitCode(event.details);
     return exitCode === undefined || exitCode === 0 ? undefined : { isError: true };
-  });
-
-  pi.registerCommand("approve", {
-    description: "Authorize one exact retry of a recent Auto-review denial",
-    handler: async (_args, ctx) => {
-      let result: LoadedSafetyConfig;
-      const activationGeneration = session.getGeneration();
-      try {
-        result = await activateConfig(ctx, false, undefined, undefined, activationGeneration);
-        assertActivationCurrent(activationGeneration);
-      } catch (error: unknown) {
-        if (isActivationSupersededError(error)) return;
-        reportPermissionSetupError(ctx, error);
-        return;
-      }
-      const runtime = ensureModeRuntime(result.config);
-      if (runtime.mode !== "auto") {
-        if (ctx.hasUI) {
-          ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-mode" }), "warning");
-        }
-        return;
-      }
-      if (!ctx.hasUI) {
-        // Host contract (runner.js): without a UI, ctx.ui is noOpUIContext,
-        // never undefined — this notify is a safe no-op documenting the
-        // requirement for log/telemetry consumers.
-        ctx.ui.notify(renderPermissionNotice({ kind: "approve-requires-ui" }), "warning");
-        return;
-      }
-      const recovery = await permissions.recoverDeniedAction(ctx.ui);
-      if (recovery.kind === "empty") {
-        ctx.ui.notify(renderPermissionNotice({ kind: "approve-empty" }), "info");
-        return;
-      }
-      if (recovery.kind !== "armed") {
-        if (recovery.kind === "stale") {
-          ctx.ui.notify(renderPermissionNotice({ kind: "approve-stale" }), "warning");
-        }
-        return;
-      }
-      pi.sendMessage(
-        {
-          customType: "pi-safety-auto-override",
-          content: renderExactRetryInstruction(recovery.dispatch),
-          display: true,
-          details: {
-            denialId: recovery.dispatch.denialId,
-          },
-        },
-        { triggerTurn: true },
-      );
-    },
   });
 
   const cyclePermissionMode = async (ctx: ExtensionContext): Promise<void> => {

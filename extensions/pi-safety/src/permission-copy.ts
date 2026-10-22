@@ -39,10 +39,6 @@ type PermissionNotice =
       activeProvider: string;
       activeModel: string;
     }
-  | { kind: "approve-requires-mode" }
-  | { kind: "approve-requires-ui" }
-  | { kind: "approve-empty" }
-  | { kind: "approve-stale" }
   | { kind: "configuration-invalid"; reason: string }
   | {
       kind: "sandbox-activation-failed";
@@ -215,14 +211,6 @@ export function renderPermissionNotice(notice: PermissionNotice): string {
       return `Automatic approval review rejected too many approval requests for this turn (${notice.consecutiveDenials} consecutive, ${notice.recentDenials} in the last ${notice.windowSize} reviews); interrupting the turn.`;
     case "reviewer-fallback":
       return `Configured reviewer ${notice.preferredModel} is unavailable. Auto-review will use ${notice.activeProvider}/${notice.activeModel}.`;
-    case "approve-requires-mode":
-      return "/approve is available only with Approve for me.";
-    case "approve-requires-ui":
-      return "/approve requires an interactive UI.";
-    case "approve-empty":
-      return "No recent Auto-review denials in this task.";
-    case "approve-stale":
-      return "That Auto-review denial is no longer available.";
     case "configuration-invalid":
       return `Permission configuration is invalid: ${notice.reason}`;
     case "sandbox-activation-failed":
@@ -247,19 +235,4 @@ export function renderPermissionSummary(summary: PermissionSummary): string {
     : "Auto-review unavailable for this turn";
   const writeRoots = summary.writeRoots.length > 0 ? summary.writeRoots.join(", ") : "none";
   return `${permissionModeLabel(summary.mode)} · ${summary.sandbox} · ${autoReview} · ${reviewer} · ${summary.ruleCount} rules · write roots: ${writeRoots}`;
-}
-
-export function renderExactRetryInstruction(input: {
-  tool: string;
-  serializedInput: string;
-  cwd: string;
-  previousDenial: string;
-}): string {
-  return [
-    "The user authorized one exact retry of the action below. Retry it exactly once without broadening or altering it. The retry still requires Auto-review and may be denied again.",
-    `Tool: ${input.tool}`,
-    `Input: ${input.serializedInput}`,
-    `Working directory: ${input.cwd}`,
-    `Previous denial: ${input.previousDenial}`,
-  ].join("\n");
 }

@@ -1,4 +1,4 @@
-import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
   type PiAction,
@@ -81,29 +81,6 @@ describe("PiSafetyRuntime nested turns", () => {
       kind: "completed",
       value: "ok",
     });
-    runtime.closeTurn();
-  });
-
-  it("keeps child denials invisible to the parent turn", async () => {
-    const runtime = new PiSafetyRuntime({
-      guardian: {
-        review: async (input: { call: { id: string } }) =>
-          input.call.id === "child-denied"
-            ? { kind: "deny" as const, rationale: "child says no" }
-            : { kind: "approve" as const, rationale: "approved" },
-      },
-    });
-    const ctx = context();
-    const ui = ctx.ui as unknown as ExtensionUIContext;
-    runtime.beginTurn(snapshot("outer"), ctx);
-    runtime.beginNestedTurn(snapshot("child"), ctx);
-
-    const outcome = await runtime.submit(hostAction(runtime, "child-denied"));
-    expect(outcome.kind).toBe("blocked");
-    expect(await runtime.recoverDeniedAction(ui)).toMatchObject({ kind: "armed" });
-
-    runtime.closeNestedTurn("child done");
-    expect(await runtime.recoverDeniedAction(ui)).toMatchObject({ kind: "empty" });
     runtime.closeTurn();
   });
 
