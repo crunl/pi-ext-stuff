@@ -19,6 +19,8 @@ import { SandboxConnectGuard } from "../src/sandbox/connect-guard.ts";
 import { SRT_DRAIN_TIMEOUT_MS, SrtProcessCoordinator } from "../src/sandbox/srt-coordinator.ts";
 import {
   assertSrtPolicySupported,
+  effectiveWriteRoots,
+  platformWriteRoots,
   type SrtRuntimeLike,
   SrtSandboxManager,
 } from "../src/sandbox/srt-enforcer.ts";
@@ -234,6 +236,25 @@ function withDarwin<T extends unknown[]>(run: (...args: T) => Promise<void>) {
 
 const weakerWrap = { enableWeakerNetworkIsolation: true };
 
+describe("write-root projection", () => {
+  it("stays zero-write when the user write set is empty", () => {
+    expect(effectiveWriteRoots([])).toEqual([]);
+  });
+
+  it("adds the platform defaults only beside a non-empty user write set", () => {
+    const roots = effectiveWriteRoots(["/work"]);
+    expect(roots).toContain("/work");
+    for (const root of platformWriteRoots()) expect(roots).toContain(root);
+  });
+
+  it("leaves the user authority list untouched — Engine and delegation keep reading it", () => {
+    const userAllowWrite = ["/work"];
+    const effective = effectiveWriteRoots(userAllowWrite);
+    expect(userAllowWrite).toEqual(["/work"]);
+    expect(effective.length).toBeGreaterThan(userAllowWrite.length);
+  });
+});
+
 describe("SRT executor contract", () => {
   it("runs hermetic fake-SRT without inject wrap network.mode (pristine)", async () => {
     const original = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -345,8 +366,10 @@ describe("SRT executor contract", () => {
   it("injects weaker isolation only when guard parentProxyUrl is live", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
-    await manager.activate(basePolicy());
-    await execute(manager, basePolicy());
+    const policy = basePolicy();
+    policy.compatibility = { allowTrustd: true };
+    await manager.activate(policy);
+    await execute(manager, policy);
     expect(runtime.wrapConfigs).toEqual([weakerWrap]);
     expect(runtime.initialized[0]).toHaveProperty("enableWeakerNetworkIsolation", true);
     const network = runtime.initialized[0]?.network as
@@ -357,12 +380,24 @@ describe("SRT executor contract", () => {
     await manager.reset();
   });
 
+  it("keeps trustd closed unless the policy explicitly trades for it", async () => {
+    const runtime = new FakeSrtRuntime();
+    const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
+    const policy = basePolicy();
+    await manager.activate(policy);
+    await execute(manager, policy);
+    expect(runtime.wrapConfigs).toEqual([undefined]);
+    expect(runtime.initialized[0]).not.toHaveProperty("enableWeakerNetworkIsolation");
+    await manager.reset();
+  });
+
   it("uses native initialize/update network lists; wrap never carries network.mode", async () => {
     const runtime = new FakeSrtRuntime();
     const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
     const policy = basePolicy();
     policy.network.access = { kind: "explicit", transport: "proxy" };
     policy.network.macosTls = "system";
+    policy.compatibility = { allowTrustd: true };
     await manager.activate(policy);
     await execute(manager, policy);
     const authorized = structuredClone(policy);
@@ -387,12 +422,15 @@ describe("SRT executor contract", () => {
     const manager = new SrtSandboxManager(runtime, new FakeConnectGuard());
     const restricted = basePolicy();
     restricted.network.access = { kind: "explicit", transport: "proxy" };
+    restricted.compatibility = { allowTrustd: true };
     await manager.activate(restricted);
     await execute(manager, restricted);
     const proxy = structuredClone(restricted);
     proxy.network.allowedDomains = ["api.example.com"];
     await execute(manager, proxy);
-    await execute(manager, basePolicy());
+    const third = basePolicy();
+    third.compatibility = { allowTrustd: true };
+    await execute(manager, third);
     expect(runtime.wrapConfigs).toEqual([weakerWrap, weakerWrap, weakerWrap]);
     expect(runtime.initialized[0]?.network).not.toHaveProperty("mode");
     expect(manager.isHealthy()).toBe(true);

@@ -28,6 +28,7 @@ import {
   type SandboxManagerLike,
   type SandboxNetworkAuthorize,
   type SandboxPolicy,
+  sandboxTransportOverlay,
   withAdditionalWriteRoots,
 } from "./sandbox-policy.ts";
 
@@ -144,17 +145,11 @@ export function createSandboxedBashOperations(
       }
 
       const executionPolicy = customConfig ?? createDefaultSandboxConfig();
-      // SRT injects a private-target NO_PROXY set by default. When the
-      // sandbox-owned callback is active, local/private exceptions must still
-      // pass through the authenticated parent guard so its exact ticket and
-      // address binding remain authoritative. Preserve the caller's other
-      // environment values; allowLocalBinding controls whether the boundary
-      // approves those targets, not whether they bypass the guard. The SRT
-      // adapter also repeats this override inside
-      // the POSIX command because SRT bakes its own NO_PROXY values into the
-      // sandbox argv after the spawn environment is assembled.
+      // Local/private targets must traverse the authenticated parent guard even
+      // when an inherited env carries a NO_PROXY. The SRT adapter repeats this
+      // same overlay as a POSIX command prefix — see `sandboxTransportOverlay`.
       const executionEnv = options.networkAuthorize
-        ? { ...(env ?? {}), NO_PROXY: "", no_proxy: "" }
+        ? { ...(env ?? {}), ...sandboxTransportOverlay() }
         : env;
       const result = await executeSandboxProgram(manager, {
         policy: executionPolicy,
@@ -169,6 +164,9 @@ export function createSandboxedBashOperations(
             : timeout > 0
               ? timeout * 1000
               : undefined,
+        // What this invocation represents, not the wrapped argv. Violation
+        // attribution and `ignoreViolations` command patterns key on it.
+        commandText: command,
         ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
         ...(options.networkAuthorize === undefined
           ? {}

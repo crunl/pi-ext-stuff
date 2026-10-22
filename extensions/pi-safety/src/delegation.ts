@@ -173,6 +173,11 @@ export function intersectSandboxPolicy(
           ),
         ];
   return {
+    // A delegated child inherits the parent's transport-compatibility
+    // tradeoffs; rebuilding the policy without this slice would close them.
+    ...(base.compatibility === undefined
+      ? {}
+      : { compatibility: structuredClone(base.compatibility) }),
     filesystem: {
       allowWrite,
       denyRead: [...base.filesystem.denyRead],

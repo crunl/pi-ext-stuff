@@ -28,7 +28,7 @@ describe("PermissionsModeState", () => {
     expect(state.severity()).toBe("none");
     // A none event is not a state change.
     expect(
-      state.applyEvent({ mode: "default", label: "default", severity: "none" }),
+      state.applyEvent({ mode: "auto", label: "default", severity: "none" }),
     ).toBe(false);
   });
 

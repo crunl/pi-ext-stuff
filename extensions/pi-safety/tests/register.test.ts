@@ -2730,6 +2730,7 @@ describe("Permission mode registration", () => {
         sandboxManagerOverride: manager,
         config: {
           sandbox: {
+            compatibility: { allowTrustd: true },
             network: {
               access: { kind: "explicit", transport: "direct" },
               network_access: true,

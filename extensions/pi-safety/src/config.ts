@@ -26,6 +26,15 @@ export interface SafetyConfig {
   sandbox: {
     enabled: boolean;
     profile: "workspace-write" | "read-only";
+    /** Runtime compatibility tradeoffs; omitted = the stronger posture. */
+    compatibility?: {
+      /**
+       * macOS: re-enable `com.apple.trustd.agent` so Go TLS verification
+       * (`gh`, `gcloud`, `terraform`, `kubectl`) works. Upstream security
+       * warning: opens a data-exfiltration vector through the trustd service.
+       */
+      allowTrustd?: boolean;
+    };
     filesystem: {
       allowWrite: string[];
       denyRead: string[];
@@ -94,6 +103,7 @@ type SafetyConfigOverlay = {
   sandbox?: {
     enabled?: boolean;
     profile?: SafetyConfig["sandbox"]["profile"];
+    compatibility?: SafetyConfig["sandbox"]["compatibility"];
     filesystem?: {
       allowWrite?: string[];
       denyRead?: string[];
@@ -353,7 +363,11 @@ function parseOverlay(input: unknown): SafetyConfigOverlay {
   }
   if ("sandbox" in input && input.sandbox !== undefined) {
     if (!isRecord(input.sandbox)) throw new ConfigError("sandbox must be an object");
-    rejectUnknownKeys(input.sandbox, ["enabled", "profile", "filesystem", "network"], "sandbox");
+    rejectUnknownKeys(
+      input.sandbox,
+      ["enabled", "profile", "compatibility", "filesystem", "network"],
+      "sandbox",
+    );
     const sandbox: NonNullable<SafetyConfigOverlay["sandbox"]> = {};
     if ("enabled" in input.sandbox && input.sandbox.enabled !== undefined)
       sandbox.enabled = expectBoolean(input.sandbox.enabled, "sandbox.enabled");
@@ -365,6 +379,22 @@ function parseOverlay(input: unknown): SafetyConfigOverlay {
         throw new ConfigError("sandbox.profile is invalid");
       }
       sandbox.profile = input.sandbox.profile as SafetyConfig["sandbox"]["profile"];
+    }
+    if ("compatibility" in input.sandbox && input.sandbox.compatibility !== undefined) {
+      if (!isRecord(input.sandbox.compatibility))
+        throw new ConfigError("sandbox.compatibility must be an object");
+      rejectUnknownKeys(input.sandbox.compatibility, ["allowTrustd"], "sandbox.compatibility");
+      const compatibility: NonNullable<SafetyConfigOverlay["sandbox"]>["compatibility"] = {};
+      if (
+        "allowTrustd" in input.sandbox.compatibility &&
+        input.sandbox.compatibility.allowTrustd !== undefined
+      ) {
+        compatibility.allowTrustd = expectBoolean(
+          input.sandbox.compatibility.allowTrustd,
+          "sandbox.compatibility.allowTrustd",
+        );
+      }
+      sandbox.compatibility = compatibility;
     }
     if ("filesystem" in input.sandbox && input.sandbox.filesystem !== undefined) {
       if (!isRecord(input.sandbox.filesystem))
@@ -552,6 +582,11 @@ function applyOverlay(base: SafetyConfig, overlay: SafetyConfigOverlay): SafetyC
   if (overlay.sandbox !== undefined) {
     if (overlay.sandbox.enabled !== undefined) config.sandbox.enabled = overlay.sandbox.enabled;
     if (overlay.sandbox.profile !== undefined) config.sandbox.profile = overlay.sandbox.profile;
+    if (overlay.sandbox.compatibility !== undefined) {
+      config.sandbox.compatibility ??= {};
+      if (overlay.sandbox.compatibility.allowTrustd !== undefined)
+        config.sandbox.compatibility.allowTrustd = overlay.sandbox.compatibility.allowTrustd;
+    }
     if (overlay.sandbox.filesystem?.allowWrite !== undefined)
       config.sandbox.filesystem.allowWrite = [...overlay.sandbox.filesystem.allowWrite];
     if (overlay.sandbox.filesystem?.denyRead !== undefined)

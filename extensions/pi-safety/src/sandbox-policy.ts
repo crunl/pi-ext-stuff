@@ -51,6 +51,20 @@ export interface SandboxPolicy {
     /** SRT allowAllUnixSockets (Codex dangerously_allow_all_* analogue). */
     dangerouslyAllowAllUnixSockets?: boolean;
   };
+  /**
+   * Runtime compatibility tradeoffs. Each entry weakens the sandbox to make a
+   * class of tools work; absent/false keeps the stronger posture. A tradeoff
+   * is policy, never a default hidden inside the enforcement seam.
+   */
+  compatibility?: {
+    /**
+     * macOS only: re-enable `com.apple.trustd.agent` so Go TLS verification
+     * (`gh`, `gcloud`, `terraform`, `kubectl`) works under a MITM proxy with a
+     * custom CA. Upstream security warning: opens a data-exfiltration vector
+     * through the trustd service.
+     */
+    allowTrustd?: boolean;
+  };
 }
 
 /**
@@ -327,6 +341,19 @@ export function createDefaultSandboxConfig(): SandboxPolicy {
   };
 }
 
+/**
+ * Transport overlay for the parent-proxy contract: local/private targets must
+ * traverse the authenticated guard even when an inherited env carries a
+ * NO_PROXY, so both spellings are emptied. SRT bakes its own private-target
+ * NO_PROXY list into the outer sandbox argv *after* the spawn environment is
+ * assembled, so the SRT adapter repeats this same overlay as a POSIX command
+ * prefix (Windows drops NO_PROXY from its child overlay and needs no prefix).
+ * Both spellings derive from this one value so they cannot drift.
+ */
+export function sandboxTransportOverlay(): { NO_PROXY: string; no_proxy: string } {
+  return { NO_PROXY: "", no_proxy: "" };
+}
+
 export function withAdditionalWriteRoots(
   config: SandboxPolicy,
   writeRoots: readonly string[],
@@ -416,6 +443,9 @@ export function createSandboxRuntimeConfig(
         ? {}
         : { dangerouslyAllowAllUnixSockets: config.network.dangerouslyAllowAllUnixSockets }),
     },
+    ...(config.compatibility?.allowTrustd === undefined
+      ? {}
+      : { compatibility: { allowTrustd: config.compatibility.allowTrustd } }),
   };
 }
 

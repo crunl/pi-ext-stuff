@@ -20,6 +20,7 @@ import {
   type SandboxExecutionResult,
   type SandboxManagerLike,
   type SandboxPolicy,
+  sandboxTransportOverlay,
 } from "../sandbox-policy.ts";
 import { errorMessage } from "../unknown-value.ts";
 import { SandboxConnectGuard, shouldBypassParentProxy } from "./connect-guard.ts";
@@ -113,29 +114,51 @@ function parentProxyActive(connectGuard?: SandboxConnectGuard): boolean {
 }
 
 /**
+ * macOS trustd access is a compatibility tradeoff, not a default. Upstream
+ * carries a security warning on `enableWeakerNetworkIsolation`: it re-enables
+ * `com.apple.trustd.agent`, a data-exfiltration vector. Off unless the policy
+ * explicitly asks for it AND a parent-proxy seam is live — the only shape that
+ * needs Go TLS (gh/gcloud/terraform/kubectl) to reach trustd.
+ */
+function trustdAllowed(policy: SandboxPolicy, connectGuard?: SandboxConnectGuard): boolean {
+  return policy.compatibility?.allowTrustd === true && parentProxyActive(connectGuard);
+}
+
+/**
  * Native SRT config only — never network.mode (pristine 0.0.79).
- * When connect-guard supplies parentProxy, inject the public
- * enableWeakerNetworkIsolation so Go TLS (gh/gcloud/…) can reach trustd
- * inside the seatbelt; documented security tradeoff in AGENTS.md.
  * Unix sockets: only explicit allowUnixSockets / dangerouslyAllowAllUnixSockets
  * are projected; empty/absent omits the fields so SRT keeps AF_UNIX blocked.
  */
+/**
+ * Platform write roots the sandbox needs regardless of the user's list. Codex
+ * workspace-write treats $TMPDIR as a platform default write root
+ * (FileSystemSpecialPath::Tmpdir), not a user writable_roots entry.
+ */
+export function platformWriteRoots(): string[] {
+  return expandSymlinkAliases(tmpdir());
+}
+
+/**
+ * What the OS actually enforces: the user's authority plus the platform
+ * defaults. Deliberately NOT what Engine or delegation read — those keep
+ * `policy.filesystem.allowWrite`, so writing to tmpdir still needs a grant.
+ * The split is a fact, not an accident; naming both sides keeps the gap
+ * auditable instead of buried inside a config translation.
+ * Gated on a non-empty user write set so read-only profiles and resolved-empty
+ * delegation intersections stay zero-write.
+ */
+export function effectiveWriteRoots(userAllowWrite: readonly string[]): string[] {
+  if (userAllowWrite.length === 0) return [...userAllowWrite];
+  return [...new Set([...userAllowWrite, ...platformWriteRoots()])];
+}
+
 function toSrtConfig(
   policy: SandboxPolicy,
   connectGuard?: SandboxConnectGuard,
 ): SandboxRuntimeConfig {
   assertSrtPolicySupported(policy);
   const authority = effectiveNetworkAuthority(policy.network);
-  // Codex workspace-write treats $TMPDIR as a platform default write root
-  // (FileSystemSpecialPath::Tmpdir), not a user writable_roots entry. Inject
-  // it only at the SRT enforcement seam so Engine path checks and delegation
-  // intersections keep seeing the user's own allowWrite list. Gated on a
-  // non-empty user write set so read-only profiles and resolved-empty
-  // delegation intersections stay zero-write.
-  const allowWrite =
-    policy.filesystem.allowWrite.length === 0
-      ? [...policy.filesystem.allowWrite]
-      : [...new Set([...policy.filesystem.allowWrite, ...expandSymlinkAliases(tmpdir())])];
+  const allowWrite = effectiveWriteRoots(policy.filesystem.allowWrite);
   const allowUnixSockets =
     policy.network.allowUnixSockets === undefined
       ? []
@@ -167,13 +190,16 @@ function toSrtConfig(
           }
         : {}),
     },
-    ...(parentProxyActive(connectGuard) ? { enableWeakerNetworkIsolation: true } : {}),
+    ...(trustdAllowed(policy, connectGuard) ? { enableWeakerNetworkIsolation: true } : {}),
   };
 }
 
-/** Per-wrap native customConfig; empty when no parentProxy seam. */
-function wrapCustomConfig(connectGuard?: SandboxConnectGuard): Record<string, unknown> | undefined {
-  return parentProxyActive(connectGuard) ? { enableWeakerNetworkIsolation: true } : undefined;
+/** Per-wrap native customConfig; undefined when no tradeoff is active. */
+function wrapCustomConfig(
+  policy: SandboxPolicy,
+  connectGuard?: SandboxConnectGuard,
+): Record<string, unknown> | undefined {
+  return trustdAllowed(policy, connectGuard) ? { enableWeakerNetworkIsolation: true } : undefined;
 }
 
 async function askNetwork(params: { host: string; port?: number }): Promise<boolean> {
@@ -232,26 +258,34 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/**
+ * How a program is carried through the sandbox, kept apart from what it
+ * represents. SRT bakes its private-target NO_PROXY list into the outer
+ * sandbox argv *after* the spawn environment is assembled, so the overlay that
+ * `sandbox.ts` puts on the request env cannot reach the tool; the same
+ * `sandboxTransportOverlay` is repeated here as a POSIX command prefix
+ * (Windows drops NO_PROXY from its child overlay and needs no prefix).
+ * `commandText` is always the un-prefixed program: the prefix is transport,
+ * never identity.
+ */
 function serializeProgram(
   program: SandboxExecutionRequest["program"],
   options: { forceProxyForLocalTargets?: boolean } = {},
-): string {
+): { command: string; commandText: string } {
   if (!isAbsolute(program.executable)) {
     throw sandboxUnavailable(`program executable must be absolute: ${program.executable}`);
   }
-  const command = [program.executable, ...program.args].map(shellQuote).join(" ");
-  // On POSIX, SRT bakes its private-target NO_PROXY list into the outer
-  // sandbox command (`--setenv` on bwrap / env assignments on seatbelt).
-  // A request.env override therefore cannot reach the actual tool. Prefix
-  // the tool itself with empty assignments whenever the sandbox-owned
-  // callback is active, so every local/private target (including the
-  // explicit allowLocalBinding mode) traverses the authenticated parent
-  // guard. Windows intentionally removes NO_PROXY from its child overlay,
-  // so there is no equivalent prefix there.
-  if (options.forceProxyForLocalTargets && process.platform !== "win32") {
-    return `NO_PROXY="" no_proxy="" ${command}`;
-  }
-  return command;
+  const commandText = [program.executable, ...program.args].map(shellQuote).join(" ");
+  // The prefix is the POSIX spelling of `sandboxTransportOverlay`: the variable
+  // set comes from the one overlay so the env and the prefix cannot drift.
+  const prefix = Object.keys(sandboxTransportOverlay())
+    .map((name) => `${name}=""`)
+    .join(" ");
+  const forceProxy = options.forceProxyForLocalTargets === true && process.platform !== "win32";
+  return {
+    command: forceProxy && prefix.length > 0 ? `${prefix} ${commandText}` : commandText,
+    commandText,
+  };
 }
 
 /**
@@ -595,20 +629,20 @@ export class SrtSandboxManager implements SandboxManagerLike {
           let lifecycleStage: "cleanup" | "restore" | undefined;
           try {
             if (changed) this.runtime.updateConfig(toSrtConfig(derived, this.connectGuard));
-            const command = serializeProgram(request.program, {
+            const transport = serializeProgram(request.program, {
               // Native SRT has no network.mode. With connect-guard the egress
               // path is parentProxy; without it, keep serializeProgram defaults.
               forceProxyForLocalTargets: request.networkAuthorize !== undefined,
             });
             const wrapped = await this.runtime.wrapWithSandboxArgv(
-              command,
+              transport.command,
               POSIX_SHELL,
-              wrapCustomConfig(this.connectGuard),
+              wrapCustomConfig(derived, this.connectGuard),
               signal,
               request.cwd,
               {
                 ...(request.commandId === undefined ? {} : { commandId: request.commandId }),
-                ...(request.commandText === undefined ? {} : { commandText: request.commandText }),
+                commandText: request.commandText ?? transport.commandText,
               },
             );
             if (signal.aborted) throw new Error("aborted");
