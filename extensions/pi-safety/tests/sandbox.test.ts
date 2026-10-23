@@ -501,9 +501,9 @@ describe("sandbox integration", () => {
     expect(() =>
       validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: true, oops: true } } }),
     ).toThrow(/sandbox.compatibility/);
-    expect(() => validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: "yes" } } })).toThrow(
-      /allowTrustd/,
-    );
+    expect(() =>
+      validateSafetyConfig({ sandbox: { compatibility: { allowTrustd: "yes" } } }),
+    ).toThrow(/allowTrustd/);
   });
 
   it("keeps Codex-style defaults while resolving protected workspace metadata", () => {
