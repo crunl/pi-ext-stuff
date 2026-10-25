@@ -1,0 +1,11 @@
+feat(pig-herdr): report pig lifecycle to herdr
+
+Go extension so herdr recognizes pig panes: session_start reports
+idle plus the pig resume argv, turn and tool events drive working
+and idle, shutdown releases the hold. Inert outside herdr (env
+gate) and in headless runs (tui gate); reload mid-turn reports
+working via IsIdle instead of a false idle.
+
+Reviewed three rounds (toggle ordering, async shutdown release,
+release coalescing, enqueue filt window, then acceptance); 19 tests
+pass under -race, host validation clean.
