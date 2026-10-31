@@ -36,11 +36,17 @@ const INVERSE = (segment: string): string => `\x1b[7m${segment}\x1b[27m`;
  * (YIQ luma, threshold 128). Light backgrounds (e.g. Catppuccin mocha's
  * pale red) keep black text; dark ones (e.g. latte's deep red) switch to
  * white so the label stays readable across mixed themes.
+ *
+ * Uses 24-bit truecolor escape sequences rather than ANSI 16-color codes
+ * (\x1b[30m / \x1b[97m), because modern terminal emulators (Ghostty, iTerm2,
+ * Alacritty) with light themes remap ANSI 15 (bright white) to dim/subtext
+ * grey to avoid invisible text against light backgrounds, making pill text
+ * illegible on dark truecolor backgrounds.
  */
 export function contrastTextFor(rgb: [number, number, number]): string {
 	const [r, g, b] = rgb;
 	const luma = (299 * r + 587 * g + 114 * b) / 1000;
-	return luma >= 128 ? "\x1b[30m" : "\x1b[97m";
+	return luma >= 128 ? "\x1b[38;2;0;0;0m" : "\x1b[38;2;255;255;255m";
 }
 
 /**

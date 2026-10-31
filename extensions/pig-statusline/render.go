@@ -102,12 +102,16 @@ func bg(c rgb, text string) string {
 }
 
 // contrastText mirrors Pi's contrastTextFor: YIQ luma picks pill text.
+// Uses 24-bit truecolor escape sequences rather than ANSI 16-color codes
+// (\x1b[30m / \x1b[97m), because modern terminal emulators (Ghostty, iTerm2,
+// Alacritty) with light themes remap ANSI 15 (bright white) to dim/subtext
+// grey to avoid invisible text against light backgrounds.
 func contrastText(c rgb) string {
 	luma := (299*c.r + 587*c.g + 114*c.b) / 1000
 	if luma >= 128 {
-		return "\x1b[30m"
+		return "\x1b[38;2;0;0;0m"
 	}
-	return "\x1b[97m"
+	return "\x1b[38;2;255;255;255m"
 }
 
 func sgrReset() string { return "\x1b[39m\x1b[49m" }
@@ -412,6 +416,17 @@ func render(snap snapshot, width int) [2]string {
 			return [2]string{fitTail(l1, width), fitTail(l2, width)}
 		}
 	}
+}
+
+// footerLines converts the fixed [2]string frame into the rows handed
+// to the host. A trailing empty row (no statuses, or line2 degraded
+// away on narrow screens) is dropped: the host paints every element,
+// so shipping "" costs a blank line under the footer.
+func footerLines(l1, l2 string) []string {
+	if l2 == "" {
+		return []string{l1}
+	}
+	return []string{l1, l2}
 }
 
 // fitTail truncates from the right, keeping the identifying head.

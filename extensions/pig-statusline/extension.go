@@ -49,7 +49,7 @@ func Extension() *sdk.Extension {
 		snap := gather(ctx)
 		return ctx.SetFooterRenderer(func(width int) []string {
 			lines := render(snap, width)
-			return lines[:]
+			return footerLines(lines[0], lines[1])
 		})
 	}
 

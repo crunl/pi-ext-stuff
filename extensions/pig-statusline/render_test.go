@@ -195,6 +195,26 @@ func TestRenderDegradeLadder(t *testing.T) {
 	_ = full
 }
 
+func TestFooterLinesDropsTrailingEmpty(t *testing.T) {
+	cases := []struct {
+		l1, l2 string
+		want   int
+	}{
+		{"a", "b", 2},
+		{"a", "", 1},
+		{"", "", 1},
+	}
+	for _, c := range cases {
+		got := footerLines(c.l1, c.l2)
+		if len(got) != c.want {
+			t.Errorf("footerLines(%q, %q) = %d rows, want %d", c.l1, c.l2, len(got), c.want)
+		}
+	}
+	if got := footerLines("a", ""); got[0] != "a" {
+		t.Errorf("single row must keep l1, got %q", got)
+	}
+}
+
 func TestRenderNils(t *testing.T) {
 	snap := fullSnapshot()
 	snap.hitRate, snap.ctxPct, snap.ctxTokens = nil, nil, nil
