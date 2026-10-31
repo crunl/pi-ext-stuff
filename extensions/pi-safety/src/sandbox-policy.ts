@@ -62,6 +62,12 @@ export interface SandboxPolicy {
      * (`gh`, `gcloud`, `terraform`, `kubectl`) works under a MITM proxy with a
      * custom CA. Upstream security warning: opens a data-exfiltration vector
      * through the trustd service.
+     *
+     * This is the explicit escape hatch, not the default path: Go >=1.27 skips
+     * `SecTrustEvaluate` once `SSL_CERT_FILE` is set and is served by
+     * `platformEnvironmentDefaults()` instead. Reach for this flag only for
+     * binaries built against an older Go toolchain (no `SSL_CERT_FILE`
+     * short-circuit) or for enterprise roots that exist only in the keychain.
      */
     allowTrustd?: boolean;
   };
@@ -353,6 +359,17 @@ export function createDefaultSandboxConfig(): SandboxPolicy {
 export function sandboxTransportOverlay(): { NO_PROXY: string; no_proxy: string } {
   return { NO_PROXY: "", no_proxy: "" };
 }
+
+/**
+ * Platform CA environment deliberately does NOT live here. This module is inside
+ * the authorizer value closure, which must stay I/O-free (no `node:fs`, no
+ * existence probes), and its output is the fingerprint-stable ledger that must
+ * look identical on every platform. The macOS bundle default for Go >= 1.27 is
+ * therefore injected once at the enforcer's spawn seam
+ * (`sandbox/srt-enforcer.ts` → `platformEnvironmentDefaults`), never baked into
+ * a policy; pre-1.27 builds and keychain-only roots use
+ * `compatibility.allowTrustd` (see above) as the explicit escape hatch.
+ */
 
 export function withAdditionalWriteRoots(
   config: SandboxPolicy,

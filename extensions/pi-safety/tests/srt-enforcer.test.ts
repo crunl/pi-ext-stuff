@@ -20,6 +20,8 @@ import { SRT_DRAIN_TIMEOUT_MS, SrtProcessCoordinator } from "../src/sandbox/srt-
 import {
   assertSrtPolicySupported,
   effectiveWriteRoots,
+  MACOS_DEFAULT_SSL_CERT_FILE,
+  platformEnvironmentDefaults,
   platformWriteRoots,
   type SrtRuntimeLike,
   SrtSandboxManager,
@@ -1342,6 +1344,45 @@ describe("Runtime denial diagnostics", () => {
     const manager = new SrtSandboxManager(runtime);
     await execute(manager, basePolicy(), { commandId: "call-42" });
     expect(runtime.lastWrapOptions?.commandId).toBe("call-42");
+    await manager.reset();
+  });
+});
+
+describe("platform CA environment defaults", () => {
+  it("aliases the system bundle path in both spellings", () => {
+    expect(expandSymlinkAliases("/private/etc")).toEqual(["/private/etc", "/etc"]);
+    expect(expandSymlinkAliases("/etc")).toEqual(["/etc", "/private/etc"]);
+    expect(expandSymlinkAliases(MACOS_DEFAULT_SSL_CERT_FILE)).toContain(
+      "/private/etc/ssl/cert.pem",
+    );
+  });
+
+  it("injects SSL_CERT_FILE only on macOS and only when the bundle exists", () => {
+    const present = (): boolean => true;
+    const missing = (): boolean => false;
+    expect(platformEnvironmentDefaults("darwin", present)).toEqual({
+      SSL_CERT_FILE: MACOS_DEFAULT_SSL_CERT_FILE,
+    });
+    // Absent bundle means no injection: an empty SSL_CERT_FILE would silently
+    // break every Go handshake instead of surfacing the trustd denial.
+    expect(platformEnvironmentDefaults("darwin", missing)).toEqual({});
+    expect(platformEnvironmentDefaults("linux", present)).toEqual({});
+    expect(platformEnvironmentDefaults("win32", present)).toEqual({});
+  });
+
+  it("spawns with platform defaults while caller env keeps priority", async () => {
+    const runtime = new FakeSrtRuntime();
+    runtime.source = "process.stdout.write(String(process.env.SSL_CERT_FILE ?? ''))";
+    const manager = new SrtSandboxManager(runtime);
+    const defaults = platformEnvironmentDefaults();
+
+    const inherited = await execute(manager, basePolicy(), { env: {} });
+    expect(inherited.stdout.toString()).toBe(defaults.SSL_CERT_FILE ?? "");
+
+    const overridden = await execute(manager, basePolicy(), {
+      env: { SSL_CERT_FILE: "/custom/ca.pem" },
+    });
+    expect(overridden.stdout.toString()).toBe("/custom/ca.pem");
     await manager.reset();
   });
 });

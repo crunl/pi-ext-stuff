@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import {
@@ -117,8 +118,13 @@ function parentProxyActive(connectGuard?: SandboxConnectGuard): boolean {
  * macOS trustd access is a compatibility tradeoff, not a default. Upstream
  * carries a security warning on `enableWeakerNetworkIsolation`: it re-enables
  * `com.apple.trustd.agent`, a data-exfiltration vector. Off unless the policy
- * explicitly asks for it AND a parent-proxy seam is live — the only shape that
- * needs Go TLS (gh/gcloud/terraform/kubectl) to reach trustd.
+ * explicitly asks for it AND a parent-proxy seam is live.
+ *
+ * It is the escape hatch, not the ordinary path: Go >=1.27 skips
+ * `SecTrustEvaluate` once `SSL_CERT_FILE` is set, so gh/gcloud/terraform/kubectl
+ * built with that toolchain are served by `platformEnvironmentDefaults()` at the
+ * spawn site below. Keep this flag for pre-1.27 binaries and for enterprise
+ * roots that live only in the keychain.
  */
 function trustdAllowed(policy: SandboxPolicy, connectGuard?: SandboxConnectGuard): boolean {
   return policy.compatibility?.allowTrustd === true && parentProxyActive(connectGuard);
@@ -136,6 +142,39 @@ function trustdAllowed(policy: SandboxPolicy, connectGuard?: SandboxConnectGuard
  */
 export function platformWriteRoots(): string[] {
   return expandSymlinkAliases(tmpdir());
+}
+
+/**
+ * macOS system CA bundle. Go >=1.27 honours `SSL_CERT_FILE` by skipping
+ * `SecTrustEvaluate`, which is exactly the trustd path the sandbox denies by
+ * default. Pointing Go at this file is what makes modern Go CLIs (`gh`,
+ * `kubectl`, ...) verify TLS out of the box inside the sandbox; binaries built
+ * against an older Go toolchain and enterprise roots that live only in the
+ * keychain keep `compatibility.allowTrustd` as the explicit escape hatch.
+ *
+ * Lives here, not in `sandbox-policy.ts`: the policy module is inside the
+ * authorizer value closure (no I/O, no host packages), and platform state must
+ * never enter the ledger fingerprint that is compared across platforms.
+ */
+export const MACOS_DEFAULT_SSL_CERT_FILE = "/etc/ssl/cert.pem";
+
+/**
+ * Single source for platform environment defaults injected into a sandboxed
+ * child. macOS is the only platform with a default: `SSL_CERT_FILE` points Go
+ * >= 1.27 at the system bundle so it never needs trustd. Every other platform
+ * gets an empty object — no cross-platform pollution.
+ *
+ * The bundle is injected only when it exists on disk: handing Go an absent
+ * `SSL_CERT_FILE` makes it load an empty CA set and fail every handshake with
+ * an opaque error — a silent deadlock compared to the honest (and escapable)
+ * trustd denial it replaces.
+ */
+export function platformEnvironmentDefaults(
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
+): NodeJS.ProcessEnv {
+  if (platform !== "darwin") return {};
+  return exists(MACOS_DEFAULT_SSL_CERT_FILE) ? { SSL_CERT_FILE: MACOS_DEFAULT_SSL_CERT_FILE } : {};
 }
 
 /**
@@ -267,6 +306,12 @@ function shellQuote(value: string): string {
  * (Windows drops NO_PROXY from its child overlay and needs no prefix).
  * `commandText` is always the un-prefixed program: the prefix is transport,
  * never identity.
+ *
+ * Invariant for the prefix: it may only *empty* the transport variables
+ * (`NAME=""`). Never append key-value assignments (`NAME="value"`) here — the
+ * prefix exists solely to cancel a NO_PROXY that SRT bakes into the argv, and
+ * any setter would silently outrank the spawn environment below, splitting the
+ * one overlay source into two competing ones.
  */
 function serializeProgram(
   program: SandboxExecutionRequest["program"],
@@ -277,7 +322,8 @@ function serializeProgram(
   }
   const commandText = [program.executable, ...program.args].map(shellQuote).join(" ");
   // The prefix is the POSIX spelling of `sandboxTransportOverlay`: the variable
-  // set comes from the one overlay so the env and the prefix cannot drift.
+  // set comes from the one overlay so the env and the prefix cannot drift, and
+  // each entry is an empty assignment (NO_PROXY cancellation only).
   const prefix = Object.keys(sandboxTransportOverlay())
     .map((name) => `${name}=""`)
     .join(" ");
@@ -317,12 +363,26 @@ function executeWrappedArgv(
       return;
     }
     const stdinMode = request.stdin === undefined || request.stdin === "ignore" ? "ignore" : "pipe";
+    // The one and only injection point for platform CA defaults. Go >=1.27
+    // stops calling `SecTrustEvaluate` once `SSL_CERT_FILE` is set, so pointing
+    // it at the macOS system bundle is what makes gh/kubectl work under the
+    // default (trustd-denying) sandbox.
+    //
+    // Deliberately here and not in `sandbox.ts`: fabricating a local env object
+    // there would shadow the SRT-restored PATH/HOME whenever a manager returns
+    // `env: undefined`. `wrapped.env` spreads after the defaults, and
+    // `request.env` spreads last, so a caller-supplied `SSL_CERT_FILE` (custom
+    // CA) always wins. `replace` mode is a caller-owned environment and inherits
+    // nothing — not even the defaults. Pre-1.27 binaries and keychain-only
+    // enterprise roots keep `sandbox.compatibility.allowTrustd` as the explicit
+    // escape hatch.
+    const platformDefaults = platformEnvironmentDefaults();
     const child = spawn(wrapped.argv[0] as string, wrapped.argv.slice(1), {
       cwd: request.cwd,
       env:
         request.envMode === "replace"
           ? (request.env ?? {})
-          : { ...wrapped.env, ...(request.env ?? {}) },
+          : { ...platformDefaults, ...wrapped.env, ...(request.env ?? {}) },
       detached: true,
       shell: false,
       stdio: [stdinMode, "pipe", "pipe"],

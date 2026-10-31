@@ -19,6 +19,9 @@ export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."
 const SYMLINK_ALIASES: Array<[string, string]> = [
   ["/private/tmp", "/tmp"],
   ["/private/var", "/var"],
+  // `/etc` is the same alias class: the sandbox reads the system CA bundle at
+  // `/etc/ssl/cert.pem`, which the kernel sees as `/private/etc/ssl/cert.pem`.
+  ["/private/etc", "/etc"],
 ];
 
 export function expandSymlinkAliases(path: string): string[] {

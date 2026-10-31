@@ -959,4 +959,15 @@ describe("sandbox integration", () => {
     expect(expanded.filesystem.allowWrite).toContain(homedir());
     expect(expanded.filesystem.allowWrite).toContain(file);
   });
+
+  it("keeps platform CA environment out of the policy projection", () => {
+    // SSL_CERT_FILE is an execution-time default owned by the enforcer's spawn
+    // seam, never policy data: baking it in here would leak macOS-only state
+    // into every platform's ledger fingerprint.
+    const runtime = createSandboxRuntimeConfig(DEFAULT_CONFIG.sandbox, "/workspace/project");
+    const serialized = JSON.stringify(runtime);
+    expect(serialized).not.toContain("SSL_CERT_FILE");
+    expect(serialized).not.toContain("cert.pem");
+    expect(Object.keys(runtime)).not.toContain("env");
+  });
 });
