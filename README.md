@@ -2,14 +2,16 @@
 
 > English · 中文说明（看图版）: [`README.zh-CN.md`](README.zh-CN.md)
 
-Three extensions for the pi coding agent, developed together in one repo but
+Four extensions for the pi coding agent, developed together in one repo but
 loadable independently. Everything ships as `.ts` sources — pi loads extensions
 directly, so there is **no build step** in any package.
 
 ## Packages
 
-- **[`pi-core`](extensions/pi-core)** — Codex-style tool presentation, live
-  token rate, edit-diff previews, boxed editor with mode badge.
+- **[`pi-core`](extensions/pi-core)** — live token rate, boxed editor with mode
+  badge, and `/effort` + `/exit` commands.
+- **[`pi-tool-render`](extensions/pi-tool-render)** — Codex-style tool
+  presentation, edit-diff previews, and `codemode` clickable tree rendering.
 - **[`pi-safety`](extensions/pi-safety)** — permission modes (`auto` / `yolo`)
   with sandboxed tool execution and a guardian reviewer.
 - **[`statusline`](extensions/statusline)** — boxed editor frame carrying
@@ -20,16 +22,20 @@ Each package README covers install, config, and usage — start there.
 ## How they relate
 
 ```text
-[pi-core]──standalone.ts──┬──> [pi-safety] ──mode/review──> [statusline]
-                          └──> [statusline]
+[shared-tool-presentation] ──┬──> [pi-tool-render]
+                             ├──> [pi-core] <──mode── [pi-safety] ──mode/review──> [statusline]
+                             ├──> [pi-safety]
+                             └──> [statusline]
 ```
 
-`pi-core` is required by `pi-safety` and `statusline`; it imports nothing back.
+`packages/shared-tool-presentation` is the shared pure leaf; `pi-tool-render`,
+`pi-core`, `pi-safety`, and `statusline` import nothing back from each other.
 
 ## Installing
 
 ```bash
 pi install ~/path/to/pi-ext-stuff/extensions/pi-core
+pi install ~/path/to/pi-ext-stuff/extensions/pi-tool-render
 pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 pi install ~/path/to/pi-ext-stuff/extensions/statusline
 ```

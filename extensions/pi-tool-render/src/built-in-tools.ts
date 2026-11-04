@@ -6,7 +6,7 @@ import {
   type ExtensionAPI,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { withCodexToolPresentation } from "./codex-tool-presentation.ts";
+import { withCodexToolPresentation } from "../../../packages/shared-tool-presentation/src/codex-tool-presentation.ts";
 
 /**
  * Register the Codex-style rendering for the built-in read-only tools.

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { registerCodexToolRendering } from "../src/tui/built-in-tools.ts";
+import { registerCodexToolRendering } from "../src/built-in-tools.ts";
 
 interface RegisteredTool {
   name: string;
@@ -35,7 +35,7 @@ describe("registerCodexToolRendering", () => {
   // The host resolves paths against ctx.cwd natively (Pi 0.85+), so the
   // registered execute() is the factory's own — this pins that behavior.
   it("executes reads against the call's cwd", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-core-builtin-"));
+    const dir = mkdtempSync(join(tmpdir(), "pi-tool-render-builtin-"));
     try {
       writeFileSync(join(dir, "probe.txt"), "probe-content\n");
       const read = collectRegistered().find((tool) => tool.name === "read");

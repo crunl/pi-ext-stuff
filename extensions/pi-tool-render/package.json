@@ -1,0 +1,56 @@
+{
+  "name": "pi-tool-render",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Codex-style tool presentation and codemode tree rendering for the Pi coding agent.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crunl/pi-ext-stuff.git",
+    "directory": "extensions/pi-tool-render"
+  },
+  "homepage": "https://github.com/crunl/pi-ext-stuff/tree/main/extensions/pi-tool-render#readme",
+  "bugs": {
+    "url": "https://github.com/crunl/pi-ext-stuff/issues"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "standalone.ts",
+    "src"
+  ],
+  "exports": {
+    ".": "./index.ts",
+    "./standalone": "./standalone.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest --run"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "packageManager": "pnpm@12.8.1"
+}

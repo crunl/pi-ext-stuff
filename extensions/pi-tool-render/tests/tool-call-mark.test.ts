@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { markToolCall } from "../src/tui/tool-call-mark.ts";
+import { markToolCall } from "../src/tool-call-mark.ts";
 
 const mark = { icon: "\u{F105E}", color: "warning" } as const;
 

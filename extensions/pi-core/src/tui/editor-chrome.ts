@@ -33,9 +33,9 @@ import {
   type ModeSeverity,
   PermissionsModeState,
 } from "../../../../packages/shared-tool-presentation/src/permissions-mode.ts";
+import { isInteractiveTui } from "../../../../packages/shared-tool-presentation/src/ui-guard.ts";
 import { buildTopBorder } from "./border-labels.ts";
 import { BOX_MIN_WIDTH, boxEditorLines, isHorizontalBorder } from "./box-editor.ts";
-import { isInteractiveTui } from "./ui-guard.ts";
 
 export type PermissionsModeProvider = () =>
   | { label: string; severity: "warning" | "error" }

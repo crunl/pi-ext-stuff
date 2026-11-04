@@ -1,8 +1,8 @@
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { codexBashToolSpec } from "../src/tui/codex-tool-specs.ts";
-import { createCodexToolRendering } from "../src/tui/tool-renderer.ts";
+import { codexBashToolSpec } from "../../../packages/shared-tool-presentation/src/codex-tool-specs.ts";
+import { createCodexToolRendering } from "../../../packages/shared-tool-presentation/src/tool-renderer.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

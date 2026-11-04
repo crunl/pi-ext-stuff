@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ChildRow, GlanceSummary } from "../src/tui/codemode-contract.ts";
+import type { ChildRow, GlanceSummary } from "../src/codemode-contract.ts";
 import {
   createCodemodeTreeRendering,
   formatCodemodeGlance,
   formatNestedCallRow,
-} from "../src/tui/codemode-tree.ts";
+} from "../src/codemode-tree.ts";
 
 const theme = {
   fg: (_color: string, text: string) => text,

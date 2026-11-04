@@ -14,12 +14,15 @@
   "pi": {
     "extensions": [
       "./extensions/pi-safety/index.ts",
+      "./extensions/pi-tool-render/index.ts",
       "./extensions/pi-core/index.ts",
       "./extensions/statusline/index.ts"
     ]
   },
   "scripts": {
     "check": "npm run --workspaces --if-present check",
+    "lint": "npm run --workspaces --if-present lint",
+    "format": "npm run --workspaces --if-present format",
     "test": "npm run --workspaces --if-present test"
   },
   "peerDependencies": {

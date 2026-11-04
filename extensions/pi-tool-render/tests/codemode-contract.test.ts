@@ -5,7 +5,7 @@ import {
   stripScriptHeader,
   summarizeCallArgs,
   toTreeView,
-} from "../src/tui/codemode-contract.ts";
+} from "../src/codemode-contract.ts";
 
 /** 1.0.0-shaped payloads. Keep in sync when the upstream pin moves. */
 const detailFixture = {

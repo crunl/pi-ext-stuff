@@ -35,14 +35,15 @@ It contains four pi extensions and one internal shared library.
   `test` = `npm run --workspaces --if-present test`
   (`package.json:22-25`).
 
-## The four members
+## The five members
 
-| Member | Purpose | src | tests |
-| --- | --- | --- | --- |
-| `extensions/pi-safety` | Permission modes, sandbox, guardian reviewer | 64 files / 24,901 lines | 54 files / 27,162 lines |
-| `extensions/pi-core` | Codex-style tool presentation, TUI polish | 27 files / 3,727 lines + 43 entry lines | 26 files / 4,423 lines |
-| `packages/shared-tool-presentation` | Pure presentation specs/renderers (shared lib) | 15 files / 2,090 lines | 3 files / 182 lines |
-| `extensions/statusline` | Boxed footer: token/model/effort/usage | 8 files / 725 lines + 2 entry lines | 5 files / 341 lines |
+| Member | Purpose |
+| --- | --- |
+| `extensions/pi-safety` | Permission modes, sandbox, guardian reviewer |
+| `extensions/pi-tool-render` | Codex-style tool presentation, `codemode` tree rendering, output-padding sync |
+| `extensions/pi-core` | Boxed editor with mode badge, working token rate, `/effort` and `/exit` commands |
+| `packages/shared-tool-presentation` | Pure presentation specs/renderers (shared single-source-of-truth library) |
+| `extensions/statusline` | Boxed footer: token/model/effort/usage |
 
 `pi-safety` dominates the codebase: it is roughly 6.7× the source of
 `pi-core` and 11× `shared-tool-presentation`, and its test suite is
@@ -67,22 +68,18 @@ runtime `dependencies` (`@anthropic-ai/sandbox-runtime`,
 `tree-sitter-bash`, `web-tree-sitter`) —
 `extensions/pi-safety/package.json:27-31`.
 
+### `extensions/pi-tool-render`
+
+Codex-style tool presentation (`read`/`grep`/`find`/`ls` plus conditional
+canonical `bash`/`write`/`edit` fallback in interactive TUI), `codemode`
+clickable tree rendering, and `outputPad` settings synchronization.
+
 ### `extensions/pi-core`
 
-An opinionated core pack: Codex-style tool rendering, a live working
-token rate in the footer spinner, edit-diff previews, a boxed editor
-carrying the permissions-mode badge (`extensions/pi-core/README.md:3-5`),
-and output-padding sync (`:27-28`). Everything else renders with Pi's
-stock components — user messages, thinking blocks, markdown code fences,
-autocomplete placement, and selector panels all follow host defaults
-(`:30-33`). Tool registration is
-first-wins; pi-core registers `read`/`grep`/`find`/`ls` with Codex
-rendering and conditionally decorates canonical `bash`/`write`/`edit`
-in interactive TUI when no extension owns them
-(`extensions/pi-core/AGENTS.md` "Cross-extension contract"). Its
-`src/register.ts` is an orchestration facade that calls every
-`register*` once, in order (`extensions/pi-core/src/register.ts:20-27`).
-Node ≥ 22.19.0 (`extensions/pi-core/package.json:40-42`).
+An opinionated TUI pack: a live working token rate in the footer spinner, a
+boxed editor carrying the permissions-mode badge, and `/effort` + `/exit`
+commands. Tool registration lives in `pi-tool-render` and `pi-safety`.
+Node ≥ 22.19.0 (`extensions/pi-core/package.json`).
 
 ### `packages/shared-tool-presentation`
 
@@ -132,57 +129,12 @@ components, and high-order presentation decorators"
 surface (`ModeSeverity`, `PermissionsModeEvent`,
 `isPermissionsModeEvent`, `PermissionsModeState`).
 
-**The duplication question — resolved.** `pi-core/src/tui/` contains
-near-namesake files (`tool-renderer.ts`, `codex-tool-specs.ts`,
-`edit-diff.ts`, `shell-command-highlight.ts`, `write-preview.ts`,
-`output-padding.ts`, `read-evidence.ts`, `bash-command-header.ts`,
-`bash-evidence.ts`, `codex-tool-presentation.ts`, `tool-output.ts`,
-`ui-guard.ts`). These are **byte-identical copies** of the
-corresponding files in `shared-tool-presentation/src/`, not re-exports
-and not divergent code: `diff -q` reports every one of the 12 shared
-names as IDENTICAL to its `pi-core/src/tui/` twin (e.g.
-`packages/shared-tool-presentation/src/tool-renderer.ts` =
-`extensions/pi-core/src/tui/tool-renderer.ts`, both 425 lines).
-The shared package has 15 files; 12 are duplicated in `pi-core`, and
-the 3 that are not are `index.ts` (the barrel), `badge.ts`, and
-`permissions-mode.ts` — which `pi-core` imports *from the shared
-package* rather than keeping local copies (see below).
-
-**The relationship, precisely.** Both trees are live, and they are
-imported through *different* paths:
-
-- `pi-core/src/tui/*` keeps its local copies and wires them together
-  internally (e.g. `extensions/pi-core/src/tui/tool-renderer.ts:7`
-  imports `./bash-command-header.ts`; `src/tui/codex-tool-specs.ts:8-14`
-  imports `./bash-evidence.ts`, `./edit-diff.ts`, `./read-evidence.ts`,
-  `./shell-command-highlight.ts`, `./tool-output.ts`, `./tool-renderer.ts`,
-  `./write-preview.ts`). `src/register.ts` drives this local graph
-  (`registerOutputPaddingSync` from `./tui/output-padding.ts`,
-  `extensions/pi-core/src/register.ts:8,20`).
-- `shared-tool-presentation/src/*` is the same 12 files plus the barrel
-  and the two statusline-facing modules, wired the same way internally
-  (e.g. `packages/shared-tool-presentation/src/tool-renderer.ts:7`
-  imports `./bash-command-header.ts`).
-- `pi-core` does **not** import its own `src/tui` twins for the shared
-  surface — it imports the shared package for the 3 non-duplicated
-  modules: `src/tui/editor-chrome.ts:30` (`badge.ts`,
-  `makeModeBadgeDecorator`), `src/tui/editor-chrome.ts:35`
-  (`permissions-mode.ts`), and `src/tui/border-labels.ts:7` (`badge.ts`,
-  `BADGE_CAP_WIDTH`), all via
-  `../../../../packages/shared-tool-presentation/src/...`. And
-  `standalone.ts:25` re-exports the whole shared barrel from
-  `../../packages/shared-tool-presentation/src/index.ts`.
-
-**So there are two sources of truth for the same 12 modules.** Nothing
-in the repo generates or syncs one from the other, and no test asserts
-the copies stay identical — a change to one tree will not reach the
-other. This is the repo's main structural hazard. The duplication also
-means `pi-core` carries ~2,000 lines of presentation code that already
-live in `shared-tool-presentation`; `standalone.ts` deliberately bridges
-the two by re-exporting the shared barrel (rather than the local
-twins), so `pi-safety`'s cross-extension imports resolve to the
-*shared* copies, while `pi-core`'s own register graph uses the *local*
-copies.
+**Single source of truth.** Earlier revisions duplicated 12 presentation
+modules across `pi-core/src/tui/` and `packages/shared-tool-presentation/src/`.
+Those duplicate shims have been removed: `packages/shared-tool-presentation/src/`
+is the sole home of the pure presentation modules, and `pi-tool-render`,
+`pi-core`, `pi-safety`, and `statusline` import from it directly via relative
+paths.
 
 **Who consumes it.** Every consumer uses a relative path into
 `packages/shared-tool-presentation/src/`, not the npm name
@@ -192,9 +144,11 @@ copies.
   `codexBashToolSpec`, `codexEditToolSpec`, `codexWriteToolSpec`,
   `createCodexToolRendering` from
   `../../../packages/shared-tool-presentation/src/index.ts`.
-- `extensions/pi-core/standalone.ts:25` — re-exports the shared barrel.
-- `extensions/pi-core/src/tui/{editor-chrome,border-labels}.ts` —
-  `badge.ts` / `permissions-mode.ts` deep imports.
+- `extensions/pi-tool-render/standalone.ts:25` — re-exports the shared barrel.
+- `extensions/pi-tool-render/src/*` — `codex-tool-presentation.ts`,
+  `output-padding.ts`, `ui-guard.ts` deep imports.
+- `extensions/pi-core/src/tui/{editor-chrome,border-labels,effort-command,working-token-rate}.ts` —
+  `badge.ts`, `permissions-mode.ts`, `ui-guard.ts` deep imports.
 - `extensions/statusline/src/status-mode.ts:1` and
   `extensions/statusline/src/palette.ts:23` — `badge.ts` deep imports.
 
@@ -246,42 +200,40 @@ shared-tool-presentation  (pure leaf, no extension imports)
   `pi-safety:mode` bus event, which pi-core subscribes to
   (`extensions/statusline/README.md` "接线与组合").
 
-**What `pi-core/standalone.ts` exports and who imports it.**
+**What `pi-tool-render/standalone.ts` exports and who imports it.**
 `standalone.ts` (26 lines) is documented as "the side-effect-free
-cross-extension surface of pi-core"
-(`extensions/pi-core/standalone.ts:1-13`). It re-exports nine names
+cross-extension surface of pi-tool-render"
+(`extensions/pi-tool-render/standalone.ts:1-13`). It re-exports nine names
 from the shared barrel — `codexBashToolSpec`, `codexEditToolSpec`,
 `codexWriteToolSpec`, `colorizeEditDiffSummary`,
 `compactBashStatusSpacing`, `createCodexToolRendering`,
 `createEditDiffBox`, `summarizeEditDiff`, `withCodexToolPresentation`
-(`extensions/pi-core/standalone.ts:15-25`) — plus `markToolCall` and
-`type ToolCallMark` from pi-core's own `src/tui`
-(`extensions/pi-core/standalone.ts:26`). `index.ts` re-exports
-`standalone.ts` (`extensions/pi-core/index.ts:17`) so existing
-`../../pi-core/index.ts` imports keep working, while steering new
-consumers to `standalone.ts` to avoid loading the register graph
-(`extensions/pi-core/index.ts:5-10`). Within this repo, the only
-in-repo importer of the shared surface is `pi-safety` — but it imports
-the shared package *directly* (per its AGENTS.md rule), so in practice
-no in-repo file imports `pi-core/standalone.ts`; it exists for
-out-of-repo and legacy consumers.
+(`extensions/pi-tool-render/standalone.ts:15-25`) — plus `markToolCall` and
+`type ToolCallMark` from `pi-tool-render/src/tool-call-mark.ts`
+(`extensions/pi-tool-render/standalone.ts:26`). `pi-tool-render/index.ts`
+re-exports `standalone.ts` (`extensions/pi-tool-render/index.ts:16`).
+Within this repo, `pi-safety`, `pi-core`, `pi-tool-render`, and `statusline`
+all import `packages/shared-tool-presentation` directly; `standalone.ts` exists
+for out-of-repo consumers.
 
 ## Pi extension registration model
 
 Each extension is a package whose `package.json` carries a
 `"pi": { "extensions": [...] }` array naming its entry file(s) —
-e.g. `extensions/pi-core/package.json:20-24` lists `"./index.ts"`.
-The root `package.json:14-21` aggregates all three in one array:
-`./extensions/pi-safety/index.ts`, `./extensions/pi-core/index.ts`,
-`./extensions/statusline/index.ts`.
+e.g. `extensions/pi-core/package.json` lists `"./index.ts"`.
+The root `package.json:14-21` aggregates all four in one array:
+`./extensions/pi-safety/index.ts`, `./extensions/pi-tool-render/index.ts`,
+`./extensions/pi-core/index.ts`, `./extensions/statusline/index.ts`.
 pi discovers the entry files from these arrays.
 
 Each `index.ts` is a thin default-export shim over the real module:
 
 - `extensions/pi-safety/index.ts:1` — `export { registerExtension as default } from "./src/register.ts"`.
-- `extensions/pi-core/index.ts:13-17` — default-exports
-  `piCore(pi)` which calls `registerExtension(pi)`, then
+- `extensions/pi-tool-render/index.ts:11-16` — default-exports
+  `piToolRender(pi)` which calls `registerExtension(pi)`, then
   `export * from "./standalone.ts"`.
+- `extensions/pi-core/index.ts:8-10` — default-exports
+  `piCore(pi)` which calls `registerExtension(pi)`.
 - `extensions/statusline/index.ts:1` — `export { default } from "./src/index.ts"`
   (auto-discovery shim).
 

@@ -2,20 +2,22 @@
 
 > 中文说明（看图版） · English: [`README.md`](README.md)
 
-三个 pi coding agent 扩展，住在一个仓库里，但能各自独立加载。
+四个 pi coding agent 扩展，住在一个仓库里，但能各自独立加载。
 全是 `.ts` 源码 —— pi 直接读，**不用构建**。
 
 ---
 
-## 三个扩展，一眼看懂
+## 四个扩展，一眼看懂
 
-- 🎨 **pi-core** —— 给工具输出化妆：好看、省字、带实时 token 速率
+- 🎨 **pi-core** —— 编辑器与状态指示：带 mode 徽章的方框编辑器、实时 token 速率、`/effort` 与 `/exit`
+- 🧩 **pi-tool-render** —— 给工具输出化妆：Codex 风格工具呈现、edit-diff 预览、`codemode` 树形渲染
 - 🛡️ **pi-safety** —— 看门人：危险命令先过沙箱 + AI 裁判
 - 📊 **statusline** —— 底部状态条：模型 / 用量 / 分支
 
 | 扩展 | 一句话 | 目录 |
 |---|---|---|
-| **pi-core** | Codex 风格工具呈现、实时 token 速率、edit-diff 预览、带 mode 徽章的方框编辑器 | [`extensions/pi-core`](extensions/pi-core) |
+| **pi-core** | 带 mode 徽章的方框编辑器、实时 token 速率、`/effort` 与 `/exit` | [`extensions/pi-core`](extensions/pi-core) |
+| **pi-tool-render** | Codex 风格工具呈现、edit-diff 预览、`codemode` 树形渲染 | [`extensions/pi-tool-render`](extensions/pi-tool-render) |
 | **pi-safety** | 权限模式（`auto` / `yolo`）+ 沙箱执行 + guardian 裁判 | [`extensions/pi-safety`](extensions/pi-safety) |
 | **statusline** | 方框编辑器框，带 token / 模型 / effort 信息 | [`extensions/statusline`](extensions/statusline) |
 
@@ -26,21 +28,19 @@
 ## 它们怎么连
 
 ```
-        pi-core          ← 地基，只出不进（没人 import 它）
-           │
-           │  standalone.ts
-           │
-     ┌─────┴─────┐
-     ▼           ▼
- pi-safety    statusline
-     │           ▲
-     └───────────┘
-      mode / review（事件总线）
+        packages/shared-tool-presentation   ← 纯渲染唯一源，只出不进
+            │
+      ┌─────┼───────────┬───────────┐
+      ▼     ▼           ▼           ▼
+pi-tool-render  pi-core  pi-safety  statusline
+                  ▲         │           ▲
+                  └─────────┴───────────┘
+                   mode / review（事件总线）
 
 ```
 
-一句话：**pi-core 是地基**，pi-safety 和 statusline 站在它上面；
-pi-safety 把权限模式通过事件总线告诉 statusline。
+一句话：**`shared-tool-presentation` 是纯渲染地基**，四个扩展站在它上面且互不反向 import；
+pi-safety 把权限模式通过事件总线告诉 pi-core 和 statusline。
 
 ---
 
@@ -48,6 +48,7 @@ pi-safety 把权限模式通过事件总线告诉 statusline。
 
 ```bash
 pi install ~/path/to/pi-ext-stuff/extensions/pi-core
+pi install ~/path/to/pi-ext-stuff/extensions/pi-tool-render
 pi install ~/path/to/pi-ext-stuff/extensions/pi-safety
 pi install ~/path/to/pi-ext-stuff/extensions/statusline
 ```

@@ -66,11 +66,3 @@ export function registerCodemodeTreeTool(pi: ExtensionAPI): void {
     defaultActive: false,
   } as unknown as Parameters<ExtensionAPI["registerTool"]>[0]);
 }
-
-/** Test seam: run capture against an explicit factory without package probing. */
-export function __captureCodemodeDefinitionForTest(
-  pi: ExtensionAPI,
-  factory: CreateCodemodeExtension,
-): Record<string, unknown> | undefined {
-  return captureCodemodeDefinition(pi, factory);
-}

@@ -11,7 +11,7 @@
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ThinkingSelectorComponent } from "@earendil-works/pi-coding-agent";
-import { isInteractiveTui } from "./ui-guard.ts";
+import { isInteractiveTui } from "../../../../packages/shared-tool-presentation/src/ui-guard.ts";
 
 interface EffortChoice {
   level: ModelThinkingLevel;

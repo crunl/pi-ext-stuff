@@ -24,12 +24,10 @@
   },
   "files": [
     "index.ts",
-    "standalone.ts",
     "src"
   ],
   "exports": {
-    ".": "./index.ts",
-    "./standalone": "./standalone.ts"
+    ".": "./index.ts"
   },
   "scripts": {
     "check": "tsc --noEmit",

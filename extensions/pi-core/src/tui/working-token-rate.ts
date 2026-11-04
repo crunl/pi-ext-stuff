@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isInteractiveTui } from "../../../../packages/shared-tool-presentation/src/ui-guard.ts";
 import { createTokenRateTracker, type TokenRateSnapshot } from "./token-rate.ts";
-import { isInteractiveTui } from "./ui-guard.ts";
 
 export const TOKEN_RATE_WIDGET_KEY = "pi-core:working-token-rate";
 

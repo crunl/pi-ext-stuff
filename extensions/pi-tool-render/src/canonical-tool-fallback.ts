@@ -9,8 +9,8 @@ import {
   type ToolDefinition,
   type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
-import { withCodexToolPresentation } from "./codex-tool-presentation.ts";
-import { isInteractiveTui } from "./ui-guard.ts";
+import { withCodexToolPresentation } from "../../../packages/shared-tool-presentation/src/codex-tool-presentation.ts";
+import { isInteractiveTui } from "../../../packages/shared-tool-presentation/src/ui-guard.ts";
 
 /** Public flag used to disable the canonical builtin presentation fallback. */
 export const CORE_BUILTIN_PRESENTATION_FLAG = "core-builtin-presentation";
@@ -55,7 +55,7 @@ export function registerCanonicalBuiltinFallback(
   pi.registerFlag(CORE_BUILTIN_PRESENTATION_FLAG, {
     type: "string",
     default: "auto",
-    description: "Render Pi's canonical bash/write/edit tools with pi-core presentation (auto|off)",
+    description: "Render Pi's canonical bash/write/edit tools with Codex presentation (auto|off)",
   });
 
   const warned = new Set<string>();
@@ -88,7 +88,7 @@ function readPresentationMode(
     ctx,
     warned,
     "invalid-flag",
-    `pi-core: ignoring invalid --${CORE_BUILTIN_PRESENTATION_FLAG} value; expected auto or off`,
+    `pi-tool-render: ignoring invalid --${CORE_BUILTIN_PRESENTATION_FLAG} value; expected auto or off`,
   );
   return "off";
 }
@@ -154,7 +154,7 @@ function skipBashForSettings(ctx: ExtensionContext, warned: Set<string>): undefi
     ctx,
     warned,
     "bash-settings",
-    "pi-core: skipped bash presentation because Pi settings could not be loaded",
+    "pi-tool-render: skipped bash presentation because Pi settings could not be loaded",
   );
   return undefined;
 }
@@ -173,7 +173,7 @@ function registerIfCanonical<P extends ToolDefinition["parameters"], D, S>(
       ctx,
       warned,
       `metadata-${name}`,
-      `pi-core: skipped ${name} presentation because Pi's canonical metadata differs`,
+      `pi-tool-render: skipped ${name} presentation because Pi's canonical metadata differs`,
     );
     return;
   }

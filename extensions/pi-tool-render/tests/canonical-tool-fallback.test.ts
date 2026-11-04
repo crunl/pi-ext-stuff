@@ -12,7 +12,7 @@ import {
   type CanonicalBuiltinFallbackDependencies,
   CORE_BUILTIN_PRESENTATION_FLAG,
   registerCanonicalBuiltinFallback,
-} from "../src/tui/canonical-tool-fallback.ts";
+} from "../src/canonical-tool-fallback.ts";
 
 type ToolName = "bash" | "write" | "edit";
 type Handler = (event: unknown, context: ExtensionContext) => unknown;
