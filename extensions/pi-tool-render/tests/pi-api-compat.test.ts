@@ -6,7 +6,7 @@ import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 /**
- * Pi has no public hook (verified through the 1.2.0 validation pin) for the
+ * Pi has no public hook (verified through the 1.5.0 validation pin) for the
  * seams canonical-tool-fallback relies on: recreating the host SettingsManager
  * and identifying Pi's canonical bash/write/edit owners by their source marker.
  * Keep those deliberate runtime seams loud: a future Pi upgrade should fail

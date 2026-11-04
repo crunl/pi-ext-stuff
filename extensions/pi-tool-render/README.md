@@ -23,8 +23,8 @@ so there is **no build step**.
 ## Requirements
 
 - Node.js ≥ 22.19.0.
-- Pi 1.2.0. The host supplies the peer packages; development dependencies are
-  pinned to 1.2.0 so API checks are reproducible.
+- Pi 1.5.0. The host supplies the peer packages; development dependencies are
+  pinned to 1.5.0 so API checks are reproducible.
 - **No third-party runtime dependencies** — only the pi core packages
   (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, provided by
   the host), `packages/shared-tool-presentation`, and Node built-ins.

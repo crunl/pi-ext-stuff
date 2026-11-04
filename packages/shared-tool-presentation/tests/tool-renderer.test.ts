@@ -1,7 +1,12 @@
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, Text, visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { compactBashStatusSpacing, summarizeEditDiff } from "../src/codex-tool-specs.ts";
 import { createCodexToolRendering } from "../src/tool-renderer.ts";
+
+beforeAll(() => {
+  initTheme("dark", false);
+});
 
 const theme = {
   fg: (_color: string, text: string) => text,

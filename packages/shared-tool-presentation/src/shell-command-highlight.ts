@@ -52,7 +52,8 @@ export function highlightShellCommandLines(command: string): string[] {
   if (source.length === 0) return [];
   const ranges = findShellCommandRanges(source);
   const theme = resolvePiTheme();
-  if (ranges.length === 0 || !theme) return highlightCode(source, "bash");
+  if (!theme) return source.split("\n");
+  if (ranges.length === 0) return highlightCode(source, "bash");
 
   const replacements = ranges.map((range, index) => ({
     ...range,

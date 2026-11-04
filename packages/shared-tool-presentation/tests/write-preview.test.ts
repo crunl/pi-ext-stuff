@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { beforeAll, describe, expect, it } from "vitest";
 import { renderWritePreviewText, updateWriteHighlightCache } from "../src/write-preview.ts";
+
+beforeAll(() => {
+  initTheme("dark", false);
+});
 
 const theme = {
   fg: (_color: string, text: string) => text,
