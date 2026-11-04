@@ -5,6 +5,19 @@
  * and high-order presentation decorators for Pi coding agent tools.
  */
 
+export {
+  BADGE_CAP_WIDTH,
+  contrastTextFor,
+  makeModeBadgeDecorator,
+  PL_LEFT,
+  PL_RIGHT,
+  parseTruecolor,
+} from "./badge.ts";
+export {
+  BASH_GLANCE_BUDGET,
+  commandGlance,
+  createBashExpandedEvidence,
+} from "./bash-evidence.ts";
 export { withCodexToolPresentation } from "./codex-tool-presentation.ts";
 export {
   codexBashToolSpec,
@@ -22,25 +35,48 @@ export {
   summarizeBashOutput,
   summarizeEditDiff,
 } from "./codex-tool-specs.ts";
-export {
-  BADGE_CAP_WIDTH,
-  PL_LEFT,
-  PL_RIGHT,
-  contrastTextFor,
-  makeModeBadgeDecorator,
-  parseTruecolor,
-} from "./badge.ts";
 export { createEditDiffBox, parseEditDiff } from "./edit-diff.ts";
-export { createBashExpandedEvidence, commandGlance, BASH_GLANCE_BUDGET } from "./bash-evidence.ts";
-export { highlightShellCommandLines, MAX_COMMAND_CHARS } from "./shell-command-highlight.ts";
 export {
-  createCodexToolRendering,
-  type CodexToolRendererSpec,
-} from "./tool-renderer.ts";
-export { type OutputPad, type OutputPaddingSource } from "./output-padding.ts";
+  type OutputPad,
+  type OutputPaddingSource,
+  outputPaddingController,
+  registerOutputPaddingSync,
+} from "./output-padding.ts";
 export {
+  isPermissionsModeEvent,
   type ModeSeverity,
   type PermissionsModeEvent,
-  isPermissionsModeEvent,
   PermissionsModeState,
 } from "./permissions-mode.ts";
+export {
+  highlightShellCommandLines,
+  MAX_COMMAND_CHARS,
+} from "./shell-command-highlight.ts";
+export {
+  countStepGroupItems,
+  createSettledStepGroupComponent,
+  createUnsettledToolStepComponent,
+  emptyStepGroupComponent,
+  findStepSpanAtY,
+  formatStepGroupClauses,
+  formatStepGroupHeader,
+  formatStepGroupSummaryText,
+  isStepGroupToolName,
+  type RenderableStepGroupItem,
+  renderThoughtStepLines,
+  type SettledStepGroupOptions,
+  STEP_GROUP_TOOL_NAMES,
+  type StepGroupCounts,
+  type StepGroupItemDescriptor,
+  type StepGroupMouseEvent,
+  type StepGroupSpan,
+  type StepGroupTheme,
+  type StepGroupToolName,
+  type UnsettledThoughtItem,
+  type UnsettledToolStepOptions,
+} from "./step-group.ts";
+export {
+  type CodexToolRendererSpec,
+  createCodexToolRendering,
+} from "./tool-renderer.ts";
+export { isInteractiveTui } from "./ui-guard.ts";

@@ -37,19 +37,26 @@ describe("pi-tool-render registration", () => {
     expect(vi.isMockFunction(tools.get("read")?.execute)).toBe(false);
   });
 
-  it("subscribes output-padding and canonical fallback lifecycle hooks", () => {
+  it("subscribes output-padding, canonical fallback, and step-group fold lifecycle hooks", () => {
     const events = new Set<string>();
     const flags = new Set<string>();
+    const registerToolRenderer = vi.fn();
     registerExtension(
       createPiMock({
         on: (event: string) => events.add(event),
         registerFlag: (flag: string) => flags.add(flag),
+        registerToolRenderer,
       }),
     );
 
     expect(events.has("session_start")).toBe(true);
+    expect(events.has("session_tree")).toBe(true);
     expect(events.has("session_shutdown")).toBe(true);
+    expect(events.has("message_start")).toBe(true);
+    expect(events.has("message_update")).toBe(true);
+    expect(events.has("message_end")).toBe(true);
     expect(flags.has("core-builtin-presentation")).toBe(true);
+    expect(registerToolRenderer).toHaveBeenCalledTimes(1);
   });
 
   it("keeps completed read and search calls on one collapsed line", () => {
