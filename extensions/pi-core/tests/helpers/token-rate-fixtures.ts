@@ -1,6 +1,8 @@
 /** Shared fixtures for token-rate tests: an assistant message with a
- * realistic shape (pi-ai AssistantMessage) and a text-delta update event. */
-export function assistantMessage(text: string, output = 0) {
+ * realistic shape (pi-ai AssistantMessage) and a text-delta update event.
+ * `timestamp` is pi's request-start stamp (Unix ms); the default 0 models a
+ * legacy/resumed message, which carries no usable anchor. */
+export function assistantMessage(text: string, output = 0, timestamp = 0) {
   return {
     role: "assistant" as const,
     content: [{ type: "text" as const, text }],
@@ -16,7 +18,7 @@ export function assistantMessage(text: string, output = 0) {
     provider: "test",
     model: "test-model",
     stopReason: "stop" as const,
-    timestamp: 0,
+    timestamp,
   };
 }
 

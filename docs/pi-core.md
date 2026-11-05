@@ -51,7 +51,7 @@ In `extensions/pi-core/src/register.ts`:
 registerEditorChrome             extensions/pi-core/src/tui/editor-chrome.ts:171
 registerEffortCommand            extensions/pi-core/src/tui/effort-command.ts:28
 registerExitCommand              extensions/pi-core/src/tui/exit-command.ts:4
-registerWorkingTokenRate         extensions/pi-core/src/tui/working-token-rate.ts:41
+registerWorkingTokenRate         extensions/pi-core/src/tui/working-token-rate.ts:52
 ```
 
 Everything goes through public Pi API surface only — tool/command registration,
@@ -133,20 +133,28 @@ Three modules in `extensions/pi-tool-render/src/`:
   shortcuts while autocomplete is open.
 - **`effort-command.ts`** (`/effort`) and **`exit-command.ts`** (`/exit`).
 - **`token-rate.ts`** + **`working-token-rate.ts`**: tracks streaming decode
-  throughput and updates `ctx.ui.setWorkingMessage`.
+  throughput and the request's time-to-first-token, and updates
+  `ctx.ui.setWorkingMessage` (`Working  50 tok/s · TTFT 1.2s`). TTFT is measured
+  from pi's own `AssistantMessage.timestamp` (the request start) to the first
+  content token, captured once per `message_start` and frozen for that message;
+  it is shown on the first token even when the decode is too short for an
+  honest rate (`Working TTFT 0.9s`), and a segment that begins anywhere else
+  (tool phase, mid-turn model switch) reports a rate but no TTFT rather than a
+  borrowed one.
 
 ## Testing
 
-- `packages/shared-tool-presentation/tests/*.test.ts` (15 files, 163 tests):
+- `packages/shared-tool-presentation/tests/*.test.ts` (16 files, 169 tests):
   covers all pure specs, renderers, diff/evidence builders, badge, permissions
-  mode, output padding, and `ui-guard`.
-- `extensions/pi-tool-render/tests/*.test.ts` (8 files, 50 tests): covers
+  mode, output padding, step-group summary/layout, and `ui-guard`.
+- `extensions/pi-tool-render/tests/*.test.ts` (9 files, 55 tests): covers
   `built-in-tools`, `canonical-tool-fallback`, `codemode-contract`,
-  `codemode-tree`, `pi-api-compat`, `register`, `review-icon-e2e`, and
-  `tool-call-mark`.
-- `extensions/pi-core/tests/*.test.ts` (7 files, 63 tests): covers `box-editor`,
-  `editor-chrome`, `effort-command`, `exit-command`, `register`, `token-rate`,
-  and `working-token-rate`.
+  `codemode-tree`, `pi-api-compat`, `register`, `review-icon-e2e`,
+  `step-group-fold`, and `tool-call-mark`.
+- `extensions/pi-core/tests/*.test.ts` (7 files, 76 tests): covers `box-editor`,
+  `editor-chrome`, `effort-command`, `exit-command`, `register`, `token-rate`
+  (rate math, decode-throughput alignment, TTFT, stream health), and
+  `working-token-rate` (working-line formatting and lifecycle).
 
 ## Where to change what
 

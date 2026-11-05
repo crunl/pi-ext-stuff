@@ -239,6 +239,120 @@ describe("working token rate adapter", () => {
     expect(setWorkingMessage).not.toHaveBeenCalled();
   });
 
+  it("appends the TTFT measured from the request start of this message", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    // pi stamps the request start on the message; the message itself only
+    // starts reaching tokens at 1000.
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 300) }, context);
+    vi.setSystemTime(1_000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
+    vi.setSystemTime(2_000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
+
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s · TTFT 0.7s");
+  });
+
+  it("prints whole seconds once the wait passes ten seconds", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 1_000_000) }, context);
+    vi.setSystemTime(1_012_345);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
+    vi.setSystemTime(1_013_345);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
+
+    // 12.345s of prefill rounds to 12s; the rate is the same 2 tok/s.
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s · TTFT 12s");
+  });
+
+  it("re-anchors the TTFT for the next assistant message", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 200) }, context);
+    vi.setSystemTime(300);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("1234"), "1234"), context);
+    vi.setSystemTime(1_300);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("12345678"), "5678"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s · TTFT 0.1s");
+
+    // Second response of the same turn: a new request, so a new TTFT anchor.
+    vi.setSystemTime(2_000);
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 2_000) }, context);
+    vi.setSystemTime(2_750);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
+    vi.setSystemTime(3_750);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efghij"), "efgh"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈2 tok/s · TTFT 0.8s");
+  });
+
+  it("shows the TTFT on the first token, before the rate is honest", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 1_000) }, context);
+    vi.setSystemTime(1_900);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
+
+    // A short decode never reaches the 1s warm-up, but the wait is already
+    // fully measured: the line shows it alone instead of freezing on the
+    // previous request's numbers. (Two calls: `agent_start`'s clear, then this.)
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working TTFT 0.9s");
+
+    // And a pure tool-call message keeps that value to the end: the tool JSON's
+    // burst rate is still too noisy to publish, so nothing overwrites it.
+    handlers.get("message_end")?.(
+      {
+        message: {
+          ...assistantMessage("", 46, 1_000),
+          stopReason: "toolUse",
+          content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "x" } }],
+        },
+      },
+      context,
+    );
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops the TTFT but keeps the rate when a segment has no request start", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { handlers, context, setWorkingMessage } = registerForTest();
+    handlers.get("agent_start")?.({}, context);
+    handlers.get("message_start")?.({ message: assistantMessage("", 0, 1_000) }, context);
+    vi.setSystemTime(1_900);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working TTFT 0.9s");
+
+    // The tool phase restarts counting without a request boundary: the first
+    // update only anchors the decode baseline, so it shows nothing (still the
+    // two calls above: `agent_start`'s clear and the TTFT line).
+    handlers.get("tool_execution_start")?.({}, context);
+    vi.setSystemTime(5_000);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("abcd"), "abcd"), context);
+    expect(setWorkingMessage).toHaveBeenCalledTimes(2);
+
+    vi.setSystemTime(5_100);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("efgh"), "efgh"), context);
+    vi.setSystemTime(6_100);
+    handlers.get("message_update")?.(messageUpdate(assistantMessage("ijkl"), "ijkl"), context);
+
+    expect(setWorkingMessage).toHaveBeenLastCalledWith("Working  ≈3 tok/s");
+  });
+
   it("starts a new agent run with the legacy widget cleared", () => {
     const { handlers, context, setWidget } = registerForTest();
     handlers.get("agent_start")?.({}, context);

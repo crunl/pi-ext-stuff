@@ -1,8 +1,8 @@
 # pi-core
 
 An opinionated personal core TUI extension pack for the pi coding agent:
-a boxed editor carrying the permissions-mode badge, a live token rate in the
-working indicator, and `/effort` + `/exit` slash commands.
+a boxed editor carrying the permissions-mode badge, a live token rate and TTFT
+in the working indicator, and `/effort` + `/exit` slash commands.
 Tool rendering and `codemode` tree presentation live in the sibling
 [`pi-tool-render`](../pi-tool-render) extension. Distributed as `.ts` sources —
 pi loads extensions directly, so there is **no build step**.
@@ -14,10 +14,17 @@ pi loads extensions directly, so there is **no build step**.
   severity from pi-safety's `pi-safety:mode` bus event. Implemented as an
   official `CustomEditor` subclass via `setEditorComponent` — no host
   prototype patching.
-- **Working token rate** — the streaming spinner in the footer shows the
-  current output speed (`⠋ Working  50 tok/s`). Uses the provider's
-  reported usage when available; falls back to a CJK-aware character
-  estimate (marked with `≈`) otherwise.
+- **Working token rate + TTFT** — the streaming spinner in the footer shows
+  the current output speed and the request's time-to-first-token
+  (`⠋ Working  50 tok/s · TTFT 1.2s`). Uses the provider's reported usage when
+  available; falls back to a CJK-aware character estimate (marked with `≈`)
+  otherwise. TTFT is measured from pi's own request stamp
+  (`AssistantMessage.timestamp`) to the first content token, so it needs no
+  timer: it is captured once per request and frozen for the rest of the stream,
+  and shows up the moment the first token lands — even for a short tool-call
+  burst whose decode never runs long enough for an honest rate
+  (`⠋ Working TTFT 0.9s`). It is omitted when there is no credible request
+  boundary (tool phase, mid-turn model switch, resumed/legacy message).
 - **`/effort` and `/exit` commands** — `/effort` opens Pi's native
   `ThinkingSelectorComponent` in the editor slot; `/exit` is a true alias for
   `/quit`.

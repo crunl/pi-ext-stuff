@@ -18,10 +18,28 @@ interface UiContext {
  * jitter; the estimate marker (≈) counts toward the column width. */
 const RATE_COLUMN_WIDTH = 3;
 
+/** TTFT is measured once per request and frozen for the rest of the stream, so
+ * it needs no alignment column: the value it prints never changes mid-message. */
+function formatTimeToFirstToken(ms: number): string {
+  const seconds = ms / 1000;
+  return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+}
+
+/** Two independent segments after `Working`, joined by `·`: the rate (needs
+ * enough decode samples to be honest) and the TTFT (known the instant the
+ * first token lands). Either can be missing on its own - a short tool-call
+ * burst shows only `TTFT 0.9s`, a segment with no request boundary only the
+ * rate - so neither is allowed to force the other onto the line. */
 function formatWorkingMessage(snapshot: TokenRateSnapshot): string {
-  const marker = snapshot.source === "estimated" ? "≈" : "";
-  const rate = `${marker}${snapshot.tokensPerSecond}`.padStart(RATE_COLUMN_WIDTH, " ");
-  return `Working ${rate} tok/s`;
+  const parts: string[] = [];
+  if (snapshot.tokensPerSecond !== undefined) {
+    const marker = snapshot.source === "estimated" ? "≈" : "";
+    parts.push(`${`${marker}${snapshot.tokensPerSecond}`.padStart(RATE_COLUMN_WIDTH, " ")} tok/s`);
+  }
+  if (snapshot.timeToFirstTokenMs !== undefined) {
+    parts.push(`TTFT ${formatTimeToFirstToken(snapshot.timeToFirstTokenMs)}`);
+  }
+  return parts.length === 0 ? "Working" : `Working ${parts.join(" · ")}`;
 }
 
 function isPureToolCallMessage(message: { content?: unknown }): boolean {
@@ -33,11 +51,11 @@ function isPureToolCallMessage(message: { content?: unknown }): boolean {
 }
 
 /** Adapter layer: tracks assistant streaming output and shows the token rate
- * as part of the footer working line (`⠋ Working  50 tok/s`) via
- * `setWorkingMessage` — which only updates the text and never restarts the
- * spinner animation. The last rate stays visible across tool phases; the
- * default message/spinner are restored when the agent goes idle. Non-TUI
- * modes never touch the UI. */
+ * plus the request's TTFT as part of the footer working line
+ * (`⠋ Working  50 tok/s · TTFT 1.2s`) via `setWorkingMessage` — which only
+ * updates the text and never restarts the spinner animation. The last rate
+ * stays visible across tool phases; the default message/spinner are restored
+ * when the agent goes idle. Non-TUI modes never touch the UI. */
 export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = Date.now): void {
   const tracker = createTokenRateTracker();
   // Last message text applied to the working line; skips identical updates
@@ -63,9 +81,11 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
 
   pi.on("message_start", (event) => {
     if (event.message.role !== "assistant") return;
-    // New stream: recompute from a fresh baseline; the working line keeps
-    // its content until the first snapshot replaces it.
-    tracker.reset();
+    // New request: recompute from a fresh baseline and take the host's request
+    // start (`message.timestamp`, stamped when the provider stream is created)
+    // as the TTFT anchor. The working line keeps its content until the first
+    // snapshot replaces it.
+    tracker.begin(event.message);
   });
 
   pi.on("message_update", (event, context) => {
@@ -100,16 +120,21 @@ export function registerWorkingTokenRate(pi: ExtensionAPI, now: () => number = D
 
   pi.on("tool_execution_start", () => {
     // Tools produce no output tokens; restart the counter but keep the last
-    // rate visible so the working line never blanks during working.
+    // rate visible so the working line never blanks during working. The reset
+    // drops the TTFT anchor too: the next rate window has no request start, and
+    // the frozen line keeps showing the last measured pair until a real
+    // `message_start` re-anchors it.
     tracker.reset();
   });
 
   pi.on("model_select", () => {
     // A model switch changes the measurement baseline (tokenizer estimate
     // ratio, usage reporting semantics — reported usage must not be clamped
-    // to the previous model's cumulative value). Reset the measurement; the
-    // working line keeps the last rate until the next stream replaces it,
-    // same behaviour as message_start.
+    // to the previous model's cumulative value). Reset the measurement without
+    // a request anchor: this is not a new request, so the segment that follows
+    // reports a rate but no TTFT, rather than charging model A's prefill to
+    // model B. The working line keeps the last value until the next stream
+    // replaces it.
     tracker.reset();
   });
 

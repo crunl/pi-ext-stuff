@@ -1,15 +1,34 @@
-import type { MessageEndEvent, MessageUpdateEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  MessageEndEvent,
+  MessageStartEvent,
+  MessageUpdateEvent,
+} from "@earendil-works/pi-coding-agent";
 
 export type TokenRateSource = "reported" | "estimated";
 
 export interface TokenRateSnapshot {
   outputTokens: number;
   source: TokenRateSource;
-  tokensPerSecond: number;
+  /** Decode throughput. Absent on the first-token snapshot, shown before the
+   * warm-up window has given the rate enough samples to be honest. */
+  tokensPerSecond?: number;
+  /** Milliseconds from the request start (pi's `message.timestamp`) to the
+   * first content token - Time To First Token. `undefined` when it cannot be
+   * measured honestly: no `message_start` anchor for this segment (tool phase,
+   * mid-turn model switch), a message without a usable timestamp, or an
+   * implausible wait (anchor after the first token, or past
+   * `MAX_PLAUSIBLE_TTFT_MS`). */
+  timeToFirstTokenMs?: number;
 }
 
 export interface TokenRateTracker {
   reset(): void;
+  /** Open a new measurement segment for a streaming assistant message.
+   * `message` is pi's `message_start` payload: its `timestamp` is the moment
+   * the request was issued, which is what TTFT is measured from. It must share
+   * a clock domain with the `now` passed to `update`/`finalize` (both default
+   * to `Date.now`). */
+  begin(message: MessageStartEvent["message"]): void;
   /** Feed one streaming update; returns a refresh-eligible snapshot or
    * `undefined` when nothing should be shown (no positive tokens yet, zero
    * elapsed time, below the first-display warm-up, or inside the throttle
@@ -39,6 +58,30 @@ interface TrackerState {
   firstTokenAt?: number;
   /** Last time a snapshot was allowed to refresh the display. */
   lastShownAt?: number;
+  /** Wall-clock ms when the request was issued (`AssistantMessage.timestamp`,
+   * set by pi when the provider stream is created). Only present for segments
+   * that began at a request boundary, i.e. a `message_start`. */
+  requestStartAt?: number;
+  /** `firstTokenAt - requestStartAt`, captured once when the decode baseline
+   * is anchored. TTFT is a per-request quantity: it never changes during a
+   * stream, so the display stays stable instead of drifting with a timer. */
+  timeToFirstTokenMs?: number;
+  /** When the TTFT-only snapshot was shown for this segment. Separate from
+   * `lastShownAt` so a latency display can never satisfy the rate's warm-up. */
+  latencyShownAt?: number;
+}
+
+/** pi's `AssistantMessage.timestamp` is the request start (`Date.now()` when
+ * the provider stream is created). The type marks it required, but the host
+ * itself re-checks it at runtime (`session-manager.getMessageActivityTime` does
+ * `typeof === "number"`), because messages restored from older session files
+ * can lack it. Read it the same way: only a positive, finite number counts as
+ * an anchor, anything else means "unknown". */
+function requestStartOf(message: MessageStartEvent["message"]): number | undefined {
+  const timestamp = (message as { timestamp?: unknown }).timestamp;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0
+    ? timestamp
+    : undefined;
 }
 
 function deltaText(event: MessageUpdateEvent["assistantMessageEvent"]): string {
@@ -117,6 +160,29 @@ export function streamHealth(idleMs: number, burstMs: number, tps: number | null
   return "healthy";
 }
 
+/** Upper bound for a credible TTFT. `message.timestamp` is the provider
+ * stream's creation time, so a value far past this means a stale anchor (a
+ * reused message object, a clock jump) rather than a real wait; hiding it is
+ * better than putting a wrong number on the line. */
+const MAX_PLAUSIBLE_TTFT_MS = 5 * 60 * 1000;
+
+/** TTFT is only reported once per segment - anchored when the first content
+ * token arrives - and dropped when the request-start anchor is missing or
+ * implausible. */
+const measureTimeToFirstToken = (state: TrackerState): number | undefined => {
+  if (state.requestStartAt === undefined || state.firstTokenAt === undefined) return undefined;
+  const elapsedMs = state.firstTokenAt - state.requestStartAt;
+  if (elapsedMs < 0 || elapsedMs > MAX_PLAUSIBLE_TTFT_MS) return undefined;
+  return elapsedMs;
+};
+
+/** Snapshot fields for TTFT; omitted entirely when unmeasured so consumers can
+ * tell "not available" from "0 ms" without a sentinel value. */
+const timeToFirstTokenFields = (
+  state: TrackerState,
+): Pick<TokenRateSnapshot, "timeToFirstTokenMs"> =>
+  state.timeToFirstTokenMs === undefined ? {} : { timeToFirstTokenMs: state.timeToFirstTokenMs };
+
 export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenRateTracker {
   let state: TrackerState | undefined;
 
@@ -124,18 +190,49 @@ export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenR
     state = undefined;
   };
 
+  const begin = (message: MessageStartEvent["message"]): void => {
+    // A request boundary: TTFT can be measured from this message's start. Any
+    // other reset (tool phase, model switch) has no request start, so the
+    // following segment is measured without a TTFT rather than misattributing
+    // the time since the last request.
+    state = { accumulatedTokens: 0, requestStartAt: requestStartOf(message) };
+  };
+
   const update = (event: MessageUpdateEvent, now: number): TokenRateSnapshot | undefined => {
     state ??= { accumulatedTokens: 0 };
     state.accumulatedTokens += estimateTokensFromChars(deltaText(event.assistantMessageEvent));
     if (state.accumulatedTokens <= 0) return undefined;
 
-    state.firstTokenAt ??= now;
+    // The first sample with positive tokens anchors the decode baseline and
+    // freezes this request's TTFT.
+    if (state.firstTokenAt === undefined) {
+      state.firstTokenAt = now;
+      state.timeToFirstTokenMs = measureTimeToFirstToken(state);
+    }
     const elapsedMs = now - state.firstTokenAt;
-    if (elapsedMs <= 0) return undefined;
-    // First display waits for a statistically meaningful span; later
-    // refreshes are throttled.
-    if (state.lastShownAt === undefined && elapsedMs < FIRST_SHOWN_MS) return undefined;
-    if (state.lastShownAt !== undefined && now - state.lastShownAt < throttleMs) return undefined;
+    // A rate needs a real decode span: the first display waits for the warm-up
+    // (a burst over a tiny span reads as a spike), later ones are throttled.
+    const rateReady =
+      elapsedMs > 0 &&
+      (state.lastShownAt === undefined
+        ? elapsedMs >= FIRST_SHOWN_MS
+        : now - state.lastShownAt >= throttleMs);
+
+    if (!rateReady) {
+      // The wait, unlike the rate, is complete the moment the first token
+      // lands. A short tool-call burst that never reaches the warm-up still
+      // gets its one honest number on the line - exactly once per segment, and
+      // without touching the rate's warm-up gate.
+      if (state.timeToFirstTokenMs !== undefined && state.latencyShownAt === undefined) {
+        state.latencyShownAt = now;
+        return {
+          outputTokens: state.accumulatedTokens,
+          source: "estimated",
+          ...timeToFirstTokenFields(state),
+        };
+      }
+      return undefined;
+    }
 
     // Whole-segment decode mean of the estimate. The measurement domain is
     // scoped per streaming segment by the lifecycle resets in
@@ -146,6 +243,7 @@ export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenR
       outputTokens: state.accumulatedTokens,
       source: "estimated",
       tokensPerSecond,
+      ...timeToFirstTokenFields(state),
     };
   };
 
@@ -167,8 +265,9 @@ export function createTokenRateTracker(throttleMs = DEFAULT_THROTTLE_MS): TokenR
       outputTokens: output,
       source: "reported",
       tokensPerSecond,
+      ...timeToFirstTokenFields(state),
     };
   };
 
-  return { reset, update, finalize };
+  return { reset, begin, update, finalize };
 }

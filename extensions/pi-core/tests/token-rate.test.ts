@@ -337,6 +337,113 @@ describe("token rate tracker", () => {
     expect(tracker.finalize(assistantMessage("", 50), 2000)).toBeUndefined();
   });
 
+  describe("time to first token", () => {
+    // One 4-latin-char delta (1 estimated token) per arrival timestamp; returns
+    // the last snapshot the tracker allowed to refresh.
+    const feed = (
+      tracker: TokenRateTracker,
+      requestStartAt: number,
+      arrivals: number[],
+    ): TokenRateSnapshot | undefined => {
+      const message = assistantMessage("", 0, requestStartAt);
+      let snapshot: TokenRateSnapshot | undefined;
+      for (const at of arrivals) {
+        snapshot = tracker.update(
+          { type: "message_update", message, assistantMessageEvent: textDelta("abcd") },
+          at,
+        );
+      }
+      return snapshot;
+    };
+
+    it("measures the wait from the request start to the first content token", () => {
+      const tracker = createTokenRateTracker();
+      tracker.begin(assistantMessage("", 0, 500));
+      // 800ms of prefill, then the rate lands one second into the decode.
+      const shown = feed(tracker, 500, [1_300, 2_300]);
+      expect(shown?.tokensPerSecond).toBe(2);
+      expect(shown?.timeToFirstTokenMs).toBe(800);
+    });
+
+    it("stays frozen across the segment and survives the finalize correction", () => {
+      const tracker = createTokenRateTracker();
+      tracker.begin(assistantMessage("", 0, 1_000));
+      expect(feed(tracker, 1_000, [1_400, 3_000])?.timeToFirstTokenMs).toBe(400);
+      // message_end corrects the rate to the real usage. TTFT is a per-request
+      // quantity, so the same wait travels with the corrected rate.
+      const finalized = tracker.finalize(assistantMessage("", 50, 1_000), 3_100);
+      expect(finalized?.timeToFirstTokenMs).toBe(400);
+    });
+
+    it("is omitted when the segment has no request boundary", () => {
+      const tracker = createTokenRateTracker();
+      const withoutBoundary = feed(tracker, 0, [1_000, 2_000]);
+      expect(withoutBoundary?.tokensPerSecond).toBe(2);
+      expect(withoutBoundary?.timeToFirstTokenMs).toBeUndefined();
+    });
+
+    it("is omitted when the request start is a legacy 0 timestamp", () => {
+      const tracker = createTokenRateTracker();
+      tracker.begin(assistantMessage("", 0, 0));
+      expect(feed(tracker, 0, [5_000, 6_000])?.timeToFirstTokenMs).toBeUndefined();
+    });
+
+    it("drops an implausible anchor instead of printing a wrong wait", () => {
+      // The anchor is ahead of the first token: a clock jump or a message
+      // object reused across a retry.
+      const ahead = createTokenRateTracker();
+      ahead.begin(assistantMessage("", 0, 5_000));
+      expect(feed(ahead, 5_000, [4_000, 5_000])?.timeToFirstTokenMs).toBeUndefined();
+
+      // A 50-minute wait is a stale anchor, not a prefill worth showing.
+      const stale = createTokenRateTracker();
+      stale.begin(assistantMessage("", 0, 1_000));
+      expect(feed(stale, 1_000, [3_000_000, 3_001_000])?.timeToFirstTokenMs).toBeUndefined();
+    });
+
+    it("reaches the line the moment the first token lands, before the rate is honest", () => {
+      const tracker = createTokenRateTracker();
+      tracker.begin(assistantMessage("", 0, 2_000));
+      // First content token at 2_900: the wait is fully measured, the rate is
+      // not (a 0ms span would read as a burst spike), so only the wait shows.
+      const latencyOnly = feed(tracker, 2_000, [2_900]);
+      expect(latencyOnly).toEqual({
+        outputTokens: 1,
+        source: "estimated",
+        timeToFirstTokenMs: 900,
+      });
+      // Showing it must not satisfy the rate's warm-up: 500ms into the decode
+      // there is still no rate.
+      expect(feed(tracker, 2_000, [3_400])).toBeUndefined();
+      // One second in, the rate joins the same line.
+      expect(feed(tracker, 2_000, [3_900])).toEqual({
+        outputTokens: 3,
+        source: "estimated",
+        tokensPerSecond: 3,
+        timeToFirstTokenMs: 900,
+      });
+    });
+
+    it("shows the latency-only snapshot once per segment", () => {
+      const tracker = createTokenRateTracker(0);
+      tracker.begin(assistantMessage("", 0, 1_000));
+      expect(feed(tracker, 1_000, [1_600])?.timeToFirstTokenMs).toBe(600);
+      // Throttle is off, so the next token arrives immediately: same TTFT, and
+      // no second latency-only refresh - it would be the identical line.
+      expect(feed(tracker, 1_000, [1_600])).toBeUndefined();
+    });
+
+    it("reset() for a tool phase clears the anchor", () => {
+      const tracker = createTokenRateTracker();
+      tracker.begin(assistantMessage("", 0, 1_000));
+      expect(feed(tracker, 1_000, [1_100, 2_100])?.timeToFirstTokenMs).toBe(100);
+      tracker.reset();
+      const afterTool = feed(tracker, 1_000, [9_000, 10_000]);
+      expect(afterTool?.tokensPerSecond).toBe(2);
+      expect(afterTool?.timeToFirstTokenMs).toBeUndefined();
+    });
+  });
+
   it("counts hangul and supplementary CJK ideographs as one token each", () => {
     // Hangul syllable block; 4 supplementary-plane ideographs (U+20000+)
     // used to fall into the latin bucket (4 chars -> 1 token).
